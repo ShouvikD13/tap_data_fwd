@@ -3,12 +3,22 @@ package models
 import "log"
 
 const (
+	/*upd xchng book*/
 	UPDATION_ON_ORDER_FORWARDING  = "P"
 	UPDATION_ON_EXCHANGE_RESPONSE = "R"
 
+	/*upd ordr book*/
+	UPDATE_ORDER_STATUS = "S"
+
+	/**/
 	ORDINARY_ORDER = "O"
 
 	FOR_NORM = "N"
+
+	/*placed status*/
+	REQUESTED = "R"
+	QUEUED    = "Q"
+	CANCELLED = "C"
 
 	DOWNLOAD     = 10
 	NOT_DOWNLOAD = 20

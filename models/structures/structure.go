@@ -59,11 +59,42 @@ type Vw_orderbook struct {
 	C_prev_ack_tm    string
 	C_pro_cli_ind    string //byte
 	C_ctcl_id        string
+
+	//-----------------------------------------------------
+
+	L_mdfctn_cntr int32  // this is we are cheching after we fetch the data from both the tables. (fod and fxb)
+	C_plcd_stts   string // it are used in updating the status after the fetcing the orders from the table
+	C_oprn_typ    string // it are used in updating the status after the fetcing the orders from the table
+
+	C_xchng_cd     string
+	C_prd_typ      string
+	C_undrlyng     string
+	C_expry_dt     string
+	C_exrc_typ     string
+	C_opt_typ      string
+	L_strike_prc   int64
+	C_ctgry_indstk string
+	L_ca_lvl       int64
 }
 
 /*
 	values of this structure  "Vw_orderbook". we are extracting from "fod_fo_ordr_dtls" . all this is happening in "fn_ref_to_ord" in "cln_pack_clnt"
 */
+
+type Vw_contract struct {
+	L_eba_cntrct_id int64  // null = -1
+	C_xchng_cd      string // null = "*"
+	C_prd_typ       string // null = '*'
+	C_undrlyng      string // null = "*"
+	C_expry_dt      string // null = "*"
+	C_exrc_typ      string // null = '*'
+	C_opt_typ       string // null = '\0'
+	L_strike_prc    int64  // null = -1
+	C_ctgry_indstk  string // null = '*'
+	L_ca_lvl        int64  // null = -1
+	C_rqst_typ      string // null = '*'
+	C_rout_crt      string // null = "*"
+}
 
 type Vw_nse_cntrct struct {
 	c_prd_typ      byte
@@ -118,21 +149,6 @@ type St_net_hdr struct {
 	si_message_length int16
 	i_seq_num         int32
 	c_checksum        [16]byte
-}
-
-type Vw_contract struct {
-	L_eba_cntrct_id int64  // null = -1
-	C_xchng_cd      string // null = "*"
-	C_prd_typ       string // null = '*'
-	C_undrlyng      string // null = "*"
-	C_expry_dt      string // null = "*"
-	C_exrc_typ      string // null = '*'
-	C_opt_typ       string // null = '\0'
-	L_strike_prc    int64  // null = -1
-	C_ctgry_indstk  string // null = '*'
-	L_ca_lvl        int64  // null = -1
-	C_rqst_typ      string // null = '*'
-	C_rout_crt      string // null = "*"
 }
 
 type St_oe_reqres struct {

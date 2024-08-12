@@ -99,7 +99,7 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 	var resultTmp int
 
 	log.Printf("[%s] Entering CLN_PACK_CLNT", cpcm.serviceName)
-	resultTmp = cpcm.fnGetNxtRec(args, Db)
+	resultTmp = cpcm.fnGetNxtRec(Db)
 	if resultTmp != 0 {
 		log.Printf("[%s] failed in getting the next record returning with result code: %d", cpcm.serviceName, resultTmp)
 		log.Printf("[%s] Exiting CLN_PACK_CLNT with error", cpcm.serviceName)
@@ -109,7 +109,7 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 	return 0
 }
 
-func (cpcm *ClnPackClntManager) fnGetNxtRec(args []string, Db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 	log.Printf("[%s] Entering fnGetNxtRec", cpcm.serviceName)
 
 	resultTmp := cpcm.fnSeqToOmd(Db)
@@ -123,6 +123,19 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(args []string, Db *gorm.DB) int {
 		return -1
 	}
 
+	if cpcm.xchngbook.C_rms_prcsd_flg == "P" {
+		log.Printf("[%s] Order ref / Mod number = |%s| / |%d| Already Processed", cpcm.serviceName, cpcm.xchngbook.C_ordr_rfrnc, cpcm.xchngbook.L_mdfctn_cntr)
+
+		log.Printf("[%s] Exiting from from 'fnGetNxtRec'", cpcm.serviceName)
+
+		return 0
+	}
+
+	if cpcm.xchngbook.C_plcd_stts != models.REQUESTED {
+		log.Printf("[%s] the Placed status is not requested . so we are we are not getting the record ", cpcm.serviceName)
+		return -1
+	}
+
 	if cpcm.xchngbook.C_ex_ordr_type == models.ORDINARY_ORDER {
 
 		log.Printf("[%s] Assigning C_ordr_rfrnc from exchngbook to orderbook", cpcm.serviceName)
@@ -133,6 +146,45 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(args []string, Db *gorm.DB) int {
 			log.Printf("[%s] Failed to fetch data into orderbook structure", cpcm.serviceName)
 			return -1
 		}
+
+		if cpcm.xchngbook.L_mdfctn_cntr != cpcm.orderbook.L_mdfctn_cntr {
+			log.Printf("[%s] L_mdfctn_cntr of both xchngbook and order are not same", cpcm.serviceName)
+			log.Printf("Exiting fnGetNxtRec")
+			return -1
+
+		}
+
+		cpcm.xchngbook.C_plcd_stts = models.QUEUED
+		cpcm.xchngbook.C_oprn_typ = models.UPDATION_ON_ORDER_FORWARDING
+
+		resultTmp = cpcm.fnUpdXchngbk(Db)
+
+		if resultTmp != 0 {
+			log.Printf("[%s] failed to update the status in Xchngbook", cpcm.serviceName)
+			return -1
+		}
+
+		cpcm.orderbook.C_plcd_stts = models.QUEUED
+		cpcm.orderbook.C_oprn_typ = models.UPDATE_ORDER_STATUS
+
+		resultTmp = cpcm.fnUpdOrdrbk(Db)
+
+		if resultTmp != 0 {
+			log.Printf("[%s] failed to update the status in Order book", cpcm.serviceName)
+			return -1
+		}
+
+		// here we are setting the contract data from orderbook structure
+		cpcm.contract.C_xchng_cd = cpcm.orderbook.C_xchng_cd
+		cpcm.contract.C_prd_typ = cpcm.orderbook.C_prd_typ
+		cpcm.contract.C_undrlyng = cpcm.orderbook.C_undrlyng
+		cpcm.contract.C_expry_dt = cpcm.orderbook.C_expry_dt
+		cpcm.contract.C_exrc_typ = cpcm.orderbook.C_exrc_typ
+		cpcm.contract.C_opt_typ = cpcm.orderbook.C_opt_typ
+		cpcm.contract.L_strike_prc = cpcm.orderbook.L_strike_prc
+		cpcm.contract.C_ctgry_indstk = cpcm.orderbook.C_ctgry_indstk
+		cpcm.contract.L_ca_lvl = cpcm.orderbook.L_ca_lvl
+
 	}
 	log.Printf("[%s] Exiting fnGetNxtRec", cpcm.serviceName)
 	return 0
@@ -216,6 +268,7 @@ WHERE fxb_xchng_cd =?
 	log.Printf("[%s]   L_ord_seq: 		%d", cpcm.serviceName, cpcm.xchngbook.L_ord_seq)
 
 	log.Printf("[%s] Data extracted and stored in the 'xchngbook' structure successfully", cpcm.serviceName)
+
 	log.Printf("[%s] Exiting fnSeqToOmd", cpcm.serviceName)
 	return 0
 }
@@ -442,5 +495,9 @@ func (cpcm *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 
 	log.Printf("[%s] Exiting fnUpdXchngbk", cpcm.serviceName)
 
+	return 0
+}
+
+func (cpcm *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
 	return 0
 }
