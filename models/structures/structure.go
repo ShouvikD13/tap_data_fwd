@@ -108,6 +108,21 @@ type St_net_hdr struct {
 	c_checksum        [16]byte
 }
 
+type Vw_contract struct {
+	L_eba_cntrct_id int64  // null = -1
+	C_xchng_cd      string // null = "*"
+	C_prd_typ       string // null = '*'
+	C_undrlyng      string // null = "*"
+	C_expry_dt      string // null = "*"
+	C_exrc_typ      string // null = '*'
+	C_opt_typ       string // null = '\0'
+	L_strike_prc    int64  // null = -1
+	C_ctgry_indstk  string // null = '*'
+	L_ca_lvl        int64  // null = -1
+	C_rqst_typ      string // null = '*'
+	C_rout_crt      string // null = "*"
+}
+
 type St_oe_reqres struct {
 	st_hdr                        St_int_header
 	c_participant_type            byte

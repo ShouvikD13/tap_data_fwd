@@ -69,7 +69,7 @@ func (cm *ConfigManager) LoadPostgreSQLConfig(serviceName string, fileName strin
 		SSLMode:  environmentManager.GetProcessSpaceValue("sslmode"),
 	}
 
-	return config, nil // Return the PostgreSQLConfig instance
+	return config, nil
 }
 
 // GetDatabaseConnection constructs a DSN string from the provided PostgreSQLConfig struct,
@@ -85,8 +85,8 @@ func (cm *ConfigManager) GetDatabaseConnection(serviceName string, cfg common.Po
 		log.Printf("[%s] failed to connect database: %v", serviceName, err) // Log the error if the connection fails
 		return -1                                                           // Return -1 on failure
 	}
-	cm.database.Db = db // Assign the database connection to the package-level variable
-	return 0            // Return 0 on success
+	cm.database.Db = db
+	return 0
 }
 
 // GetDB returns the currently established database connection as a *gorm.DB instance.
