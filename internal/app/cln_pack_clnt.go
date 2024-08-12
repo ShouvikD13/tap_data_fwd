@@ -72,14 +72,14 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 		return -1
 	}
 
-	TmpByteArr := []byte(temp_str) // these i have to look again
-	TmpArrLen := len(TmpByteArr)   // this i have to look again
+	// TmpByteArr := []byte(temp_str) // these i have to look again
+	// TmpArrLen := len(TmpByteArr)   // this i have to look again
 
 	cpcm.xchngbook.C_mod_trd_dt = temp_str
 
-	models.SETNULL(cpcm.serviceName, []byte(cpcm.xchngbook.C_mod_trd_dt), TmpArrLen)
+	cpcm.serviceName = cpcm.xchngbook.C_mod_trd_dt
 
-	log.Printf("[%s] Modification trade date fetched and set in C_mod_trd_dt: %s", cpcm.serviceName, cpcm.xchngbook.C_mod_trd_dt[:TmpArrLen])
+	log.Printf("[%s] Modification trade date fetched and set in C_mod_trd_dt: %s", cpcm.serviceName, cpcm.xchngbook.C_mod_trd_dt)
 
 	cpcm.xchngbook.L_ord_seq = 0 // I am initially setting it to '0' because it was set that way in 'fn_bat_init' and I have not seen it getting changed anywhere. If I find it being changed somewhere, I will update it accordingly.
 
@@ -123,16 +123,17 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(args []string, Db *gorm.DB) int {
 		return -1
 	}
 
-	// Log the assignment of C_ordr_rfrnc
-	log.Printf("[%s] Assigning C_ordr_rfrnc from exchngbook to orderbook", cpcm.serviceName)
-	cpcm.orderbook.C_ordr_rfrnc = cpcm.xchngbook.C_ordr_rfrnc
+	if cpcm.xchngbook.C_ex_ordr_type == models.ORDINARY_ORDER {
 
-	resultTmp = cpcm.fnRefToOrd(Db)
-	if resultTmp != 0 {
-		log.Printf("[%s] Failed to fetch data into orderbook structure", cpcm.serviceName)
-		return -1
+		log.Printf("[%s] Assigning C_ordr_rfrnc from exchngbook to orderbook", cpcm.serviceName)
+		cpcm.orderbook.C_ordr_rfrnc = cpcm.xchngbook.C_ordr_rfrnc
+
+		resultTmp = cpcm.fnRefToOrd(Db)
+		if resultTmp != 0 {
+			log.Printf("[%s] Failed to fetch data into orderbook structure", cpcm.serviceName)
+			return -1
+		}
 	}
-
 	log.Printf("[%s] Exiting fnGetNxtRec", cpcm.serviceName)
 	return 0
 }
@@ -351,6 +352,95 @@ FOR UPDATE NOWAIT;
 	return 0
 }
 
-func (cpcm *ClnPackClntManager) fn_upd_xchngbk(db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
+
+	var iRecExists int64
+
+	log.Printf("[%s] Entering fnUpdXchngbk", cpcm.serviceName)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_xchng_cd)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_ordr_rfrnc)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_pipe_id)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_mod_trd_dt)
+	log.Printf("[%s]: %d", cpcm.serviceName, cpcm.xchngbook.L_ord_seq)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_slm_flg)
+	log.Printf("[%s]: %d", cpcm.serviceName, cpcm.xchngbook.L_dsclsd_qty)
+	log.Printf("[%s]: %d", cpcm.serviceName, cpcm.xchngbook.L_ord_tot_qty)
+	log.Printf("[%s]: %d", cpcm.serviceName, cpcm.xchngbook.L_ord_lmt_rt)
+	log.Printf("[%s]: %d", cpcm.serviceName, cpcm.xchngbook.L_stp_lss_tgr)
+	log.Printf("[%s]: %d", cpcm.serviceName, cpcm.xchngbook.L_mdfctn_cntr)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_valid_dt)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_ord_typ)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_req_typ)
+	log.Printf("[%s]: %s", cpcm.serviceName, cpcm.xchngbook.C_plcd_stts)
+
+	switch cpcm.xchngbook.C_oprn_typ {
+	case models.UPDATION_ON_ORDER_FORWARDING:
+
+		query1 := `UPDATE fxb_fo_xchng_book 
+				SET fxb_plcd_stts = ?, fxb_frwd_tm = SYSDATE
+				WHERE fxb_ordr_rfrnc = ? 
+				AND fxb_mdfctn_cntr = ?`
+
+		result := db.Exec(query1, cpcm.xchngbook.C_plcd_stts, cpcm.xchngbook.C_ordr_rfrnc, cpcm.xchngbook.L_mdfctn_cntr)
+		if result.Error != nil {
+			log.Printf("[%s] Error updating order forwarding: %v", cpcm.serviceName, result.Error)
+			return -1
+		}
+
+	case models.UPDATION_ON_EXCHANGE_RESPONSE:
+		if cpcm.xchngbook.L_dwnld_flg == models.DOWNLOAD {
+
+			result := db.Raw(
+				`SELECT COUNT(*) 
+					FROM fxb_fo_xchng_book 
+					WHERE fxb_jiffy = ? 
+					AND fxb_xchng_cd = ? 
+					AND fxb_pipe_id = ?`,
+				cpcm.xchngbook.D_jiffy, cpcm.xchngbook.C_xchng_cd, cpcm.xchngbook.C_pipe_id,
+			).Scan(&iRecExists)
+			if result.Error != nil {
+				log.Printf("[%s] SQL error: %v", cpcm.serviceName, result.Error)
+				return -1
+			}
+
+			if iRecExists > 0 {
+				log.Printf("[%s] Record already processed", cpcm.serviceName)
+				return -1
+			}
+		}
+
+		c_xchng_rmrks := strings.TrimSpace(cpcm.xchngbook.C_xchng_rmrks)
+
+		result := db.Exec(
+			`UPDATE fxb_fo_xchng_book 
+				SET fxb_plcd_stts = ?, 
+					fxb_rms_prcsd_flg = ?, 
+					fxb_ors_msg_typ = ?, 
+					fxb_ack_tm = TO_DATE(?, 'DD-Mon-yyyy hh24:mi:ss'), 
+					fxb_xchng_rmrks = RTRIM(fxb_xchng_rmrks) || ?, 
+					fxb_jiffy = ? 
+				WHERE fxb_ordr_rfrnc = ? 
+				AND fxb_mdfctn_cntr = ?`,
+			cpcm.xchngbook.C_plcd_stts,
+			cpcm.xchngbook.C_rms_prcsd_flg,
+			cpcm.xchngbook.L_ors_msg_typ,
+			cpcm.xchngbook.C_ack_tm,
+			c_xchng_rmrks,
+			cpcm.xchngbook.D_jiffy,
+			cpcm.xchngbook.C_ordr_rfrnc,
+			cpcm.xchngbook.L_mdfctn_cntr,
+		)
+		if result.Error != nil {
+			log.Printf("[%s] Error updating exchange response: %v", cpcm.serviceName, result.Error)
+			return -1
+		}
+
+	default:
+		log.Printf("[%s] Invalid Operation Type", cpcm.serviceName)
+		return -1
+	}
+
+	log.Printf("[%s] Exiting fnUpdXchngbk", cpcm.serviceName)
+
 	return 0
 }

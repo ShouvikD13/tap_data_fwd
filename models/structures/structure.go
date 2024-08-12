@@ -18,16 +18,28 @@ type Vw_xchngbook struct {
 	C_pipe_id     string // this variable we are getting from the args[3]
 	C_mod_trd_dt  string // checkout this one, we are getting from table "exg_xchng_mstr"
 	L_ord_seq     int32  // this variable we are gettign from the table
-	C_slm_flg     string //byte   // this variable we are gettign from the table
+	C_slm_flg     string // byte   // this variable we are gettign from the table
 	L_dsclsd_qty  int32  // this variable we are gettign from the table
 	L_ord_tot_qty int32  // this variable we are gettign from the table
 	L_ord_lmt_rt  int32  // this variable we are gettign from the table
 	L_stp_lss_tgr int32  // this variable we are gettign from the table
-	C_ord_typ     string //byte   // this variable we are gettign from the table
-	C_req_typ     string //byte   // this variable we are gettign from the table
+	C_ord_typ     string // byte   // this variable we are gettign from the table
+	C_req_typ     string // byte   // this variable we are gettign from the table
 	C_valid_dt    string // this variable we are gettign from the table
 	C_xchng_cd    string // this we are getting from "opm_ord_pipe_mstr"
-	C_oprn_typ    string // this is we are setting
+
+	//-----------------------------------------------------------------------------
+	C_ex_ordr_type  string  // this one we have to use to use for set we need this for ordinary order type.
+	C_oprn_typ      string  // this is we are setting
+	C_plcd_stts     string  // this field is used in "fnRefToOrd" to change the status in "UPDATION_ON_ORDER_FORWARDING"
+	L_mdfctn_cntr   int32   // used in same querry as above
+	C_frwrd_tm      string  // used in same querry as above
+	D_jiffy         float64 //used in "fnRefToOrd" to change the status in "UPDATION_ON_EXCHANGE_RESPONSE"
+	L_dwnld_flg     int32   // used in same querry as above
+	C_xchng_rmrks   string  // used in last query of "fnRefToOrd"
+	C_rms_prcsd_flg string  // used in same query as above
+	L_ors_msg_typ   int32   // used in same query as above
+	C_ack_tm        string  // used in same querry as above
 }
 
 /*
