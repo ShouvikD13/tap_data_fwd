@@ -63,7 +63,7 @@ type Vw_orderbook struct {
 	//-----------------------------------------------------
 
 	L_mdfctn_cntr int32  // this is we are cheching after we fetch the data from both the tables. (fod and fxb)
-	C_plcd_stts   string // it are used in updating the status after the fetcing the orders from the table
+	C_ordr_stts   string // it are used in updating the status after the fetcing the orders from the table
 	C_oprn_typ    string // it are used in updating the status after the fetcing the orders from the table
 
 	C_xchng_cd     string

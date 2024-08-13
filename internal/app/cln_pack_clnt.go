@@ -165,7 +165,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			return -1
 		}
 
-		cpcm.orderbook.C_plcd_stts = models.QUEUED
+		cpcm.orderbook.C_ordr_stts = models.QUEUED
 		cpcm.orderbook.C_oprn_typ = models.UPDATE_ORDER_STATUS
 
 		resultTmp = cpcm.fnUpdOrdrbk(Db)
@@ -521,6 +521,31 @@ func (cpcm *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 }
 
 func (cpcm *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
+
+	log.Printf("[%s] Starting 'fnUpdOrdbk' function", cpcm.serviceName)
+
+	query := `
+    UPDATE fod_fo_ordr_dtls
+    SET fod_ordr_stts = ?
+    WHERE fod_ordr_rfrnc = ?;
+`
+
+	log.Printf("[%s] Executing query to update order status", cpcm.serviceName)
+
+	log.Printf("[%s] Order Reference: %s", cpcm.serviceName, cpcm.orderbook.C_ordr_rfrnc)
+	log.Printf("[%s]  Order Status: %s", cpcm.serviceName, cpcm.orderbook.C_ordr_stts)
+
+	result := db.Exec(query, cpcm.orderbook.C_ordr_stts, strings.TrimSpace(cpcm.orderbook.C_ordr_rfrnc))
+
+	if result.Error != nil {
+		log.Printf("[%s] Error executing update query: %v", cpcm.serviceName, result.Error)
+		log.Printf("[%s] Exiting 'fnUpdOrdbk' with error", cpcm.serviceName)
+		return -1
+	}
+
+	log.Printf("[%s] Order status updated successfully", cpcm.serviceName)
+
+	log.Printf("[%s] returning from 'fnUpdOrdbk' function", cpcm.serviceName)
 	return 0
 }
 
