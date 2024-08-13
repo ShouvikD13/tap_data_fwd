@@ -694,5 +694,55 @@ func (cpcm *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 }
 
 func (cpcm *ClnPackClntManager) fnRjctRcrd(db *gorm.DB) int {
+
+	var resultTmp int
+	var c_tm_stmp string
+
+	log.Printf("[%s] Function 'fnRjctRcrd' starts", cpcm.serviceName)
+
+	/*
+		// log.Printf("[%s] Product type is : %s", cpcm.serviceName, cpcm.orderbook.C_prd_typ)
+
+		// if cpcm.orderbook.C_prd_typ == models.FUTURES {
+		// 	svc = "SFO_FUT_ACK"
+		// } else {
+		// 	svc = "SFO_OPT_ACK"
+		// }
+	*/
+
+	query := `SELECT TO_CHAR(NOW(), 'DD-Mon-YYYY HH24:MI:SS') AS c_tm_stmp`
+
+	row := db.Raw(query).Row()
+	err := row.Scan(&c_tm_stmp)
+
+	if err != nil {
+		log.Printf("[%s] Error getting the system time: %v", cpcm.serviceName, err)
+		return -1
+	}
+
+	c_tm_stmp = strings.TrimSpace(c_tm_stmp)
+
+	log.Printf("[%s] Current timestamp: %s", cpcm.serviceName, c_tm_stmp)
+
+	cpcm.xchngbook.C_plcd_stts = "REJECT"
+	cpcm.xchngbook.C_rms_prcsd_flg = "NOT_PROCESSED"
+	cpcm.xchngbook.L_ors_msg_typ = models.ORS_NEW_ORD_RJCT
+	cpcm.xchngbook.C_ack_tm = c_tm_stmp
+	cpcm.xchngbook.C_xchng_rmrks = "Token id not available"
+	cpcm.xchngbook.D_jiffy = 0
+	cpcm.xchngbook.C_oprn_typ = "UPDATION_ON_EXCHANGE_RESPONSE"
+
+	log.Printf("[%s] Before calling 'fnUpdXchngbk' on 'Reject Record' ", cpcm.serviceName)
+
+	resultTmp = cpcm.fnUpdXchngbk(db)
+
+	if resultTmp != 0 {
+		log.Printf("[%s] returned from 'fnUpdXchngbk' with an Error", cpcm.serviceName)
+		log.Printf("[%s] exiting from 'fnRjctRcrd'", cpcm.serviceName)
+		return -1
+	}
+
+	log.Printf("[%s] Time Before calling 'fnUpdXchngbk' : %s ", cpcm.serviceName, c_tm_stmp)
+	log.Printf("[%s] Function 'fnRjctRcrd' ends successfully", cpcm.serviceName)
 	return 0
 }

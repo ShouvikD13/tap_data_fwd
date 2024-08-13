@@ -28,6 +28,12 @@ const (
 	/**** SFO_GT_EXT_CNT ****/
 	NFO_ENTTY = 1
 	BFO_ENTTY = 2
+
+	/* product type */
+	FUTURES = "F"
+
+	// on reject order
+	ORS_NEW_ORD_RJCT = 5304
 )
 
 /*********************************************************************/
