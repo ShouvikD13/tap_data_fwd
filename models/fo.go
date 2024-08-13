@@ -22,6 +22,12 @@ const (
 
 	DOWNLOAD     = 10
 	NOT_DOWNLOAD = 20
+
+	CONTRACT_TO_NSE_ID = "N"
+
+	/**** SFO_GT_EXT_CNT ****/
+	NFO_ENTTY = 1
+	BFO_ENTTY = 2
 )
 
 /*********************************************************************/

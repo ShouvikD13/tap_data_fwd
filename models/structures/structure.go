@@ -97,11 +97,20 @@ type Vw_contract struct {
 }
 
 type Vw_nse_cntrct struct {
-	c_prd_typ      byte
-	c_ctgry_indstk byte
-	c_symbol       string
-	l_ca_lvl       int32
-	l_token_id     int32
+	C_prd_typ      string //byte
+	C_ctgry_indstk string //byte
+	C_symbol       string // this field we are initialising from first query in "fn_get_ext_cnt"
+	L_ca_lvl       int32
+	L_token_id     int32
+
+	//----------------------------
+	// these all fields are initialising from "fn_get_ext_cnt"
+	C_xchng_cd   string
+	C_expry_dt   string
+	C_exrc_typ   string
+	C_opt_typ    string
+	L_strike_prc int64
+	C_rqst_typ   string
 }
 
 /*

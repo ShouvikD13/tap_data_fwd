@@ -10,15 +10,16 @@ import (
 )
 
 type ClnPackClntManager struct {
-	serviceName string                   // Name of the service being managed
-	xchngbook   *structures.Vw_xchngbook // Pointer to the Vw_xchngbook structure
-	orderbook   *structures.Vw_orderbook // Pointer to the Vw_orderbook structure
-	contract    *structures.Vw_contract  // we are updating it's value from orderbook
-	cPanNo      string                   // Pan number, initialized in the 'fnRefToOrd' method
-	cLstActRef  string                   // Last activity reference, initialized in the 'fnRefToOrd' method
-	cEspID      string                   // ESP ID, initialized in the 'fnRefToOrd' method
-	cAlgoID     string                   // Algorithm ID, initialized in the 'fnRefToOrd' method
-	cSourceFlg  string                   // Source flag, initialized in the 'fnRefToOrd' method
+	serviceName  string                    // Name of the service being managed
+	xchngbook    *structures.Vw_xchngbook  // Pointer to the Vw_xchngbook structure
+	orderbook    *structures.Vw_orderbook  // Pointer to the Vw_orderbook structure
+	contract     *structures.Vw_contract   // we are updating it's value from orderbook
+	nse_contract *structures.Vw_nse_cntrct //we are updating it in 'fn_get_ext_cnt'
+	cPanNo       string                    // Pan number, initialized in the 'fnRefToOrd' method
+	cLstActRef   string                    // Last activity reference, initialized in the 'fnRefToOrd' method
+	cEspID       string                    // ESP ID, initialized in the 'fnRefToOrd' method
+	cAlgoID      string                    // Algorithm ID, initialized in the 'fnRefToOrd' method
+	cSourceFlg   string                    // Source flag, initialized in the 'fnRefToOrd' method
 }
 
 func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
@@ -175,6 +176,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		}
 
 		// here we are setting the contract data from orderbook structure
+		log.Printf("[%s] Setting contract data from orderbook structure", cpcm.serviceName)
 		cpcm.contract.C_xchng_cd = cpcm.orderbook.C_xchng_cd
 		cpcm.contract.C_prd_typ = cpcm.orderbook.C_prd_typ
 		cpcm.contract.C_undrlyng = cpcm.orderbook.C_undrlyng
@@ -185,6 +187,26 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		cpcm.contract.C_ctgry_indstk = cpcm.orderbook.C_ctgry_indstk
 		cpcm.contract.L_ca_lvl = cpcm.orderbook.L_ca_lvl
 
+		log.Printf("[%s] contract.C_xchng_cd: |%s|", cpcm.serviceName, cpcm.contract.C_xchng_cd)
+		log.Printf("[%s] contract.C_prd_typ: |%s|", cpcm.serviceName, cpcm.contract.C_prd_typ)
+		log.Printf("[%s] contract.C_undrlyng: |%s|", cpcm.serviceName, cpcm.contract.C_undrlyng)
+		log.Printf("[%s] contract.C_expry_dt: |%s|", cpcm.serviceName, cpcm.contract.C_expry_dt)
+		log.Printf("[%s] contract.C_exrc_typ: |%s|", cpcm.serviceName, cpcm.contract.C_exrc_typ)
+		log.Printf("[%s] contract.C_opt_typ: |%s|", cpcm.serviceName, cpcm.contract.C_opt_typ)
+		log.Printf("[%s] contract.L_strike_prc: |%d|", cpcm.serviceName, cpcm.contract.L_strike_prc)
+		log.Printf("[%s] contract.C_ctgry_indstk: |%s|", cpcm.serviceName, cpcm.contract.C_ctgry_indstk)
+		log.Printf("[%s] contract.L_ca_lvl: |%d|", cpcm.serviceName, cpcm.contract.L_ca_lvl)
+
+		if cpcm.xchngbook.C_xchng_cd == "NFO" {
+
+			cpcm.contract.C_rqst_typ = models.CONTRACT_TO_NSE_ID
+
+			resultTmp = cpcm.fnGetExtCnt(Db)
+
+			if resultTmp != 0 {
+				log.Printf("[%s] failed to load data in NSE CNT ", cpcm.serviceName)
+			}
+		}
 	}
 	log.Printf("[%s] Exiting fnGetNxtRec", cpcm.serviceName)
 	return 0
@@ -195,32 +217,32 @@ func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 	log.Printf("[%s] Before extracting the data from the 'fxb_ordr_rfrnc' and storing it in the 'xchngbook' structure", cpcm.serviceName)
 
 	query := `
-	SELECT fxb_ordr_rfrnc,
-       fxb_lmt_mrkt_sl_flg,
-       fxb_dsclsd_qty,
-       fxb_ordr_tot_qty,
-       fxb_lmt_rt,
-       fxb_stp_lss_tgr,
-       TO_CHAR(TO_DATE(fxb_ordr_valid_dt, 'YYYY-MM-DD'), 'DD-Mon-YYYY') AS valid_dt,
-       CASE
-           WHEN fxb_ordr_type = 'V' THEN 'T'
-           ELSE fxb_ordr_type
-       END AS ord_typ,
-       fxb_rqst_typ,
-       fxb_ordr_sqnc
-FROM FXB_FO_XCHNG_BOOK
-WHERE fxb_xchng_cd =?
-  AND fxb_pipe_id = ?
-  AND TO_DATE(fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
-  AND fxb_ordr_sqnc = (
-      SELECT MIN(fxb_b.fxb_ordr_sqnc)
-      FROM FXB_FO_XCHNG_BOOK fxb_b
-      WHERE fxb_b.fxb_xchng_cd = ?
-        AND TO_DATE(fxb_b.fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
-        AND fxb_b.fxb_pipe_id = ?
+		SELECT fxb_ordr_rfrnc,
+		fxb_lmt_mrkt_sl_flg,
+		fxb_dsclsd_qty,
+		fxb_ordr_tot_qty,
+		fxb_lmt_rt,
+		fxb_stp_lss_tgr,
+		TO_CHAR(TO_DATE(fxb_ordr_valid_dt, 'YYYY-MM-DD'), 'DD-Mon-YYYY') AS valid_dt,
+		CASE
+			WHEN fxb_ordr_type = 'V' THEN 'T'
+			ELSE fxb_ordr_type
+		END AS ord_typ,
+		fxb_rqst_typ,
+		fxb_ordr_sqnc
+	FROM FXB_FO_XCHNG_BOOK
+	WHERE fxb_xchng_cd =?
+	AND fxb_pipe_id = ?
+	AND TO_DATE(fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
+	AND fxb_ordr_sqnc = (
+		SELECT MIN(fxb_b.fxb_ordr_sqnc)
+		FROM FXB_FO_XCHNG_BOOK fxb_b
+		WHERE fxb_b.fxb_xchng_cd = ?
+			AND TO_DATE(fxb_b.fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
+			AND fxb_b.fxb_pipe_id = ?
         AND fxb_b.fxb_plcd_stts = 'R'
-  )
-`
+  	)
+	`
 
 	log.Printf("[%s] Executing query to fetch order details", cpcm.serviceName)
 
@@ -304,12 +326,12 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
     COALESCE(fod_lst_act_ref, '0'),
     COALESCE(FOD_ESP_ID, '*'),
     COALESCE(FOD_ALGO_ID, '*'),
-    COALESCE(FOD_SOURCE_FLG, '*')
-FROM
-    fod_fo_ordr_dtls
-WHERE
-    fod_ordr_rfrnc = ?
-FOR UPDATE NOWAIT;
+		COALESCE(FOD_SOURCE_FLG, '*')
+	FROM
+		fod_fo_ordr_dtls
+	WHERE
+		fod_ordr_rfrnc = ?
+	FOR UPDATE NOWAIT;
 
     `
 
@@ -499,5 +521,46 @@ func (cpcm *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 }
 
 func (cpcm *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
+	return 0
+}
+
+func (cpcm *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
+	var i_sem_entity int
+	var c_stck_cd, c_symbl string
+
+	if cpcm.contract.C_xchng_cd == "NFO" {
+		i_sem_entity = models.NFO_ENTTY
+	} else {
+		i_sem_entity = models.BFO_ENTTY
+	}
+
+	c_stck_cd = cpcm.contract.C_undrlyng
+
+	c_stck_cd = strings.ToUpper(c_stck_cd)
+
+	// log
+
+	query := `
+			SELECT TRIM(sem_map_vl)
+			INTO ?
+			FROM sem_stck_map
+			WHERE sem_entty = ?
+			AND sem_stck_cd = ?;
+			`
+	db.Raw(query, &c_symbl, i_sem_entity, c_stck_cd)
+
+	// log
+
+	// Assign values to the NSE contract structure
+	cpcm.nse_contract.C_xchng_cd = cpcm.contract.C_xchng_cd
+	cpcm.nse_contract.C_prd_typ = cpcm.contract.C_prd_typ
+	cpcm.nse_contract.C_expry_dt = cpcm.contract.C_expry_dt
+	cpcm.nse_contract.C_exrc_typ = cpcm.contract.C_exrc_typ
+	cpcm.nse_contract.C_opt_typ = cpcm.contract.C_opt_typ
+	cpcm.nse_contract.L_strike_prc = cpcm.contract.L_strike_prc
+	cpcm.nse_contract.C_symbol = c_symbl
+	cpcm.nse_contract.C_rqst_typ = cpcm.contract.C_rqst_typ
+	cpcm.nse_contract.C_ctgry_indstk = cpcm.contract.C_ctgry_indstk
+
 	return 0
 }
