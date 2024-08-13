@@ -111,6 +111,7 @@ type Vw_nse_cntrct struct {
 	C_opt_typ    string
 	L_strike_prc int64
 	C_rqst_typ   string
+	C_series     string
 }
 
 /*

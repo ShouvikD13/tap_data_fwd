@@ -526,7 +526,7 @@ func (cpcm *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
 
 func (cpcm *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	var i_sem_entity int
-	var c_stck_cd, c_symbl string
+	var c_stck_cd, c_symbl, c_exg_cd string
 
 	if cpcm.contract.C_xchng_cd == "NFO" {
 		i_sem_entity = models.NFO_ENTTY
@@ -537,19 +537,28 @@ func (cpcm *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	c_stck_cd = cpcm.contract.C_undrlyng
 
 	c_stck_cd = strings.ToUpper(c_stck_cd)
+	log.Printf("[%s] Converted 'c_stck_cd' to uppercase: %s", cpcm.serviceName, c_stck_cd)
 
-	// log
+	query1 := `
+		SELECT TRIM(sem_map_vl)
+		FROM sem_stck_map
+		WHERE sem_entty = ?
+		AND sem_stck_cd = ?;
+	`
+	log.Printf("[%s] Executing query to fetch 'C_symbol'", cpcm.serviceName)
 
-	query := `
-			SELECT TRIM(sem_map_vl)
-			INTO ?
-			FROM sem_stck_map
-			WHERE sem_entty = ?
-			AND sem_stck_cd = ?;
-			`
-	db.Raw(query, &c_symbl, i_sem_entity, c_stck_cd)
+	row1 := db.Raw(query1, i_sem_entity, c_stck_cd).Row()
 
-	// log
+	err := row1.Scan(&c_symbl)
+
+	if err != nil {
+		log.Printf("[%s] Error scanning row: %v", cpcm.serviceName, err)
+		log.Printf("[%s] Exiting 'fnGetExtCnt' due to error", cpcm.serviceName)
+		return -1
+	}
+
+	log.Printf("[%s] Value successfully fetched from the table 'sem_stck_map'", cpcm.serviceName)
+	log.Printf("[%s] cpcm.nse_contract.C_symbol is: %s", cpcm.serviceName, c_symbl)
 
 	// Assign values to the NSE contract structure
 	cpcm.nse_contract.C_xchng_cd = cpcm.contract.C_xchng_cd
@@ -561,6 +570,84 @@ func (cpcm *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	cpcm.nse_contract.C_symbol = c_symbl
 	cpcm.nse_contract.C_rqst_typ = cpcm.contract.C_rqst_typ
 	cpcm.nse_contract.C_ctgry_indstk = cpcm.contract.C_ctgry_indstk
+
+	log.Printf("[%s] cpcm.nse_contract.C_xchng_cd is: %s", cpcm.serviceName, cpcm.nse_contract.C_xchng_cd)
+	log.Printf("[%s] cpcm.nse_contract.C_prd_typ is: %s", cpcm.serviceName, cpcm.nse_contract.C_prd_typ)
+	log.Printf("[%s] cpcm.nse_contract.C_expry_dt is: %s", cpcm.serviceName, cpcm.nse_contract.C_expry_dt)
+	log.Printf("[%s] cpcm.nse_contract.C_exrc_typ is: %s", cpcm.serviceName, cpcm.nse_contract.C_exrc_typ)
+	log.Printf("[%s] cpcm.nse_contract.C_opt_typ is: %s", cpcm.serviceName, cpcm.nse_contract.C_opt_typ)
+	log.Printf("[%s] cpcm.nse_contract.L_strike_prc is: %d", cpcm.serviceName, cpcm.nse_contract.L_strike_prc)
+	log.Printf("[%s] cpcm.nse_contract.C_symbol is: %s", cpcm.serviceName, cpcm.nse_contract.C_symbol)
+	log.Printf("[%s] cpcm.nse_contract.C_ctgry_indstk is: %s", cpcm.serviceName, cpcm.nse_contract.C_ctgry_indstk)
+	log.Printf("[%s] cpcm.nse_contract.C_rqst_typ is: %s", cpcm.serviceName, cpcm.nse_contract.C_rqst_typ)
+
+	if cpcm.contract.C_xchng_cd == "NFO" {
+		c_exg_cd = "NSE"
+	} else if cpcm.contract.C_xchng_cd == "BFO" {
+		c_exg_cd = "BSE"
+	} else {
+		log.Printf("[%s] Invalid option '%s' for 'cpcm.contract.C_xchng_cd'. Exiting 'fnGetExtCnt'", cpcm.serviceName, cpcm.contract.C_xchng_cd)
+		return -1
+	}
+
+	query2 := `
+		SELECT COALESCE(ESS_XCHNG_SUB_SERIES, ' ')
+		FROM ESS_SGMNT_STCK
+		WHERE ess_stck_cd = ?
+		AND ess_xchng_cd = ?;
+	`
+
+	log.Printf("[%s] Executing query to fetch 'C_series'", cpcm.serviceName)
+
+	row2 := db.Raw(query2, cpcm.contract.C_undrlyng, c_exg_cd).Row()
+
+	err2 := row2.Scan(&cpcm.nse_contract.C_series)
+
+	if err2 != nil {
+		log.Printf("[%s] Error scanning row: %v", cpcm.serviceName, err2)
+		log.Printf("[%s] Exiting 'fnGetExtCnt' due to error", cpcm.serviceName)
+		return -1
+	}
+
+	log.Printf("[%s] Value successfully fetched from the table 'ESS_SGMNT_STCK'", cpcm.serviceName)
+	log.Printf("[%s] cpcm.nse_contract.C_series is: %s", cpcm.serviceName, cpcm.nse_contract.C_series)
+
+	query3 := `
+		SELECT COALESCE(ftq_token_no, 0),
+		       COALESCE(ftq_ca_lvl, 0)
+		FROM ftq_fo_trd_qt
+		WHERE ftq_xchng_cd = ?
+		  AND ftq_prdct_typ = ?
+		  AND ftq_undrlyng = ?
+		  AND ftq_expry_dt = TO_DATE(?, 'dd-Mon-yyyy')
+		  AND ftq_exer_typ = ?
+		  AND ftq_opt_typ = ?
+		  AND ftq_strk_prc = ?;
+	`
+
+	log.Printf("[%s] Executing query to fetch 'L_token_id' and 'L_ca_lvl'", cpcm.serviceName)
+
+	row3 := db.Raw(query3,
+		cpcm.contract.C_xchng_cd,
+		cpcm.contract.C_prd_typ,
+		cpcm.contract.C_undrlyng,
+		cpcm.contract.C_expry_dt,
+		cpcm.contract.C_exrc_typ,
+		cpcm.contract.C_opt_typ,
+		cpcm.contract.L_strike_prc,
+	).Row()
+
+	err3 := row3.Scan(&cpcm.nse_contract.L_token_id, &cpcm.nse_contract.L_ca_lvl)
+
+	if err3 != nil {
+		log.Printf("[%s] Error scanning row: %v", cpcm.serviceName, err3)
+		log.Printf("[%s] Exiting 'fnGetExtCnt' due to error", cpcm.serviceName)
+		return -1
+	}
+
+	log.Printf("[%s] Values successfully fetched from the table 'ftq_fo_trd_qt'", cpcm.serviceName)
+	log.Printf("[%s] cpcm.nse_contract.L_token_id is: %d", cpcm.serviceName, cpcm.nse_contract.L_token_id)
+	log.Printf("[%s] cpcm.nse_contract.L_ca_lvl is: %d", cpcm.serviceName, cpcm.nse_contract.L_ca_lvl)
 
 	return 0
 }
