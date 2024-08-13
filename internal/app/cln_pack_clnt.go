@@ -206,7 +206,23 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			if resultTmp != 0 {
 				log.Printf("[%s] failed to load data in NSE CNT ", cpcm.serviceName)
 			}
+		} else {
+			log.Printf("[%s] returning from 'fnGetNxtRec' because 'xchngbook.C_xchng_cd' is not 'NFO' ", cpcm.serviceName)
+			log.Printf("[%s] returning with Error")
+			return -1
 		}
+
+		log.Printf("[%s] Packing Ordinary Order STARTS ", cpcm.serviceName)
+
+		if cpcm.nse_contract.L_token_id == 0 {
+			log.Printf("[%s] Token id for ordinary order is: %d", cpcm.serviceName, cpcm.nse_contract.L_token_id)
+
+			log.Printf("[%s] token id is not avialable so we are calling 'fn_rjct_rcrd' ", cpcm.serviceName)
+
+			resultTmp = cpcm.fnRjctRcrd(Db)
+
+		}
+
 	}
 	log.Printf("[%s] Exiting fnGetNxtRec", cpcm.serviceName)
 	return 0
@@ -674,5 +690,9 @@ func (cpcm *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	log.Printf("[%s] cpcm.nse_contract.L_token_id is: %d", cpcm.serviceName, cpcm.nse_contract.L_token_id)
 	log.Printf("[%s] cpcm.nse_contract.L_ca_lvl is: %d", cpcm.serviceName, cpcm.nse_contract.L_ca_lvl)
 
+	return 0
+}
+
+func (cpcm *ClnPackClntManager) fnRjctRcrd(db *gorm.DB) int {
 	return 0
 }
