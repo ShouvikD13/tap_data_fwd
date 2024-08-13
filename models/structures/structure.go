@@ -40,6 +40,11 @@ type Vw_xchngbook struct {
 	C_rms_prcsd_flg string  // used in same query as above
 	L_ors_msg_typ   int32   // used in same query as above
 	C_ack_tm        string  // used in same querry as above
+
+	//c_ip_addrs, FXB_IP, 'NA'
+	//c_prcimpv_flg, FXB_PRCIMPV_FLG 'N'
+	// these values are also to be added in the table
+
 }
 
 /*

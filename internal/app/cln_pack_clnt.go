@@ -14,12 +14,15 @@ type ClnPackClntManager struct {
 	xchngbook    *structures.Vw_xchngbook  // Pointer to the Vw_xchngbook structure
 	orderbook    *structures.Vw_orderbook  // Pointer to the Vw_orderbook structure
 	contract     *structures.Vw_contract   // we are updating it's value from orderbook
-	nse_contract *structures.Vw_nse_cntrct //we are updating it in 'fn_get_ext_cnt'
-	cPanNo       string                    // Pan number, initialized in the 'fnRefToOrd' method
-	cLstActRef   string                    // Last activity reference, initialized in the 'fnRefToOrd' method
-	cEspID       string                    // ESP ID, initialized in the 'fnRefToOrd' method
-	cAlgoID      string                    // Algorithm ID, initialized in the 'fnRefToOrd' method
-	cSourceFlg   string                    // Source flag, initialized in the 'fnRefToOrd' method
+	nse_contract *structures.Vw_nse_cntrct // we are updating it in 'fn_get_ext_cnt'
+	requestQueue *structures.St_req_q_data // this is used in 'fnGetNxtRec'
+	eplm         *ExchngPackLibMaster
+	cPanNo       string // Pan number, initialized in the 'fnRefToOrd' method
+	cLstActRef   string // Last activity reference, initialized in the 'fnRefToOrd' method
+	cEspID       string // ESP ID, initialized in the 'fnRefToOrd' method
+	cAlgoID      string // Algorithm ID, initialized in the 'fnRefToOrd' method
+	cSourceFlg   string // Source flag, initialized in the 'fnRefToOrd' method
+	cPrgmFlg     string
 }
 
 func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
@@ -112,6 +115,8 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 
 func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 	log.Printf("[%s] Entering fnGetNxtRec", cpcm.serviceName)
+
+	cpcm.cPrgmFlg = "0"
 
 	resultTmp := cpcm.fnSeqToOmd(Db)
 	if resultTmp != 0 {
@@ -221,14 +226,28 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 
 			resultTmp = cpcm.fnRjctRcrd(Db)
 
+			if resultTmp != 0 {
+				log.Printf("[%s] returned from 'fnRjctRcrd' with Error", cpcm.serviceName)
+				log.Printf("[%s] Exiting from 'fnGetNxtRec' ", cpcm.serviceName)
+			}
+
+		}
+		// before that i think we have to intialize the 'ExchngPackLibMaster'
+
+		if cpcm.xchngbook.C_slm_flg == "S" {
+			resultTmp = cpcm.eplm.fnPackOrdnryOrdToNse()
 		}
 
 	}
+
 	log.Printf("[%s] Exiting fnGetNxtRec", cpcm.serviceName)
 	return 0
 }
 
 func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
+	var c_ip_addrs string
+	var c_prcimpv_flg string
+
 	log.Printf("[%s] Entering fnSeqToOmd", cpcm.serviceName)
 	log.Printf("[%s] Before extracting the data from the 'fxb_ordr_rfrnc' and storing it in the 'xchngbook' structure", cpcm.serviceName)
 
@@ -246,6 +265,8 @@ func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 		END AS ord_typ,
 		fxb_rqst_typ,
 		fxb_ordr_sqnc
+		COALESCE(FXB_IP, 'NA')
+		COALESCE(FXB_PRCIMPV_FLG, 'N')
 	FROM FXB_FO_XCHNG_BOOK
 	WHERE fxb_xchng_cd =?
 	AND fxb_pipe_id = ?
@@ -285,12 +306,20 @@ func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 		&cpcm.xchngbook.C_ord_typ,
 		&cpcm.xchngbook.C_req_typ,
 		&cpcm.xchngbook.L_ord_seq,
+		&c_ip_addrs,
+		&c_prcimpv_flg,
 	)
 
 	if err != nil {
 		log.Printf("[%s] Error scanning row: %v", cpcm.serviceName, err)
 		log.Printf("[%s] Exiting fnSeqToOmd with error", cpcm.serviceName)
 		return -1
+	}
+
+	if c_prcimpv_flg == "Y" {
+		cpcm.cPrgmFlg = "T"
+	} else {
+		cpcm.cPrgmFlg = c_ip_addrs
 	}
 
 	log.Printf("[%s] Data extracted and stored in the 'xchngbook' structure:", cpcm.serviceName)
