@@ -26,6 +26,7 @@ type ClnPackClntManager struct {
 }
 
 func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
+
 	var temp_str string
 	var resultTmp int
 	cpcm.serviceName = "cln_pack_clnt"
