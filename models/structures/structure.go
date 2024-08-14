@@ -138,6 +138,24 @@ type St_opm_pipe_mstr struct {
 	c_opm_trdr_id   string // null="*"
 	si_user_typ_glb int    // null=0   (i think , it can be 0 (for trader) , 4 (for CORPORATE_MANAGER) , 5 (for BRANCH_MANAGER) )
 
+	/* Table name "OPM_ORD_PIPE_MSTR"
+	opm_xchng_cd,
+	opm_max_pnd_ord,
+	opm_stream_no
+	OPM_TRDR_ID,
+	OPM_BRNCH_ID
+	OPM_XCHNG_CD
+	OPM_PIPE_ID
+	*/
+
+	/* Table Name "exg_xchng_mstr"
+	exg_nxt_trd_dt,
+	exg_brkr_id,
+	exg_ctcl_id
+	exg_xchng_cd
+
+	*/
+
 }
 
 /*

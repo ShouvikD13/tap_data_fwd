@@ -16,11 +16,12 @@ type ClnPackClntManager struct {
 	contract     *structures.Vw_contract   // we are updating it's value from orderbook
 	nse_contract *structures.Vw_nse_cntrct // we are updating it in 'fn_get_ext_cnt'
 	requestQueue *structures.St_req_q_data // this is used in 'fnGetNxtRec'
-	cPanNo       string                    // Pan number, initialized in the 'fnRefToOrd' method
-	cLstActRef   string                    // Last activity reference, initialized in the 'fnRefToOrd' method
-	cEspID       string                    // ESP ID, initialized in the 'fnRefToOrd' method
-	cAlgoID      string                    // Algorithm ID, initialized in the 'fnRefToOrd' method
-	cSourceFlg   string                    // Source flag, initialized in the 'fnRefToOrd' method
+	pipe_mstr    *structures.St_opm_pipe_mstr
+	cPanNo       string // Pan number, initialized in the 'fnRefToOrd' method
+	cLstActRef   string // Last activity reference, initialized in the 'fnRefToOrd' method
+	cEspID       string // ESP ID, initialized in the 'fnRefToOrd' method
+	cAlgoID      string // Algorithm ID, initialized in the 'fnRefToOrd' method
+	cSourceFlg   string // Source flag, initialized in the 'fnRefToOrd' method
 	cPrgmFlg     string
 }
 
@@ -212,7 +213,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			}
 		} else {
 			log.Printf("[%s] returning from 'fnGetNxtRec' because 'xchngbook.C_xchng_cd' is not 'NFO' ", cpcm.serviceName)
-			log.Printf("[%s] returning with Error")
+			log.Printf("[%s] returning with Error", cpcm.serviceName)
 			return -1
 		}
 
@@ -232,24 +233,29 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 
 		}
 
-		if cpcm.xchngbook.C_slm_flg == "S" {
-			// here we are initialising the "ExchngPackLibMaster"
-			eplm := NewExchngPackLibMaster(
-				cpcm.serviceName,
-				cpcm.requestQueue,
-				cpcm.xchngbook,
-				cpcm.orderbook,
-				cpcm.contract,
-				cpcm.nse_contract,
-				cpcm.cPanNo,
-				cpcm.cLstActRef,
-				cpcm.cEspID,
-				cpcm.cAlgoID,
-				cpcm.cSourceFlg,
-			)
+		// here we are initialising the "ExchngPackLibMaster"
+		eplm := NewExchngPackLibMaster(
+			cpcm.serviceName,
+			cpcm.requestQueue,
+			cpcm.xchngbook,
+			cpcm.orderbook,
+			cpcm.pipe_mstr,
+			cpcm.nse_contract,
+			cpcm.cPanNo,
+			cpcm.cLstActRef,
+			cpcm.cEspID,
+			cpcm.cAlgoID,
+			cpcm.cSourceFlg,
+			cpcm.cPrgmFlg,
+		)
 
-			eplm.fnPackOrdnryOrdToNse()
+		resultTmp = eplm.fnPackOrdnryOrdToNse()
 
+		if resultTmp != 0 {
+			log.Printf("[%s] 'fnPackOrdnryOrdToNse' returned an error.", cpcm.serviceName)
+			log.Printf("[%s] Exiting 'fnGetNxtRec'.", cpcm.serviceName)
+		} else {
+			log.Printf("[%s] Data successfully packed.", cpcm.serviceName)
 		}
 
 	}
@@ -605,6 +611,7 @@ func (cpcm *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
 	log.Printf("[%s] Order status updated successfully", cpcm.serviceName)
 
 	log.Printf("[%s] returning from 'fnUpdOrdbk' function", cpcm.serviceName)
+
 	return 0
 }
 
