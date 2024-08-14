@@ -16,12 +16,11 @@ type ClnPackClntManager struct {
 	contract     *structures.Vw_contract   // we are updating it's value from orderbook
 	nse_contract *structures.Vw_nse_cntrct // we are updating it in 'fn_get_ext_cnt'
 	requestQueue *structures.St_req_q_data // this is used in 'fnGetNxtRec'
-	eplm         *ExchngPackLibMaster
-	cPanNo       string // Pan number, initialized in the 'fnRefToOrd' method
-	cLstActRef   string // Last activity reference, initialized in the 'fnRefToOrd' method
-	cEspID       string // ESP ID, initialized in the 'fnRefToOrd' method
-	cAlgoID      string // Algorithm ID, initialized in the 'fnRefToOrd' method
-	cSourceFlg   string // Source flag, initialized in the 'fnRefToOrd' method
+	cPanNo       string                    // Pan number, initialized in the 'fnRefToOrd' method
+	cLstActRef   string                    // Last activity reference, initialized in the 'fnRefToOrd' method
+	cEspID       string                    // ESP ID, initialized in the 'fnRefToOrd' method
+	cAlgoID      string                    // Algorithm ID, initialized in the 'fnRefToOrd' method
+	cSourceFlg   string                    // Source flag, initialized in the 'fnRefToOrd' method
 	cPrgmFlg     string
 }
 
@@ -232,10 +231,25 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			}
 
 		}
-		// before that i think we have to intialize the 'ExchngPackLibMaster'
 
 		if cpcm.xchngbook.C_slm_flg == "S" {
-			resultTmp = cpcm.eplm.fnPackOrdnryOrdToNse()
+			// here we are initialising the "ExchngPackLibMaster"
+			eplm := NewExchngPackLibMaster(
+				cpcm.serviceName,
+				cpcm.requestQueue,
+				cpcm.xchngbook,
+				cpcm.orderbook,
+				cpcm.contract,
+				cpcm.nse_contract,
+				cpcm.cPanNo,
+				cpcm.cLstActRef,
+				cpcm.cEspID,
+				cpcm.cAlgoID,
+				cpcm.cSourceFlg,
+			)
+
+			eplm.fnPackOrdnryOrdToNse()
+
 		}
 
 	}
