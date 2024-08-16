@@ -76,14 +76,15 @@ func (cm *ConfigManager) LoadPostgreSQLConfig(serviceName string, fileName strin
 // establishes a connection to the PostgreSQL database using GORM, and returns an int status code.
 // It returns 0 on success and -1 on failure.
 func (cm *ConfigManager) GetDatabaseConnection(serviceName string, cfg common.PostgreSQLConfig) int {
-	// Construct the DSN string for PostgreSQL connection
+
+	log.Printf("[%s] Setting up the database connection", serviceName)
 	dsn := fmt.Sprintf("user=%s password=%s dbname=%s host=%s port=%d sslmode=%s",
 		cfg.Username, cfg.Password, cfg.DBName, cfg.Host, cfg.Port, cfg.SSLMode)
-	// Open the database connection using GORM
+
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Printf("[%s] failed to connect database: %v", serviceName, err) // Log the error if the connection fails
-		return -1                                                           // Return -1 on failure
+		log.Printf("[%s] failed to connect database: %v", serviceName, err)
+		return -1
 	}
 	cm.database.Db = db
 	return 0

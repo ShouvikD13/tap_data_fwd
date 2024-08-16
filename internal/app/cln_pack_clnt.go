@@ -82,8 +82,6 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 
 	cpcm.xchngbook.C_mod_trd_dt = temp_str
 
-	cpcm.serviceName = cpcm.xchngbook.C_mod_trd_dt
-
 	log.Printf("[%s] Modification trade date fetched and set in C_mod_trd_dt: %s", cpcm.serviceName, cpcm.xchngbook.C_mod_trd_dt)
 
 	cpcm.xchngbook.L_ord_seq = 0 // I am initially setting it to '0' because it was set that way in 'fn_bat_init' and I have not seen it getting changed anywhere. If I find it being changed somewhere, I will update it accordingly.
@@ -172,7 +170,6 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		}
 
 		cpcm.orderbook.C_ordr_stts = models.QUEUED
-		cpcm.orderbook.C_oprn_typ = models.UPDATE_ORDER_STATUS
 
 		resultTmp = cpcm.fnUpdOrdrbk(Db)
 
@@ -191,7 +188,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		cpcm.contract.C_opt_typ = cpcm.orderbook.C_opt_typ
 		cpcm.contract.L_strike_prc = cpcm.orderbook.L_strike_prc
 		cpcm.contract.C_ctgry_indstk = cpcm.orderbook.C_ctgry_indstk
-		cpcm.contract.L_ca_lvl = cpcm.orderbook.L_ca_lvl
+		// cpcm.contract.L_ca_lvl = cpcm.orderbook.L_ca_lvl
 
 		log.Printf("[%s] contract.C_xchng_cd: |%s|", cpcm.serviceName, cpcm.contract.C_xchng_cd)
 		log.Printf("[%s] contract.C_prd_typ: |%s|", cpcm.serviceName, cpcm.contract.C_prd_typ)
@@ -201,7 +198,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		log.Printf("[%s] contract.C_opt_typ: |%s|", cpcm.serviceName, cpcm.contract.C_opt_typ)
 		log.Printf("[%s] contract.L_strike_prc: |%d|", cpcm.serviceName, cpcm.contract.L_strike_prc)
 		log.Printf("[%s] contract.C_ctgry_indstk: |%s|", cpcm.serviceName, cpcm.contract.C_ctgry_indstk)
-		log.Printf("[%s] contract.L_ca_lvl: |%d|", cpcm.serviceName, cpcm.contract.L_ca_lvl)
+		//log.Printf("[%s] contract.L_ca_lvl: |%d|", cpcm.serviceName, cpcm.contract.L_ca_lvl)
 
 		if cpcm.xchngbook.C_xchng_cd == "NFO" {
 
@@ -274,32 +271,43 @@ func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 
 	query := `
 		SELECT fxb_ordr_rfrnc,
-		fxb_lmt_mrkt_sl_flg,
-		fxb_dsclsd_qty,
-		fxb_ordr_tot_qty,
-		fxb_lmt_rt,
-		fxb_stp_lss_tgr,
-		TO_CHAR(TO_DATE(fxb_ordr_valid_dt, 'YYYY-MM-DD'), 'DD-Mon-YYYY') AS valid_dt,
-		CASE
-			WHEN fxb_ordr_type = 'V' THEN 'T'
-			ELSE fxb_ordr_type
-		END AS ord_typ,
-		fxb_rqst_typ,
-		fxb_ordr_sqnc
-		COALESCE(FXB_IP, 'NA')
-		COALESCE(FXB_PRCIMPV_FLG, 'N')
-	FROM FXB_FO_XCHNG_BOOK
-	WHERE fxb_xchng_cd =?
-	AND fxb_pipe_id = ?
-	AND TO_DATE(fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
-	AND fxb_ordr_sqnc = (
-		SELECT MIN(fxb_b.fxb_ordr_sqnc)
-		FROM FXB_FO_XCHNG_BOOK fxb_b
-		WHERE fxb_b.fxb_xchng_cd = ?
-			AND TO_DATE(fxb_b.fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
-			AND fxb_b.fxb_pipe_id = ?
-        AND fxb_b.fxb_plcd_stts = 'R'
-  	)
+       fxb_lmt_mrkt_sl_flg AS C_slm_flg,
+       fxb_dsclsd_qty AS L_dsclsd_qty,
+       fxb_ordr_tot_qty AS L_ord_tot_qty,
+       fxb_lmt_rt AS L_ord_lmt_rt,
+       fxb_stp_lss_tgr AS L_stp_lss_tgr,
+       TO_CHAR(TO_DATE(fxb_ordr_valid_dt, 'YYYY-MM-DD'), 'DD-Mon-YYYY') AS C_valid_dt,
+       CASE
+           WHEN fxb_ordr_type = 'V' THEN 'T'
+           ELSE fxb_ordr_type
+       END AS C_ord_typ,
+       fxb_rqst_typ AS C_req_typ,
+       fxb_ordr_sqnc AS L_ord_seq,
+       COALESCE(fxb_ip, 'NA') AS C_ip_addrs,
+       COALESCE(fxb_prcimpv_flg, 'N') AS C_prcimpv_flg,
+       fxb_ex_ordr_typ AS C_ex_ordr_type,
+       fxb_plcd_stts AS C_plcd_stts,
+       fxb_mdfctn_cntr AS L_mdfctn_cntr,
+       fxb_frwd_tm AS C_frwrd_tm,
+       fxb_jiffy AS D_jiffy,
+       fxb_xchng_rmrks AS C_xchng_rmrks,
+       fxb_rms_prcsd_flg AS C_rms_prcsd_flg,
+       fxb_ors_msg_typ AS L_ors_msg_typ,
+       fxb_ack_tm AS C_ack_tm
+FROM FXB_FO_XCHNG_BOOK
+WHERE fxb_xchng_cd = ?
+  AND fxb_pipe_id = ?
+  AND TO_DATE(fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
+  AND fxb_ordr_sqnc = (
+       SELECT MIN(fxb_b.fxb_ordr_sqnc)
+       FROM FXB_FO_XCHNG_BOOK fxb_b
+       WHERE fxb_b.fxb_xchng_cd = ?
+         AND TO_DATE(fxb_b.fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
+         AND fxb_b.fxb_pipe_id = ?
+         AND fxb_b.fxb_plcd_stts = 'R'
+);
+
+
 	`
 
 	log.Printf("[%s] Executing query to fetch order details", cpcm.serviceName)
@@ -317,18 +325,27 @@ func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 		cpcm.xchngbook.C_pipe_id).Row()
 
 	err := row.Scan(
-		&cpcm.xchngbook.C_ordr_rfrnc,
-		&cpcm.xchngbook.C_slm_flg,
-		&cpcm.xchngbook.L_dsclsd_qty,
-		&cpcm.xchngbook.L_ord_tot_qty,
-		&cpcm.xchngbook.L_ord_lmt_rt,
-		&cpcm.xchngbook.L_stp_lss_tgr,
-		&cpcm.xchngbook.C_valid_dt,
-		&cpcm.xchngbook.C_ord_typ,
-		&cpcm.xchngbook.C_req_typ,
-		&cpcm.xchngbook.L_ord_seq,
-		&c_ip_addrs,
-		&c_prcimpv_flg,
+		&cpcm.xchngbook.C_ordr_rfrnc,    // fxb_ordr_rfrnc
+		&cpcm.xchngbook.C_slm_flg,       // fxb_lmt_mrkt_sl_flg
+		&cpcm.xchngbook.L_dsclsd_qty,    // fxb_dsclsd_qty
+		&cpcm.xchngbook.L_ord_tot_qty,   // fxb_ordr_tot_qty
+		&cpcm.xchngbook.L_ord_lmt_rt,    // fxb_lmt_rt
+		&cpcm.xchngbook.L_stp_lss_tgr,   // fxb_stp_lss_tgr
+		&cpcm.xchngbook.C_valid_dt,      // C_valid_dt (formatted as 'DD-Mon-YYYY')
+		&cpcm.xchngbook.C_ord_typ,       // C_ord_typ (transformed 'V' to 'T')
+		&cpcm.xchngbook.C_req_typ,       // C_req_typ
+		&cpcm.xchngbook.L_ord_seq,       // L_ord_seq
+		&c_ip_addrs,                     // COALESCE(fxb_ip, 'NA')
+		&c_prcimpv_flg,                  // COALESCE(fxb_prcimpv_flg, 'N')
+		&cpcm.xchngbook.C_ex_ordr_type,  // C_ex_ordr_type
+		&cpcm.xchngbook.C_plcd_stts,     // C_plcd_stts
+		&cpcm.xchngbook.L_mdfctn_cntr,   // L_mdfctn_cntr
+		&cpcm.xchngbook.C_frwrd_tm,      // C_frwrd_tm
+		&cpcm.xchngbook.D_jiffy,         // D_jiffy
+		&cpcm.xchngbook.C_xchng_rmrks,   // C_xchng_rmrks
+		&cpcm.xchngbook.C_rms_prcsd_flg, // C_rms_prcsd_flg
+		&cpcm.xchngbook.L_ors_msg_typ,   // L_ors_msg_typ
+		&cpcm.xchngbook.C_ack_tm,        // C_ack_tm
 	)
 
 	if err != nil {
@@ -344,16 +361,27 @@ func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 	}
 
 	log.Printf("[%s] Data extracted and stored in the 'xchngbook' structure:", cpcm.serviceName)
-	log.Printf("[%s]   C_ordr_rfrnc: 	%s", cpcm.serviceName, cpcm.xchngbook.C_ordr_rfrnc)
-	log.Printf("[%s]   C_slm_flg: 		%s", cpcm.serviceName, cpcm.xchngbook.C_slm_flg)
-	log.Printf("[%s]   L_dsclsd_qty: 	%d", cpcm.serviceName, cpcm.xchngbook.L_dsclsd_qty)
-	log.Printf("[%s]   L_ord_tot_qty: 	%d", cpcm.serviceName, cpcm.xchngbook.L_ord_tot_qty)
-	log.Printf("[%s]   L_ord_lmt_rt: 	%d", cpcm.serviceName, cpcm.xchngbook.L_ord_lmt_rt)
-	log.Printf("[%s]   L_stp_lss_tgr: 	%d", cpcm.serviceName, cpcm.xchngbook.L_stp_lss_tgr)
-	log.Printf("[%s]   C_valid_dt: 		%s", cpcm.serviceName, cpcm.xchngbook.C_valid_dt)
-	log.Printf("[%s]   C_ord_typ: 		%s", cpcm.serviceName, cpcm.xchngbook.C_ord_typ)
-	log.Printf("[%s]   C_req_typ: 		%s", cpcm.serviceName, cpcm.xchngbook.C_req_typ)
-	log.Printf("[%s]   L_ord_seq: 		%d", cpcm.serviceName, cpcm.xchngbook.L_ord_seq)
+	log.Printf("[%s]   C_ordr_rfrnc:     %s", cpcm.serviceName, cpcm.xchngbook.C_ordr_rfrnc)
+	log.Printf("[%s]   C_slm_flg:        %s", cpcm.serviceName, cpcm.xchngbook.C_slm_flg)
+	log.Printf("[%s]   L_dsclsd_qty:     %d", cpcm.serviceName, cpcm.xchngbook.L_dsclsd_qty)
+	log.Printf("[%s]   L_ord_tot_qty:    %d", cpcm.serviceName, cpcm.xchngbook.L_ord_tot_qty)
+	log.Printf("[%s]   L_ord_lmt_rt:     %d", cpcm.serviceName, cpcm.xchngbook.L_ord_lmt_rt)
+	log.Printf("[%s]   L_stp_lss_tgr:    %d", cpcm.serviceName, cpcm.xchngbook.L_stp_lss_tgr)
+	log.Printf("[%s]   C_valid_dt:       %s", cpcm.serviceName, cpcm.xchngbook.C_valid_dt)
+	log.Printf("[%s]   C_ord_typ:        %s", cpcm.serviceName, cpcm.xchngbook.C_ord_typ)
+	log.Printf("[%s]   C_req_typ:        %s", cpcm.serviceName, cpcm.xchngbook.C_req_typ)
+	log.Printf("[%s]   L_ord_seq:        %d", cpcm.serviceName, cpcm.xchngbook.L_ord_seq)
+	log.Printf("[%s]   IpAddrs:          %s", cpcm.serviceName, c_ip_addrs)
+	log.Printf("[%s]   PrcimpvFlg:       %s", cpcm.serviceName, c_prcimpv_flg)
+	log.Printf("[%s]   C_ex_ordr_type:   %s", cpcm.serviceName, cpcm.xchngbook.C_ex_ordr_type)
+	log.Printf("[%s]   C_plcd_stts:      %s", cpcm.serviceName, cpcm.xchngbook.C_plcd_stts)
+	log.Printf("[%s]   L_mdfctn_cntr:    %d", cpcm.serviceName, cpcm.xchngbook.L_mdfctn_cntr)
+	log.Printf("[%s]   C_frwrd_tm:       %s", cpcm.serviceName, cpcm.xchngbook.C_frwrd_tm)
+	log.Printf("[%s]   D_jiffy:          %f", cpcm.serviceName, cpcm.xchngbook.D_jiffy)
+	log.Printf("[%s]   C_xchng_rmrks:    %s", cpcm.serviceName, cpcm.xchngbook.C_xchng_rmrks)
+	log.Printf("[%s]   C_rms_prcsd_flg:  %s", cpcm.serviceName, cpcm.xchngbook.C_rms_prcsd_flg)
+	log.Printf("[%s]   L_ors_msg_typ:    %d", cpcm.serviceName, cpcm.xchngbook.L_ors_msg_typ)
+	log.Printf("[%s]   C_ack_tm:         %s", cpcm.serviceName, cpcm.xchngbook.C_ack_tm)
 
 	log.Printf("[%s] Data extracted and stored in the 'xchngbook' structure successfully", cpcm.serviceName)
 

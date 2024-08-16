@@ -80,7 +80,7 @@ func (Em *EnvironmentManager) GetProcessSpaceValue(token string) string {
 		log.Printf("[%s] Token '%s' not found in configuration map", Em.ServiceName, token)
 		return ""
 	}
-	log.Printf("[%s] Retrieved value for token '%s': %s", Em.ConfigMap, token, value)
+	log.Printf("[%s] Retrieved value for token '%s': %s", Em.ServiceName, token, value)
 	return value
 }
 

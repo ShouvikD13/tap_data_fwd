@@ -30,12 +30,12 @@ type Vw_xchngbook struct {
 
 	//-----------------------------------------------------------------------------
 	C_ex_ordr_type  string  // this one we have to use to use for set we need this for ordinary order type.
-	C_oprn_typ      string  // this is we are setting
+	C_oprn_typ      string  // this is we are setting       // this column is not in the 'fxb' table.
 	C_plcd_stts     string  // this field is used in "fnRefToOrd" to change the status in "UPDATION_ON_ORDER_FORWARDING"
 	L_mdfctn_cntr   int32   // used in same querry as above
 	C_frwrd_tm      string  // used in same querry as above
 	D_jiffy         float64 //used in "fnRefToOrd" to change the status in "UPDATION_ON_EXCHANGE_RESPONSE"
-	L_dwnld_flg     int32   // used in same querry as above
+	L_dwnld_flg     int32   // used in same querry as above // this column is not in the 'fxb' table.
 	C_xchng_rmrks   string  // used in last query of "fnRefToOrd"
 	C_rms_prcsd_flg string  // used in same query as above
 	L_ors_msg_typ   int32   // used in same query as above
@@ -69,7 +69,7 @@ type Vw_orderbook struct {
 
 	L_mdfctn_cntr int32  // this is we are cheching after we fetch the data from both the tables. (fod and fxb)
 	C_ordr_stts   string // it are used in updating the status after the fetcing the orders from the table
-	C_oprn_typ    string // it are used in updating the status after the fetcing the orders from the table
+	// C_oprn_typ    string // it are used in updating the status after the fetcing the orders from the table
 
 	C_xchng_cd     string
 	C_prd_typ      string
@@ -79,7 +79,7 @@ type Vw_orderbook struct {
 	C_opt_typ      string
 	L_strike_prc   int64
 	C_ctgry_indstk string
-	L_ca_lvl       int64
+	// L_ca_lvl       int64
 }
 
 /*
@@ -96,17 +96,17 @@ type Vw_contract struct {
 	C_opt_typ       string // null = '\0'
 	L_strike_prc    int64  // null = -1
 	C_ctgry_indstk  string // null = '*'
-	L_ca_lvl        int64  // null = -1
-	C_rqst_typ      string // null = '*'
-	C_rout_crt      string // null = "*"
+	// L_ca_lvl        int64  // null = -1
+	C_rqst_typ string // null = '*'
+	C_rout_crt string // null = "*"
 }
 
 type Vw_nse_cntrct struct {
 	C_prd_typ      string //byte
 	C_ctgry_indstk string //byte
 	C_symbol       string // this field we are initialising from first query in "fn_get_ext_cnt"
-	L_ca_lvl       int32
-	L_token_id     int32
+	L_ca_lvl       int32  //this field we are initialising from  query in "fn_get_ext_cnt"
+	L_token_id     int32  //this field we are initialising from  query in "fn_get_ext_cnt"
 
 	//----------------------------
 	// these all fields are initialising from "fn_get_ext_cnt"
