@@ -405,27 +405,37 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 
 	query := `
     SELECT
-    fod_clm_mtch_accnt,
-    fod_ordr_flw,
-    fod_ordr_tot_qty,
-    fod_exec_qty,
-    COALESCE(fod_exec_qty_day, 0),
-    fod_settlor,
-    fod_spl_flag,
-    TO_CHAR(fod_ord_ack_tm, 'YYYY-MM-DD HH24:MI:SS') AS fod_ord_ack_tm,
-    TO_CHAR(fod_lst_rqst_ack_tm, 'YYYY-MM-DD HH24:MI:SS') AS fod_lst_rqst_ack_tm,
-    fod_pro_cli_ind,
-    COALESCE(fod_ctcl_id, ' '),
-    COALESCE(fod_pan_no, '*'),
-    COALESCE(fod_lst_act_ref, '0'),
-    COALESCE(FOD_ESP_ID, '*'),
-    COALESCE(FOD_ALGO_ID, '*'),
-		COALESCE(FOD_SOURCE_FLG, '*')
-	FROM
-		fod_fo_ordr_dtls
-	WHERE
-		fod_ordr_rfrnc = ?
-	FOR UPDATE NOWAIT;
+    fod_clm_mtch_accnt AS C_cln_mtch_accnt,
+    fod_ordr_flw AS C_ordr_flw,
+    fod_ordr_tot_qty AS L_ord_tot_qty,
+    fod_exec_qty AS L_exctd_qty,
+    COALESCE(fod_exec_qty_day, 0) AS L_exctd_qty_day,
+    fod_settlor AS C_settlor,
+    fod_spl_flag AS C_spl_flg,
+    TO_CHAR(fod_ord_ack_tm, 'YYYY-MM-DD HH24:MI:SS') AS C_ack_tm,
+    TO_CHAR(fod_lst_rqst_ack_tm, 'YYYY-MM-DD HH24:MI:SS') AS C_prev_ack_tm,
+    fod_pro_cli_ind AS C_pro_cli_ind,
+    COALESCE(fod_ctcl_id, ' ') AS C_ctcl_id,
+    COALESCE(fod_pan_no, '*') AS C_pan_no,
+    COALESCE(fod_lst_act_ref, '0') AS C_lst_act_ref,
+    COALESCE(fod_esp_id, '*') AS C_esp_id,
+    COALESCE(fod_algo_id, '*') AS C_algo_id,
+    COALESCE(fod_source_flg, '*') AS C_source_flg,
+    fod_mdfctn_cntr AS L_mdfctn_cntr,
+    fod_ordr_stts AS C_ordr_stts,
+    fod_xchng_cd AS C_xchng_cd,
+    fod_prdct_typ AS C_prd_typ,
+    fod_undrlying AS C_undrlyng,
+    fod_expry_dt AS C_expry_dt,
+    fod_exer_typ AS C_exrc_typ,
+    fod_opt_typ AS C_opt_typ,
+    fod_strk_prc AS L_strike_prc,
+    fod_indstk AS C_ctgry_indstk
+FROM
+    fod_fo_ordr_dtls
+WHERE
+    fod_ordr_rfrnc =  ?
+FOR UPDATE NOWAIT;
 
     `
 
@@ -452,6 +462,16 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 		&cpcm.cEspID,
 		&cpcm.cAlgoID,
 		&cpcm.cSourceFlg,
+		&cpcm.orderbook.L_mdfctn_cntr,
+		&cpcm.orderbook.C_ordr_stts,
+		&cpcm.orderbook.C_xchng_cd,
+		&cpcm.orderbook.C_prd_typ,
+		&cpcm.orderbook.C_undrlyng,
+		&cpcm.orderbook.C_expry_dt,
+		&cpcm.orderbook.C_exrc_typ,
+		&cpcm.orderbook.C_opt_typ,
+		&cpcm.orderbook.L_strike_prc,
+		&cpcm.orderbook.C_ctgry_indstk,
 	)
 
 	if err != nil {
@@ -467,6 +487,7 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 	cpcm.cSourceFlg = strings.TrimSpace(cpcm.cSourceFlg)
 
 	log.Printf("[%s] Data extracted and stored in the 'orderbook' structure:", cpcm.serviceName)
+
 	log.Printf("[%s]   C_cln_mtch_accnt:   %s", cpcm.serviceName, cpcm.orderbook.C_cln_mtch_accnt)
 	log.Printf("[%s]   C_ordr_flw:        %s", cpcm.serviceName, cpcm.orderbook.C_ordr_flw)
 	log.Printf("[%s]   L_ord_tot_qty:     %d", cpcm.serviceName, cpcm.orderbook.L_ord_tot_qty)
@@ -483,6 +504,16 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 	log.Printf("[%s]   C_esp_id:          %s", cpcm.serviceName, cpcm.cEspID)
 	log.Printf("[%s]   C_algo_id:         %s", cpcm.serviceName, cpcm.cAlgoID)
 	log.Printf("[%s]   C_source_flg_tmp:  %s", cpcm.serviceName, cpcm.cSourceFlg)
+	log.Printf("[%s]   L_mdfctn_cntr:     %d", cpcm.serviceName, cpcm.orderbook.L_mdfctn_cntr)
+	log.Printf("[%s]   C_ordr_stts:       %s", cpcm.serviceName, cpcm.orderbook.C_ordr_stts)
+	log.Printf("[%s]   C_xchng_cd:        %s", cpcm.serviceName, cpcm.orderbook.C_xchng_cd)
+	log.Printf("[%s]   C_prd_typ:         %s", cpcm.serviceName, cpcm.orderbook.C_prd_typ)
+	log.Printf("[%s]   C_undrlyng:        %s", cpcm.serviceName, cpcm.orderbook.C_undrlyng)
+	log.Printf("[%s]   C_expry_dt:        %s", cpcm.serviceName, cpcm.orderbook.C_expry_dt)
+	log.Printf("[%s]   C_exrc_typ:        %s", cpcm.serviceName, cpcm.orderbook.C_exrc_typ)
+	log.Printf("[%s]   C_opt_typ:         %s", cpcm.serviceName, cpcm.orderbook.C_opt_typ)
+	log.Printf("[%s]   L_strike_prc:      %d", cpcm.serviceName, cpcm.orderbook.L_strike_prc)
+	log.Printf("[%s]   C_ctgry_indstk:    %s", cpcm.serviceName, cpcm.orderbook.C_ctgry_indstk)
 
 	log.Printf("[%s] Data extracted and stored in the 'orderbook' structure successfully", cpcm.serviceName)
 
@@ -546,7 +577,7 @@ func (cpcm *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 	case models.UPDATION_ON_ORDER_FORWARDING:
 
 		query1 := `UPDATE fxb_fo_xchng_book 
-				SET fxb_plcd_stts = ?, fxb_frwd_tm = SYSDATE
+				SET fxb_plcd_stts = ?, fxb_frwd_tm = CURRENT_TIMESTAMP
 				WHERE fxb_ordr_rfrnc = ? 
 				AND fxb_mdfctn_cntr = ?`
 
