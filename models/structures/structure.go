@@ -181,29 +181,29 @@ type St_exch_msg struct {
 type St_net_hdr struct {
 	S_message_length int16
 	I_seq_num        int32
-	C_checksum       [16]byte
+	C_checksum       string //[16]byte
 }
 
 type St_oe_reqres struct {
-	St_hdr                        St_int_header
-	C_participant_type            byte
-	C_filler_1                    byte
+	St_hdr                        *St_int_header
+	C_participant_type            string // byte
+	C_filler_1                    string //byte
 	Si_competitor_period          int16
 	Si_solicitor_period           int16
-	C_modified_cancelled_by       byte
-	C_filler_2                    byte
+	C_modified_cancelled_by       string //byte
+	C_filler_2                    string // byte
 	Si_reason_code                int16
 	C_filler_3                    string
 	L_token_no                    int32
-	St_con_desc                   St_contract_desc
-	C_counter_party_broker_id     [LEN_BROKER_ID]byte
-	C_filler_4                    byte
+	St_con_desc                   *St_contract_desc
+	C_counter_party_broker_id     string //[LEN_BROKER_ID]byte
+	C_filler_4                    string //byte
 	C_filler_5                    string
-	C_closeout_flg                byte
-	C_filler_6                    byte
+	C_closeout_flg                string //byte
+	C_filler_6                    string //byte
 	Si_order_type                 int16
 	D_order_number                float64
-	C_account_number              [LEN_ACCOUNT_NUMBER]byte
+	C_account_number              string //[LEN_ACCOUNT_NUMBER]byte
 	Si_book_type                  int16
 	Si_buy_sell_indicator         int16
 	Li_disclosed_volume           int32
@@ -217,18 +217,18 @@ type St_oe_reqres struct {
 	Li_entry_date_time            int32
 	Li_minimum_fill_aon_volume    int32
 	Li_last_modified              int32
-	St_ord_flg                    St_order_flags
+	St_ord_flg                    *St_order_flags
 	Si_branch_id                  int16
-	Li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
-	C_broker_id                   [LEN_BROKER_ID]byte
-	C_remarks                     [LEN_REMARKS]byte
-	C_open_close                  byte
-	C_settlor                     [LEN_SETTLOR]byte
+	Li_trader_id                  int32  // Changed from int16 to int32 in Ver 1.8
+	C_broker_id                   string //[LEN_BROKER_ID]byte
+	C_remarks                     string //[LEN_REMARKS]byte
+	C_open_close                  string // byte
+	C_settlor                     string //[LEN_SETTLOR]byte
 	Si_pro_client_indicator       int16
 	Si_settlement_period          int16
-	C_cover_uncover               byte
-	C_giveup_flag                 byte
-	I_order_seq                   int32 // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
+	C_cover_uncover               string // byte
+	C_giveup_flag                 string // byte
+	I_order_seq                   int32  // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
 	D_nnf_field                   float64
 	D_filler19                    float64
 	C_pan                         string // Added in Ver 2.7
@@ -246,8 +246,8 @@ type St_int_header struct {
 	Li_trader_id      int32
 	Si_error_code     int16
 	C_filler_2        string
-	C_time_stamp_1    [LEN_TIME_STAMP]byte
-	C_time_stamp_2    [LEN_TIME_STAMP]byte
+	C_time_stamp_1    string //[LEN_TIME_STAMP]byte
+	C_time_stamp_2    string //[LEN_TIME_STAMP]byte
 	Si_message_length int32
 }
 
@@ -255,7 +255,7 @@ type St_contract_desc struct {
 	C_instrument_name [LEN_INSTRUMENT_NAME]byte
 	C_symbol          [LEN_SYMBOL_NSE]byte
 	Li_expiry_date    int32
-	Li_strike_price   int32
+	Li_strike_price   int64
 	C_option_type     [LEN_OPTION_TYPE]byte
 	Si_ca_level       int16
 }
@@ -287,5 +287,5 @@ type St_pk_sequence struct {
 }
 
 type St_addtnal_order_flags struct {
-	C_cover_uncover byte
+	C_cover_uncover string //byte
 }
