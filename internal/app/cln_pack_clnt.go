@@ -18,6 +18,8 @@ type ClnPackClntManager struct {
 	nse_contract *structures.Vw_nse_cntrct // we are updating it in 'fn_get_ext_cnt'
 	requestQueue *structures.St_req_q_data // this is used in 'fnGetNxtRec'
 	pipe_mstr    *structures.St_opm_pipe_mstr
+	oe_reqres    *structures.St_oe_reqres
+	exch_msg     *structures.St_exch_msg
 	cPanNo       string // Pan number, initialized in the 'fnRefToOrd' method
 	cLstActRef   string // Last activity reference, initialized in the 'fnRefToOrd' method
 	cEspID       string // ESP ID, initialized in the 'fnRefToOrd' method
@@ -37,6 +39,8 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 	cpcm.nse_contract = &structures.Vw_nse_cntrct{}
 	cpcm.requestQueue = &structures.St_req_q_data{}
 	cpcm.pipe_mstr = &structures.St_opm_pipe_mstr{}
+	cpcm.oe_reqres = &structures.St_oe_reqres{}
+	cpcm.exch_msg = &structures.St_exch_msg{}
 	log.Printf("[%s] Entering Fn_bat_init", cpcm.serviceName)
 
 	// we are getting the 7 args
@@ -246,6 +250,8 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			cpcm.orderbook,
 			cpcm.pipe_mstr,
 			cpcm.nse_contract,
+			cpcm.oe_reqres,
+			cpcm.exch_msg,
 			cpcm.cPanNo,
 			cpcm.cLstActRef,
 			cpcm.cEspID,

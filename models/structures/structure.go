@@ -133,10 +133,10 @@ type St_opm_pipe_mstr struct {
 		int si_user_typ_glb;	 //----------------------(this one is used) "this one we are getting from "cofiguration file" "GetProcessSpaceValue()""
 
 	*/
-	li_opm_brnch_id int64  // null=-1
-	c_xchng_brkr_id string // null="*"
-	c_opm_trdr_id   string // null="*"
-	si_user_typ_glb int    // null=0   (i think , it can be 0 (for trader) , 4 (for CORPORATE_MANAGER) , 5 (for BRANCH_MANAGER) )
+	L_opm_brnch_id  int64  // null=-1
+	C_xchng_brkr_id string // null="*"
+	C_opm_trdr_id   string // null="*"
+	S_user_typ_glb  int    // null=0   (i think , it can be 0 (for trader) , 4 (for CORPORATE_MANAGER) , 5 (for BRANCH_MANAGER) )
 
 	/* Table name "OPM_ORD_PIPE_MSTR"
 	opm_xchng_cd,
@@ -165,90 +165,90 @@ type St_opm_pipe_mstr struct {
 // ================================ till now all the strctures we are getting as parameters ========================
 
 type St_req_q_data struct {
-	li_msg_type int64
+	L_msg_type int64
 	/* we are changeing this field multiple times.
 		1. it is changing, where we are packing the structure which is in "fn_pack_ordnry_ord_to_nse" here we are setting the the variable based on the request type like (if request is "new" then "li_msg_type = BOARD_LOT_IN" and if request is "modify" the "li_msg_type = ORDER_MOD_IN" and if request is "cancel" then "li_msg_type = ORDER_CANCEL_IN")
 	 	2.
 	*/
-	st_exch_msg_data St_exch_msg // in the original structure here a union is used . but i am directly using the structure.
+	St_exch_msg_data St_exch_msg // in the original structure here a union is used . but i am directly using the structure.
 }
 
 type St_exch_msg struct {
-	st_net_header St_net_hdr
-	st_oe_res     St_oe_reqres
+	St_net_header St_net_hdr
+	St_oe_res     St_oe_reqres
 }
 
 type St_net_hdr struct {
-	si_message_length int16
-	i_seq_num         int32
-	c_checksum        [16]byte
+	S_message_length int16
+	I_seq_num        int32
+	C_checksum       [16]byte
 }
 
 type St_oe_reqres struct {
-	st_hdr                        St_int_header
-	c_participant_type            byte
-	c_filler_1                    byte
-	si_competitor_period          int16
-	si_solicitor_period           int16
-	c_modified_cancelled_by       byte
-	c_filler_2                    byte
-	si_reason_code                int16
-	c_filler_3                    string
-	l_token_no                    int32
-	st_con_desc                   St_contract_desc
-	c_counter_party_broker_id     [LEN_BROKER_ID]byte
-	c_filler_4                    byte
-	c_filler_5                    string
-	c_closeout_flg                byte
-	c_filler_6                    byte
-	si_order_type                 int16
-	d_order_number                float64
-	c_account_number              [LEN_ACCOUNT_NUMBER]byte
-	si_book_type                  int16
-	si_buy_sell_indicator         int16
-	li_disclosed_volume           int32
-	li_disclosed_volume_remaining int32
-	li_total_volume_remaining     int32
-	li_volume                     int32
-	li_volume_filled_today        int32
-	li_price                      int32
-	li_trigger_price              int32
-	li_good_till_date             int32
-	li_entry_date_time            int32
-	li_minimum_fill_aon_volume    int32
-	li_last_modified              int32
-	st_ord_flg                    St_order_flags
-	si_branch_id                  int16
-	li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
-	c_broker_id                   [LEN_BROKER_ID]byte
-	c_remarks                     [LEN_REMARKS]byte
-	c_open_close                  byte
-	c_settlor                     [LEN_SETTLOR]byte
-	si_pro_client_indicator       int16
-	si_settlement_period          int16
-	c_cover_uncover               byte
-	c_giveup_flag                 byte
-	i_order_seq                   int32 // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
-	d_nnf_field                   float64
-	d_filler19                    float64
-	c_pan                         string // Added in Ver 2.7
-	l_algo_id                     int32  // Added in Ver 2.7
-	si_algo_category              int16  // Added in Ver 2.7
-	ll_lastactivityref            int64  // Added in Ver 2.9
-	c_reserved                    string // Updated in Ver 2.9
+	St_hdr                        St_int_header
+	C_participant_type            byte
+	C_filler_1                    byte
+	Si_competitor_period          int16
+	Si_solicitor_period           int16
+	C_modified_cancelled_by       byte
+	C_filler_2                    byte
+	Si_reason_code                int16
+	C_filler_3                    string
+	L_token_no                    int32
+	St_con_desc                   St_contract_desc
+	C_counter_party_broker_id     [LEN_BROKER_ID]byte
+	C_filler_4                    byte
+	C_filler_5                    string
+	C_closeout_flg                byte
+	C_filler_6                    byte
+	Si_order_type                 int16
+	D_order_number                float64
+	C_account_number              [LEN_ACCOUNT_NUMBER]byte
+	Si_book_type                  int16
+	Si_buy_sell_indicator         int16
+	Li_disclosed_volume           int32
+	Li_disclosed_volume_remaining int32
+	Li_total_volume_remaining     int32
+	Li_volume                     int32
+	Li_volume_filled_today        int32
+	Li_price                      int32
+	Li_trigger_price              int32
+	Li_good_till_date             int32
+	Li_entry_date_time            int32
+	Li_minimum_fill_aon_volume    int32
+	Li_last_modified              int32
+	St_ord_flg                    St_order_flags
+	Si_branch_id                  int16
+	Li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
+	C_broker_id                   [LEN_BROKER_ID]byte
+	C_remarks                     [LEN_REMARKS]byte
+	C_open_close                  byte
+	C_settlor                     [LEN_SETTLOR]byte
+	Si_pro_client_indicator       int16
+	Si_settlement_period          int16
+	C_cover_uncover               byte
+	C_giveup_flag                 byte
+	I_order_seq                   int32 // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
+	D_nnf_field                   float64
+	D_filler19                    float64
+	C_pan                         string // Added in Ver 2.7
+	L_algo_id                     int32  // Added in Ver 2.7
+	Si_algo_category              int16  // Added in Ver 2.7
+	Ll_lastactivityref            int64  // Added in Ver 2.9
+	C_reserved                    string // Updated in Ver 2.9
 }
 
 type St_int_header struct {
 	Si_transaction_code int16
 	Li_log_time         int32
 
-	C_alpha_char      [LEN_ALPHA_CHAR]byte
+	C_alpha_char      string //[LEN_ALPHA_CHAR]byte
 	Li_trader_id      int32
 	Si_error_code     int16
 	C_filler_2        string
 	C_time_stamp_1    [LEN_TIME_STAMP]byte
 	C_time_stamp_2    [LEN_TIME_STAMP]byte
-	Si_message_length int16
+	Si_message_length int32
 }
 
 type St_contract_desc struct {
@@ -261,31 +261,31 @@ type St_contract_desc struct {
 }
 
 type St_order_flags struct {
-	flg_ato         uint32 // 1 bit
-	flg_market      uint32 // 1 bit
-	flg_sl          uint32 // 1 bit
-	flg_mit         uint32 // 1 bit
-	flg_day         uint32 // 1 bit
-	flg_gtc         uint32 // 1 bit
-	flg_ioc         uint32 // 1 bit
-	flg_aon         uint32 // 1 bit
-	flg_mf          uint32 // 1 bit
-	flg_matched_ind uint32 // 1 bit
-	flg_traded      uint32 // 1 bit
-	flg_modified    uint32 // 1 bit
-	flg_frozen      uint32 // 1 bit
-	flg_filler1     uint32 // 3 bits
+	Flg_ato         uint32 // 1 bit
+	Flg_market      uint32 // 1 bit
+	Flg_sl          uint32 // 1 bit
+	Flg_mit         uint32 // 1 bit
+	Flg_day         uint32 // 1 bit
+	Flg_gtc         uint32 // 1 bit
+	Flg_ioc         uint32 // 1 bit
+	Flg_aon         uint32 // 1 bit
+	Flg_mf          uint32 // 1 bit
+	Flg_matched_ind uint32 // 1 bit
+	Flg_traded      uint32 // 1 bit
+	Flg_modified    uint32 // 1 bit
+	Flg_frozen      uint32 // 1 bit
+	Flg_filler1     uint32 // 3 bits
 }
 
 //-------------------------------------------------------------------------------------------------------------------
 
 type St_pk_sequence struct {
-	c_pipe_id  string
-	c_trd_dt   string
-	c_rqst_typ string
-	i_seq_num  int32
+	C_pipe_id  string
+	C_trd_dt   string
+	C_rqst_typ string
+	C_seq_num  int32
 }
 
 type St_addtnal_order_flags struct {
-	c_cover_uncover byte
+	C_cover_uncover byte
 }

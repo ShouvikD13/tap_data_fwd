@@ -34,6 +34,16 @@ const (
 
 	// on reject order
 	ORS_NEW_ORD_RJCT = 5304
+
+	//length
+	LEN_ALPHA_CHAR = 2
+
+	// Order & Trade management
+	BOARD_LOT_IN = 2000
+
+	TRADER            = "T"
+	CORPORATE_MANAGER = "M"
+	BRANCH_MANAGER    = "B"
 )
 
 /*********************************************************************/
