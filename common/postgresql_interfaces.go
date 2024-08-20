@@ -5,7 +5,7 @@ import (
 )
 
 type DBConfigLoader interface {
-	LoadPostgreSQLConfig(serviceName string, fileName string) (*PostgreSQLConfig, error)
+	LoadPostgreSQLConfig(serviceName string, fileName string) int
 }
 
 type DBConnector interface {

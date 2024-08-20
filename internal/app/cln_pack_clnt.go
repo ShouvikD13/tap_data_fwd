@@ -20,9 +20,6 @@ type ClnPackClntManager struct {
 	pipe_mstr    *structures.St_opm_pipe_mstr
 	oe_reqres    *structures.St_oe_reqres
 	exch_msg     *structures.St_exch_msg
-	St_hdr       *structures.St_int_header
-	St_con_desc  *structures.St_contract_desc
-	St_ord_flg   *structures.St_order_flags
 	cPanNo       string // Pan number, initialized in the 'fnRefToOrd' method
 	cLstActRef   string // Last activity reference, initialized in the 'fnRefToOrd' method
 	cEspID       string // ESP ID, initialized in the 'fnRefToOrd' method
@@ -44,9 +41,9 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 	cpcm.pipe_mstr = &structures.St_opm_pipe_mstr{}
 	cpcm.oe_reqres = &structures.St_oe_reqres{}
 	cpcm.exch_msg = &structures.St_exch_msg{}
-	cpcm.St_hdr = &structures.St_int_header{}
-	cpcm.St_con_desc = &structures.St_contract_desc{}
-	cpcm.St_ord_flg = &structures.St_order_flags{}
+	cpcm.oe_reqres.St_hdr = &structures.St_int_header{}
+	cpcm.oe_reqres.St_con_desc = &structures.St_contract_desc{}
+	cpcm.oe_reqres.St_ord_flg = &structures.St_order_flags{}
 	log.Printf("[%s]  [Fn_bat_init] Entering Fn_bat_init", cpcm.serviceName)
 
 	// we are getting the 7 args
@@ -273,9 +270,6 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			cpcm.nse_contract,
 			cpcm.oe_reqres,
 			cpcm.exch_msg,
-			cpcm.St_hdr,
-			cpcm.St_con_desc,
-			cpcm.St_ord_flg,
 			cpcm.cPanNo,
 			cpcm.cLstActRef,
 			cpcm.cEspID,
@@ -467,7 +461,8 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
     fod_exer_typ AS C_exrc_typ,
     fod_opt_typ AS C_opt_typ,
     fod_strk_prc AS L_strike_prc,
-    fod_indstk AS C_ctgry_indstk
+    fod_indstk AS C_ctgry_indstk,
+	fod_ack_nmbr As C_xchng_ack
 	FROM
 		fod_fo_ordr_dtls
 	WHERE
@@ -509,6 +504,7 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 		&cpcm.orderbook.C_opt_typ,
 		&cpcm.orderbook.L_strike_prc,
 		&cpcm.orderbook.C_ctgry_indstk,
+		&cpcm.orderbook.C_xchng_ack,
 	)
 
 	if err != nil {
@@ -551,6 +547,7 @@ func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 	log.Printf("[%s] [fnRefToOrd]   C_opt_typ:         %s", cpcm.serviceName, cpcm.orderbook.C_opt_typ)
 	log.Printf("[%s] [fnRefToOrd]   L_strike_prc:      %d", cpcm.serviceName, cpcm.orderbook.L_strike_prc)
 	log.Printf("[%s] [fnRefToOrd]   C_ctgry_indstk:    %s", cpcm.serviceName, cpcm.orderbook.C_ctgry_indstk)
+	log.Printf("[%s] [fnRefToOrd]   C_xchng_ack	: 	   %s", cpcm.serviceName, cpcm.orderbook.C_xchng_ack)
 
 	log.Printf("[%s] [fnRefToOrd] Data extracted and stored in the 'orderbook' structure successfully", cpcm.serviceName)
 

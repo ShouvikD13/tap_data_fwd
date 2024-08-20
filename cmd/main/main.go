@@ -3,6 +3,7 @@ package main
 import (
 	"DATA_FWD_TAP/config"
 	"DATA_FWD_TAP/internal/app"
+	"DATA_FWD_TAP/models"
 	"log"
 )
 
@@ -12,7 +13,6 @@ func main() {
 	serviceName := args[0]
 	var resultTmp int
 
-	// Print the name of the program
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
 	/* testing Eviroment.go
@@ -33,20 +33,21 @@ func main() {
 	}
 	*/
 	//----------------------------------------------
+	environmentManager := models.NewEnvironmentManager(serviceName, "C:/Users/devdu/go-workspace/data_fwd_tap/config/EnvConfig.ini")
 
-	cfgManager := &config.ConfigManager{}
+	configManager := config.NewConfigManager(serviceName,
+		environmentManager.FileName,
+		environmentManager)
 
-	// Here we are loading PostgreSQL configuration
-	cfg, err := cfgManager.LoadPostgreSQLConfig(serviceName, "C:/Users/devdu/go-workspace/data_fwd_tap/config/EnvConfig.ini")
-	if err != nil {
-		log.Fatalf("[%s] Failed to load PostgreSQL configuration: %v", serviceName, err)
+	if configManager.LoadPostgreSQLConfig() != 0 {
+		log.Fatalf("[%s] Failed to load PostgreSQL configuration: ", serviceName)
 	}
 
-	if cfgManager.GetDatabaseConnection(serviceName, *cfg) != 0 {
+	if configManager.GetDatabaseConnection() != 0 {
 		log.Fatalf("[%s] Failed to connect to database", serviceName)
 	}
 
-	DB := cfgManager.GetDB(serviceName)
+	DB := configManager.GetDB()
 	if DB == nil {
 		log.Fatalf("[%s] Database connection is nil. Failed to get the database instance.", serviceName)
 	}

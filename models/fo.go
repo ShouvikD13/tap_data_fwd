@@ -44,6 +44,14 @@ const (
 	TRADER            = "T"
 	CORPORATE_MANAGER = "M"
 	BRANCH_MANAGER    = "B"
+
+	//for Expiry DT
+	TEN_YRS_IN_SEC = 315513000
+
+	/**** Order request type ****/
+	NEW    = "N"
+	MODIFY = "M"
+	CANCEL = "C"
 )
 
 /*********************************************************************/

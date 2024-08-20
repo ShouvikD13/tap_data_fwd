@@ -64,12 +64,12 @@ type Vw_orderbook struct {
 	C_prev_ack_tm    string
 	C_pro_cli_ind    string //byte
 	C_ctcl_id        string
-
+	C_xchng_ack      string //getting from querry of fetching the order details
 	//-----------------------------------------------------
 
-	L_mdfctn_cntr int32  // this is we are cheching after we fetch the data from both the tables. (fod and fxb)
-	C_ordr_stts   string // it are used in updating the status after the fetcing the orders from the table
-	// C_oprn_typ    string // it are used in updating the status after the fetcing the orders from the table
+	L_mdfctn_cntr int32  // this is we are changing after we fetch the data from both the tables. (fod and fxb)
+	C_ordr_stts   string // it is used in updating the status after the fetcing the orders from the table
+	// C_oprn_typ    string // it is used in updating the status after the fetcing the orders from the table
 
 	C_xchng_cd     string
 	C_prd_typ      string
@@ -167,8 +167,8 @@ type St_opm_pipe_mstr struct {
 type St_req_q_data struct {
 	L_msg_type int64
 	/* we are changeing this field multiple times.
-		1. it is changing, where we are packing the structure which is in "fn_pack_ordnry_ord_to_nse" here we are setting the the variable based on the request type like (if request is "new" then "li_msg_type = BOARD_LOT_IN" and if request is "modify" the "li_msg_type = ORDER_MOD_IN" and if request is "cancel" then "li_msg_type = ORDER_CANCEL_IN")
-	 	2.
+	1. it is changing, where we are packing the structure which is in "fn_pack_ordnry_ord_to_nse" here we are setting the the variable based on the request type like (if request is "new" then "li_msg_type = BOARD_LOT_IN")
+
 	*/
 	St_exch_msg_data St_exch_msg // in the original structure here a union is used . but i am directly using the structure.
 }

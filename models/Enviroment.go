@@ -36,40 +36,39 @@ const (
 type EnvironmentManager struct {
 	ConfigMap   map[string]string
 	ServiceName string
+	FileName    string
 }
 
-func (Em *EnvironmentManager) InitProcessSpace(serviceName1 string, FileName string, ProcessName string) int {
-	Em.ServiceName = serviceName1
+func NewEnvironmentManager(serviceName, fileName string) *EnvironmentManager {
+	return &EnvironmentManager{
+		ConfigMap:   make(map[string]string), // Initialize the ConfigMap as an empty map
+		ServiceName: serviceName,
+		FileName:    fileName,
+	}
+}
+func (Em *EnvironmentManager) InitProcessSpace(ProcessName string) int {
 	log.Printf("[%s] Initializing process space", Em.ServiceName)
-
-	cfg, err := ini.Load(FileName)
+	cfg, err := ini.Load(Em.FileName)
 	if err != nil {
-		log.Printf("[%s] Error loading INI file: %s, Error: %v", Em.ServiceName, FileName, err)
+		log.Printf("[%s] Error loading INI file: %s, Error: %v", Em.ServiceName, Em.FileName, err)
 		return -1
 	}
-
-	log.Printf("[%s] Successfully loaded INI file: %s", Em.ServiceName, FileName)
-
+	log.Printf("[%s] Successfully loaded INI file: %s", Em.ServiceName, Em.FileName)
 	section, err := cfg.GetSection(ProcessName)
 	if err != nil {
-		log.Printf("[%s] Section '%s' not specified in INI file: %s, Error: %v", Em.ServiceName, ProcessName, FileName, err)
+		log.Printf("[%s] Section '%s' not specified in INI file: %s, Error: %v", Em.ServiceName, ProcessName, Em.FileName, err)
 		return -1
 	}
-
-	log.Printf("[%s] Successfully retrieved section: %s from INI file: %s", Em.ServiceName, ProcessName, FileName)
-
-	Em.ConfigMap = make(map[string]string)
+	log.Printf("[%s] Successfully retrieved section: %s from INI file: %s", Em.ServiceName, ProcessName, Em.FileName)
 
 	for _, key := range section.Keys() {
 		Em.ConfigMap[key.Name()] = key.String()
 		log.Printf("[%s] Loaded key: %s, value: %s", Em.ServiceName, key.Name(), key.String())
 	}
-
 	if len(Em.ConfigMap) > MaxToken {
 		log.Printf("[%s] Exceeding max token limit: MaxToken: %d, Count of tokens: %d", Em.ServiceName, MaxToken, len(Em.ConfigMap))
 		return -1
 	}
-
 	log.Printf("[%s] Process space initialized successfully with %d tokens", Em.ServiceName, len(Em.ConfigMap))
 	return 0
 }
