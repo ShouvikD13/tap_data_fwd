@@ -3,6 +3,7 @@ package config
 import (
 	"DATA_FWD_TAP/common"
 	"DATA_FWD_TAP/models"
+	"strconv"
 
 	"fmt"
 	"log"
@@ -44,36 +45,34 @@ type ConfigManager struct {
 	}
 	environmentManager *models.EnvironmentManager
 	resultTmp          int
-	FileName           string
 	cfg                *common.PostgreSQLConfig
 	serviceName        string
 }
 
-func NewConfigManager(serviceName, fileName string, envManager *models.EnvironmentManager) *ConfigManager {
+func NewConfigManager(serviceName string, envManager *models.EnvironmentManager) *ConfigManager {
 	return &ConfigManager{
-		environmentManager: envManager,
-		FileName:           fileName,
 		serviceName:        serviceName,
+		environmentManager: envManager,
 	}
 }
 
 // LoadPostgreSQLConfig reads the configuration from an INI file and returns a PostgreSQLConfig instance.
 // It takes the file name of the INI file as an argument.
 func (cm *ConfigManager) LoadPostgreSQLConfig() int {
-
-	cm.resultTmp = cm.environmentManager.InitProcessSpace("database")
-	if cm.resultTmp != 0 {
-		log.Printf("[%s] Failed to read config file: %v", cm.serviceName, cm.resultTmp)
+	portStr := cm.environmentManager.GetProcessSpaceValue("database", "port")
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Printf("[%s] Failed to convert port value '%s' to integer: %v", cm.serviceName, portStr, err)
 		return -1
 	}
 
 	cm.cfg = &common.PostgreSQLConfig{
-		Host:     cm.environmentManager.GetProcessSpaceValue("host"),
-		Port:     cm.environmentManager.GetProcessSpaceValueAsInt("port"),
-		Username: cm.environmentManager.GetProcessSpaceValue("username"),
-		Password: cm.environmentManager.GetProcessSpaceValue("password"),
-		DBName:   cm.environmentManager.GetProcessSpaceValue("dbname"),
-		SSLMode:  cm.environmentManager.GetProcessSpaceValue("sslmode"),
+		Host:     cm.environmentManager.GetProcessSpaceValue("database", "host"),
+		Port:     port,
+		Username: cm.environmentManager.GetProcessSpaceValue("database", "username"),
+		Password: cm.environmentManager.GetProcessSpaceValue("database", "password"),
+		DBName:   cm.environmentManager.GetProcessSpaceValue("database", "dbname"),
+		SSLMode:  cm.environmentManager.GetProcessSpaceValue("database", "sslmode"),
 	}
 
 	return 0

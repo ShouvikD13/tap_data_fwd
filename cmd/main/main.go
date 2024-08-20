@@ -35,9 +35,9 @@ func main() {
 	//----------------------------------------------
 	environmentManager := models.NewEnvironmentManager(serviceName, "C:/Users/devdu/go-workspace/data_fwd_tap/config/EnvConfig.ini")
 
-	configManager := config.NewConfigManager(serviceName,
-		environmentManager.FileName,
-		environmentManager)
+	environmentManager.LoadIniFile()
+
+	configManager := config.NewConfigManager(serviceName, environmentManager)
 
 	if configManager.LoadPostgreSQLConfig() != 0 {
 		log.Fatalf("[%s] Failed to load PostgreSQL configuration: ", serviceName)
