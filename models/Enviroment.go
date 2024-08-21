@@ -70,7 +70,6 @@ func (Em *EnvironmentManager) GetProcessSpaceValue(ProcessName, tokenName string
 		log.Printf("[%s] Token '%s' not found in section '%s'", Em.ServiceName, tokenName, ProcessName)
 		return ""
 	}
-
 	value := key.String()
 	log.Printf("[%s] Retrieved value for token '%s': %s", Em.ServiceName, tokenName, value)
 	return value

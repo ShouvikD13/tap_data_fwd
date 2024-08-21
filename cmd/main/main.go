@@ -126,7 +126,7 @@ func main() {
 
 	// Testing "cln_pack_clnt.go"
 
-	VarClnPack := &app.ClnPackClntManager{}
+	VarClnPack := &app.ClnPackClntManager{Envm: environmentManager}
 	resultTmp = VarClnPack.Fn_bat_init(args[1:], DB)
 
 	if resultTmp != 0 {
