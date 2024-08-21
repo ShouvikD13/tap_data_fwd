@@ -320,7 +320,7 @@ func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 		fxb_stp_lss_tgr AS L_stp_lss_tgr,
 		TO_CHAR(TO_DATE(fxb_ordr_valid_dt, 'YYYY-MM-DD'), 'DD-Mon-YYYY') AS C_valid_dt,
 		CASE
-			WHEN fxb_ordr_type = 'R' THEN 'P'
+			WHEN fxb_ordr_type = 'V' THEN 'T'
 			ELSE fxb_ordr_type
 		END AS C_ord_typ,
 		fxb_rqst_typ AS C_req_typ,

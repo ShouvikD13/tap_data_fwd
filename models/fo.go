@@ -52,6 +52,15 @@ const (
 	NEW    = "N"
 	MODIFY = "M"
 	CANCEL = "C"
+
+	//Book type
+
+	REGULAR_LOT_ORDER   = 1
+	STOP_LOSS_MIT_ORDER = 3
+
+	//Buy Sell indicator
+	NSE_BUY  = 1
+	NSE_SELL = 2
 )
 
 /*********************************************************************/

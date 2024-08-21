@@ -123,12 +123,14 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse() int {
 
 	// Starting thr intialization of Header
 
-	traderID, err := eplm.ConvertToInt32(eplm.pipe_mstr.C_opm_trdr_id)
+	value, err := strconv.Atoi(strings.TrimSpace(eplm.pipe_mstr.C_opm_trdr_id))
 	if err != nil {
-		log.Printf("[%s] [fnPackOrdnryOrdToNse] Conversion failed. Trader ID: %d", eplm.serviceName, traderID)
-	} else {
-		eplm.oe_reqres.St_hdr.Li_trader_id = traderID //1  HDR
+		log.Printf("[%s] ERROR: Failed to convert Trader ID to int: %v", eplm.serviceName, err)
+		// return -1
 	}
+
+	eplm.oe_reqres.St_hdr.Li_trader_id = int32(value)
+
 	eplm.oe_reqres.St_hdr.Li_log_time = 0                                        // 2 HDR
 	eplm.oe_reqres.St_hdr.C_alpha_char = strings.TrimSpace(strings.ToUpper(" ")) // 3 HDR 'orstonse'
 	eplm.oe_reqres.St_hdr.Si_transaction_code = models.BOARD_LOT_IN              // 4 HDR
@@ -188,10 +190,62 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse() int {
 	} else {
 		eplm.oe_reqres.D_order_number, err = strconv.ParseFloat(eplm.orderbook.C_xchng_ack, 64)
 		if err != nil {
-			log.Printf("[%s] [fnPackOrdnryOrdToNse] \033[ERROR: Error parsing order number: %v\033[0m", eplm.serviceName, err)
+			log.Printf("[%s] [fnPackOrdnryOrdToNse] [ERROR: Error parsing order number: %v", eplm.serviceName, err)
 			log.Printf("[%s] [fnPackOrdnryOrdToNse] Returning from 'fnPackOrdnryOrdToNse' with an error ", eplm.serviceName)
 			return -1
 		}
+	}
+
+	copyAndFormatSymbol(eplm.oe_reqres.C_account_number[:], len(eplm.oe_reqres.C_account_number), eplm.orderbook.C_cln_mtch_accnt) //19 BDY
+
+	if eplm.xchngbook.C_slm_flg == "M" {
+		eplm.oe_reqres.Si_book_type = models.REGULAR_LOT_ORDER //20 BDY
+		eplm.oe_reqres.Li_price = 0                            //21 BDY
+	} else {
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid slm flag ...", eplm.serviceName)
+		return -1
+	}
+
+	switch eplm.orderbook.C_ordr_flw { //22 BDY
+	case "B":
+		eplm.oe_reqres.Si_buy_sell_indicator = models.NSE_BUY
+	case "S":
+		eplm.oe_reqres.Si_buy_sell_indicator = models.NSE_SELL
+	default:
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid order flow flag ...", eplm.serviceName)
+		return -1
+	}
+
+	eplm.oe_reqres.Li_disclosed_volume = eplm.xchngbook.L_dsclsd_qty                     // 23 BDY
+	eplm.oe_reqres.Li_disclosed_volume_remaining = eplm.oe_reqres.Li_disclosed_volume    //24 BDY
+	eplm.oe_reqres.Li_volume = eplm.xchngbook.L_ord_tot_qty - eplm.orderbook.L_exctd_qty //25 BDY
+
+	if eplm.xchngbook.L_ord_tot_qty > eplm.orderbook.L_ord_tot_qty {
+		eplm.oe_reqres.Li_total_volume_remaining = eplm.orderbook.L_ord_tot_qty - eplm.orderbook.L_exctd_qty //26 BDY
+	} else {
+		eplm.oe_reqres.Li_total_volume_remaining = eplm.xchngbook.L_ord_tot_qty - eplm.orderbook.L_exctd_qty
+	}
+
+	eplm.oe_reqres.Li_volume_filled_today = eplm.orderbook.L_exctd_qty_day //27 BDY
+	eplm.oe_reqres.Li_trigger_price = eplm.xchngbook.L_stp_lss_tgr         //28 BDY
+
+	switch eplm.xchngbook.C_ord_typ { // 29 BDY
+	case "T", "I":
+		eplm.oe_reqres.Li_good_till_date = 0
+
+	case "D":
+		eplm.TimeArrToLong(eplm.xchngbook.C_valid_dt, &eplm.oe_reqres.Li_good_till_date)
+
+	default:
+		log.Printf(" [%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid order type ...", eplm.serviceName)
+		return -1
+	}
+
+	if eplm.xchngbook.C_req_typ == models.NEW {
+		eplm.oe_reqres.Li_entry_date_time = 0 // 30 BDY
+	} else {
+		log.Printf(" [%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid Request type for setting Entry Date Time  ...", eplm.serviceName)
+		return -1
 	}
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse]  Printing header structure for Ordinary Order....", eplm.serviceName)
@@ -336,16 +390,6 @@ func (eplm *ExchngPackLibMaster) fn_orstonse_cntrct_desc() int {
 	return 0
 }
 
-func (eplm *ExchngPackLibMaster) ConvertToInt32(s string) (int32, error) {
-	trimmed := strings.TrimSpace(s)
-	value, err := strconv.Atoi(trimmed)
-	if err != nil {
-		log.Printf("[%s] ERROR: error in  converting string to int: %v", eplm.serviceName, err)
-		return -1, err
-	}
-	return int32(value), nil
-}
-
 func copyAndFormatSymbol(dest []byte, destLen int, src string) { //'fn_orstonse_char'
 
 	srcUpper := strings.ToUpper(src)
@@ -374,6 +418,20 @@ func (eplm *ExchngPackLibMaster) longToTimeArr() int {
 	liSrc := t.Unix() + models.TEN_YRS_IN_SEC
 
 	eplm.oe_reqres.St_con_desc.Li_expiry_date = int32(liSrc)
+
+	return 0
+}
+func (eplm *ExchngPackLibMaster) TimeArrToLong(C_valid_dt string, date *int32) int {
+
+	layout := time.RFC3339
+
+	t, err := time.Parse(layout, C_valid_dt)
+	if err != nil {
+		log.Printf("[%s] [TimeArrToLong] ERROR: error in parsing valid date: %v", eplm.serviceName, err)
+		return -1
+	}
+
+	*date = int32(t.Unix())
 
 	return 0
 }

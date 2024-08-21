@@ -203,7 +203,7 @@ type St_oe_reqres struct {
 	C_filler_6                    string //byte
 	Si_order_type                 int16
 	D_order_number                float64
-	C_account_number              string //[LEN_ACCOUNT_NUMBER]byte
+	C_account_number              [LEN_ACCOUNT_NUMBER]byte
 	Si_book_type                  int16
 	Si_buy_sell_indicator         int16
 	Li_disclosed_volume           int32
