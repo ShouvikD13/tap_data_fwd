@@ -289,7 +289,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			cpcm.cPrgmFlg,
 		)
 
-		resultTmp = eplm.fnPackOrdnryOrdToNse()
+		resultTmp = eplm.fnPackOrdnryOrdToNse(Db)
 
 		if resultTmp != 0 {
 			log.Printf("[%s]  [fnGetNxtRec] 'fnPackOrdnryOrdToNse' returned an error.", cpcm.ServiceName)

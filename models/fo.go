@@ -37,7 +37,7 @@ const (
 
 	//length
 	LEN_ALPHA_CHAR = 2
-
+	LEN_SETTLOR    = 12
 	// Order & Trade management
 	BOARD_LOT_IN = 2000
 
@@ -49,9 +49,9 @@ const (
 	TEN_YRS_IN_SEC = 315513000
 
 	/**** Order request type ****/
-	NEW    = "N"
-	MODIFY = "M"
-	CANCEL = "C"
+	NEW = "N"
+	// MODIFY = "M"
+	// CANCEL = "C"
 
 	//Book type
 
@@ -61,6 +61,28 @@ const (
 	//Buy Sell indicator
 	NSE_BUY  = 1
 	NSE_SELL = 2
+
+	// Order placed by Broker / Customer Indicator
+
+	BRKR_PLCD  = "P"
+	CSTMR_PLCD = "C"
+
+	//
+	NSE_CLIENT = 1
+	NSE_PRO    = 2
+
+	FO_AUTO_MTM_ALG_ID      = 24264
+	FO_AUTO_MTM_ALG_CAT_ID  = 99
+	FO_PRICE_IMP_ALG_ID     = 37383
+	FO_PRICE_IMP_ALG_CAT_ID = 1
+	FO_PRFT_ORD_ALG_CAT_ID  = 1
+	FO_PRFT_ORD_ALG_ID      = 82686
+	FO_FLASH_TRD_ALG_CAT_ID = 1
+	FO_FLASH_TRD_ALG_ID     = 89385
+	FO_NON_ALG_ID           = 0
+	FO_NON_ALG_CAT_ID       = 0
+	FO_FOGTT_ALG_ID         = 98816
+	FO_FOGTT_ALG_CAT_ID     = 1
 )
 
 /*********************************************************************/

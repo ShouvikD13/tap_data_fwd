@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type ExchngPackLibMaster struct {
@@ -48,7 +50,7 @@ func NewExchngPackLibMaster(serviceName string, reqQueue *structures.St_req_q_da
 		cPrgmFlg:     cPrgmFlg,
 	}
 }
-func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse() int {
+func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Inside 'fnPackOrdnryOrdToNse' ", eplm.serviceName)
 
@@ -243,10 +245,159 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse() int {
 
 	if eplm.xchngbook.C_req_typ == models.NEW {
 		eplm.oe_reqres.Li_entry_date_time = 0 // 30 BDY
+		eplm.oe_reqres.Li_last_modified = 0   //31 BDY
 	} else {
-		log.Printf(" [%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid Request type for setting Entry Date Time  ...", eplm.serviceName)
+		log.Printf(" [%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid Request type for setting 'Entry Date Time'  ...", eplm.serviceName)
+		log.Printf(" [%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid Request type for setting 'Last Modified'  ...", eplm.serviceName)
 		return -1
 	}
+
+	eplm.oe_reqres.Li_minimum_fill_aon_volume = 0 // 32 BDY
+	eplm.oe_reqres.St_ord_flg.Flg_ato = 0         // 1 FLG
+	eplm.oe_reqres.St_ord_flg.Flg_market = 0      //2 FLG
+
+	if eplm.xchngbook.C_slm_flg == "M" { //3 FLG
+
+		eplm.oe_reqres.St_ord_flg.Flg_sl = 0
+	} else {
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [ERROR: Invalid slm flag for setting 'Flg_sl'  ...", eplm.serviceName)
+		return -1
+	}
+
+	eplm.oe_reqres.St_ord_flg.Flg_mit = 0 //4 FLG
+	if eplm.xchngbook.C_ord_typ == "T" {
+		eplm.oe_reqres.St_ord_flg.Flg_day = 1 //5 FLG
+	} else {
+		eplm.oe_reqres.St_ord_flg.Flg_day = 0 //6 FLG
+	}
+
+	eplm.oe_reqres.St_ord_flg.Flg_gtc = 0 // 7 FLG
+
+	if eplm.xchngbook.C_ord_typ == "I" {
+		eplm.oe_reqres.St_ord_flg.Flg_ioc = 1 // 8 FLG
+	} else {
+		eplm.oe_reqres.St_ord_flg.Flg_ioc = 0
+	}
+
+	eplm.oe_reqres.St_ord_flg.Flg_aon = 0         // 9  FLG
+	eplm.oe_reqres.St_ord_flg.Flg_mf = 0          // 10 FLG
+	eplm.oe_reqres.St_ord_flg.Flg_matched_ind = 0 // 11 FLG
+	eplm.oe_reqres.St_ord_flg.Flg_traded = 0      // 12 FLG
+	eplm.oe_reqres.St_ord_flg.Flg_modified = 0    // 13 FLG
+	eplm.oe_reqres.St_ord_flg.Flg_frozen = 0      // 14 FLG
+	eplm.oe_reqres.St_ord_flg.Flg_filler1 = 0     // 15 FLG
+
+	eplm.oe_reqres.Si_branch_id = int16(eplm.pipe_mstr.L_opm_brnch_id) //33 BDY
+
+	value1, err := strconv.Atoi(eplm.pipe_mstr.C_opm_trdr_id)
+	if err != nil {
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Error converting C_opm_trdr_id to int:  ... %v", eplm.serviceName, err)
+		return -1
+	}
+	eplm.oe_reqres.Li_trader_id = int32(value1) // 34 BDY
+
+	copyAndFormatSymbol(eplm.oe_reqres.C_broker_id[:], len(eplm.oe_reqres.C_broker_id), eplm.pipe_mstr.C_xchng_brkr_id) //35 BDY
+
+	eplm.oe_reqres.I_order_seq = eplm.xchngbook.L_ord_seq // 36 BDY
+	eplm.oe_reqres.C_open_close = "O"                     // 37 BDY
+
+	for i := range eplm.oe_reqres.C_settlor {
+		eplm.oe_reqres.C_settlor[i] = 0 // 38 BDY
+	}
+
+	query := `
+		SELECT ICD_CUST_TYPE
+		FROM ICD_INFO_CLIENT_DTLS
+		JOIN IAI_INFO_ACCOUNT_INFO ON ICD_SERIAL_NO = IAI_SERIAL_NO
+		WHERE IAI_MATCH_ACCOUNT_NO = ?
+	`
+	var icdCustType string
+	result := db.Raw(query, eplm.orderbook.C_cln_mtch_accnt).Scan(&icdCustType)
+	if result.Error != nil {
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Error executing query: ... %v", eplm.serviceName, result.Error)
+		return -1
+	}
+
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] ICD_CUST_TYPE: %s", eplm.serviceName, icdCustType)
+	if icdCustType != "NRI" {
+		if eplm.orderbook.C_pro_cli_ind == models.BRKR_PLCD {
+			copyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], models.LEN_SETTLOR, " ") // already set to zero now setting value
+			eplm.oe_reqres.Si_pro_client_indicator = models.NSE_PRO                   // 39 BDY
+		} else {
+			copyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], models.LEN_SETTLOR, eplm.pipe_mstr.C_xchng_brkr_id)
+			eplm.oe_reqres.Si_pro_client_indicator = models.NSE_CLIENT
+		}
+	} else {
+		copyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], models.LEN_SETTLOR, eplm.orderbook.C_settlor)
+		eplm.oe_reqres.Si_pro_client_indicator = models.NSE_CLIENT
+	}
+
+	switch eplm.cPrgmFlg {
+	case "A":
+		eplm.oe_reqres.L_algo_id = models.FO_AUTO_MTM_ALG_ID            //40 BDY
+		eplm.oe_reqres.Si_algo_category = models.FO_AUTO_MTM_ALG_CAT_ID //41 BDY
+
+	case "T":
+		eplm.oe_reqres.L_algo_id = models.FO_PRICE_IMP_ALG_ID
+		eplm.oe_reqres.Si_algo_category = models.FO_PRICE_IMP_ALG_CAT_ID
+
+	case "Z":
+		eplm.oe_reqres.L_algo_id = models.FO_PRFT_ORD_ALG_ID
+		eplm.oe_reqres.Si_algo_category = models.FO_PRFT_ORD_ALG_CAT_ID
+
+	case "G":
+		eplm.oe_reqres.L_algo_id = models.FO_FLASH_TRD_ALG_ID
+		eplm.oe_reqres.Si_algo_category = models.FO_FLASH_TRD_ALG_CAT_ID
+
+	default:
+		if eplm.cAlgoID != "*" {
+			algoID, err := strconv.Atoi(eplm.cAlgoID)
+			if err != nil {
+				log.Printf("[%s] [ProcessAlgorithmFlags] [Error converting cAlgoID ...  %v", eplm.cUserTypGlb, err)
+				return -1
+			}
+			eplm.oe_reqres.L_algo_id = int32(algoID)
+			eplm.oe_reqres.Si_algo_category = 0
+		} else {
+			eplm.oe_reqres.L_algo_id = models.FO_NON_ALG_ID
+			eplm.oe_reqres.Si_algo_category = models.FO_NON_ALG_CAT_ID
+		}
+	}
+
+	if eplm.cSourceFlg == "G" {
+		eplm.oe_reqres.L_algo_id = models.FO_FOGTT_ALG_ID
+		eplm.oe_reqres.Si_algo_category = models.FO_FOGTT_ALG_CAT_ID
+	}
+
+	eplm.orderbook.C_ctcl_id = strings.TrimSpace(eplm.orderbook.C_ctcl_id)
+
+	if eplm.cPrgmFlg == "A" || eplm.cPrgmFlg == "T" || eplm.cPrgmFlg == "Z" || eplm.cPrgmFlg == "G" || eplm.cSourceFlg == "G" {
+
+		eplm.orderbook.C_ctcl_id = eplm.orderbook.C_ctcl_id + "000"
+	} else if eplm.cAlgoID != "*" && eplm.cSourceFlg == "M" {
+
+		eplm.orderbook.C_ctcl_id = "333333333333" + "000"
+	} else if eplm.cAlgoID != "*" && (eplm.cSourceFlg == "W" || eplm.cSourceFlg == "E") {
+
+		eplm.orderbook.C_ctcl_id = "111111111111" + "000"
+	} else if eplm.cAlgoID != "*" && eplm.cEspID == "4124" {
+
+		eplm.orderbook.C_ctcl_id = "333333333333" + "000"
+	} else if eplm.cAlgoID != "*" {
+
+		eplm.orderbook.C_ctcl_id = "111111111111" + "000"
+	} else {
+
+		eplm.orderbook.C_ctcl_id = eplm.orderbook.C_ctcl_id + "100"
+	}
+
+	eplm.oe_reqres.D_nnf_field, err = strconv.ParseFloat(eplm.orderbook.C_ctcl_id, 64)
+	if err != nil {
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Error in converting the 'C_ctcl_id' in float ... ", eplm.serviceName)
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] Exiting from the function ", eplm.serviceName)
+	}
+
+	eplm.oe_reqres.D_filler19 = 0.0
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse]  Printing header structure for Ordinary Order....", eplm.serviceName)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' li_log_time is :	%d ", eplm.serviceName, eplm.oe_reqres.St_hdr.Li_log_time)
@@ -435,3 +586,39 @@ func (eplm *ExchngPackLibMaster) TimeArrToLong(C_valid_dt string, date *int32) i
 
 	return 0
 }
+
+/*void fn_cnvt_htn_oe_reqres( struct st_oe_reqres *ptr_oe_reqres )
+{
+  fn_cnvt_htn_int_header( &ptr_oe_reqres->st_hdr);
+  ptr_oe_reqres->si_competitor_period                 = htons(ptr_oe_reqres->si_competitor_period);
+  ptr_oe_reqres->si_solicitor_period                  = htons(ptr_oe_reqres->si_solicitor_period);
+  ptr_oe_reqres->si_reason_code                       = htons(ptr_oe_reqres->si_reason_code);
+  ptr_oe_reqres->l_token_no                           = htonl(ptr_oe_reqres->l_token_no);
+  fn_cnvt_htn_cntrct_desc(&ptr_oe_reqres->st_con_desc);
+  ptr_oe_reqres->si_order_type                        = htons(ptr_oe_reqres->si_order_type);
+  ptr_oe_reqres->d_order_number						  = be64toh(ptr_oe_reqres->d_order_number);
+  ptr_oe_reqres->si_book_type                         = htons(ptr_oe_reqres->si_book_type);
+  ptr_oe_reqres->si_buy_sell_indicator                = htons(ptr_oe_reqres->si_buy_sell_indicator);
+  ptr_oe_reqres->li_disclosed_volume                  = htonl(ptr_oe_reqres->li_disclosed_volume);
+  ptr_oe_reqres->li_disclosed_volume_remaining        = htonl(ptr_oe_reqres->li_disclosed_volume_remaining);
+  ptr_oe_reqres->li_total_volume_remaining            = htonl(ptr_oe_reqres->li_total_volume_remaining);
+  ptr_oe_reqres->li_volume                            = htonl(ptr_oe_reqres->li_volume);
+  ptr_oe_reqres->li_volume_filled_today               = htonl(ptr_oe_reqres->li_volume_filled_today);
+  ptr_oe_reqres->li_price                             = htonl(ptr_oe_reqres->li_price);
+  ptr_oe_reqres->li_trigger_price                     = htonl(ptr_oe_reqres->li_trigger_price);
+  ptr_oe_reqres->li_good_till_date                    = htonl(ptr_oe_reqres->li_good_till_date);
+  ptr_oe_reqres->li_entry_date_time                   = htonl(ptr_oe_reqres->li_entry_date_time);
+  ptr_oe_reqres->li_minimum_fill_aon_volume           = htonl(ptr_oe_reqres->li_minimum_fill_aon_volume);
+  ptr_oe_reqres->li_last_modified                     = htonl(ptr_oe_reqres->li_last_modified);
+  ptr_oe_reqres->si_branch_id                         = htons(ptr_oe_reqres->si_branch_id);
+  ptr_oe_reqres->li_trader_id                         = htonl(ptr_oe_reqres->li_trader_id);
+  ptr_oe_reqres->si_pro_client_indicator              = htons(ptr_oe_reqres->si_pro_client_indicator);
+  ptr_oe_reqres->si_settlement_period                 = htons(ptr_oe_reqres->si_settlement_period);
+  ptr_oe_reqres->i_ordr_sqnc                          = htonl(ptr_oe_reqres->i_ordr_sqnc);
+  ptr_oe_reqres->d_nnf_field                          = be64toh(ptr_oe_reqres->d_nnf_field);
+  ptr_oe_reqres->d_filler19                           = be64toh(ptr_oe_reqres->d_filler19);
+  ptr_oe_reqres->l_algo_id                            = htonl(ptr_oe_reqres->l_algo_id);
+  ptr_oe_reqres->si_algo_category                     = htons(ptr_oe_reqres->si_algo_category);
+  ptr_oe_reqres->ll_lastactivityref                   = be64toh(ptr_oe_reqres->ll_lastactivityref);
+}
+*/

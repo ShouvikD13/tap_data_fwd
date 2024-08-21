@@ -219,11 +219,11 @@ type St_oe_reqres struct {
 	Li_last_modified              int32
 	St_ord_flg                    *St_order_flags
 	Si_branch_id                  int16
-	Li_trader_id                  int32  // Changed from int16 to int32 in Ver 1.8
-	C_broker_id                   string //[LEN_BROKER_ID]byte
+	Li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
+	C_broker_id                   [LEN_BROKER_ID]byte
 	C_remarks                     string //[LEN_REMARKS]byte
 	C_open_close                  string // byte
-	C_settlor                     string //[LEN_SETTLOR]byte
+	C_settlor                     [LEN_SETTLOR]byte
 	Si_pro_client_indicator       int16
 	Si_settlement_period          int16
 	C_cover_uncover               string // byte
