@@ -21,18 +21,27 @@ type ExchngPackLibMaster struct {
 	nse_contract *structures.Vw_nse_cntrct
 	oe_reqres    *structures.St_oe_reqres
 	exch_msg     *structures.St_exch_msg
-
-	cPanNo      string
-	cLstActRef  string
-	cEspID      string
-	cAlgoID     string
-	cSourceFlg  string
-	cPrgmFlg    string
-	cUserTypGlb string
+	OCM          *models.OrderConversionManager
+	cPanNo       string
+	cLstActRef   string
+	cEspID       string
+	cAlgoID      string
+	cSourceFlg   string
+	cPrgmFlg     string
+	cUserTypGlb  string
 }
 
 // constructor function
-func NewExchngPackLibMaster(serviceName string, reqQueue *structures.St_req_q_data, xchngbook *structures.Vw_xchngbook, orderbook *structures.Vw_orderbook, pipe_mstr *structures.St_opm_pipe_mstr, nseContract *structures.Vw_nse_cntrct, oe_req *structures.St_oe_reqres, exch_msg *structures.St_exch_msg, cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string) *ExchngPackLibMaster {
+func NewExchngPackLibMaster(serviceName string,
+	reqQueue *structures.St_req_q_data,
+	xchngbook *structures.Vw_xchngbook,
+	orderbook *structures.Vw_orderbook,
+	pipe_mstr *structures.St_opm_pipe_mstr,
+	nseContract *structures.Vw_nse_cntrct,
+	oe_req *structures.St_oe_reqres,
+	exch_msg *structures.St_exch_msg,
+	OCM *models.OrderConversionManager,
+	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string) *ExchngPackLibMaster {
 	return &ExchngPackLibMaster{
 		serviceName:  serviceName,
 		requestQueue: reqQueue,
@@ -42,6 +51,7 @@ func NewExchngPackLibMaster(serviceName string, reqQueue *structures.St_req_q_da
 		nse_contract: nseContract,
 		oe_reqres:    oe_req,
 		exch_msg:     exch_msg,
+		OCM:          OCM,
 		cPanNo:       cPanNo,
 		cLstActRef:   cLstActRef,
 		cEspID:       cEspID,
@@ -467,6 +477,8 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_closed is :	%d ", eplm.serviceName, eplm.oe_reqres.St_ord_flg.Flg_closed)
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_fill_and_kill is :	%d ", eplm.serviceName, eplm.oe_reqres.St_ord_flg.Flg_fill_and_kill)
 
+	eplm.ConvertOrderReqResToNetworkOrder()
+
 	return 0
 }
 
@@ -622,3 +634,75 @@ func (eplm *ExchngPackLibMaster) TimeArrToLong(C_valid_dt string, date *int32) i
   ptr_oe_reqres->ll_lastactivityref                   = be64toh(ptr_oe_reqres->ll_lastactivityref);
 }
 */
+
+func (eplm *ExchngPackLibMaster) ConvertOrderReqResToNetworkOrder() {
+	eplm.ConvertIntHeaderToNetworkOrder() //&eplm.oe_reqres.St_hdr
+	eplm.oe_reqres.Si_competitor_period = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_competitor_period)
+	eplm.oe_reqres.Si_solicitor_period = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_solicitor_period)
+	eplm.oe_reqres.Si_reason_code = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_reason_code)
+	eplm.oe_reqres.L_token_no = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.L_token_no)
+	eplm.ConvertContractDescToNetworkOrder() //&eplm.oe_reqres.St_con_desc
+	eplm.oe_reqres.Si_order_type = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_order_type)
+	eplm.oe_reqres.D_order_number = eplm.OCM.ConvertFloat64ToNetworkOrder(eplm.oe_reqres.D_order_number)
+	eplm.oe_reqres.Si_book_type = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_book_type)
+	eplm.oe_reqres.Si_buy_sell_indicator = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_buy_sell_indicator)
+	eplm.oe_reqres.Li_disclosed_volume = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_disclosed_volume)
+	eplm.oe_reqres.Li_disclosed_volume_remaining = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_disclosed_volume_remaining)
+	eplm.oe_reqres.Li_total_volume_remaining = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_total_volume_remaining)
+	eplm.oe_reqres.Li_volume = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_volume)
+	eplm.oe_reqres.Li_volume_filled_today = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_volume_filled_today)
+	eplm.oe_reqres.Li_price = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_price)
+	eplm.oe_reqres.Li_trigger_price = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_trigger_price)
+	eplm.oe_reqres.Li_good_till_date = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_good_till_date)
+	eplm.oe_reqres.Li_entry_date_time = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_entry_date_time)
+	eplm.oe_reqres.Li_minimum_fill_aon_volume = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_minimum_fill_aon_volume)
+	eplm.oe_reqres.Li_last_modified = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_last_modified)
+	eplm.oe_reqres.Si_branch_id = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_branch_id)
+	eplm.oe_reqres.Li_trader_id = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.Li_trader_id)
+	eplm.oe_reqres.Si_pro_client_indicator = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_pro_client_indicator)
+	eplm.oe_reqres.Si_settlement_period = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_settlement_period)
+	eplm.oe_reqres.I_order_seq = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.I_order_seq)
+	eplm.oe_reqres.D_nnf_field = eplm.OCM.ConvertFloat64ToNetworkOrder(eplm.oe_reqres.D_nnf_field)
+	eplm.oe_reqres.D_filler19 = eplm.OCM.ConvertFloat64ToNetworkOrder(eplm.oe_reqres.D_filler19)
+	eplm.oe_reqres.L_algo_id = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.L_algo_id)
+	eplm.oe_reqres.Si_algo_category = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_algo_category)
+	eplm.oe_reqres.Ll_lastactivityref = eplm.OCM.ConvertInt64ToNetworkOrder(eplm.oe_reqres.Ll_lastactivityref)
+}
+
+/*
+void fn_cnvt_htn_int_header ( struct st_int_header *ptr_st_int_header )
+{
+  ptr_st_int_header->si_transaction_code = htons(ptr_st_int_header->si_transaction_code);
+	ptr_st_int_header->li_log_time         = htonl(ptr_st_int_header->li_log_time);
+  ptr_st_int_header->li_trader_id        = htonl(ptr_st_int_header->li_trader_id);
+  ptr_st_int_header->si_error_code       = htons(ptr_st_int_header->si_error_code);
+  ptr_st_int_header->si_message_length   = htons(ptr_st_int_header->si_message_length);
+}
+
+void fn_cnvt_htn_net_hdr ( struct st_net_hdr *ptr_net_hdr)
+{
+	ptr_net_hdr->si_message_length = htons(ptr_net_hdr->si_message_length);
+	ptr_net_hdr->i_seq_num = htonl(ptr_net_hdr->i_seq_num);
+}
+
+void fn_cnvt_htn_cntrct_desc( struct  st_contract_desc *ptr_st_contract_desc )
+{
+     ptr_st_contract_desc->li_expiry_date = htonl( ptr_st_contract_desc->li_expiry_date );
+     ptr_st_contract_desc->li_strike_price = htonl( ptr_st_contract_desc->li_strike_price );
+		 ptr_st_contract_desc->si_ca_level     = htons (ptr_st_contract_desc->si_ca_level);
+}
+*/
+
+func (eplm *ExchngPackLibMaster) ConvertIntHeaderToNetworkOrder() {
+	eplm.oe_reqres.St_hdr.Si_transaction_code = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.St_hdr.Si_transaction_code)
+	eplm.oe_reqres.St_hdr.Li_log_time = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.St_hdr.Li_log_time)
+	eplm.oe_reqres.St_hdr.Li_trader_id = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.St_hdr.Li_trader_id)
+	eplm.oe_reqres.St_hdr.Si_error_code = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.St_hdr.Si_error_code)
+	eplm.oe_reqres.St_hdr.Si_message_length = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.St_hdr.Si_message_length)
+}
+
+func (eplm *ExchngPackLibMaster) ConvertContractDescToNetworkOrder() {
+	eplm.oe_reqres.St_con_desc.Li_expiry_date = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.St_con_desc.Li_expiry_date)
+	eplm.oe_reqres.St_con_desc.Li_strike_price = eplm.OCM.ConvertInt64ToNetworkOrder(eplm.oe_reqres.St_con_desc.Li_strike_price)
+	eplm.oe_reqres.St_con_desc.Si_ca_level = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.St_con_desc.Si_ca_level)
+}
