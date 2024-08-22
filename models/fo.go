@@ -83,6 +83,8 @@ const (
 	FO_NON_ALG_CAT_ID       = 0
 	FO_FOGTT_ALG_ID         = 98816
 	FO_FOGTT_ALG_CAT_ID     = 1
+
+	MAX_SEQ_NUM = 2147483647
 )
 
 /*********************************************************************/

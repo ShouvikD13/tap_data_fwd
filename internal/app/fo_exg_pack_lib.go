@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"gorm.io/gorm"
 )
@@ -21,6 +22,8 @@ type ExchngPackLibMaster struct {
 	nse_contract *structures.Vw_nse_cntrct
 	oe_reqres    *structures.St_oe_reqres
 	exch_msg     *structures.St_exch_msg
+	net_hdr      *structures.St_net_hdr
+	q_packet     *structures.St_req_q_data
 	OCM          *models.OrderConversionManager
 	cPanNo       string
 	cLstActRef   string
@@ -40,6 +43,8 @@ func NewExchngPackLibMaster(serviceName string,
 	nseContract *structures.Vw_nse_cntrct,
 	oe_req *structures.St_oe_reqres,
 	exch_msg *structures.St_exch_msg,
+	net_hdr *structures.St_net_hdr,
+	q_packet *structures.St_req_q_data,
 	OCM *models.OrderConversionManager,
 	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string) *ExchngPackLibMaster {
 	return &ExchngPackLibMaster{
@@ -51,6 +56,8 @@ func NewExchngPackLibMaster(serviceName string,
 		nse_contract: nseContract,
 		oe_reqres:    oe_req,
 		exch_msg:     exch_msg,
+		net_hdr:      net_hdr,
+		q_packet:     q_packet,
 		OCM:          OCM,
 		cPanNo:       cPanNo,
 		cLstActRef:   cLstActRef,
@@ -479,6 +486,45 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	eplm.ConvertOrderReqResToNetworkOrder()
 
+	eplm.exch_msg.St_oe_res = *eplm.oe_reqres
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Assigned oe_reqres to St_oe_res]", eplm.serviceName)
+
+	eplm.net_hdr.C_checksum = " "
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set C_checksum to a blank space]", eplm.serviceName)
+
+	tmpVar := eplm.GetResetSequence(db)
+	if tmpVar == -1 {
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Error: Failed to retrieve sequence number...]", eplm.serviceName)
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Returning from this function with error]", eplm.serviceName)
+		return -1
+	} else {
+		eplm.net_hdr.I_seq_num = tmpVar
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set I_seq_num to: %d]", eplm.serviceName, eplm.net_hdr.I_seq_num)
+	}
+
+	sizeNetHeader := unsafe.Sizeof(structures.St_net_hdr{})
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_net_hdr: %d]", eplm.serviceName, sizeNetHeader)
+
+	sizeOrdEnt := unsafe.Sizeof(structures.St_oe_reqres{})
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres: %d]", eplm.serviceName, sizeOrdEnt)
+
+	eplm.net_hdr.S_message_length = int16(sizeOrdEnt + sizeNetHeader)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set S_message_length to: %d]", eplm.serviceName, eplm.net_hdr.S_message_length)
+
+	eplm.exch_msg.St_net_header = *eplm.net_hdr
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Assigned net_hdr to St_net_header]", eplm.serviceName)
+
+	eplm.ConvertNetHeaderToNetworkOrder()
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Converted net header to network order]", eplm.serviceName)
+
+	eplm.q_packet.L_msg_type = int64(models.BOARD_LOT_IN)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set L_msg_type to: %d]", eplm.serviceName, eplm.q_packet.L_msg_type)
+
+	eplm.q_packet.St_exch_msg_data = *eplm.exch_msg
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Assigned exch_msg to St_exch_msg_data]", eplm.serviceName)
+
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] Data Copied into Queue Packet", eplm.serviceName)
+
 	return 0
 }
 
@@ -705,4 +751,50 @@ func (eplm *ExchngPackLibMaster) ConvertContractDescToNetworkOrder() {
 	eplm.oe_reqres.St_con_desc.Li_expiry_date = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.oe_reqres.St_con_desc.Li_expiry_date)
 	eplm.oe_reqres.St_con_desc.Li_strike_price = eplm.OCM.ConvertInt64ToNetworkOrder(eplm.oe_reqres.St_con_desc.Li_strike_price)
 	eplm.oe_reqres.St_con_desc.Si_ca_level = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.St_con_desc.Si_ca_level)
+}
+
+func (eplm *ExchngPackLibMaster) ConvertNetHeaderToNetworkOrder() {
+
+	eplm.net_hdr.I_seq_num = eplm.OCM.ConvertInt32ToNetworkOrder(eplm.net_hdr.I_seq_num)
+	eplm.net_hdr.S_message_length = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.net_hdr.S_message_length)
+}
+
+func (eplm *ExchngPackLibMaster) GetResetSequence(db *gorm.DB) int32 {
+	var seqNum int32
+	var query string
+
+	log.Printf("[%s] [GetResetSequence] [Executing increment sequence query for pipe ID: %s, trade date: %s]", eplm.serviceName, eplm.xchngbook.C_pipe_id, eplm.xchngbook.C_mod_trd_dt)
+
+	query = `
+		UPDATE fsp_fo_seq_plcd
+		SET fsp_seq_num = fsp_seq_num + 1
+		WHERE fsp_pipe_id = ? AND fsp_trd_dt = TO_DATE(?, 'YYYY-MM-DD')
+		RETURNING fsp_seq_num;
+	`
+	result1 := db.Raw(query, eplm.xchngbook.C_pipe_id, eplm.xchngbook.C_mod_trd_dt).Scan(&seqNum)
+
+	if result1.Error != nil {
+		log.Printf("[%s] [GetResetSequence] [Error executing increment sequence query: %v]", eplm.serviceName, result1.Error)
+		return -1
+	}
+	log.Printf("[%s] [GetResetSequence] [Incremented sequence number: %d]", eplm.serviceName, seqNum)
+
+	if seqNum == models.MAX_SEQ_NUM {
+		log.Printf("[%s] [GetResetSequence] [Sequence number reached MAX_SEQ_NUM, resetting...]", eplm.serviceName)
+
+		query = `
+			UPDATE fsp_fo_seq_plcd
+			SET fsp_seq_num = 0
+			WHERE fsp_pipe_id = ? AND fsp_trd_dt = TO_DATE(?, 'YYYY-MM-DD')
+			RETURNING fsp_seq_num;
+		`
+		result2 := db.Raw(query, eplm.xchngbook.C_pipe_id, eplm.xchngbook.C_mod_trd_dt).Scan(&seqNum)
+
+		if result2.Error != nil {
+			log.Printf("[%s] [GetResetSequence] [Error executing reset sequence query: %v]", eplm.serviceName, result2.Error)
+			return -1
+		}
+		log.Printf("[%s] [GetResetSequence] [Sequence number reset to: %d]", eplm.serviceName, seqNum)
+	}
+	return seqNum
 }
