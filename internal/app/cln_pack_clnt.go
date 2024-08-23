@@ -146,12 +146,19 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 	var resultTmp int
 
 	log.Printf("[%s] [CLN_PACK_CLNT] Entering CLN_PACK_CLNT", cpcm.ServiceName)
-	resultTmp = cpcm.fnGetNxtRec(Db)
-	if resultTmp != 0 {
-		log.Printf("[%s] [CLN_PACK_CLNT] failed in getting the next record returning with result code: %d", cpcm.ServiceName, resultTmp)
-		log.Printf("[%s] [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT with error", cpcm.ServiceName)
-		return -1
+
+	for {
+		resultTmp = cpcm.fnGetNxtRec(Db)
+		if resultTmp != 0 {
+			log.Printf("[%s] [CLN_PACK_CLNT] failed in getting the next record returning with result code: %d", cpcm.ServiceName, resultTmp)
+			log.Printf("[%s] [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT with error", cpcm.ServiceName)
+			return -1
+		}
+
+		// here i have to add functions for begin , commit or abort Transaction.
+
 	}
+
 	log.Printf("[%s] [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT", cpcm.ServiceName)
 	return 0
 }

@@ -88,7 +88,7 @@ func (tm *TransactionManager) FnCommitTran(serviceName string, tranType int) int
 			tm.Tran.Rollback()
 			return -1
 		}
-		log.Println("[%s] Transaction committed", serviceName)
+		log.Printf("[%s] Transaction committed", serviceName)
 	} else if tranType == REMOTE_TRNSCTN {
 		// No log needed
 		// here we are not commiting the transaction because the transaction type is "REMOTE_TRNSCTN"

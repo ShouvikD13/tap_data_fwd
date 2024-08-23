@@ -645,42 +645,6 @@ func (eplm *ExchngPackLibMaster) TimeArrToLong(C_valid_dt string, date *int32) i
 	return 0
 }
 
-/*void fn_cnvt_htn_oe_reqres( struct st_oe_reqres *ptr_oe_reqres )
-{
-  fn_cnvt_htn_int_header( &ptr_oe_reqres->st_hdr);
-  ptr_oe_reqres->si_competitor_period                 = htons(ptr_oe_reqres->si_competitor_period);
-  ptr_oe_reqres->si_solicitor_period                  = htons(ptr_oe_reqres->si_solicitor_period);
-  ptr_oe_reqres->si_reason_code                       = htons(ptr_oe_reqres->si_reason_code);
-  ptr_oe_reqres->l_token_no                           = htonl(ptr_oe_reqres->l_token_no);
-  fn_cnvt_htn_cntrct_desc(&ptr_oe_reqres->st_con_desc);
-  ptr_oe_reqres->si_order_type                        = htons(ptr_oe_reqres->si_order_type);
-  ptr_oe_reqres->d_order_number						  = be64toh(ptr_oe_reqres->d_order_number);
-  ptr_oe_reqres->si_book_type                         = htons(ptr_oe_reqres->si_book_type);
-  ptr_oe_reqres->si_buy_sell_indicator                = htons(ptr_oe_reqres->si_buy_sell_indicator);
-  ptr_oe_reqres->li_disclosed_volume                  = htonl(ptr_oe_reqres->li_disclosed_volume);
-  ptr_oe_reqres->li_disclosed_volume_remaining        = htonl(ptr_oe_reqres->li_disclosed_volume_remaining);
-  ptr_oe_reqres->li_total_volume_remaining            = htonl(ptr_oe_reqres->li_total_volume_remaining);
-  ptr_oe_reqres->li_volume                            = htonl(ptr_oe_reqres->li_volume);
-  ptr_oe_reqres->li_volume_filled_today               = htonl(ptr_oe_reqres->li_volume_filled_today);
-  ptr_oe_reqres->li_price                             = htonl(ptr_oe_reqres->li_price);
-  ptr_oe_reqres->li_trigger_price                     = htonl(ptr_oe_reqres->li_trigger_price);
-  ptr_oe_reqres->li_good_till_date                    = htonl(ptr_oe_reqres->li_good_till_date);
-  ptr_oe_reqres->li_entry_date_time                   = htonl(ptr_oe_reqres->li_entry_date_time);
-  ptr_oe_reqres->li_minimum_fill_aon_volume           = htonl(ptr_oe_reqres->li_minimum_fill_aon_volume);
-  ptr_oe_reqres->li_last_modified                     = htonl(ptr_oe_reqres->li_last_modified);
-  ptr_oe_reqres->si_branch_id                         = htons(ptr_oe_reqres->si_branch_id);
-  ptr_oe_reqres->li_trader_id                         = htonl(ptr_oe_reqres->li_trader_id);
-  ptr_oe_reqres->si_pro_client_indicator              = htons(ptr_oe_reqres->si_pro_client_indicator);
-  ptr_oe_reqres->si_settlement_period                 = htons(ptr_oe_reqres->si_settlement_period);
-  ptr_oe_reqres->i_ordr_sqnc                          = htonl(ptr_oe_reqres->i_ordr_sqnc);
-  ptr_oe_reqres->d_nnf_field                          = be64toh(ptr_oe_reqres->d_nnf_field);
-  ptr_oe_reqres->d_filler19                           = be64toh(ptr_oe_reqres->d_filler19);
-  ptr_oe_reqres->l_algo_id                            = htonl(ptr_oe_reqres->l_algo_id);
-  ptr_oe_reqres->si_algo_category                     = htons(ptr_oe_reqres->si_algo_category);
-  ptr_oe_reqres->ll_lastactivityref                   = be64toh(ptr_oe_reqres->ll_lastactivityref);
-}
-*/
-
 func (eplm *ExchngPackLibMaster) ConvertOrderReqResToNetworkOrder() {
 	eplm.ConvertIntHeaderToNetworkOrder() //&eplm.oe_reqres.St_hdr
 	eplm.oe_reqres.Si_competitor_period = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_competitor_period)
@@ -714,30 +678,6 @@ func (eplm *ExchngPackLibMaster) ConvertOrderReqResToNetworkOrder() {
 	eplm.oe_reqres.Si_algo_category = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.Si_algo_category)
 	eplm.oe_reqres.Ll_lastactivityref = eplm.OCM.ConvertInt64ToNetworkOrder(eplm.oe_reqres.Ll_lastactivityref)
 }
-
-/*
-void fn_cnvt_htn_int_header ( struct st_int_header *ptr_st_int_header )
-{
-  ptr_st_int_header->si_transaction_code = htons(ptr_st_int_header->si_transaction_code);
-	ptr_st_int_header->li_log_time         = htonl(ptr_st_int_header->li_log_time);
-  ptr_st_int_header->li_trader_id        = htonl(ptr_st_int_header->li_trader_id);
-  ptr_st_int_header->si_error_code       = htons(ptr_st_int_header->si_error_code);
-  ptr_st_int_header->si_message_length   = htons(ptr_st_int_header->si_message_length);
-}
-
-void fn_cnvt_htn_net_hdr ( struct st_net_hdr *ptr_net_hdr)
-{
-	ptr_net_hdr->si_message_length = htons(ptr_net_hdr->si_message_length);
-	ptr_net_hdr->i_seq_num = htonl(ptr_net_hdr->i_seq_num);
-}
-
-void fn_cnvt_htn_cntrct_desc( struct  st_contract_desc *ptr_st_contract_desc )
-{
-     ptr_st_contract_desc->li_expiry_date = htonl( ptr_st_contract_desc->li_expiry_date );
-     ptr_st_contract_desc->li_strike_price = htonl( ptr_st_contract_desc->li_strike_price );
-		 ptr_st_contract_desc->si_ca_level     = htons (ptr_st_contract_desc->si_ca_level);
-}
-*/
 
 func (eplm *ExchngPackLibMaster) ConvertIntHeaderToNetworkOrder() {
 	eplm.oe_reqres.St_hdr.Si_transaction_code = eplm.OCM.ConvertInt16ToNetworkOrder(eplm.oe_reqres.St_hdr.Si_transaction_code)

@@ -36,8 +36,16 @@ const (
 	ORS_NEW_ORD_RJCT = 5304
 
 	//length
-	LEN_ALPHA_CHAR = 2
-	LEN_SETTLOR    = 12
+	LEN_ALPHA_CHAR      = 2
+	LEN_SETTLOR         = 12
+	LEN_BROKER_ID       = 5
+	LEN_FILLER_OPTIONS  = 3
+	LEN_ACCOUNT_NUMBER  = 10
+	LEN_REMARKS         = 24
+	LEN_TIME_STAMP      = 8
+	LEN_INSTRUMENT_NAME = 6
+	LEN_SYMBOL_NSE      = 10
+	LEN_OPTION_TYPE     = 2
 	// Order & Trade management
 	BOARD_LOT_IN = 2000
 

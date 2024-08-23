@@ -1,17 +1,6 @@
 package structures
 
-const (
-	LEN_BROKER_ID       = 5
-	LEN_FILLER_OPTIONS  = 3
-	LEN_ACCOUNT_NUMBER  = 10
-	LEN_REMARKS         = 24
-	LEN_SETTLOR         = 12
-	LEN_ALPHA_CHAR      = 2
-	LEN_TIME_STAMP      = 8
-	LEN_INSTRUMENT_NAME = 6
-	LEN_SYMBOL_NSE      = 10
-	LEN_OPTION_TYPE     = 2
-)
+import "DATA_FWD_TAP/models"
 
 type Vw_xchngbook struct {
 	C_ordr_rfrnc  string // this valiable we are getting from the table
@@ -203,7 +192,7 @@ type St_oe_reqres struct {
 	C_filler_6                    string //byte
 	Si_order_type                 int16
 	D_order_number                float64
-	C_account_number              [LEN_ACCOUNT_NUMBER]byte
+	C_account_number              [models.LEN_ACCOUNT_NUMBER]byte
 	Si_book_type                  int16
 	Si_buy_sell_indicator         int16
 	Li_disclosed_volume           int32
@@ -220,10 +209,10 @@ type St_oe_reqres struct {
 	St_ord_flg                    *St_order_flags
 	Si_branch_id                  int16
 	Li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
-	C_broker_id                   [LEN_BROKER_ID]byte
+	C_broker_id                   [models.LEN_BROKER_ID]byte
 	C_remarks                     string //[LEN_REMARKS]byte
 	C_open_close                  string // byte
-	C_settlor                     [LEN_SETTLOR]byte
+	C_settlor                     [models.LEN_SETTLOR]byte
 	Si_pro_client_indicator       int16
 	Si_settlement_period          int16
 	C_cover_uncover               string // byte
@@ -252,11 +241,11 @@ type St_int_header struct {
 }
 
 type St_contract_desc struct {
-	C_instrument_name [LEN_INSTRUMENT_NAME]byte
-	C_symbol          [LEN_SYMBOL_NSE]byte
+	C_instrument_name [models.LEN_INSTRUMENT_NAME]byte
+	C_symbol          [models.LEN_SYMBOL_NSE]byte
 	Li_expiry_date    int32
 	Li_strike_price   int64
-	C_option_type     [LEN_OPTION_TYPE]byte
+	C_option_type     [models.LEN_OPTION_TYPE]byte
 	Si_ca_level       int16
 }
 
@@ -279,13 +268,13 @@ type St_order_flags struct {
 
 //-------------------------------------------------------------------------------------------------------------------
 
-type St_pk_sequence struct {
-	C_pipe_id  string
-	C_trd_dt   string
-	C_rqst_typ string
-	C_seq_num  int32
-}
+// type St_pk_sequence struct { Not Used
+// 	C_pipe_id  string
+// 	C_trd_dt   string
+// 	C_rqst_typ string
+// 	C_seq_num  int32
+// }
 
-type St_addtnal_order_flags struct {
-	C_cover_uncover string //byte
-}
+// type St_addtnal_order_flags struct {  Not Used
+// 	C_cover_uncover string //byte
+// }
