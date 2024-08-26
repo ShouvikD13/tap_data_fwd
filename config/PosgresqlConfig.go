@@ -40,7 +40,7 @@ import (
 
 // ConfigManager implements the DBConfigLoader, DBConnector, and DBAccessor interfaces.
 type ConfigManager struct {
-	database struct {
+	Database struct {
 		Db *gorm.DB // GORM database connection instance
 	}
 	environmentManager *models.EnvironmentManager
@@ -92,7 +92,7 @@ func (cm *ConfigManager) GetDatabaseConnection() int {
 		log.Printf("[%s] failed to connect database: %v", cm.serviceName, err)
 		return -1
 	}
-	cm.database.Db = db
+	cm.Database.Db = db
 	return 0
 }
 
@@ -100,5 +100,5 @@ func (cm *ConfigManager) GetDatabaseConnection() int {
 
 func (cm *ConfigManager) GetDB() *gorm.DB {
 	log.Printf("[%s] GetDb is called and Returning the Database instance ", cm.serviceName)
-	return cm.database.Db // Return the GORM database connection instance
+	return cm.Database.Db // Return the GORM database connection instance
 }

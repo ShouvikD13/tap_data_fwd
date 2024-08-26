@@ -5,15 +5,15 @@ import (
 )
 
 type DBConfigLoader interface {
-	LoadPostgreSQLConfig(serviceName string, fileName string) int
+	LoadPostgreSQLConfig() int
 }
 
 type DBConnector interface {
-	GetDatabaseConnection(serviceName string, cfg PostgreSQLConfig) int
+	GetDatabaseConnection() int
 }
 
 type DBAccessor interface {
-	GetDB(serviceName string) *gorm.DB
+	GetDB() *gorm.DB
 }
 
 type PostgreSQLConfig struct {

@@ -16,15 +16,21 @@ import (
 /*    - LOCAL_TRNSCTN: Constant for local transaction type.                       */
 /*                                                                                */
 /*  Structs:                                                                      */
-/*    - TransactionManager: Holds a GORM DB transaction instance.                 */
+/*    - TransactionManager: Manages database transactions using GORM.             */
 /*                                                                                */
 /*  Functions:                                                                    */
-/*    - FnBeginTran: Begins a new transaction and determines if it is local or    */
-/*      remote based on the database connection status.                           */
+/*    - NewTransactionManager: Creates and returns a new TransactionManager      */
+/*      instance with the specified service name and database accessor.           */
+/*                                                                                */
+/*    - FnBeginTran: Begins a new transaction. Determines if the transaction is   */
+/*      local or remote based on the database connection status.                   */
 /*                                                                                */
 /*    - PingDatabase: Checks if the database connection is alive by pinging it.   */
 /*                                                                                */
 /*    - FnCommitTran: Commits the transaction if it is local, or skips commit     */
+/*      for remote transactions.                                                  */
+/*                                                                                */
+/*    - FnAbortTran: Rolls back the transaction if it is local, or skips rollback */
 /*      for remote transactions.                                                  */
 /*                                                                                */
 /**********************************************************************************/
@@ -36,67 +42,90 @@ const (
 )
 
 type TransactionManager struct {
-	Tran       *gorm.DB
-	DbAccessor common.DBAccessor
+	ServiceName string
+	TranType    int
+	Tran        *gorm.DB
+	DbAccessor  common.DBAccessor
 }
 
-func (tm *TransactionManager) FnBeginTran(serviceName string) int {
+func NewTransactionManager(ServiceName string, dbAccessor common.DBAccessor) *TransactionManager {
+	return &TransactionManager{
+		ServiceName: ServiceName,
+		DbAccessor:  dbAccessor,
+	}
+}
+
+func (tm *TransactionManager) FnBeginTran() int {
 
 	// Check if a transaction is already active (GORM does not provide tpgetlev equivalent, manage this externally if needed)
 
-	var TranType int
-	db := tm.DbAccessor.GetDB(serviceName) // Get the database instance on this instance we will check if there is any active transaction.
-
-	err := PingDatabase(serviceName, db) // Use PingDatabase to check if there is any active transaction.
+	db := tm.DbAccessor.GetDB() // Get the database instance on this instance we will check if there is any active transaction.
+	fmt.Println(tm.DbAccessor)
+	fmt.Println(db)
+	err := tm.PingDatabase(db) // Use PingDatabase to check if there is any active transaction.
 
 	if err == nil {
 		tm.Tran = db.Begin() // Begin the transaction here. This line represents something unique. When we call db.Begin(), it returns a new *gorm.DB instance, and we are supposed to use this instance throughout the transaction. This is because we have to maintain the 'isolation'.
 		if tm.Tran.Error != nil {
-			errMsg := fmt.Sprintf("[%s] tpbegin error: %v", serviceName, tm.Tran.Error)
+			errMsg := fmt.Sprintf("[%s] tpbegin error: %v", tm.ServiceName, tm.Tran.Error)
 			log.Println("L31200", errMsg)
 			return -1
 		}
-		TranType = LOCAL_TRNSCTN
-		log.Printf("[%s] EBA : tranType:%d", serviceName, TranType)
-		return TranType
+		tm.TranType = LOCAL_TRNSCTN
+		log.Printf("[%s] EBA : tm.tranType:%d", tm.ServiceName, tm.TranType)
+
 	} else {
-		TranType = REMOTE_TRNSCTN
-		log.Printf("[%s] EBA : tranType:%d", serviceName, TranType)
-		return TranType
+		tm.TranType = REMOTE_TRNSCTN
+		log.Printf("[%s] EBA : tm.tranType:%d", tm.ServiceName, tm.TranType)
+
 	}
+	return 0
 }
 
-func PingDatabase(serviceName string, db *gorm.DB) error {
+func (tm *TransactionManager) PingDatabase(db *gorm.DB) error {
 	sqlDB, err := db.DB() // Get the underlying *sql.DB
 	if err != nil {
-		log.Printf("[%s] Failed to get underlying *sql.DB: %v", serviceName, err)
+		log.Printf("[%s] Failed to get underlying *sql.DB: %v", tm.ServiceName, err)
 		return err
 	}
 	if err := sqlDB.Ping(); err != nil {
-		log.Printf("[%s] Failed to ping database: %v", serviceName, err)
+		log.Printf("[%s] Failed to ping database: %v", tm.ServiceName, err)
 		return err
 	}
 	return nil
 }
 
-func (tm *TransactionManager) FnCommitTran(serviceName string, tranType int) int {
-
-	if tranType == LOCAL_TRNSCTN {
+func (tm *TransactionManager) FnCommitTran() int {
+	switch tm.TranType {
+	case LOCAL_TRNSCTN:
 		if err := tm.Tran.Commit().Error; err != nil {
-			errMsg := fmt.Sprintf("[%s] tpcommit error: %v", serviceName, err)
-			log.Println(errMsg)
-			tm.Tran.Rollback()
+			log.Printf("[%s] tpcommit error: %v", tm.ServiceName, err)
+			tm.Tran.Rollback() // Ensure rollback on commit error
 			return -1
 		}
-		log.Printf("[%s] Transaction committed", serviceName)
-	} else if tranType == REMOTE_TRNSCTN {
-		// No log needed
-		// here we are not commiting the transaction because the transaction type is "REMOTE_TRNSCTN"
-		log.Printf("[%s] Skipping commit for remote transaction", serviceName)
-	} else {
-		errMsg := fmt.Sprintf("[%s] Invalid Transaction Number |%d|", serviceName, tranType)
-		log.Println(errMsg)
+		log.Printf("[%s] Transaction committed", tm.ServiceName)
+	case REMOTE_TRNSCTN:
+		log.Printf("[%s] Skipping commit for remote transaction", tm.ServiceName)
+	default:
+		log.Printf("[%s] Invalid Transaction Number |%d|", tm.ServiceName, tm.TranType)
+		return -1
+	}
+	return 0
+}
 
+func (tm *TransactionManager) FnAbortTran() int {
+	switch tm.TranType {
+	case LOCAL_TRNSCTN:
+		if err := tm.Tran.Rollback().Error; err != nil {
+			log.Printf("[%s] tpabort error: %v", tm.ServiceName, err)
+			return -1
+		}
+		log.Printf("[%s] Transaction aborted", tm.ServiceName)
+	case REMOTE_TRNSCTN:
+		log.Printf("[%s] Skipping abort for remote transaction", tm.ServiceName)
+	default:
+		log.Printf("[%s] Invalid Transaction Number |%d|", tm.ServiceName, tm.TranType)
+		return -1
 	}
 	return 0
 }

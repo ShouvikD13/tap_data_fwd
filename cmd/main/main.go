@@ -33,7 +33,7 @@ func main() {
 	}
 	*/
 	//----------------------------------------------
-	environmentManager := models.NewEnvironmentManager(serviceName, "C:/Users/devdu/go-workspace/data_fwd_tap/config/EnvConfig.ini")
+	environmentManager := models.NewEnvironmentManager(serviceName, "/mnt/c/Users/devdu/go-workspace/data_fwd_tap/config/EnvConfig.ini")
 
 	environmentManager.LoadIniFile()
 
@@ -126,7 +126,10 @@ func main() {
 
 	// Testing "cln_pack_clnt.go"
 
-	VarClnPack := &app.ClnPackClntManager{Envm: environmentManager}
+	VarClnPack := &app.ClnPackClntManager{
+		Enviroment_manager: environmentManager,
+		Config_manager:     configManager,
+	}
 	resultTmp = VarClnPack.Fn_bat_init(args[1:], DB)
 
 	if resultTmp != 0 {
