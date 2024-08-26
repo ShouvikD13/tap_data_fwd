@@ -68,21 +68,21 @@ func (MQM *MessageQueueManager) WriteToQueue(mtype int) int {
 	return 0
 }
 
-func (MQM *MessageQueueManager) ReadFromQueue(mtype int) (*structures.St_req_q_data, int64, int) {
+func (MQM *MessageQueueManager) ReadFromQueue(mtype int) ([]byte, int64, int) {
 	receivedData, receivedType, err := MQM.mq.ReceiveBytes(mtype, 0) // Added 0 for flags
 	if err != nil {
 		log.Printf("[%s] [readFromQueue] [Error] failed to receive message: %v", MQM.ServiceName, err)
 		return nil, 0, -1
 	}
 
-	deserializedData, err := MQM.deserialize(receivedData)
-	if err != nil {
-		log.Printf("[%s] [readFromQueue] [Error] failed to deserialize data: %v", MQM.ServiceName, err)
-		return nil, 0, -1
-	}
+	// deserializedData, err := MQM.deserialize(receivedData)
+	// if err != nil {
+	// 	log.Printf("[%s] [readFromQueue] [Error] failed to deserialize data: %v", MQM.ServiceName, err)
+	// 	return nil, 0, -1
+	// }
 
 	// Convert receivedType to int64 for return
-	return deserializedData, int64(receivedType), 0
+	return receivedData, int64(receivedType), 0
 }
 
 func (MQM *MessageQueueManager) DestroyQueue() int {

@@ -5,6 +5,7 @@ import (
 	"DATA_FWD_TAP/config"
 	"DATA_FWD_TAP/models"
 	"DATA_FWD_TAP/models/structures"
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -214,13 +215,22 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 
 		log.Printf("[%s] [CLN_PACK_CLNT] Successfully wrote to queue with message type %d", client_pack_manager.ServiceName, mtype)
 
+		// testing purposes
+		receivedData, receivedType, readErr := client_pack_manager.Message_queue_manager.ReadFromQueue(mtype)
+		if readErr != 0 {
+			log.Printf("[%s] [CLN_PACK_CLNT] Error reading from queue with message type %d: %d", client_pack_manager.ServiceName, mtype, readErr)
+			return -1
+		}
+		log.Printf("[%s] [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", client_pack_manager.ServiceName, mtype, receivedType)
+
+		fmt.Println(receivedData)
+
 		mtype++
 
 		if mtype > client_pack_manager.Max_Pack_Val {
 			mtype = 1
 		}
 
-		// testing purposes
 		TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
                         SET fxb_plcd_stts = 'R'
                         WHERE fxb_plcd_stts = 'Q'`
