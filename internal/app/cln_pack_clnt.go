@@ -1025,6 +1025,44 @@ func (client_pack_manager *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
 	return 0
 }
 
+/***********************************************************************************************
+ * fnGetExtCnt retrieves and sets external contract details based on the values provided
+ * in the `contract` structure within the 'ClnPackClntManager' instance. This function performs
+ * multiple operations to populate the `nse_contract` structure with relevant data.
+ *
+ * The function performs the following operations:
+ * 1. **Determine Entity Type**: Based on the value of `C_xchng_cd` in the `contract` structure,
+ *    sets the `i_sem_entity` variable to either `models.NFO_ENTTY` or `models.BFO_ENTTY`.
+ *
+ * 2. **Fetch Symbol**: Executes a query to fetch the stock symbol (`C_symbol`) from the
+ *    'sem_stck_map' table using the stock code (`C_undrlyng`) and entity type.
+ *
+ * 3. **Determine Exchange Code**: Sets the exchange code (`c_exg_cd`) based on the value of
+ *    `C_xchng_cd` in the `contract` structure.
+ *
+ * 4. **Fetch Series**: Executes a query to fetch the series (`C_series`) from the 'ESS_SGMNT_STCK'
+ *    table using the underlying stock code (`C_undrlyng`) and exchange code (`c_exg_cd`).
+ *
+ * 5. **Fetch Token ID and CA Level**: Executes a query to fetch token ID (`L_token_id`) and
+ *    CA level (`L_ca_lvl`) from the 'ftq_fo_trd_qt' table using various contract details including
+ *    exchange code, product type, underlying stock code, expiry date, exercise type, option type,
+ *    and strike price. The expiry date is formatted to 'dd-Mon-yyyy'.
+ *
+ * INPUT PARAMETERS:
+ *    - db *gorm.DB: The database connection instance used for executing SQL queries.
+ *
+ * OUTPUT PARAMETERS:
+ *    int - Returns 0 for success or -1 if an error occurs .
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Determines the entity type and fetches the symbol from 'sem_stck_map'.
+ * 2. Based on the `C_xchng_cd`, sets the appropriate exchange code and fetches the series from
+ *    'ESS_SGMNT_STCK'.
+ * 3. Retrieves token ID and CA level from 'ftq_fo_trd_qt' using the formatted expiry date and
+ *    other contract details.
+ * 4. Updates the `nse_contract` structure with the fetched values.
+ ***********************************************************************************************/
+
 func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	var i_sem_entity int
 	var c_stck_cd, c_symbl, c_exg_cd string
@@ -1172,6 +1210,31 @@ func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 
 	return 0
 }
+
+/***********************************************************************************************
+ * fnRjctRcrd processes record rejection by updating the 'Xchngbook' structure within the
+ * 'ClnPackClntManager'. It performs the following steps:
+ *
+ * 1. **Fetch Timestamp**: Retrieves the current system timestamp in 'DD-Mon-YYYY HH24:MI:SS'
+ *    format and logs it.
+ *
+ * 2. **Update Record**: Sets the status of the record to 'REJECT', marks it as 'NOT_PROCESSED',
+ *    and updates relevant fields with rejection details.
+ *
+ * 3. **Persist Updates**: Calls 'fnUpdXchngbk' to save the updated status and details to the
+ *    'xchng_book' tble.
+ *
+ * INPUT PARAMETERS:
+ *    - db *gorm.DB: The database connection for executing queries.
+ *
+ * OUTPUT PARAMETERS:
+ *    - int: Returns 0 on success; -1 on error.
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Logs the current timestamp retrieved from the database.
+ * 2. Updates the 'Xchngbook' structure with rejection information.
+ * 3. Calls 'fnUpdXchngbk' to apply and save the changes, handling any errors.
+ ***********************************************************************************************/
 
 func (client_pack_manager *ClnPackClntManager) fnRjctRcrd(db *gorm.DB) int {
 
