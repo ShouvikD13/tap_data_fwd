@@ -41,40 +41,30 @@ type ClnPackClntManager struct {
 	Config_manager           *config.ConfigManager
 }
 
-/******************************************************************************/
-/* Fn_bat_init initializes the client package manager, sets up various data   */
-/* structures, and fetches necessary configuration and database values to     */
-/* prepare for processing.												      */
-/*                                                                            */
-/* INPUT PARAMETERS:                                                          */
-/*    args[]        - Command-line arguments, which must contain at least 7   */
-/*                    elements. The fourth argument (args[3]) is used to      */
-/*                    specify the pipe ID.                                    */
-/*    Db            - A pointer to a GORM database connection object used for */
-/*                    executing SQL queries to fetch necessary data.          */
-/*                                                                            */
-/* OUTPUT PARAMETERS:                                                         */
-/*    int           - Returns 0 on success, or -1 on failure. The function    */
-/*                    may return -1 if there are insufficient arguments, if   */
-/*                    a database query fails, or if message queue creation    */
-/*                    fails.                                                  */
-/*                                                                            */
-/* FUNCTIONAL FLOW:                                                           */
-/* 1. Initializes the necessary structures and managers to set up the service.*/
-/* 2. Validates command-line arguments to ensure sufficient parameters are    */
-/*    provided for further processing.                                        */
-/* 3. Sets the pipe ID using the command-line argument and creates a message  */
-/*    queue for inter-process communication.                                  */
-/* 4. Executes SQL queries to fetch exchange code, trader ID, branch ID, trade*/
-/*    date, and broker ID, which are stored in the initialized structures.    */
-/* 5. Reads and converts configuration values, such as user type and packing  */
-/*    limit (message limit in queue), from a configuration file.			  */
-/* 6. Calls the CLN_PACK_CLNT function to perform the main service logic.     */
-/* 7. Returns an appropriate status code based on the success or failure of   */
-/*    the operations performed.                                               */
-/*                                                                            */
-/******************************************************************************/
-
+/***************************************************************************************
+ * Fn_bat_init initializes the client package manager by setting up data structures,
+ * fetching configuration values, and preparing the environment for processing.
+ * It ensures all prerequisites are met before the service starts.
+ *
+ * INPUT PARAMETERS:
+ *    args[] - Command-line arguments, which must include at least 7 elements.
+ *             The fourth argument (args[3]) specifies the pipe ID.
+ *    Db     - Pointer to a GORM database connection object used for SQL queries.
+ *
+ * OUTPUT PARAMETERS:
+ *    int    - Returns 0 for success, or -1 if an error occurs.
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Initializes required structures and managers for the service.
+ * 2. Validates command-line arguments to ensure all necessary parameters are present.
+ * 3. Sets the pipe ID from the command-line argument and creates a message queue.
+ * 4. Executes SQL queries to fetch and store necessary data such as exchange code,
+ *    trader ID, branch ID, trade date, and broker ID.
+ * 5. Reads configuration values from a file, including user type and message limit.
+ * 6. Invokes the `CLN_PACK_CLNT` function to start the main service logic.
+ * 7. Returns a status code indicating the success or failure of the initialization.
+ *
+ ***********************************************************************************************/
 func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 
 	var temp_str string
@@ -328,11 +318,39 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 	return 0
 }
 
+/***************************************************************************************
+ * fnGetNxtRec retrieves and processes the next record from the database based on its
+ * status and type, then updates relevant structures and statuses. It handles extraction
+ * of order data, updates database statuses, and packs the data for further processing.
+ *
+ * INPUT PARAMETERS:
+ *    Db - Pointer to a GORM database connection object for SQL operations.
+ *
+ * OUTPUT PARAMETERS:
+ *    int - Returns 0 for successful execution, or -1 if an error occurs.
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Calls 'fnSeqToOmd' to fetch records from the 'FXB_FO_XCHNG_BOOK' table.
+ * 2. Ensures 'C_plcd_stts' is 'REQUESTED'.
+ * 3. Processes the order if its type is 'ORDINARY_ORDER':
+ *    a. Transfers 'C_ordr_rfrnc' from 'Xchngbook' to 'orderbook'.
+ *    b. Calls 'fnRefToOrd' to fetch order details from 'fod_fo_ordr_dtls'.
+ *    c. Compares 'L_mdfctn_cntr' between 'Xchngbook' and 'orderbook'.
+ *    d. Updates 'Xchngbook' and 'orderbook' statuses to 'QUEUED':
+ *       - Calls 'fnUpdXchngbk' and 'fnUpdOrdrbk' to update the database.
+ *    e. Sets the contract data using values from 'orderbook'.
+ *    f. Checks if 'C_xchng_cd' is "NFO":
+ *       - If "NFO", sets the request type and calls 'fnGetExtCnt' to load additional data.
+ *    g. Calls 'fnPackOrdnryOrdToNse' to pack data into the final structure 'St_req_q_data'.
+ *
+ ***********************************************************************************************/
+
 func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 	log.Printf("[%s] [fnGetNxtRec] Entering fnGetNxtRec", client_pack_manager.ServiceName)
 
 	client_pack_manager.cPrgmFlg = "0"
 
+	// Calling the function 'fnSeqToOmd' to fetched the Records from the 'FXB_FO_XCHNG_BOOK'
 	resultTmp := client_pack_manager.fnSeqToOmd(Db)
 	if resultTmp != 0 {
 		log.Printf("[%s] [fnGetNxtRec] Failed to fetch data into eXchngbook structure", client_pack_manager.ServiceName)
@@ -357,10 +375,13 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		return -1
 	}
 
+	// Checking the order type. Only fetch the order if it is of type 'Ordinary_Order'; otherwise, return without fetching.
 	if client_pack_manager.Xchngbook.C_ex_ordr_type == models.ORDINARY_ORDER {
 
 		log.Printf("[%s] [fnGetNxtRec] Assigning C_ordr_rfrnc from eXchngbook to orderbook", client_pack_manager.ServiceName)
 		client_pack_manager.orderbook.C_ordr_rfrnc = client_pack_manager.Xchngbook.C_ordr_rfrnc
+
+		// Calling the function 'fnRefToOrd' to fetch orders from the 'fod_fo_ordr_dtls' table.
 
 		resultTmp = client_pack_manager.fnRefToOrd(Db)
 		if resultTmp != 0 {
@@ -368,6 +389,7 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			return -1
 		}
 
+		// After fetching the records from 'order_book' and 'xchng_book', we check whether the values of 'L_mdfctn_cntr' from both tables are equal.
 		if client_pack_manager.Xchngbook.L_mdfctn_cntr != client_pack_manager.orderbook.L_mdfctn_cntr {
 			log.Printf("[%s] [fnGetNxtRec] L_mdfctn_cntr of both Xchngbook and order are not same", client_pack_manager.ServiceName)
 			log.Printf(" [fnGetNxtRec]  Exiting fnGetNxtRec")
@@ -375,6 +397,7 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 
 		}
 
+		// Here, we are updating the status of 'xchngbook' to reflect the change in 'FXB_FO_XCHNG_BOOK', indicating that the record has been read.
 		client_pack_manager.Xchngbook.C_plcd_stts = models.QUEUED
 		client_pack_manager.Xchngbook.C_oprn_typ = models.UPDATION_ON_ORDER_FORWARDING
 
@@ -386,7 +409,7 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		}
 
 		client_pack_manager.orderbook.C_ordr_stts = models.QUEUED
-
+		// Here, we are updating the status of the 'fod_fo_ordr_dtls' table to indicate that this record has been read and queued.
 		resultTmp = client_pack_manager.fnUpdOrdrbk(Db)
 
 		if resultTmp != 0 {
@@ -420,6 +443,7 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 
 			client_pack_manager.contract.C_rqst_typ = models.CONTRACT_TO_NSE_ID
 
+			// Calling this function to extract data from various tables and store it in the contract structure.
 			resultTmp = client_pack_manager.fnGetExtCnt(Db)
 
 			if resultTmp != 0 {
@@ -434,11 +458,14 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 
 		log.Printf("[%s] [fnGetNxtRec] Packing Ordinary Order STARTS ", client_pack_manager.ServiceName)
 
+		// Checking if 'Token_id' is received from 'fnGetExtCnt'. If not, the record will be rejected.
+
 		if client_pack_manager.nse_contract.L_token_id == 0 {
 			log.Printf("[%s] [fnGetNxtRec] Token id for ordinary order is: %d", client_pack_manager.ServiceName, client_pack_manager.nse_contract.L_token_id)
 
 			log.Printf("[%s] [fnGetNxtRec] token id is not avialable so we are calling 'fn_rjct_rcrd' ", client_pack_manager.ServiceName)
 
+			// Calling 'fnRjctRcrd' to reject the record.
 			resultTmp = client_pack_manager.fnRjctRcrd(Db)
 
 			if resultTmp != 0 {
@@ -470,6 +497,7 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			client_pack_manager.cPrgmFlg,
 		)
 
+		// Calling the function 'fnPackOrdnryOrdToNse' to pack the entire data into the final structure 'St_req_q_data'.
 		resultTmp = eplm.fnPackOrdnryOrdToNse(Db)
 
 		if resultTmp != 0 {
@@ -528,7 +556,7 @@ func (client_pack_manager *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
          AND TO_DATE(fxb_b.fxb_mod_trd_dt, 'YYYY-MM-DD') = TO_DATE(?, 'YYYY-MM-DD')
          AND fxb_b.fxb_pipe_id = ?
          AND fxb_b.fxb_plcd_stts = 'R'
-);
+		);
 
 
 	`
