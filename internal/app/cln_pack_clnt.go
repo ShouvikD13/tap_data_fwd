@@ -21,7 +21,6 @@ type ClnPackClntManager struct {
 	orderbook                *structures.Vw_orderbook  // Pointer to the Vw_orderbook structure
 	contract                 *structures.Vw_contract   // we are updating it's value from orderbook
 	nse_contract             *structures.Vw_nse_cntrct // we are updating it in 'fn_get_ext_cnt'
-	requestQueue             *structures.St_req_q_data // this is used in 'fnGetNxtRec'
 	pipe_mstr                *structures.St_opm_pipe_mstr
 	oe_reqres                *structures.St_oe_reqres
 	exch_msg                 *structures.St_exch_msg
@@ -74,7 +73,6 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 	client_pack_manager.orderbook = &structures.Vw_orderbook{}
 	client_pack_manager.contract = &structures.Vw_contract{}
 	client_pack_manager.nse_contract = &structures.Vw_nse_cntrct{}
-	client_pack_manager.requestQueue = &structures.St_req_q_data{}
 	client_pack_manager.pipe_mstr = &structures.St_opm_pipe_mstr{}
 	client_pack_manager.oe_reqres = &structures.St_oe_reqres{}
 	client_pack_manager.exch_msg = &structures.St_exch_msg{}
@@ -479,7 +477,6 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		// here we are initialising the "ExchngPackLibMaster"
 		eplm := NewExchngPackLibMaster(
 			client_pack_manager.ServiceName,
-			client_pack_manager.requestQueue,
 			client_pack_manager.Xchngbook,
 			client_pack_manager.orderbook,
 			client_pack_manager.pipe_mstr,
@@ -512,6 +509,30 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 	log.Printf("[%s] [fnGetNxtRec] Exiting fnGetNxtRec", client_pack_manager.ServiceName)
 	return 0
 }
+
+/***************************************************************************************
+ * fnSeqToOmd fetches the next record from the 'FXB_FO_XCHNG_BOOK' table in the database
+ * based on specified criteria (exchange code, pipe ID, trade date, and order sequence).
+ * It retrieves order information and stores it in the 'Xchngbook' structure
+ * within the 'ClnPackClntManager' instance.
+ *
+ * INPUT PARAMETERS:
+ *    db - Pointer to a GORM database connection object for SQL operations.
+ *
+ * OUTPUT PARAMETERS:
+ *    int - Returns 0 for successful data retrieval, or -1 if an error occurs.
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Constructs and executes a SQL query using GORM's 'Raw' method to fetch order details
+ *    from the 'FXB_FO_XCHNG_BOOK' table:
+ *    a. The query selects various columns, including order reference, quantity, order type,
+ *       sequence number, etc., based on specified conditions.
+ *    b. Utilizes 'TO_DATE' to format date fields and 'COALESCE' to handle null values for
+ *       specific fields.
+ * 2. Scans the retrieved row into the fields of the 'Xchngbook' structure and additional
+ *    local variables ('c_ip_addrs', 'c_prcimpv_flg').
+ *
+ ***********************************************************************************************/
 
 func (client_pack_manager *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 	var c_ip_addrs string

@@ -15,7 +15,6 @@ import (
 
 type ExchngPackLibMaster struct {
 	serviceName  string
-	requestQueue *structures.St_req_q_data
 	xchngbook    *structures.Vw_xchngbook
 	orderbook    *structures.Vw_orderbook
 	pipe_mstr    *structures.St_opm_pipe_mstr
@@ -36,7 +35,6 @@ type ExchngPackLibMaster struct {
 
 // constructor function
 func NewExchngPackLibMaster(serviceName string,
-	reqQueue *structures.St_req_q_data,
 	xchngbook *structures.Vw_xchngbook,
 	orderbook *structures.Vw_orderbook,
 	pipe_mstr *structures.St_opm_pipe_mstr,
@@ -49,7 +47,6 @@ func NewExchngPackLibMaster(serviceName string,
 	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string) *ExchngPackLibMaster {
 	return &ExchngPackLibMaster{
 		serviceName:  serviceName,
-		requestQueue: reqQueue,
 		xchngbook:    xchngbook,
 		orderbook:    orderbook,
 		pipe_mstr:    pipe_mstr,
