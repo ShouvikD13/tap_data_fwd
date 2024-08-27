@@ -220,13 +220,37 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 	return 0
 }
 
+/***************************************************************************************
+ * CLN_PACK_CLNT handles the core operations of the client package manager service.
+ * It continuously retrieves newly created orders from the database, manages database
+ * transactions, and writes the data to a system queue.
+ *
+ * INPUT PARAMETERS:
+ *    args[] - Command-line arguments used for service configuration and control.
+ *    Db     - Pointer to a GORM database connection object for SQL operations.
+ *
+ * OUTPUT PARAMETERS:
+ *    int    - Returns 0 for success, or -1 if an error occurs.
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Enters an infinite loop to continuously process orders.
+ * 2. Initiates a local transaction with `FnBeginTran()`.
+ * 3. Retrieves the next order record using `fnGetNxtRec()`.
+ * 4. Commits the transaction with `FnCommitTran()`.
+ * 5. Writes the fetched data to the system queue using `WriteToQueue()`.
+ * 6. Increments the message type and reset if it exceeds the maximum value.
+ *
+ ***********************************************************************************************/
+
 func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 	var resultTmp int
 	mtype := 1
 
 	log.Printf("[%s] [CLN_PACK_CLNT] Entering CLN_PACK_CLNT", client_pack_manager.ServiceName)
 
+	// Setting up an infinite loop to keep the service running and continuously fetch newly created orders.
 	for {
+		// Beginning a local transaction for the service to perform fetch and update operations on the database.
 		resultTmp = client_pack_manager.Transaction_manager.FnBeginTran()
 		if resultTmp == -1 {
 			log.Printf("[%s] [CLN_PACK_CLNT] Transaction begin failed", client_pack_manager.ServiceName)
@@ -234,6 +258,7 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 		}
 		log.Printf("[%s] [CLN_PACK_CLNT] Transaction started with type: %d", client_pack_manager.ServiceName, client_pack_manager.Transaction_manager.TranType)
 
+		// Calling the function to fetch the next order record.
 		resultTmp = client_pack_manager.fnGetNxtRec(Db)
 		if resultTmp != 0 {
 			log.Printf("[%s] [CLN_PACK_CLNT] failed in getting the next record returning with result code: %d", client_pack_manager.ServiceName, resultTmp)
@@ -245,6 +270,7 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 			return -1
 		}
 
+		// Committing the transaction if it is a local transaction.
 		if client_pack_manager.Transaction_manager.FnCommitTran() == -1 {
 			log.Printf("[%s] [CLN_PACK_CLNT] Transaction commit failed", client_pack_manager.ServiceName)
 			return -1
@@ -252,6 +278,7 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 
 		log.Printf("[%s] [CLN_PACK_CLNT] Transaction committed successfully", client_pack_manager.ServiceName)
 
+		// Writing the data fetched from 'fnGetNxtRec' to the system queue (Linux).
 		if client_pack_manager.Message_queue_manager.WriteToQueue(mtype) != 0 {
 			log.Printf("[%s] [CLN_PACK_CLNT] Error writing to queue with message type %d", client_pack_manager.ServiceName, mtype)
 			return -1
@@ -259,7 +286,7 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 
 		log.Printf("[%s] [CLN_PACK_CLNT] Successfully wrote to queue with message type %d", client_pack_manager.ServiceName, mtype)
 
-		// testing purposes
+		// testing purposes (this will not be the part of actuall code)
 		receivedData, receivedType, readErr := client_pack_manager.Message_queue_manager.ReadFromQueue(mtype)
 		if readErr != 0 {
 			log.Printf("[%s] [CLN_PACK_CLNT] Error reading from queue with message type %d: %d", client_pack_manager.ServiceName, mtype, readErr)
