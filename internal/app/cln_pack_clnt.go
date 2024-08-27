@@ -661,6 +661,31 @@ func (client_pack_manager *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 	return 0
 }
 
+/***********************************************************************************************
+ * fnRefToOrd retrieves and processes order data from the 'fod_fo_ordr_dtls' and 'CLM_CLNT_MSTR'
+ * tables in the database, and stores it in the `orderbook` structure within the
+ * 'ClnPackClntManager' instance.
+ *
+ * INPUT PARAMETERS:
+ *    None
+ *
+ * OUTPUT PARAMETERS:
+ *    int - Returns 0 for success, or -1 if an error occurs.
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Constructs and executes a SQL query using GORM's 'Raw' method to fetch order details
+ *    from the 'fod_fo_ordr_dtls' table:
+ *    a. Selects various columns, including client match account, order flow, total order quantity,
+ *       executed quantity, etc., based on specified conditions.
+ *    b. Uses 'FOR UPDATE NOWAIT' to lock selected rows for update and prevent other transactions
+ *       from waiting for the lock.
+ * 2. Scans the retrieved row into the fields of the `orderbook` structure within the
+ *    'ClnPackClntManager' instance.
+ * 3. Constructs and executes a second SQL query to fetch client details from the 'CLM_CLNT_MSTR' table
+ *    where the client match account matches the previously fetched value.
+ *
+ ***********************************************************************************************/
+
 func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 	/*
 		c_pan_no --> we are simply setting it to 0 using memset in the
@@ -827,6 +852,38 @@ func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 	return 0
 }
 
+/***********************************************************************************************
+ * fnUpdXchngbk updates the status of a record in the 'fxb_fo_xchng_book' table based on the
+ * operation type specified in the `Xchngbook` structure within the 'ClnPackClntManager' instance.
+ * which are set in the 'fnGetNxtRec' .
+ * The function handles two main operations:
+ * 1. **Order Forwarding Update**: Updates the 'fxb_plcd_stts' and 'fxb_frwd_tm' fields for a record
+ *    where 'fxb_ordr_rfrnc' and 'fxb_mdfctn_cntr' match the values in the `Xchngbook` structure.
+ * 2. **Exchange Response Update**: If the download flag indicates the record should be processed, it
+ *    checks if the record exists using the provided 'fxb_jiffy', 'fxb_xchng_cd', and 'fxb_pipe_id'.
+ *    If the record exists, it logs that it has already been processed. Otherwise, it updates the record
+ *    with the provided status, remarks, and other details.
+ *
+ * INPUT PARAMETERS:
+ *    - db *gorm.DB: The database connection instance used for executing SQL queries.
+ *
+ * OUTPUT PARAMETERS:
+ *    int - Returns 0 for success or -1 if an error occurs during the update operations.
+ *
+ * FUNCTIONAL FLOW:
+
+ * 1. Based on the `C_oprn_typ` value in the `Xchngbook` structure:
+ *    a. For **Order Forwarding** (`models.UPDATION_ON_ORDER_FORWARDING`):
+ *       - Constructs and executes a SQL query to update 'fxb_plcd_stts' and 'fxb_frwd_tm' fields
+ *         for the record that matches 'fxb_ordr_rfrnc' and 'fxb_mdfctn_cntr'.
+ *    b. For **Exchange Response** (`models.UPDATION_ON_EXCHANGE_RESPONSE`):
+ *       - Checks if the record should be processed based on the `L_dwnld_flg` value.
+ *       - If processing is required, it verifies if a record already exists using the provided
+ *         'fxb_jiffy', 'fxb_xchng_cd', and 'fxb_pipe_id'.
+ *       - If the record is not found, updates the 'fxb_fo_xchng_book' table with new values including
+ *         'fxb_plcd_stts', 'fxb_rms_prcsd_flg', 'fxb_ors_msg_typ', and 'fxb_ack_tm'.
+ ***********************************************************************************************/
+
 func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 
 	var iRecExists int64
@@ -919,6 +976,24 @@ func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 
 	return 0
 }
+
+/***********************************************************************************************
+ * fnUpdOrdrbk updates the 'order status' of a record in the 'fod_fo_ordr_dtls' table based on
+ * the details provided in the `orderbook` structure within the 'ClnPackClntManager' instance.
+ * The function performs the following operations:
+ * 1. **Order Status Update**: Updates the 'fod_ordr_stts' field for a record where the
+ *    'fod_ordr_rfrnc' matches the value specified in the `orderbook` structure.
+ *
+ * INPUT PARAMETERS:
+ *    - db *gorm.DB: The database connection instance used for executing SQL queries.
+ *
+ * OUTPUT PARAMETERS:
+ *    int - Returns 0 for success or -1 if an error occurs during the update operation.
+ *
+ * FUNCTIONAL FLOW:
+ * 1. Constructs and executes a SQL query to update the 'fod_ordr_stts' field in the
+ *    'fod_fo_ordr_dtls' table where 'fod_ordr_rfrnc' matches the value from the `orderbook` structure.
+ ***********************************************************************************************/
 
 func (client_pack_manager *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
 
