@@ -41,6 +41,40 @@ type ClnPackClntManager struct {
 	Config_manager           *config.ConfigManager
 }
 
+/******************************************************************************/
+/* Fn_bat_init initializes the client package manager, sets up various data   */
+/* structures, and fetches necessary configuration and database values to     */
+/* prepare for processing.												      */
+/*                                                                            */
+/* INPUT PARAMETERS:                                                          */
+/*    args[]        - Command-line arguments, which must contain at least 7   */
+/*                    elements. The fourth argument (args[3]) is used to      */
+/*                    specify the pipe ID.                                    */
+/*    Db            - A pointer to a GORM database connection object used for */
+/*                    executing SQL queries to fetch necessary data.          */
+/*                                                                            */
+/* OUTPUT PARAMETERS:                                                         */
+/*    int           - Returns 0 on success, or -1 on failure. The function    */
+/*                    may return -1 if there are insufficient arguments, if   */
+/*                    a database query fails, or if message queue creation    */
+/*                    fails.                                                  */
+/*                                                                            */
+/* FUNCTIONAL FLOW:                                                           */
+/* 1. Initializes the necessary structures and managers to set up the service.*/
+/* 2. Validates command-line arguments to ensure sufficient parameters are    */
+/*    provided for further processing.                                        */
+/* 3. Sets the pipe ID using the command-line argument and creates a message  */
+/*    queue for inter-process communication.                                  */
+/* 4. Executes SQL queries to fetch exchange code, trader ID, branch ID, trade*/
+/*    date, and broker ID, which are stored in the initialized structures.    */
+/* 5. Reads and converts configuration values, such as user type and packing  */
+/*    limit (message limit in queue), from a configuration file.			  */
+/* 6. Calls the CLN_PACK_CLNT function to perform the main service logic.     */
+/* 7. Returns an appropriate status code based on the success or failure of   */
+/*    the operations performed.                                               */
+/*                                                                            */
+/******************************************************************************/
+
 func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 
 	var temp_str string
@@ -74,8 +108,12 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 		return -1
 	}
 
+	// setting pipe_id with command line argument (command line argument recieved from main)
+	// using Pipe_Id to fetch xchng_code
 	client_pack_manager.Xchngbook.C_pipe_id = args[3]
 
+	/* Create a message queue using the CreateQueue function from MessageQueue.go file ().
+	This function is responsible for creating a system-level queue on Linux. */
 	if client_pack_manager.Message_queue_manager.CreateQueue(3) != 0 {
 		log.Printf("[%s] [Fn_bat_init] Returning from 'CreateQueue' with an Error... %s", client_pack_manager.ServiceName)
 		log.Printf("[%s] [Fn_bat_init] Exiting from function", client_pack_manager.ServiceName)
@@ -85,7 +123,7 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 
 	log.Printf("[%s] [Fn_bat_init] Copied pipe ID from args[3]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_pipe_id)
 
-	// Fetch exchange code
+	// Fetch exchange code from 'opm_ord_pipe_mstr'
 	queryForOpm_Xchng_Cd := `SELECT opm_xchng_cd
 				FROM opm_ord_pipe_mstr
 				WHERE opm_pipe_id = ?`
@@ -104,7 +142,8 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 	temp_str = ""
 	log.Printf("[%s] [Fn_bat_init] Exchange code fetched: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_cd)
 
-	//
+	/*here we are fetching the 'OPM_TRDR_ID' and 'OPM_BRNCH_ID' by using 'OPM_XCHNG_CD' and 'OPM_PIPE_ID'
+	which is fatched earlier */
 
 	queryForTraderAndBranchID := `SELECT OPM_TRDR_ID, OPM_BRNCH_ID
 				FROM OPM_ORD_PIPE_MSTR
@@ -121,7 +160,9 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 	}
 
 	log.Printf("[%s] [Fn_bat_init] fetched trader ID: %s and branch ID : %d", client_pack_manager.ServiceName, client_pack_manager.pipe_mstr.C_opm_trdr_id, client_pack_manager.pipe_mstr.L_opm_brnch_id)
-	// Fetch modification trade date
+
+	// Fetch modification trade date from 'exg_xchng_mstr'
+
 	queryFor_exg_nxt_trd_dt := `SELECT exg_nxt_trd_dt,
 				exg_brkr_id
 				FROM exg_xchng_mstr
@@ -153,6 +194,7 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 	}
 	client_pack_manager.pipe_mstr.S_user_typ_glb = userType
 
+	//this value also we are reding from configuration file "I have set the temp value in the configuration file for now"
 	maxPackValStr := client_pack_manager.Enviroment_manager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
 	if maxPackValStr == "" {
 		log.Printf("[%s] [Fn_bat_init] 'PACK_VAL' not found in the configuration under 'PackingLimit'", client_pack_manager.ServiceName)
@@ -167,6 +209,7 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 		client_pack_manager.Max_Pack_Val = maxPackVal
 	}
 
+	// finally we are calling the CLN_PACK_CLNT function (service)
 	resultTmp = client_pack_manager.CLN_PACK_CLNT(args, Db)
 	if resultTmp != 0 {
 		log.Printf("[%s] [Fn_bat_init] CLN_PACK_CLNT failed with result code: %d", client_pack_manager.ServiceName, resultTmp)
