@@ -1211,31 +1211,6 @@ func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	return 0
 }
 
-/***********************************************************************************************
- * fnRjctRcrd processes record rejection by updating the 'Xchngbook' structure within the
- * 'ClnPackClntManager'. It performs the following steps:
- *
- * 1. **Fetch Timestamp**: Retrieves the current system timestamp in 'DD-Mon-YYYY HH24:MI:SS'
- *    format and logs it.
- *
- * 2. **Update Record**: Sets the status of the record to 'REJECT', marks it as 'NOT_PROCESSED',
- *    and updates relevant fields with rejection details.
- *
- * 3. **Persist Updates**: Calls 'fnUpdXchngbk' to save the updated status and details to the
- *    'xchng_book' tble.
- *
- * INPUT PARAMETERS:
- *    - db *gorm.DB: The database connection for executing queries.
- *
- * OUTPUT PARAMETERS:
- *    - int: Returns 0 on success; -1 on error.
- *
- * FUNCTIONAL FLOW:
- * 1. Logs the current timestamp retrieved from the database.
- * 2. Updates the 'Xchngbook' structure with rejection information.
- * 3. Calls 'fnUpdXchngbk' to apply and save the changes, handling any errors.
- ***********************************************************************************************/
-
 func (client_pack_manager *ClnPackClntManager) fnRjctRcrd(db *gorm.DB) int {
 
 	var resultTmp int

@@ -13,6 +13,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const defaultTimeStamp = "0"
+
 type ExchngPackLibMaster struct {
 	serviceName  string
 	xchngbook    *structures.Vw_xchngbook
@@ -64,6 +66,8 @@ func NewExchngPackLibMaster(serviceName string,
 		cPrgmFlg:     cPrgmFlg,
 	}
 }
+
+// There is an issue with the field `c_remark`; it is not being initialized anywhere  in original code.
 func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Inside 'fnPackOrdnryOrdToNse' ", eplm.serviceName)
@@ -147,11 +151,11 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	eplm.oe_reqres.St_hdr.Li_trader_id = int32(value)
 
-	eplm.oe_reqres.St_hdr.Li_log_time = 0                                        // 2 HDR
-	eplm.oe_reqres.St_hdr.C_alpha_char = strings.TrimSpace(strings.ToUpper(" ")) // 3 HDR 'orstonse'
-	eplm.oe_reqres.St_hdr.Si_transaction_code = models.BOARD_LOT_IN              // 4 HDR
-	eplm.oe_reqres.St_hdr.C_filler_2 = strings.TrimSpace(strings.ToUpper(" "))   // 5 HDR
-	eplm.oe_reqres.St_hdr.Si_error_code = 0                                      // 6 HDR
+	eplm.oe_reqres.St_hdr.Li_log_time = 0                                                  // 2 HDR
+	copyAndFormatSymbol(eplm.oe_reqres.St_hdr.C_alpha_char[:], models.LEN_ALPHA_CHAR, " ") // 3 HDR 'orstonse'
+	eplm.oe_reqres.St_hdr.Si_transaction_code = models.BOARD_LOT_IN                        // 4 HDR
+	eplm.oe_reqres.St_hdr.C_filler_2 = strings.TrimSpace(strings.ToUpper(" "))             // 5 HDR
+	eplm.oe_reqres.St_hdr.Si_error_code = 0                                                // 6 HDR
 	/*
 		for i := range eplm.oe_reqres.St_hdr.C_time_stamp_1 {
 			eplm.oe_reqres.St_hdr.C_time_stamp_1[i] = 0 //7 HDR
@@ -159,8 +163,9 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		for i := range eplm.oe_reqres.St_hdr.C_time_stamp_2 {
 			eplm.oe_reqres.St_hdr.C_time_stamp_2[i] = 0 //8 HDR
 	}*/
-	eplm.oe_reqres.St_hdr.C_time_stamp_1 = "0"                                             //7 HDR
-	eplm.oe_reqres.St_hdr.C_time_stamp_2 = "0"                                             //8 HDR
+
+	copy(eplm.oe_reqres.St_hdr.C_time_stamp_1[:], defaultTimeStamp)                        //7 HDR
+	copy(eplm.oe_reqres.St_hdr.C_time_stamp_2[:], defaultTimeStamp)                        //8 HDR
 	eplm.oe_reqres.St_hdr.Si_message_length = int32(reflect.TypeOf(eplm.oe_reqres).Size()) //9 HDR
 
 	// Header structure Done Till here
@@ -194,12 +199,12 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		return -1
 	}
 
-	eplm.oe_reqres.C_counter_party_broker_id = strings.TrimSpace(strings.ToUpper(" ")) // 12 BDY
-	eplm.oe_reqres.C_filler_4 = " "                                                    // 13 BDY
-	eplm.oe_reqres.C_filler_5 = strings.TrimSpace(strings.ToUpper(" "))                // 14 BDY
-	eplm.oe_reqres.C_closeout_flg = " "                                                // 15 BDY
-	eplm.oe_reqres.C_filler_6 = " "                                                    // 16 BDY
-	eplm.oe_reqres.Si_order_type = 0                                                   // 17 BDY
+	copyAndFormatSymbol(eplm.oe_reqres.C_counter_party_broker_id[:], models.LEN_BROKER_ID, " ") // 12 BDY
+	eplm.oe_reqres.C_filler_4 = strings.TrimSpace(strings.ToUpper(" "))                         // 13 BDY
+	eplm.oe_reqres.C_filler_5 = strings.TrimSpace(strings.ToUpper(" "))                         // 14 BDY
+	eplm.oe_reqres.C_closeout_flg = strings.TrimSpace(strings.ToUpper(" "))                     // 15 BDY
+	eplm.oe_reqres.C_filler_6 = strings.TrimSpace(strings.ToUpper(" "))                         // 16 BDY
+	eplm.oe_reqres.Si_order_type = 0                                                            // 17 BDY
 
 	if eplm.xchngbook.C_req_typ == models.NEW { // 18 BDY
 		eplm.oe_reqres.D_order_number = 0
@@ -411,7 +416,31 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		log.Printf("[%s] [fnPackOrdnryOrdToNse] Exiting from the function ", eplm.serviceName)
 	}
 
+	if eplm.cPanNo != "*" {
+
+		eplm.oe_reqres.C_pan = strings.TrimSpace(strings.ToUpper(eplm.cPanNo))
+	} else {
+		eplm.oe_reqres.C_pan = strings.TrimSpace(strings.ToUpper(" "))
+	}
+
+	/*
+		cPanNo
+		C_cover_uncover
+		C_giveup_flag
+		C_reserved
+	*/
+
+	/***** Since there is no provision for
+	settlement period in EBA we set this to  **/
+	eplm.oe_reqres.Si_settlement_period = 0
+
+	eplm.oe_reqres.C_cover_uncover = "V"
+
+	eplm.oe_reqres.C_giveup_flag = "P"
+
 	eplm.oe_reqres.D_filler19 = 0.0
+
+	eplm.oe_reqres.C_reserved = strings.TrimSpace(strings.ToUpper(" "))
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse]  Printing header structure for Ordinary Order....", eplm.serviceName)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' li_log_time is :	%d ", eplm.serviceName, eplm.oe_reqres.St_hdr.Li_log_time)
@@ -462,6 +491,10 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' li_entry_date_time is :	%d ", eplm.serviceName, eplm.oe_reqres.Li_entry_date_time)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' li_minimum_fill_aon_volume is :	%d ", eplm.serviceName, eplm.oe_reqres.Li_minimum_fill_aon_volume)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' li_last_modified is :	%d ", eplm.serviceName, eplm.oe_reqres.Li_last_modified)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_PanNo is :	%s ", eplm.serviceName, eplm.oe_reqres.C_pan)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_cover_uncover is :	%s ", eplm.serviceName, eplm.oe_reqres.C_cover_uncover)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_giveup_flag is :	%s ", eplm.serviceName, eplm.oe_reqres.C_giveup_flag)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_reserved is :	%s ", eplm.serviceName, eplm.oe_reqres.C_reserved)
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Printing order flags structure for Ordinary Order....", eplm.serviceName)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_ato is :	%d ", eplm.serviceName, eplm.oe_reqres.St_ord_flg.Flg_ato)

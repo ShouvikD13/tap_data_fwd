@@ -46,6 +46,7 @@ const (
 	LEN_INSTRUMENT_NAME = 6
 	LEN_SYMBOL_NSE      = 10
 	LEN_OPTION_TYPE     = 2
+	LEN_PAN             = 10 // this value i have deduce from original C code "char c_pan[10];				  /*** Ver 2.7 ***/"
 	// Order & Trade management
 	BOARD_LOT_IN = 2000
 
