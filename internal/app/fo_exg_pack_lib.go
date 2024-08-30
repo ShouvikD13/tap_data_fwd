@@ -26,13 +26,13 @@ type ExchngPackLibMaster struct {
 	net_hdr      *structures.St_net_hdr
 	q_packet     *structures.St_req_q_data
 	OCM          *models.OrderConversionManager
-	cPanNo       string
-	cLstActRef   string
-	cEspID       string
-	cAlgoID      string
-	cSourceFlg   string
-	cPrgmFlg     string
-	cUserTypGlb  string
+	cPanNo       [models.LEN_PAN]byte
+	cLstActRef   byte
+	cEspID       byte
+	cAlgoID      byte
+	cSourceFlg   byte
+	cPrgmFlg     byte
+	cUserTypGlb  byte
 }
 
 // constructor function
@@ -67,7 +67,9 @@ func NewExchngPackLibMaster(serviceName string,
 	}
 }
 
-// There is an issue with the field `c_remark`; it is not being initialized anywhere  in original code.
+// There is an issue with the field `c_remark`. it is not being initialized anywhere in the original code.
+// In the NNF, `c_remark` is mentioned as 'cOrdFiller CHAR 24', but there is no description provided for it.
+
 func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Inside 'fnPackOrdnryOrdToNse' ", eplm.serviceName)
@@ -154,8 +156,9 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.oe_reqres.St_hdr.Li_log_time = 0                                                  // 2 HDR
 	copyAndFormatSymbol(eplm.oe_reqres.St_hdr.C_alpha_char[:], models.LEN_ALPHA_CHAR, " ") // 3 HDR 'orstonse'
 	eplm.oe_reqres.St_hdr.Si_transaction_code = models.BOARD_LOT_IN                        // 4 HDR
-	eplm.oe_reqres.St_hdr.C_filler_2 = strings.TrimSpace(strings.ToUpper(" "))             // 5 HDR
-	eplm.oe_reqres.St_hdr.Si_error_code = 0                                                // 6 HDR
+	eplm.oe_reqres.St_hdr.C_filler_2 = ' '                                                 // 5 HDR
+
+	eplm.oe_reqres.St_hdr.Si_error_code = 0 // 6 HDR
 	/*
 		for i := range eplm.oe_reqres.St_hdr.C_time_stamp_1 {
 			eplm.oe_reqres.St_hdr.C_time_stamp_1[i] = 0 //7 HDR

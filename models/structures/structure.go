@@ -170,26 +170,26 @@ type St_exch_msg struct {
 type St_net_hdr struct {
 	S_message_length int16
 	I_seq_num        int32
-	C_checksum       string //[16]byte
+	C_checksum       [16]byte
 }
 
 type St_oe_reqres struct {
 	St_hdr                        *St_int_header
-	C_participant_type            string // byte
-	C_filler_1                    string //byte
+	C_participant_type            byte // byte
+	C_filler_1                    byte //byte
 	Si_competitor_period          int16
 	Si_solicitor_period           int16
-	C_modified_cancelled_by       string //byte
-	C_filler_2                    string // byte
+	C_modified_cancelled_by       byte //byte
+	C_filler_2                    byte // byte
 	Si_reason_code                int16
-	C_filler_3                    string
+	C_filler_3                    byte
 	L_token_no                    int32
 	St_con_desc                   *St_contract_desc
 	C_counter_party_broker_id     [models.LEN_BROKER_ID]byte
-	C_filler_4                    string //byte
-	C_filler_5                    string
-	C_closeout_flg                string //byte
-	C_filler_6                    string //byte
+	C_filler_4                    byte //byte
+	C_filler_5                    byte
+	C_closeout_flg                byte //byte
+	C_filler_6                    byte //byte
 	Si_order_type                 int16
 	D_order_number                float64
 	C_account_number              [models.LEN_ACCOUNT_NUMBER]byte
@@ -211,20 +211,20 @@ type St_oe_reqres struct {
 	Li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
 	C_broker_id                   [models.LEN_BROKER_ID]byte
 	C_remarks                     [models.LEN_REMARKS]byte
-	C_open_close                  string // byte
+	C_open_close                  byte // byte
 	C_settlor                     [models.LEN_SETTLOR]byte
 	Si_pro_client_indicator       int16
 	Si_settlement_period          int16
-	C_cover_uncover               string // byte
-	C_giveup_flag                 string // byte
-	I_order_seq                   int32  // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
+	C_cover_uncover               byte  // byte
+	C_giveup_flag                 byte  // byte
+	I_order_seq                   int32 // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
 	D_nnf_field                   float64
 	D_filler19                    float64
-	C_pan                         string // Added in Ver 2.7
-	L_algo_id                     int32  // Added in Ver 2.7
-	Si_algo_category              int16  // Added in Ver 2.7
-	Ll_lastactivityref            int64  // Added in Ver 2.9
-	C_reserved                    string // Updated in Ver 2.9
+	C_pan                         byte  // Added in Ver 2.7
+	L_algo_id                     int32 // Added in Ver 2.7
+	Si_algo_category              int16 // Added in Ver 2.7
+	Ll_lastactivityref            int64 // Added in Ver 2.9
+	C_reserved                    byte  // Updated in Ver 2.9
 }
 
 type St_int_header struct {
@@ -234,7 +234,7 @@ type St_int_header struct {
 	C_alpha_char      [models.LEN_ALPHA_CHAR]byte // this one is changed <---------------------
 	Li_trader_id      int32
 	Si_error_code     int16
-	C_filler_2        string
+	C_filler_2        byte
 	C_time_stamp_1    [models.LEN_TIME_STAMP]byte // this one is changed <---------------------
 	C_time_stamp_2    [models.LEN_TIME_STAMP]byte // this one is changed <---------------------
 	Si_message_length int32
@@ -269,7 +269,7 @@ type St_order_flags struct {
 //-------------------------------------------------------------------------------------------------------------------
 
 // type St_pk_sequence struct { Not Used
-// 	C_pipe_id  string
+// 	C_pipe_id  byte
 // 	C_trd_dt   string
 // 	C_rqst_typ string
 // 	C_seq_num  int32
