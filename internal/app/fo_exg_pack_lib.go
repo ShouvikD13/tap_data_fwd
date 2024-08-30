@@ -637,7 +637,7 @@ func (eplm *ExchngPackLibMaster) fn_orstonse_cntrct_desc() int {
 		}
 
 		if len(eplm.nse_contract.C_exrc_typ) > 0 {
-			eplm.oe_reqres.St_con_desc.C_option_type[1] = eplm.nse_contract.C_exrc_typ[0] //here i have to assume the the string will be of size 1. This problems happens because i replace all the byte array with string
+			eplm.oe_reqres.St_con_desc.C_option_type[1] = eplm.nse_contract.C_exrc_typ[0]
 		} else {
 			eplm.oe_reqres.St_con_desc.C_option_type[1] = 'X'
 		}
