@@ -368,13 +368,13 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		return 0
 	}
 
-	if client_pack_manager.Xchngbook.C_plcd_stts != models.REQUESTED {
+	if client_pack_manager.Xchngbook.C_plcd_stts != string(models.REQUESTED) {
 		log.Printf("[%s] [fnGetNxtRec] the Placed status is not requested . so we are we are not getting the record ", client_pack_manager.ServiceName)
 		return -1
 	}
 
 	// Checking the order type. Only fetch the order if it is of type 'Ordinary_Order'; otherwise, return without fetching.
-	if client_pack_manager.Xchngbook.C_ex_ordr_type == models.ORDINARY_ORDER {
+	if client_pack_manager.Xchngbook.C_ex_ordr_type == string(models.ORDINARY_ORDER) {
 
 		log.Printf("[%s] [fnGetNxtRec] Assigning C_ordr_rfrnc from eXchngbook to orderbook", client_pack_manager.ServiceName)
 		client_pack_manager.orderbook.C_ordr_rfrnc = client_pack_manager.Xchngbook.C_ordr_rfrnc
@@ -396,8 +396,8 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		}
 
 		// Here, we are updating the status of 'xchngbook' to reflect the change in 'FXB_FO_XCHNG_BOOK', indicating that the record has been read.
-		client_pack_manager.Xchngbook.C_plcd_stts = models.QUEUED
-		client_pack_manager.Xchngbook.C_oprn_typ = models.UPDATION_ON_ORDER_FORWARDING
+		client_pack_manager.Xchngbook.C_plcd_stts = string(models.QUEUED)
+		client_pack_manager.Xchngbook.C_oprn_typ = string(models.UPDATION_ON_ORDER_FORWARDING)
 
 		resultTmp = client_pack_manager.fnUpdXchngbk(Db)
 
@@ -406,7 +406,7 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			return -1
 		}
 
-		client_pack_manager.orderbook.C_ordr_stts = models.QUEUED
+		client_pack_manager.orderbook.C_ordr_stts = string(models.QUEUED)
 		// Here, we are updating the status of the 'fod_fo_ordr_dtls' table to indicate that this record has been read and queued.
 		resultTmp = client_pack_manager.fnUpdOrdrbk(Db)
 
@@ -439,7 +439,7 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 
 		if strings.TrimSpace(client_pack_manager.Xchngbook.C_xchng_cd) == "NFO" {
 
-			client_pack_manager.contract.C_rqst_typ = models.CONTRACT_TO_NSE_ID
+			client_pack_manager.contract.C_rqst_typ = string(models.CONTRACT_TO_NSE_ID)
 
 			// Calling this function to extract data from various tables and store it in the contract structure.
 			resultTmp = client_pack_manager.fnGetExtCnt(Db)
@@ -906,7 +906,7 @@ func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_plcd_stts)
 
 	switch client_pack_manager.Xchngbook.C_oprn_typ {
-	case models.UPDATION_ON_ORDER_FORWARDING:
+	case string(models.UPDATION_ON_ORDER_FORWARDING):
 
 		query1 := `UPDATE fxb_fo_xchng_book 
 				SET fxb_plcd_stts = ?, fxb_frwd_tm = CURRENT_TIMESTAMP
@@ -919,7 +919,7 @@ func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 			return -1
 		}
 
-	case models.UPDATION_ON_EXCHANGE_RESPONSE:
+	case string(models.UPDATION_ON_EXCHANGE_RESPONSE):
 		if client_pack_manager.Xchngbook.L_dwnld_flg == models.DOWNLOAD {
 
 			result := db.Raw(

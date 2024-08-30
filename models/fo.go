@@ -4,33 +4,33 @@ import "log"
 
 const (
 	/*upd xchng book*/
-	UPDATION_ON_ORDER_FORWARDING  = "P"
-	UPDATION_ON_EXCHANGE_RESPONSE = "R"
+	UPDATION_ON_ORDER_FORWARDING  = 'P'
+	UPDATION_ON_EXCHANGE_RESPONSE = 'R'
 
 	/*upd ordr book*/
-	UPDATE_ORDER_STATUS = "S"
+	UPDATE_ORDER_STATUS = 'S'
 
 	/**/
-	ORDINARY_ORDER = "O"
+	ORDINARY_ORDER = 'O'
 
-	FOR_NORM = "N"
+	FOR_NORM = 'N'
 
 	/*placed status*/
-	REQUESTED = "R"
-	QUEUED    = "Q"
-	CANCELLED = "C"
+	REQUESTED = 'R'
+	QUEUED    = 'Q'
+	CANCELLED = 'C'
 
 	DOWNLOAD     = 10
 	NOT_DOWNLOAD = 20
 
-	CONTRACT_TO_NSE_ID = "N"
+	CONTRACT_TO_NSE_ID = 'N'
 
 	/**** SFO_GT_EXT_CNT ****/
 	NFO_ENTTY = 1
 	BFO_ENTTY = 2
 
 	/* product type */
-	FUTURES = "F"
+	FUTURES = 'F'
 
 	// on reject order
 	ORS_NEW_ORD_RJCT = 5304
@@ -50,15 +50,15 @@ const (
 	// Order & Trade management
 	BOARD_LOT_IN = 2000
 
-	TRADER            = "T"
-	CORPORATE_MANAGER = "M"
-	BRANCH_MANAGER    = "B"
+	TRADER            = 'T'
+	CORPORATE_MANAGER = 'M'
+	BRANCH_MANAGER    = 'B'
 
 	//for Expiry DT
 	TEN_YRS_IN_SEC = 315513000
 
 	/**** Order request type ****/
-	NEW = "N"
+	NEW = 'N'
 	// MODIFY = "M"
 	// CANCEL = "C"
 
@@ -73,8 +73,8 @@ const (
 
 	// Order placed by Broker / Customer Indicator
 
-	BRKR_PLCD  = "P"
-	CSTMR_PLCD = "C"
+	BRKR_PLCD  = 'P'
+	CSTMR_PLCD = 'C'
 
 	//
 	NSE_CLIENT = 1

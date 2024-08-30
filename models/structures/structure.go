@@ -220,11 +220,11 @@ type St_oe_reqres struct {
 	I_order_seq                   int32 // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
 	D_nnf_field                   float64
 	D_filler19                    float64
-	C_pan                         byte  // Added in Ver 2.7
-	L_algo_id                     int32 // Added in Ver 2.7
-	Si_algo_category              int16 // Added in Ver 2.7
-	Ll_lastactivityref            int64 // Added in Ver 2.9
-	C_reserved                    byte  // Updated in Ver 2.9
+	C_pan                         [models.LEN_PAN]byte // Added in Ver 2.7
+	L_algo_id                     int32                // Added in Ver 2.7
+	Si_algo_category              int16                // Added in Ver 2.7
+	Ll_lastactivityref            int64                // Added in Ver 2.9
+	C_reserved                    byte                 // Updated in Ver 2.9
 }
 
 type St_int_header struct {

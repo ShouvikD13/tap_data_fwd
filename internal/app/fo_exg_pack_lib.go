@@ -27,9 +27,9 @@ type ExchngPackLibMaster struct {
 	q_packet     *structures.St_req_q_data
 	OCM          *models.OrderConversionManager
 	cPanNo       [models.LEN_PAN]byte
-	cLstActRef   byte
-	cEspID       byte
-	cAlgoID      byte
+	cLstActRef   [22]byte
+	cEspID       [51]byte
+	cAlgoID      [51]byte
 	cSourceFlg   byte
 	cPrgmFlg     byte
 	cUserTypGlb  byte
@@ -47,6 +47,21 @@ func NewExchngPackLibMaster(serviceName string,
 	q_packet *structures.St_req_q_data,
 	OCM *models.OrderConversionManager,
 	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string) *ExchngPackLibMaster {
+
+	var (
+		bPanNo     [10]byte
+		bLstActRef [22]byte
+		bEspID     [51]byte
+		bAlgoID    [51]byte
+	)
+
+	copy(bPanNo[:], []byte(cPanNo))
+	copy(bLstActRef[:], []byte(cLstActRef))
+	copy(bEspID[:], []byte(cEspID))
+	copy(bAlgoID[:], []byte(cAlgoID))
+	bSourceFlg := cSourceFlg[0]
+	bPrgmFlg := cPrgmFlg[0]
+
 	return &ExchngPackLibMaster{
 		serviceName:  serviceName,
 		xchngbook:    xchngbook,
@@ -58,12 +73,12 @@ func NewExchngPackLibMaster(serviceName string,
 		net_hdr:      net_hdr,
 		q_packet:     q_packet,
 		OCM:          OCM,
-		cPanNo:       cPanNo,
-		cLstActRef:   cLstActRef,
-		cEspID:       cEspID,
-		cAlgoID:      cAlgoID,
-		cSourceFlg:   cSourceFlg,
-		cPrgmFlg:     cPrgmFlg,
+		cPanNo:       bPanNo,
+		cLstActRef:   bLstActRef,
+		cEspID:       bEspID,
+		cAlgoID:      bAlgoID,
+		cSourceFlg:   bSourceFlg,
+		cPrgmFlg:     bPrgmFlg,
 	}
 }
 
@@ -74,13 +89,20 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Inside 'fnPackOrdnryOrdToNse' ", eplm.serviceName)
 
-	eplm.cEspID = strings.TrimSpace(eplm.cEspID)
-	eplm.cAlgoID = strings.TrimSpace(eplm.cAlgoID)
-	eplm.cSourceFlg = strings.TrimSpace(eplm.cSourceFlg)
+	trimmedEspID := strings.TrimSpace(string(eplm.cEspID[:]))
+	copy(eplm.cEspID[:], trimmedEspID)
+	for i := len(trimmedEspID); i < len(eplm.cEspID); i++ {
+		eplm.cEspID[i] = 0 // null in golnag
+	}
+
+	trimmedAlgoID := strings.TrimSpace(string(eplm.cAlgoID[:]))
+	copy(eplm.cAlgoID[:], trimmedAlgoID)
+	for i := len(trimmedAlgoID); i < len(eplm.cAlgoID); i++ {
+		eplm.cAlgoID[i] = 0
+	}
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Trimmed cEspID: '%s'", eplm.serviceName, eplm.cEspID)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Trimmed cAlgoID: '%s'", eplm.serviceName, eplm.cAlgoID)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] Trimmed cSourceFlg: '%s'", eplm.serviceName, eplm.cSourceFlg)
 
 	if eplm.orderbook != nil {
 		log.Printf("[%s] [fnPackOrdnryOrdToNse] Order book data...", eplm.serviceName)
@@ -185,16 +207,16 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		return -1
 	}
 
-	eplm.oe_reqres.Ll_lastactivityref = 0                               //1 BDY
-	eplm.oe_reqres.C_participant_type = "C"                             //2 BDY
-	eplm.oe_reqres.C_filler_1 = " "                                     //3 BDY
-	eplm.oe_reqres.Si_competitor_period = 0                             //4 BDY
-	eplm.oe_reqres.Si_solicitor_period = 0                              //5 BDY
-	eplm.oe_reqres.C_modified_cancelled_by = eplm.cUserTypGlb           //6 BDY
-	eplm.oe_reqres.C_filler_2 = " "                                     //7 BDY
-	eplm.oe_reqres.Si_reason_code = 0                                   //8 BDY
-	eplm.oe_reqres.C_filler_3 = strings.TrimSpace(strings.ToUpper(" ")) //9 BDY
-	eplm.oe_reqres.L_token_no = eplm.nse_contract.L_token_id            //10 BDY
+	eplm.oe_reqres.Ll_lastactivityref = 0                     //1 BDY
+	eplm.oe_reqres.C_participant_type = 'C'                   //2 BDY
+	eplm.oe_reqres.C_filler_1 = ' '                           //3 BDY
+	eplm.oe_reqres.Si_competitor_period = 0                   //4 BDY
+	eplm.oe_reqres.Si_solicitor_period = 0                    //5 BDY
+	eplm.oe_reqres.C_modified_cancelled_by = eplm.cUserTypGlb //6 BDY
+	eplm.oe_reqres.C_filler_2 = ' '                           //7 BDY
+	eplm.oe_reqres.Si_reason_code = 0                         //8 BDY
+	eplm.oe_reqres.C_filler_3 = ' '                           //9 BDY
+	eplm.oe_reqres.L_token_no = eplm.nse_contract.L_token_id  //10 BDY
 
 	if eplm.fn_orstonse_cntrct_desc() != 0 { // 11 BDY
 		log.Printf("[%s] [fnPackOrdnryOrdToNse] returned from 'fn_orstonse_cntrct_desc()' with error ", eplm.serviceName)
@@ -203,13 +225,13 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	}
 
 	copyAndFormatSymbol(eplm.oe_reqres.C_counter_party_broker_id[:], models.LEN_BROKER_ID, " ") // 12 BDY
-	eplm.oe_reqres.C_filler_4 = strings.TrimSpace(strings.ToUpper(" "))                         // 13 BDY
-	eplm.oe_reqres.C_filler_5 = strings.TrimSpace(strings.ToUpper(" "))                         // 14 BDY
-	eplm.oe_reqres.C_closeout_flg = strings.TrimSpace(strings.ToUpper(" "))                     // 15 BDY
-	eplm.oe_reqres.C_filler_6 = strings.TrimSpace(strings.ToUpper(" "))                         // 16 BDY
+	eplm.oe_reqres.C_filler_4 = ' '                                                             // 13 BDY
+	eplm.oe_reqres.C_filler_5 = ' '                                                             // 14 BDY
+	eplm.oe_reqres.C_closeout_flg = ' '                                                         // 15 BDY
+	eplm.oe_reqres.C_filler_6 = ' '                                                             // 16 BDY
 	eplm.oe_reqres.Si_order_type = 0                                                            // 17 BDY
 
-	if eplm.xchngbook.C_req_typ == models.NEW { // 18 BDY
+	if eplm.xchngbook.C_req_typ == string(models.NEW) { // 18 BDY
 		eplm.oe_reqres.D_order_number = 0
 	} else {
 		eplm.oe_reqres.D_order_number, err = strconv.ParseFloat(eplm.orderbook.C_xchng_ack, 64)
@@ -265,7 +287,7 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		return -1
 	}
 
-	if eplm.xchngbook.C_req_typ == models.NEW {
+	if eplm.xchngbook.C_req_typ == string(models.NEW) {
 		eplm.oe_reqres.Li_entry_date_time = 0 // 30 BDY
 		eplm.oe_reqres.Li_last_modified = 0   //31 BDY
 	} else {
@@ -321,7 +343,7 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	copyAndFormatSymbol(eplm.oe_reqres.C_broker_id[:], len(eplm.oe_reqres.C_broker_id), eplm.pipe_mstr.C_xchng_brkr_id) //35 BDY
 
 	eplm.oe_reqres.I_order_seq = eplm.xchngbook.L_ord_seq // 36 BDY
-	eplm.oe_reqres.C_open_close = "O"                     // 37 BDY
+	eplm.oe_reqres.C_open_close = 'O'                     // 37 BDY
 
 	for i := range eplm.oe_reqres.C_settlor {
 		eplm.oe_reqres.C_settlor[i] = 0 // 38 BDY
@@ -342,7 +364,7 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] ICD_CUST_TYPE: %s", eplm.serviceName, icdCustType)
 	if icdCustType != "NRI" {
-		if eplm.orderbook.C_pro_cli_ind == models.BRKR_PLCD {
+		if eplm.orderbook.C_pro_cli_ind == string(models.BRKR_PLCD) {
 			copyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], models.LEN_SETTLOR, " ") // already set to zero now setting value
 			eplm.oe_reqres.Si_pro_client_indicator = models.NSE_PRO                   // 39 BDY
 		} else {
@@ -355,25 +377,26 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	}
 
 	switch eplm.cPrgmFlg {
-	case "A":
+	case 'A':
 		eplm.oe_reqres.L_algo_id = models.FO_AUTO_MTM_ALG_ID            //40 BDY
 		eplm.oe_reqres.Si_algo_category = models.FO_AUTO_MTM_ALG_CAT_ID //41 BDY
 
-	case "T":
+	case 'T':
 		eplm.oe_reqres.L_algo_id = models.FO_PRICE_IMP_ALG_ID
 		eplm.oe_reqres.Si_algo_category = models.FO_PRICE_IMP_ALG_CAT_ID
 
-	case "Z":
+	case 'Z':
 		eplm.oe_reqres.L_algo_id = models.FO_PRFT_ORD_ALG_ID
 		eplm.oe_reqres.Si_algo_category = models.FO_PRFT_ORD_ALG_CAT_ID
 
-	case "G":
+	case 'G':
 		eplm.oe_reqres.L_algo_id = models.FO_FLASH_TRD_ALG_ID
 		eplm.oe_reqres.Si_algo_category = models.FO_FLASH_TRD_ALG_CAT_ID
 
 	default:
-		if eplm.cAlgoID != "*" {
-			algoID, err := strconv.Atoi(eplm.cAlgoID)
+		cAlgoIDStr1 := strings.TrimSpace(string(eplm.cAlgoID[:]))
+		if cAlgoIDStr1 != "*" {
+			algoID, err := strconv.Atoi(cAlgoIDStr1)
 			if err != nil {
 				log.Printf("[%s] [ProcessAlgorithmFlags] [Error converting cAlgoID ...  %v", eplm.cUserTypGlb, err)
 				return -1
@@ -386,30 +409,28 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		}
 	}
 
-	if eplm.cSourceFlg == "G" {
+	if eplm.cSourceFlg == 'G' {
 		eplm.oe_reqres.L_algo_id = models.FO_FOGTT_ALG_ID
 		eplm.oe_reqres.Si_algo_category = models.FO_FOGTT_ALG_CAT_ID
 	}
 
 	eplm.orderbook.C_ctcl_id = strings.TrimSpace(eplm.orderbook.C_ctcl_id)
 
-	if eplm.cPrgmFlg == "A" || eplm.cPrgmFlg == "T" || eplm.cPrgmFlg == "Z" || eplm.cPrgmFlg == "G" || eplm.cSourceFlg == "G" {
+	cAlgoIDStr := strings.TrimSpace(string(eplm.cAlgoID[:]))
+	cSourceFlgStr := strings.TrimSpace(string(eplm.cSourceFlg))
+	cEspIDStr := strings.TrimSpace(string(eplm.cEspID[:]))
 
+	if eplm.cPrgmFlg == 'A' || eplm.cPrgmFlg == 'T' || eplm.cPrgmFlg == 'Z' || eplm.cPrgmFlg == 'G' || cSourceFlgStr == "G" {
 		eplm.orderbook.C_ctcl_id = eplm.orderbook.C_ctcl_id + "000"
-	} else if eplm.cAlgoID != "*" && eplm.cSourceFlg == "M" {
-
+	} else if cAlgoIDStr != "*" && cSourceFlgStr == "M" {
 		eplm.orderbook.C_ctcl_id = "333333333333" + "000"
-	} else if eplm.cAlgoID != "*" && (eplm.cSourceFlg == "W" || eplm.cSourceFlg == "E") {
-
+	} else if cAlgoIDStr != "*" && (cSourceFlgStr == "W" || cSourceFlgStr == "E") {
 		eplm.orderbook.C_ctcl_id = "111111111111" + "000"
-	} else if eplm.cAlgoID != "*" && eplm.cEspID == "4124" {
-
+	} else if cAlgoIDStr != "*" && cEspIDStr == "4124" {
 		eplm.orderbook.C_ctcl_id = "333333333333" + "000"
-	} else if eplm.cAlgoID != "*" {
-
+	} else if cAlgoIDStr != "*" {
 		eplm.orderbook.C_ctcl_id = "111111111111" + "000"
 	} else {
-
 		eplm.orderbook.C_ctcl_id = eplm.orderbook.C_ctcl_id + "100"
 	}
 
@@ -419,11 +440,12 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		log.Printf("[%s] [fnPackOrdnryOrdToNse] Exiting from the function ", eplm.serviceName)
 	}
 
-	if eplm.cPanNo != "*" {
+	cPanNoStr := strings.TrimSpace(strings.ToUpper(string(eplm.cPanNo[:])))
 
-		eplm.oe_reqres.C_pan = strings.TrimSpace(strings.ToUpper(eplm.cPanNo))
+	if cPanNoStr != "*" {
+		copy(eplm.oe_reqres.C_pan[:], cPanNoStr)
 	} else {
-		eplm.oe_reqres.C_pan = strings.TrimSpace(strings.ToUpper(" "))
+		copy(eplm.oe_reqres.C_pan[:], "          ")
 	}
 
 	/*
@@ -437,50 +459,50 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	settlement period in EBA we set this to  **/
 	eplm.oe_reqres.Si_settlement_period = 0
 
-	eplm.oe_reqres.C_cover_uncover = "V"
+	eplm.oe_reqres.C_cover_uncover = 'V'
 
-	eplm.oe_reqres.C_giveup_flag = "P"
+	eplm.oe_reqres.C_giveup_flag = 'P'
 
 	eplm.oe_reqres.D_filler19 = 0.0
 
-	eplm.oe_reqres.C_reserved = strings.TrimSpace(strings.ToUpper(" "))
+	eplm.oe_reqres.C_reserved = ' '
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse]  Printing header structure for Ordinary Order....", eplm.serviceName)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' li_log_time is :	%d ", eplm.serviceName, eplm.oe_reqres.St_hdr.Li_log_time)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_alpha_char is :	%s ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_alpha_char)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_alpha_char is :	%c ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_alpha_char)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' si_transaction_code is :	%d ", eplm.serviceName, eplm.oe_reqres.St_hdr.Si_transaction_code)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' si_error_code is :	%d ", eplm.serviceName, eplm.oe_reqres.St_hdr.Si_error_code)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_filler_2 is :	%s ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_filler_2)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_time_stamp_1 is :	%s ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_time_stamp_1)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_time_stamp_2 is :	%s ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_time_stamp_2)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_filler_2 is :	%c ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_filler_2)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_time_stamp_1 is :	%c ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_time_stamp_1)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' c_time_stamp_2 is :	%c ", eplm.serviceName, eplm.oe_reqres.St_hdr.C_time_stamp_2)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'Int Header' si_message_length is :	%d ", eplm.serviceName, eplm.oe_reqres.St_hdr.Si_message_length)
 
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_participant_type is :	%s ", eplm.serviceName, eplm.oe_reqres.C_participant_type)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_1 is :	%s ", eplm.serviceName, eplm.oe_reqres.C_filler_1)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_participant_type is :	%c ", eplm.serviceName, eplm.oe_reqres.C_participant_type)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_1 is :	%c ", eplm.serviceName, eplm.oe_reqres.C_filler_1)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' si_competitor_period is :	%d ", eplm.serviceName, eplm.oe_reqres.Si_competitor_period)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' si_solicitor_period is :	%d ", eplm.serviceName, eplm.oe_reqres.Si_solicitor_period)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_modified_cancelled_by is :	%s ", eplm.serviceName, eplm.oe_reqres.C_modified_cancelled_by)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_2 is :	%s ", eplm.serviceName, eplm.oe_reqres.C_filler_2)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_modified_cancelled_by is :	%c ", eplm.serviceName, eplm.oe_reqres.C_modified_cancelled_by)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_2 is :	%c ", eplm.serviceName, eplm.oe_reqres.C_filler_2)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' si_reason_code is :	%d ", eplm.serviceName, eplm.oe_reqres.Si_reason_code)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_3 is :	%s ", eplm.serviceName, eplm.oe_reqres.C_filler_3)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_3 is :	%c ", eplm.serviceName, eplm.oe_reqres.C_filler_3)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' l_token_no is :	%d ", eplm.serviceName, eplm.oe_reqres.L_token_no)
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Printing contract_desc structure for Ordinary Order....", eplm.serviceName)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' c_instrument_name is :	%s ", eplm.serviceName, eplm.oe_reqres.St_con_desc.C_instrument_name)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' c_symbol is :	%s ", eplm.serviceName, eplm.oe_reqres.St_con_desc.C_symbol)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' c_instrument_name is :	%c ", eplm.serviceName, eplm.oe_reqres.St_con_desc.C_instrument_name)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' c_symbol is :	%c ", eplm.serviceName, eplm.oe_reqres.St_con_desc.C_symbol)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' li_expiry_date is :	%d ", eplm.serviceName, eplm.oe_reqres.St_con_desc.Li_expiry_date)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' li_strike_price is :	%d ", eplm.serviceName, eplm.oe_reqres.St_con_desc.Li_strike_price)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' c_option_type is :	%s ", eplm.serviceName, eplm.oe_reqres.St_con_desc.C_option_type)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' c_option_type is :	%c ", eplm.serviceName, eplm.oe_reqres.St_con_desc.C_option_type)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'contract_desc' si_ca_level is :	%d ", eplm.serviceName, eplm.oe_reqres.St_con_desc.Si_ca_level)
 
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_counter_party_broker_id is :	%s ", eplm.serviceName, eplm.oe_reqres.C_counter_party_broker_id)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_4 is :	%s ", eplm.serviceName, eplm.oe_reqres.C_filler_4)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_5 is :	%s ", eplm.serviceName, eplm.oe_reqres.C_filler_5)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_closeout_flg is :	%s ", eplm.serviceName, eplm.oe_reqres.C_closeout_flg)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_6 is :	%s ", eplm.serviceName, eplm.oe_reqres.C_filler_6)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_counter_party_broker_id is :	%c ", eplm.serviceName, eplm.oe_reqres.C_counter_party_broker_id)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_4 is :	%c ", eplm.serviceName, eplm.oe_reqres.C_filler_4)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_5 is :	%c ", eplm.serviceName, eplm.oe_reqres.C_filler_5)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_closeout_flg is :	%c ", eplm.serviceName, eplm.oe_reqres.C_closeout_flg)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_filler_6 is :	%c ", eplm.serviceName, eplm.oe_reqres.C_filler_6)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' si_order_type is :	%d ", eplm.serviceName, eplm.oe_reqres.Si_order_type)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' d_order_number is :	%f ", eplm.serviceName, eplm.oe_reqres.D_order_number)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_account_number is :	%s ", eplm.serviceName, eplm.oe_reqres.C_account_number)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_account_number is :	%c ", eplm.serviceName, eplm.oe_reqres.C_account_number)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' si_book_type is :	%d ", eplm.serviceName, eplm.oe_reqres.Si_book_type)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' si_buy_sell_indicator is :	%d ", eplm.serviceName, eplm.oe_reqres.Si_buy_sell_indicator)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' li_disclosed_volume is :	%d ", eplm.serviceName, eplm.oe_reqres.Li_disclosed_volume)
@@ -494,10 +516,10 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' li_entry_date_time is :	%d ", eplm.serviceName, eplm.oe_reqres.Li_entry_date_time)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' li_minimum_fill_aon_volume is :	%d ", eplm.serviceName, eplm.oe_reqres.Li_minimum_fill_aon_volume)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' li_last_modified is :	%d ", eplm.serviceName, eplm.oe_reqres.Li_last_modified)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_PanNo is :	%s ", eplm.serviceName, eplm.oe_reqres.C_pan)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_cover_uncover is :	%s ", eplm.serviceName, eplm.oe_reqres.C_cover_uncover)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_giveup_flag is :	%s ", eplm.serviceName, eplm.oe_reqres.C_giveup_flag)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_reserved is :	%s ", eplm.serviceName, eplm.oe_reqres.C_reserved)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' c_PanNo is :	%c ", eplm.serviceName, eplm.oe_reqres.C_pan)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_cover_uncover is :	%c ", eplm.serviceName, eplm.oe_reqres.C_cover_uncover)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_giveup_flag is :	%c ", eplm.serviceName, eplm.oe_reqres.C_giveup_flag)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_reserved is :	%c ", eplm.serviceName, eplm.oe_reqres.C_reserved)
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Printing order flags structure for Ordinary Order....", eplm.serviceName)
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_ato is :	%d ", eplm.serviceName, eplm.oe_reqres.St_ord_flg.Flg_ato)
@@ -522,7 +544,8 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.exch_msg.St_oe_res = *eplm.oe_reqres
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Assigned oe_reqres to St_oe_res]", eplm.serviceName)
 
-	eplm.net_hdr.C_checksum = " "
+	copy(eplm.net_hdr.C_checksum[:], "                ") // 16 spaces
+
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set C_checksum to a blank space]", eplm.serviceName)
 
 	tmpVar := eplm.GetResetSequence(db)
