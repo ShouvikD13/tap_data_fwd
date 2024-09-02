@@ -182,12 +182,12 @@ type St_oe_reqres struct {
 	C_modified_cancelled_by       byte //byte
 	C_filler_2                    byte // byte
 	Si_reason_code                int16
-	C_filler_3                    byte
+	C_filler_3                    [4]byte
 	L_token_no                    int32
 	St_con_desc                   *St_contract_desc
 	C_counter_party_broker_id     [models.LEN_BROKER_ID]byte
 	C_filler_4                    byte //byte
-	C_filler_5                    byte
+	C_filler_5                    [2]byte
 	C_closeout_flg                byte //byte
 	C_filler_6                    byte //byte
 	Si_order_type                 int16
@@ -208,62 +208,159 @@ type St_oe_reqres struct {
 	Li_last_modified              int32
 	St_ord_flg                    *St_order_flags
 	Si_branch_id                  int16
-	Li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
+	Li_trader_id                  int32
 	C_broker_id                   [models.LEN_BROKER_ID]byte
 	C_remarks                     [models.LEN_REMARKS]byte
 	C_open_close                  byte // byte
 	C_settlor                     [models.LEN_SETTLOR]byte
 	Si_pro_client_indicator       int16
 	Si_settlement_period          int16
-	C_cover_uncover               byte  // byte
-	C_giveup_flag                 byte  // byte
-	I_order_seq                   int32 // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
-	D_nnf_field                   float64
-	D_filler19                    float64
-	C_pan                         [models.LEN_PAN]byte // Added in Ver 2.7
-	L_algo_id                     int32                // Added in Ver 2.7
-	Si_algo_category              int16                // Added in Ver 2.7
-	Ll_lastactivityref            int64                // Added in Ver 2.9
-	C_reserved                    byte                 // Updated in Ver 2.9
+	//================================================
+	C_cover_uncover byte // byte   Replaced with 'St_additional_ord_flags'
+	C_giveup_flag   byte // byte   Replaced with 'C_reserved_7 '
+
+	/*
+		Filler1                       byte                             // Size: 1 bit (Offset: 220)
+		Filler2                       byte                            // Size: 1 bit (Offset: 220)
+		Filler3                       byte                            // Size: 1 bit (Offset: 220)
+		Filler4                       byte                            // Size: 1 bit (Offset: 220)
+		Filler5                       byte                            // Size: 1 bit (Offset: 220)
+		Filler6                       byte                            // Size: 1 bit (Offset: 220)
+		Filler7                       byte                            // Size: 1 bit (Offset: 220)
+		Filler8                       byte                            // Size: 1 bit (Offset: 220)
+		Filler9                       byte                            // Size: 1 bit (Offset: 221)
+		Filler10                      byte                            // Size: 1 bit (Offset: 221)
+		Filler11                      byte                            // Size: 1 bit (Offset: 221)
+		Filler12                      byte                            // Size: 1 bit (Offset: 221)
+		Filler13                      byte                            // Size: 1 bit (Offset: 221)
+		Filler14                      byte                            // Size: 1 bit (Offset: 221)
+		Filler15                      byte                            // Size: 1 bit (Offset: 221)
+		Filler16                      byte                            // Size: 1 bit (Offset: 221)
+		Filler17                      byte                            // Size: 1 byte (Offset: 222)
+		Filler18                      byte                            // Size: 1 byte (Offset: 223)
+
+	*/
+	// All the fillers replace with below field
+	I_order_seq int32
+	//==================================================
+	D_nnf_field        float64
+	D_filler19         float64 // Replaced with 'MktReplay                     int64 '
+	C_pan              [models.LEN_PAN]byte
+	L_algo_id          int32
+	Si_algo_category   int16
+	Ll_lastactivityref int64
+	C_reserved         [52]byte
 }
+
+/*    Structure from NSE Document of 316 bytes
+type St_oe_reqres struct {
+St_hdr                        *St_int_header                  // Size: 40 bytes (Offset: 0)
+C_participant_type            byte                            // Size: 1 byte (Offset: 40)
+C_filler_1                    byte                            // Size: 1 byte (Offset: 41)
+Si_competitor_period          int16                           // Size: 2 bytes (Offset: 42)
+Si_solicitor_period           int16                           // Size: 2 bytes (Offset: 44)
+C_modified_cancelled_by       byte                            // Size: 1 byte (Offset: 46)
+C_filler_2                    byte                            // Size: 1 byte (Offset: 47)
+Si_reason_code                int16                           // Size: 2 bytes (Offset: 48)
+C_filler_3                    [4]byte                         // Size: 4 bytes (Offset: 50)
+L_token_no                    int32                           // Size: 4 bytes (Offset: 54)
+St_con_desc                   *St_contract_desc               // Size: 28 bytes (Offset: 58)
+C_counter_party_broker_id     [models.LEN_BROKER_ID]byte      // Size: 5 bytes (Offset: 86)
+C_filler_4                    byte                            // Size: 1 byte (Offset: 91)
+C_filler_5                    [2]byte                         // Size: 2 bytes (Offset: 92)
+C_closeout_flg                byte                            // Size: 1 byte (Offset: 94)
+C_filler_6                    byte                            // Size: 1 byte (Offset: 95)
+Si_order_type                 int16                           // Size: 2 bytes (Offset: 96)
+D_order_number                float64                         // Size: 8 bytes (Offset: 98)
+C_account_number              [models.LEN_ACCOUNT_NUMBER]byte // Size: 10 bytes (Offset: 106)
+Si_book_type                  int16                           // Size: 2 bytes (Offset: 116)
+Si_buy_sell_indicator         int16                           // Size: 2 bytes (Offset: 118)
+Li_disclosed_volume           int32                           // Size: 4 bytes (Offset: 120)
+Li_disclosed_volume_remaining int32                           // Size: 4 bytes (Offset: 124)
+Li_total_volume_remaining     int32                           // Size: 4 bytes (Offset: 128)
+Li_volume                     int32                           // Size: 4 bytes (Offset: 132)
+Li_volume_filled_today        int32                           // Size: 4 bytes (Offset: 136)
+Li_price                      int32                           // Size: 4 bytes (Offset: 140)
+Li_trigger_price              int32                           // Size: 4 bytes (Offset: 144)
+Li_good_till_date             int32                           // Size: 4 bytes (Offset: 148)
+Li_entry_date_time            int32                           // Size: 4 bytes (Offset: 152)
+Li_minimum_fill_aon_volume    int32                           // Size: 4 bytes (Offset: 156)
+Li_last_modified              int32                           // Size: 4 bytes (Offset: 160)
+St_ord_flg                    *St_order_flags                 // Size: 2 bytes (Offset: 164)
+Si_branch_id                  int16                           // Size: 2 bytes (Offset: 166)
+Li_trader_id                  int32                           // Size: 4 bytes (Offset: 168)
+C_broker_id                   [models.LEN_BROKER_ID]byte      // Size: 5 bytes (Offset: 172)
+C_ord_filler                  [models.LEN_REMARKS]byte        // Size: 24 bytes (Offset: 177)
+C_open_close                  byte                            // Size: 1 byte (Offset: 201)
+C_settlor                     [models.LEN_SETTLOR]byte        // Size: 12 bytes (Offset: 202)
+Si_pro_client_indicator       int16                           // Size: 2 bytes (Offset: 214)
+Si_settlement_period          int16                           // Size: 2 bytes (Offset: 216)
+St_additional_ord_flags       *St_order_flags                 // Size: 1 byte (Offset: 218)
+C_reserved_7                  byte                            // Size: 1 byte (Offset: 219)
+Filler1                       byte                             // Size: 1 bit (Offset: 220)
+Filler2                       byte                            // Size: 1 bit (Offset: 220)
+Filler3                       byte                            // Size: 1 bit (Offset: 220)
+Filler4                       byte                            // Size: 1 bit (Offset: 220)
+Filler5                       byte                            // Size: 1 bit (Offset: 220)
+Filler6                       byte                            // Size: 1 bit (Offset: 220)
+Filler7                       byte                            // Size: 1 bit (Offset: 220)
+Filler8                       byte                            // Size: 1 bit (Offset: 220)
+Filler9                       byte                            // Size: 1 bit (Offset: 221)
+Filler10                      byte                            // Size: 1 bit (Offset: 221)
+Filler11                      byte                            // Size: 1 bit (Offset: 221)
+Filler12                      byte                            // Size: 1 bit (Offset: 221)
+Filler13                      byte                            // Size: 1 bit (Offset: 221)
+Filler14                      byte                            // Size: 1 bit (Offset: 221)
+Filler15                      byte                            // Size: 1 bit (Offset: 221)
+Filler16                      byte                            // Size: 1 bit (Offset: 221)
+Filler17                      byte                            // Size: 1 byte (Offset: 222)
+Filler18                      byte                            // Size: 1 byte (Offset: 223)
+D_nnf_field                   float64                         // Size: 8 bytes (Offset: 224)
+MktReplay                     int64                           // <-------------                    // Size: 8 bytes (Offset: 232)
+C_pan                         [models.LEN_PAN]byte            // Size: 10 bytes (Offset: 240)
+L_algo_id                     int32                           // Size: 4 bytes (Offset: 250)
+Si_algo_category              int16                           // Size: 2 bytes (Offset: 254)
+Ll_lastactivityref            int64                           // Size: 8 bytes (Offset: 256)
+C_reserved_8                  [52]byte                        // Size: 52 bytes (Offset: 264)
+}
+*/
 
 type St_int_header struct {
 	Si_transaction_code int16
 	Li_log_time         int32
-
-	C_alpha_char      [models.LEN_ALPHA_CHAR]byte // this one is changed <---------------------
-	Li_trader_id      int32
-	Si_error_code     int16
-	C_filler_2        byte
-	C_time_stamp_1    [models.LEN_TIME_STAMP]byte // this one is changed <---------------------
-	C_time_stamp_2    [models.LEN_TIME_STAMP]byte // this one is changed <---------------------
-	Si_message_length int32
+	C_alpha_char        [models.LEN_ALPHA_CHAR]byte
+	Li_trader_id        int32
+	Si_error_code       int16
+	C_filler_2          int64
+	C_time_stamp_1      [models.LEN_TIME_STAMP]byte
+	C_time_stamp_2      [models.LEN_TIME_STAMP]byte
+	Si_message_length   int16
 }
 
 type St_contract_desc struct {
 	C_instrument_name [models.LEN_INSTRUMENT_NAME]byte
 	C_symbol          [models.LEN_SYMBOL_NSE]byte
 	Li_expiry_date    int32
-	Li_strike_price   int64
+	Li_strike_price   int32
 	C_option_type     [models.LEN_OPTION_TYPE]byte
 	Si_ca_level       int16
 }
 
 type St_order_flags struct {
-	Flg_ato         uint32 // 1 bit
-	Flg_market      uint32 // 1 bit
-	Flg_sl          uint32 // 1 bit
-	Flg_mit         uint32 // 1 bit
-	Flg_day         uint32 // 1 bit
-	Flg_gtc         uint32 // 1 bit
-	Flg_ioc         uint32 // 1 bit
-	Flg_aon         uint32 // 1 bit
-	Flg_mf          uint32 // 1 bit
-	Flg_matched_ind uint32 // 1 bit
-	Flg_traded      uint32 // 1 bit
-	Flg_modified    uint32 // 1 bit
-	Flg_frozen      uint32 // 1 bit
-	Flg_filler1     uint32 // 3 bits
+	Flg_ato         uint16 // 1 bit
+	Flg_market      uint16 // 1 bit
+	Flg_sl          uint16 // 1 bit
+	Flg_mit         uint16 // 1 bit
+	Flg_day         uint16 // 1 bit
+	Flg_gtc         uint16 // 1 bit
+	Flg_ioc         uint16 // 1 bit
+	Flg_aon         uint16 // 1 bit
+	Flg_mf          uint16 // 1 bit
+	Flg_matched_ind uint16 // 1 bit
+	Flg_traded      uint16 // 1 bit
+	Flg_modified    uint16 // 1 bit
+	Flg_frozen      uint16 // 1 bit
+	Flg_filler1     uint16 // 3 bits
 }
 
 //-------------------------------------------------------------------------------------------------------------------
