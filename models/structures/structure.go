@@ -2,6 +2,23 @@ package structures
 
 import "DATA_FWD_TAP/models"
 
+const (
+	FlgATO        = 1 << 0  // ATO is the 1st bit
+	FlgMarket     = 1 << 1  // Market is the 2nd bit
+	FlgSL         = 1 << 2  // SL is the 3rd bit
+	FlgMIT        = 1 << 3  // MIT is the 4th bit
+	FlgDay        = 1 << 4  // Day is the 5th bit
+	FlgGTC        = 1 << 5  // GTC is the 6th bit
+	FlgIOC        = 1 << 6  // IOC is the 7th bit
+	FlgAON        = 1 << 7  // AON is the 8th bit
+	FlgMF         = 1 << 8  // MF is the 9th bit
+	FlgMatchedInd = 1 << 9  // MatchedInd is the 10th bit
+	FlgTraded     = 1 << 10 // Traded is the 11th bit
+	FlgModified   = 1 << 11 // Modified is the 12th bit
+	FlgFrozen     = 1 << 12 // Frozen is the 13th bit
+	FlgFiller1    = 7 << 13 // Filler1 is the 14th, 15th, and 16th bits (3 bits) . 7 --> (0111)
+)
+
 type Vw_xchngbook struct {
 	C_ordr_rfrnc  string // this valiable we are getting from the table
 	C_pipe_id     string // this variable we are getting from the args[3]
@@ -347,20 +364,17 @@ type St_contract_desc struct {
 }
 
 type St_order_flags struct {
-	Flg_ato         uint16 // 1 bit
-	Flg_market      uint16 // 1 bit
-	Flg_sl          uint16 // 1 bit
-	Flg_mit         uint16 // 1 bit
-	Flg_day         uint16 // 1 bit
-	Flg_gtc         uint16 // 1 bit
-	Flg_ioc         uint16 // 1 bit
-	Flg_aon         uint16 // 1 bit
-	Flg_mf          uint16 // 1 bit
-	Flg_matched_ind uint16 // 1 bit
-	Flg_traded      uint16 // 1 bit
-	Flg_modified    uint16 // 1 bit
-	Flg_frozen      uint16 // 1 bit
-	Flg_filler1     uint16 // 3 bits
+	Flags uint16
+}
+
+func (o *St_order_flags) SetFlag(flag uint16) {
+	o.Flags |= flag
+}
+func (o *St_order_flags) ClearFlag(flag uint16) {
+	o.Flags &^= flag
+}
+func (o *St_order_flags) IsFlagSet(flag uint16) bool {
+	return o.Flags&flag != 0
 }
 
 //-------------------------------------------------------------------------------------------------------------------
