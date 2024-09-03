@@ -3,20 +3,20 @@ package structures
 import "DATA_FWD_TAP/models"
 
 const (
-	FlgATO        = 1 << 0  // ATO is the 1st bit
-	FlgMarket     = 1 << 1  // Market is the 2nd bit
-	FlgSL         = 1 << 2  // SL is the 3rd bit
-	FlgMIT        = 1 << 3  // MIT is the 4th bit
-	FlgDay        = 1 << 4  // Day is the 5th bit
-	FlgGTC        = 1 << 5  // GTC is the 6th bit
-	FlgIOC        = 1 << 6  // IOC is the 7th bit
-	FlgAON        = 1 << 7  // AON is the 8th bit
-	FlgMF         = 1 << 8  // MF is the 9th bit
-	FlgMatchedInd = 1 << 9  // MatchedInd is the 10th bit
-	FlgTraded     = 1 << 10 // Traded is the 11th bit
-	FlgModified   = 1 << 11 // Modified is the 12th bit
-	FlgFrozen     = 1 << 12 // Frozen is the 13th bit
-	FlgFiller1    = 7 << 13 // Filler1 is the 14th, 15th, and 16th bits (3 bits) . 7 --> (0111)
+	Flg_ATO        uint16 = 1 << 0  // ATO is the 1st bit
+	Flg_Market     uint16 = 1 << 1  // Market is the 2nd bit
+	Flg_SL         uint16 = 1 << 2  // SL is the 3rd bit
+	Flg_MIT        uint16 = 1 << 3  // MIT is the 4th bit
+	Flg_Day        uint16 = 1 << 4  // Day is the 5th bit
+	Flg_GTC        uint16 = 1 << 5  // GTC is the 6th bit
+	Flg_IOC        uint16 = 1 << 6  // IOC is the 7th bit
+	Flg_AON        uint16 = 1 << 7  // AON is the 8th bit
+	Flg_MF         uint16 = 1 << 8  // MF is the 9th bit
+	Flg_MatchedInd uint16 = 1 << 9  // MatchedInd is the 10th bit
+	Flg_Traded     uint16 = 1 << 10 // Traded is the 11th bit
+	Flg_Modified   uint16 = 1 << 11 // Modified is the 12th bit
+	Flg_Frozen     uint16 = 1 << 12 // Frozen is the 13th bit
+	Flg_Filler1    uint16 = 7 << 13 // Filler1 is the 14th, 15th, and 16th bits (3 bits)
 )
 
 type Vw_xchngbook struct {
@@ -83,7 +83,7 @@ type Vw_orderbook struct {
 	C_expry_dt     string
 	C_exrc_typ     string
 	C_opt_typ      string
-	L_strike_prc   int64
+	L_strike_prc   int32
 	C_ctgry_indstk string
 	// L_ca_lvl       int64
 }
@@ -100,7 +100,7 @@ type Vw_contract struct {
 	C_expry_dt      string // null = "*"
 	C_exrc_typ      string // null = '*'
 	C_opt_typ       string // null = '\0'
-	L_strike_prc    int64  // null = -1
+	L_strike_prc    int32  // null = -1
 	C_ctgry_indstk  string // null = '*'
 	// L_ca_lvl        int64  // null = -1
 	C_rqst_typ string // null = '*'
@@ -120,7 +120,7 @@ type Vw_nse_cntrct struct {
 	C_expry_dt   string
 	C_exrc_typ   string
 	C_opt_typ    string
-	L_strike_prc int64
+	L_strike_prc int32
 	C_rqst_typ   string
 	C_series     string
 }
@@ -370,10 +370,12 @@ type St_order_flags struct {
 func (o *St_order_flags) SetFlag(flag uint16) {
 	o.Flags |= flag
 }
+
 func (o *St_order_flags) ClearFlag(flag uint16) {
 	o.Flags &^= flag
 }
-func (o *St_order_flags) IsFlagSet(flag uint16) bool {
+
+func (o *St_order_flags) GetFlagValue(flag uint16) bool {
 	return o.Flags&flag != 0
 }
 

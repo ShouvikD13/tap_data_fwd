@@ -160,19 +160,6 @@ func main() {
 
 	// log.Println("ESR Service Ended Successfully")
 
-	log.Println("Starting ESR Service")
-
-	VarESR := &app.ESRManger{
-		ServiceName: serviceName,
-		ENVM:        environmentManager,
-		// Initialize other fields if necessary
-	}
-
-	// Start the ESR client (similarly to Fn_bat_init in ClnPackClntManager)
-	VarESR.ClnEsrClnt()
-
-	log.Println("ESR Service Ended Successfully")
-
 	//=======================================================================================================
 
 	log.Printf("[%s] Main Ended Here...", serviceName)
