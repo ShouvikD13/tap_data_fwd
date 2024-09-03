@@ -182,12 +182,12 @@ type St_oe_reqres struct {
 	C_modified_cancelled_by       byte //byte
 	C_filler_2                    byte // byte
 	Si_reason_code                int16
-	C_filler_3                    byte
+	C_filler_3                    [4]byte
 	L_token_no                    int32
 	St_con_desc                   *St_contract_desc
 	C_counter_party_broker_id     [models.LEN_BROKER_ID]byte
 	C_filler_4                    byte //byte
-	C_filler_5                    byte
+	C_filler_5                    [2]byte
 	C_closeout_flg                byte //byte
 	C_filler_6                    byte //byte
 	Si_order_type                 int16
@@ -208,23 +208,48 @@ type St_oe_reqres struct {
 	Li_last_modified              int32
 	St_ord_flg                    *St_order_flags
 	Si_branch_id                  int16
-	Li_trader_id                  int32 // Changed from int16 to int32 in Ver 1.8
+	Li_trader_id                  int32
 	C_broker_id                   [models.LEN_BROKER_ID]byte
 	C_remarks                     [models.LEN_REMARKS]byte
 	C_open_close                  byte // byte
 	C_settlor                     [models.LEN_SETTLOR]byte
 	Si_pro_client_indicator       int16
 	Si_settlement_period          int16
-	C_cover_uncover               byte  // byte
-	C_giveup_flag                 byte  // byte
-	I_order_seq                   int32 // Changed from i_ordr_rfrnc to i_ordr_sqnc in Ver 1.7
-	D_nnf_field                   float64
-	D_filler19                    float64
-	C_pan                         [models.LEN_PAN]byte // Added in Ver 2.7
-	L_algo_id                     int32                // Added in Ver 2.7
-	Si_algo_category              int16                // Added in Ver 2.7
-	Ll_lastactivityref            int64                // Added in Ver 2.9
-	C_reserved                    byte                 // Updated in Ver 2.9
+	//================================================
+	C_cover_uncover byte // byte   Replaced with 'St_additional_ord_flags'
+	C_giveup_flag   byte // byte   Replaced with 'C_reserved_7 '
+
+	/*
+		Filler1                       byte                             // Size: 1 bit (Offset: 220)
+		Filler2                       byte                            // Size: 1 bit (Offset: 220)
+		Filler3                       byte                            // Size: 1 bit (Offset: 220)
+		Filler4                       byte                            // Size: 1 bit (Offset: 220)
+		Filler5                       byte                            // Size: 1 bit (Offset: 220)
+		Filler6                       byte                            // Size: 1 bit (Offset: 220)
+		Filler7                       byte                            // Size: 1 bit (Offset: 220)
+		Filler8                       byte                            // Size: 1 bit (Offset: 220)
+		Filler9                       byte                            // Size: 1 bit (Offset: 221)
+		Filler10                      byte                            // Size: 1 bit (Offset: 221)
+		Filler11                      byte                            // Size: 1 bit (Offset: 221)
+		Filler12                      byte                            // Size: 1 bit (Offset: 221)
+		Filler13                      byte                            // Size: 1 bit (Offset: 221)
+		Filler14                      byte                            // Size: 1 bit (Offset: 221)
+		Filler15                      byte                            // Size: 1 bit (Offset: 221)
+		Filler16                      byte                            // Size: 1 bit (Offset: 221)
+		Filler17                      byte                            // Size: 1 byte (Offset: 222)
+		Filler18                      byte                            // Size: 1 byte (Offset: 223)
+
+	*/
+	// All the fillers replace with below field
+	I_order_seq int32
+	//==================================================
+	D_nnf_field        float64
+	D_filler19         float64 // Replaced with 'MktReplay                     int64 '
+	C_pan              [models.LEN_PAN]byte
+	L_algo_id          int32
+	Si_algo_category   int16
+	Ll_lastactivityref int64
+	C_reserved         [52]byte
 }
 
 type St_int_header struct {
