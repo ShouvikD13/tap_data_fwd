@@ -278,10 +278,11 @@ func (ESRM *ESRManger) ClnEsrClnt() {
 						C_alpha_char:        [models.LEN_ALPHA_CHAR]byte{'A' + byte(i), 'B' + byte(i)},
 						Li_trader_id:        int32(i * 200),
 						Si_error_code:       int16(i),
-						C_filler_2:          0,
-						C_time_stamp_1:      [models.LEN_TIME_STAMP]byte{'T', 'S', '1', byte(i + '0'), ' ', ' ', ' ', ' '},
-						C_time_stamp_2:      [models.LEN_TIME_STAMP]byte{'T', 'S', '2', byte(i + '0'), ' ', ' ', ' ', ' '},
-						Si_message_length:   int16(i * 100),
+
+						C_filler_2:        0,
+						C_time_stamp_1:    [models.LEN_TIME_STAMP]byte{'T', 'S', '1', byte(i + '0'), ' ', ' ', ' ', ' '},
+						C_time_stamp_2:    [models.LEN_TIME_STAMP]byte{'T', 'S', '2', byte(i + '0'), ' ', ' ', ' ', ' '},
+						Si_message_length: int16(i * 100),
 					},
 					C_participant_type:      byte('A' + i),
 					Si_competitor_period:    int16(i),
@@ -295,10 +296,12 @@ func (ESRM *ESRManger) ClnEsrClnt() {
 						C_symbol:          [models.LEN_SYMBOL_NSE]byte{'S', 'Y', 'M', byte(i + '0')},
 						Li_expiry_date:    int32(i * 10000),
 						Li_strike_price:   int32(i * 50000),
-						C_option_type:     [models.LEN_OPTION_TYPE]byte{'O', 'T'},
-						Si_ca_level:       int16(i * 10),
+
+						C_option_type: [models.LEN_OPTION_TYPE]byte{'O', 'T'},
+						Si_ca_level:   int16(i * 10),
 					},
 					St_ord_flg: &structures.St_order_flags{
+
 						Flg_ato:         uint16(1),
 						Flg_market:      uint16(0),
 						Flg_sl:          uint16(1),
@@ -323,7 +326,8 @@ func (ESRM *ESRManger) ClnEsrClnt() {
 					C_account_number:   [models.LEN_ACCOUNT_NUMBER]byte{'A', 'C', 'C', byte('0' + i)},
 					L_algo_id:          int32(i * 6000),
 					Ll_lastactivityref: int64(i * 7000),
-					C_reserved:         ,
+
+					C_reserved: byte(0),
 				},
 			},
 		}
