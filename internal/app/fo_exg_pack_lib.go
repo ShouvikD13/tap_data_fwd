@@ -529,19 +529,20 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_reserved is :	%c ", eplm.serviceName, eplm.oe_reqres.C_reserved)
 
 	// Log the values of different flags in the 'order flags' structure
+	// Log the values of different flags in the 'order flags' structure
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Printing order flags structure for Ordinary Order....", eplm.serviceName)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_ato is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_ATO))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_market is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Market))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_sl is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_SL))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_mit is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_MIT))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_day is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Day))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_gtc is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_GTC))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_ioc is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_IOC))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_aon is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_AON))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_mf is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_MF))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_matched_ind is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_MatchedInd))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_traded is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Traded))
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_modified is : %d", eplm.serviceName, eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Modified))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_ato is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_ATO)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_market is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Market)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_sl is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_SL)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_mit is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_MIT)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_day is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Day)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_gtc is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_GTC)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_ioc is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_IOC)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_aon is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_AON)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_mf is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_MF)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_matched_ind is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_MatchedInd)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_traded is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Traded)))
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] 'order flags' flg_modified is : %d", eplm.serviceName, boolToInt(eplm.oe_reqres.St_ord_flg.GetFlagValue(structures.Flg_Modified)))
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_cancelled is :	%d ", eplm.serviceName, eplm.oe_reqres.St_ord_flg.Flg_cancelled)
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_cancel_pending is :	%d ", eplm.serviceName, eplm.oe_reqres.St_ord_flg.Flg_cancel_pending)
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_closed is :	%d ", eplm.serviceName, eplm.oe_reqres.St_ord_flg.Flg_closed)
@@ -801,4 +802,11 @@ func (eplm *ExchngPackLibMaster) GetResetSequence(db *gorm.DB) int32 {
 		log.Printf("[%s] [GetResetSequence] [Sequence number reset to: %d]", eplm.serviceName, seqNum)
 	}
 	return seqNum
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
