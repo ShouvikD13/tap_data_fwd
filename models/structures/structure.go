@@ -184,11 +184,22 @@ type St_exch_msg struct {
 	St_oe_res     St_oe_reqres
 }
 
-type St_net_hdr struct {
+type St_net_hdr struct { //correct size
 	S_message_length int16
 	I_seq_num        int32
 	C_checksum       [16]byte
 }
+
+/* Message Formats (above structure)
+Change to Packet Format
+
+• Max length will be the predefined value of 1024 bytes.
+
+Length = size of length field (2 bytes) +
+         size of sequence number field (4 bytes) +
+         size of the checksum field (16 bytes) +
+         size of Message data (variable number of bytes as per the transcode)
+*/
 
 type St_oe_reqres struct {
 	St_hdr                        *St_int_header
@@ -342,7 +353,7 @@ C_reserved_8                  [52]byte                        // Size: 52 bytes 
 }
 */
 
-type St_int_header struct {
+type St_int_header struct { // correct size
 	Si_transaction_code int16
 	Li_log_time         int32
 	C_alpha_char        [models.LEN_ALPHA_CHAR]byte
@@ -354,7 +365,23 @@ type St_int_header struct {
 	Si_message_length   int16
 }
 
-type St_contract_desc struct {
+/* Structure Name: MESSAGE_HEADER
+Packet Length: 40 bytes
+
+| Field Name      | Data Type | Size (bytes) | Offset |
+|-----------------|-----------|--------------|--------|
+| TransactionCode | SHORT     | 2            | 0      |
+| LogTime         | LONG      | 4            | 2      |
+| AlphaChar       | CHAR      | 2            | 6      |
+| UserId          | LONG      | 4            | 8      |
+| ErrorCode       | SHORT     | 2            | 12     |
+| Timestamp       | LONGLONG  | 8            | 14     |
+| TimeStamp1      | CHAR      | 8            | 22     |
+| TimeStamp2      | CHAR      | 8            | 30     |
+| MessageLength   | SHORT     | 2            | 38     |
+*/
+
+type St_contract_desc struct { // correct size
 	C_instrument_name [models.LEN_INSTRUMENT_NAME]byte
 	C_symbol          [models.LEN_SYMBOL_NSE]byte
 	Li_expiry_date    int32
@@ -363,9 +390,43 @@ type St_contract_desc struct {
 	Si_ca_level       int16
 }
 
-type St_order_flags struct {
+/*Structure Name: CONTRACT_DESC
+Packet Length: 28 bytes
+
+| Field Name      | Data Type | Size (bytes) | Offset |
+|-----------------|-----------|--------------|--------|
+| InstrumentName  | CHAR      | 6            | 0      |
+| Symbol          | CHAR      | 10           | 6      |
+| ExpiryDate      | LONG      | 4            | 16     |
+| StrikePrice     | LONG      | 4            | 20     |
+| OptionType      | CHAR      | 2            | 24     |
+| CALevel         | SHORT     | 2            | 26     |
+*/
+
+type St_order_flags struct { //correct size
 	Flags uint16
 }
+
+/* Structure Name: ST_ORDER_FLAGS
+Packet Length: 2 bytes
+
+| Field Name  | Data Type | Size (bits) | Offset |
+|-------------|-----------|-------------|--------|
+| ATO         | BIT       | 1           | 0      |
+| Market      | BIT       | 1           | 0      |
+| SL          | BIT       | 1           | 0      |
+| MIT         | BIT       | 1           | 0      |
+| Day         | BIT       | 1           | 0      |
+| GTC         | BIT       | 1           | 0      |
+| IOC         | BIT       | 1           | 0      |
+| AON         | BIT       | 1           | 0      |
+| MF          | BIT       | 1           | 1      |
+| MatchedInd  | BIT       | 1           | 1      |
+| Traded      | BIT       | 1           | 1      |
+| Modified    | BIT       | 1           | 1      |
+| Frozen      | BIT       | 1           | 1      |
+| Reserved    | BIT       | 3           | 1      |
+*/
 
 func (o *St_order_flags) SetFlag(flag uint16) {
 	o.Flags |= flag
