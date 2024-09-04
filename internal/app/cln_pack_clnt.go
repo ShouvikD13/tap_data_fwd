@@ -313,7 +313,7 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 	}
 
 	// log.Printf("[%s] [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT", client_pack_manager.ServiceName)
-	return 0
+	//return 0
 }
 
 /***************************************************************************************
