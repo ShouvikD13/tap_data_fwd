@@ -26,6 +26,9 @@ type ClnPackClntManager struct {
 	exch_msg                 *structures.St_exch_msg
 	net_hdr                  *structures.St_net_hdr
 	q_packet                 *structures.St_req_q_data
+	int_header               *structures.St_int_header
+	contract_desc            *structures.St_contract_desc
+	order_flag               *structures.St_order_flags
 	Order_conversion_manager *models.OrderConversionManager
 	cPanNo                   string // Pan number, initialized in the 'fnRefToOrd' method
 	cLstActRef               string // Last activity reference, initialized in the 'fnRefToOrd' method
@@ -76,13 +79,13 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 	client_pack_manager.pipe_mstr = &structures.St_opm_pipe_mstr{}
 	client_pack_manager.oe_reqres = &structures.St_oe_reqres{}
 	client_pack_manager.exch_msg = &structures.St_exch_msg{}
-	client_pack_manager.oe_reqres.St_hdr = &structures.St_int_header{}
-	client_pack_manager.oe_reqres.St_con_desc = &structures.St_contract_desc{}
-	client_pack_manager.oe_reqres.St_ord_flg = &structures.St_order_flags{}
 	client_pack_manager.Order_conversion_manager = &models.OrderConversionManager{}
 	client_pack_manager.net_hdr = &structures.St_net_hdr{}
 	client_pack_manager.q_packet = &structures.St_req_q_data{}
 	client_pack_manager.Message_queue_manager = &MessageQueueDir.MessageQueueManager{}
+	client_pack_manager.int_header = &structures.St_int_header{}
+	client_pack_manager.contract_desc = &structures.St_contract_desc{}
+	client_pack_manager.order_flag = &structures.St_order_flags{}
 	client_pack_manager.Transaction_manager = models.NewTransactionManager(client_pack_manager.ServiceName, client_pack_manager.Config_manager)
 
 	client_pack_manager.Message_queue_manager.Req_q_data = client_pack_manager.q_packet
@@ -485,6 +488,9 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			client_pack_manager.exch_msg,
 			client_pack_manager.net_hdr,
 			client_pack_manager.q_packet,
+			client_pack_manager.int_header,
+			client_pack_manager.contract_desc,
+			client_pack_manager.order_flag,
 			client_pack_manager.Order_conversion_manager,
 			client_pack_manager.cPanNo,
 			client_pack_manager.cLstActRef,

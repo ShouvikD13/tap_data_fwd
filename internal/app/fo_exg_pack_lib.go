@@ -16,23 +16,26 @@ import (
 const defaultTimeStamp = "0"
 
 type ExchngPackLibMaster struct {
-	serviceName  string
-	xchngbook    *structures.Vw_xchngbook
-	orderbook    *structures.Vw_orderbook
-	pipe_mstr    *structures.St_opm_pipe_mstr
-	nse_contract *structures.Vw_nse_cntrct
-	oe_reqres    *structures.St_oe_reqres
-	exch_msg     *structures.St_exch_msg
-	net_hdr      *structures.St_net_hdr
-	q_packet     *structures.St_req_q_data
-	OCM          *models.OrderConversionManager
-	cPanNo       [models.LEN_PAN]byte
-	cLstActRef   [22]byte
-	cEspID       [51]byte
-	cAlgoID      [51]byte
-	cSourceFlg   byte
-	cPrgmFlg     byte
-	cUserTypGlb  byte
+	serviceName   string
+	xchngbook     *structures.Vw_xchngbook
+	orderbook     *structures.Vw_orderbook
+	pipe_mstr     *structures.St_opm_pipe_mstr
+	nse_contract  *structures.Vw_nse_cntrct
+	oe_reqres     *structures.St_oe_reqres
+	exch_msg      *structures.St_exch_msg
+	net_hdr       *structures.St_net_hdr
+	q_packet      *structures.St_req_q_data
+	int_header    *structures.St_int_header
+	contract_desc *structures.St_contract_desc
+	order_flag    *structures.St_order_flags
+	OCM           *models.OrderConversionManager
+	cPanNo        [models.LEN_PAN]byte
+	cLstActRef    [22]byte
+	cEspID        [51]byte
+	cAlgoID       [51]byte
+	cSourceFlg    byte
+	cPrgmFlg      byte
+	cUserTypGlb   byte
 }
 
 // constructor function
@@ -45,6 +48,9 @@ func NewExchngPackLibMaster(serviceName string,
 	exch_msg *structures.St_exch_msg,
 	net_hdr *structures.St_net_hdr,
 	q_packet *structures.St_req_q_data,
+	int_header *structures.St_int_header,
+	contract_desc *structures.St_contract_desc,
+	order_flag *structures.St_order_flags,
 	OCM *models.OrderConversionManager,
 	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string) *ExchngPackLibMaster {
 
@@ -63,22 +69,25 @@ func NewExchngPackLibMaster(serviceName string,
 	bPrgmFlg := cPrgmFlg[0]
 
 	return &ExchngPackLibMaster{
-		serviceName:  serviceName,
-		xchngbook:    xchngbook,
-		orderbook:    orderbook,
-		pipe_mstr:    pipe_mstr,
-		nse_contract: nseContract,
-		oe_reqres:    oe_req,
-		exch_msg:     exch_msg,
-		net_hdr:      net_hdr,
-		q_packet:     q_packet,
-		OCM:          OCM,
-		cPanNo:       bPanNo,
-		cLstActRef:   bLstActRef,
-		cEspID:       bEspID,
-		cAlgoID:      bAlgoID,
-		cSourceFlg:   bSourceFlg,
-		cPrgmFlg:     bPrgmFlg,
+		serviceName:   serviceName,
+		xchngbook:     xchngbook,
+		orderbook:     orderbook,
+		pipe_mstr:     pipe_mstr,
+		nse_contract:  nseContract,
+		oe_reqres:     oe_req,
+		exch_msg:      exch_msg,
+		net_hdr:       net_hdr,
+		q_packet:      q_packet,
+		int_header:    int_header,
+		contract_desc: contract_desc,
+		order_flag:    order_flag,
+		OCM:           OCM,
+		cPanNo:        bPanNo,
+		cLstActRef:    bLstActRef,
+		cEspID:        bEspID,
+		cAlgoID:       bAlgoID,
+		cSourceFlg:    bSourceFlg,
+		cPrgmFlg:      bPrgmFlg,
 	}
 }
 
@@ -567,26 +576,50 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set I_seq_num to: %d]", eplm.serviceName, eplm.net_hdr.I_seq_num)
 	}
 
-	sizeNetHeader := unsafe.Sizeof(structures.St_net_hdr{})
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_net_hdr: %d]", eplm.serviceName, sizeNetHeader)
+	sizeNetHeader := unsafe.Sizeof(eplm.net_hdr)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_net_hdr with Data : %d]", eplm.serviceName, sizeNetHeader)
 
-	sizeOrdEnt := unsafe.Sizeof(structures.St_oe_reqres{})
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres: %d]", eplm.serviceName, sizeOrdEnt)
+	sizeOrdEnt := unsafe.Sizeof(eplm.oe_reqres)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres with Data : %d]", eplm.serviceName, sizeOrdEnt)
+
+	sizeHdr := unsafe.Sizeof(eplm.oe_reqres.St_hdr)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_HDR with Data : %d]", eplm.serviceName, sizeHdr)
+
+	sizeContractDesc := unsafe.Sizeof(eplm.oe_reqres.St_con_desc)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_con_desc with Data : %d]", eplm.serviceName, sizeContractDesc)
+
+	sizeOrderFlag := unsafe.Sizeof(eplm.oe_reqres.St_ord_flg)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_ord_flg with Data : %d]", eplm.serviceName, sizeOrderFlag)
 
 	eplm.net_hdr.S_message_length = int16(sizeOrdEnt + sizeNetHeader)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set S_message_length to: %d]", eplm.serviceName, eplm.net_hdr.S_message_length)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set S_message_length with Data to: %d]", eplm.serviceName, eplm.net_hdr.S_message_length)
+
+	sizeNetHeader1 := unsafe.Sizeof(structures.St_net_hdr{})
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_net_hdr without_data : %d]", eplm.serviceName, sizeNetHeader1)
+
+	sizeOrdEnt1 := unsafe.Sizeof(structures.St_oe_reqres{})
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres without_data : %d]", eplm.serviceName, sizeOrdEnt1)
+
+	sizeHdr1 := unsafe.Sizeof(structures.St_int_header{})
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_HDR without_data : %d]", eplm.serviceName, sizeHdr1)
+
+	sizeContractDesc1 := unsafe.Sizeof(structures.St_contract_desc{})
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_con_desc without_data : %d]", eplm.serviceName, sizeContractDesc1)
+
+	sizeOrderFlag1 := unsafe.Sizeof(structures.St_order_flags{})
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_ord_flg without_data : %d]", eplm.serviceName, sizeOrderFlag1)
+
+	message_length := int16(sizeOrdEnt1 + sizeNetHeader1)
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set S_message_length without_data to: %d]", eplm.serviceName, message_length)
 
 	eplm.exch_msg.St_net_header = *eplm.net_hdr
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Assigned net_hdr to St_net_header]", eplm.serviceName)
 
 	eplm.ConvertNetHeaderToNetworkOrder()
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Converted net header to network order]", eplm.serviceName)
 
 	eplm.q_packet.L_msg_type = int64(models.BOARD_LOT_IN)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set L_msg_type to: %d]", eplm.serviceName, eplm.q_packet.L_msg_type)
 
 	eplm.q_packet.St_exch_msg_data = *eplm.exch_msg
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Assigned exch_msg to St_exch_msg_data]", eplm.serviceName)
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Data Copied into Queue Packet", eplm.serviceName)
 

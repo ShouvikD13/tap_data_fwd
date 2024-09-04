@@ -159,9 +159,7 @@ type St_opm_pipe_mstr struct {
 	exg_brkr_id,
 	exg_ctcl_id
 	exg_xchng_cd
-
 	*/
-
 }
 
 /*
@@ -248,27 +246,27 @@ type St_oe_reqres struct {
 	C_giveup_flag   byte // byte   Replaced with 'C_reserved_7 '
 
 	/*
-		Filler1                       byte                             // Size: 1 bit (Offset: 220)
-		Filler2                       byte                            // Size: 1 bit (Offset: 220)
-		Filler3                       byte                            // Size: 1 bit (Offset: 220)
-		Filler4                       byte                            // Size: 1 bit (Offset: 220)
-		Filler5                       byte                            // Size: 1 bit (Offset: 220)
-		Filler6                       byte                            // Size: 1 bit (Offset: 220)
-		Filler7                       byte                            // Size: 1 bit (Offset: 220)
-		Filler8                       byte                            // Size: 1 bit (Offset: 220)
-		Filler9                       byte                            // Size: 1 bit (Offset: 221)
-		Filler10                      byte                            // Size: 1 bit (Offset: 221)
-		Filler11                      byte                            // Size: 1 bit (Offset: 221)
-		Filler12                      byte                            // Size: 1 bit (Offset: 221)
-		Filler13                      byte                            // Size: 1 bit (Offset: 221)
-		Filler14                      byte                            // Size: 1 bit (Offset: 221)
-		Filler15                      byte                            // Size: 1 bit (Offset: 221)
-		Filler16                      byte                            // Size: 1 bit (Offset: 221)
-		Filler17                      byte                            // Size: 1 byte (Offset: 222)
-		Filler18                      byte                            // Size: 1 byte (Offset: 223)
+		Filler1                       1 bit                             // Size: 1 bit (Offset: 220)
+		Filler2                       1 bit                            // Size: 1 bit (Offset: 220)
+		Filler3                       1 bit                            // Size: 1 bit (Offset: 220)
+		Filler4                       1 bit                            // Size: 1 bit (Offset: 220)
+		Filler5                       1 bit                            // Size: 1 bit (Offset: 220)
+		Filler6                       1 bit                            // Size: 1 bit (Offset: 220)
+		Filler7                       1 bit                            // Size: 1 bit (Offset: 220)
+		Filler8                       1 bit                            // Size: 1 bit (Offset: 220)
+		Filler9                       1 bit                            // Size: 1 bit (Offset: 221)
+		Filler10                      1 bit                            // Size: 1 bit (Offset: 221)
+		Filler11                      1 bit                            // Size: 1 bit (Offset: 221)
+		Filler12                      1 bit                            // Size: 1 bit (Offset: 221)
+		Filler13                      1 bit                            // Size: 1 bit (Offset: 221)
+		Filler14                      1 bit                            // Size: 1 bit (Offset: 221)
+		Filler15                      1 bit                            // Size: 1 bit (Offset: 221)
+		Filler16                      1 bit                            // Size: 1 bit (Offset: 221)
+		Filler17                      1 byte                            // Size: 1 byte (Offset: 222)
+		Filler18                      1 byte                            // Size: 1 byte (Offset: 223)
 
 	*/
-	// All the fillers replace with below field
+	// All the fillers replace with below field (4 bytes total)
 	I_order_seq int32
 	//==================================================
 	D_nnf_field        float64
@@ -279,6 +277,25 @@ type St_oe_reqres struct {
 	Ll_lastactivityref int64
 	C_reserved         [52]byte
 }
+
+/*
+
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_net_hdr with Data : 8]
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres with Data : 8]
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_HDR with Data : 8]
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_con_desc with Data : 8]
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_ord_flg with Data : 8]
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Set S_message_length with Data to: 16]
+
+
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_net_hdr without_data : 24]   <------ 22
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres without_data : 304] //<------ 316
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_int_header without_data : 56] <------ 40
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_con_desc without_data :  28]
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_ord_flg without_data : 2]
+	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Set S_message_length without_data to: 328]
+
+*/
 
 /*    Structure from NSE Document of 316 bytes
 type St_oe_reqres struct {
@@ -356,12 +373,12 @@ C_reserved_8                  [52]byte                        // Size: 52 bytes 
 type St_int_header struct { // correct size
 	Si_transaction_code int16
 	Li_log_time         int32
-	C_alpha_char        [models.LEN_ALPHA_CHAR]byte
+	C_alpha_char        [models.LEN_ALPHA_CHAR]byte // const models.LEN_ALPHA_CHAR untyped int = 2
 	Li_trader_id        int32
 	Si_error_code       int16
 	C_filler_2          int64
-	C_time_stamp_1      [models.LEN_TIME_STAMP]byte
-	C_time_stamp_2      [models.LEN_TIME_STAMP]byte
+	C_time_stamp_1      [models.LEN_TIME_STAMP]byte // const models.LEN_TIME_STAMP untyped int = 8
+	C_time_stamp_2      [models.LEN_TIME_STAMP]byte // const models.LEN_TIME_STAMP untyped int = 8
 	Si_message_length   int16
 }
 
