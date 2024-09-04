@@ -200,7 +200,7 @@ Length = size of length field (2 bytes) +
 */
 
 type St_oe_reqres struct {
-	St_hdr                        *St_int_header
+	St_hdr                        St_int_header
 	C_participant_type            byte // byte
 	C_filler_1                    byte //byte
 	Si_competitor_period          int16
@@ -210,7 +210,7 @@ type St_oe_reqres struct {
 	Si_reason_code                int16
 	C_filler_3                    [4]byte
 	L_token_no                    int32
-	St_con_desc                   *St_contract_desc
+	St_con_desc                   St_contract_desc
 	C_counter_party_broker_id     [models.LEN_BROKER_ID]byte
 	C_filler_4                    byte //byte
 	C_filler_5                    [2]byte
@@ -232,7 +232,7 @@ type St_oe_reqres struct {
 	Li_entry_date_time            int32
 	Li_minimum_fill_aon_volume    int32
 	Li_last_modified              int32
-	St_ord_flg                    *St_order_flags
+	St_ord_flg                    St_order_flags
 	Si_branch_id                  int16
 	Li_trader_id                  int32
 	C_broker_id                   [models.LEN_BROKER_ID]byte
@@ -277,25 +277,6 @@ type St_oe_reqres struct {
 	Ll_lastactivityref int64
 	C_reserved         [52]byte
 }
-
-/*
-
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_net_hdr with Data : 8]
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres with Data : 8]
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_HDR with Data : 8]
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_con_desc with Data : 8]
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_ord_flg with Data : 8]
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Set S_message_length with Data to: 16]
-
-
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_net_hdr without_data : 24]   <------ 22
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres without_data : 304] //<------ 316
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_int_header without_data : 56] <------ 40
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_con_desc without_data :  28]
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Size of St_ord_flg without_data : 2]
-	2024/09/04 13:44:07 [cln_pack_clnt] [fnPackOrdnryOrdToNse] [Set S_message_length without_data to: 328]
-
-*/
 
 /*    Structure from NSE Document of 316 bytes
 type St_oe_reqres struct {
