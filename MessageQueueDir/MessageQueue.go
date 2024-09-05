@@ -98,14 +98,14 @@ func (MQM *MessageQueueManager) CreateQueue(key int) int {
 }
 
 func (MQM *MessageQueueManager) WriteToQueue(mtype int) int {
-	log.Printf(" Data Before packing: %v", MQM.Req_q_data)
+	// log.Printf(" Data Before packing: %v", MQM.Req_q_data)
 	log.Printf("[%s] [writeToQueue] size of 'MQM.Req_q_data': %d bytes", MQM.ServiceName, unsafe.Sizeof(MQM.Req_q_data))
 	packedData, err := MQM.pack(MQM.Req_q_data)
 	if err != nil {
 		log.Printf("[%s] [writeToQueue] [Error] failed to pack data: %v", MQM.ServiceName, err)
 		return -1
 	}
-	log.Printf("Packed Data: %v", packedData) // <---------------------------------------
+	// log.Printf("Packed Data: %v", packedData) // <---------------------------------------
 	log.Printf("[%s] [writeToQueue] Packed data size: %d bytes", MQM.ServiceName, len(packedData))
 
 	err = MQM.mq.SendBytes(packedData, mtype, 0)

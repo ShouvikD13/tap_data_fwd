@@ -3,6 +3,8 @@ package app
 import (
 	"DATA_FWD_TAP/models"
 	"DATA_FWD_TAP/models/structures"
+	"bytes"
+	"encoding/binary"
 	"log"
 	"reflect"
 	"strconv"
@@ -197,9 +199,9 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 			eplm.int_header.C_time_stamp_2[i] = 0 //8 HDR
 	}*/
 
-	copy(eplm.int_header.C_time_stamp_1[:], defaultTimeStamp)                        //7 HDR
-	copy(eplm.int_header.C_time_stamp_2[:], defaultTimeStamp)                        //8 HDR
-	eplm.int_header.Si_message_length = int16(reflect.TypeOf(eplm.oe_reqres).Size()) //9 HDR
+	copy(eplm.int_header.C_time_stamp_1[:], defaultTimeStamp)                                 //7 HDR
+	copy(eplm.int_header.C_time_stamp_2[:], defaultTimeStamp)                                 //8 HDR
+	eplm.int_header.Si_message_length = int16(reflect.TypeOf(eplm.exch_msg.St_oe_res).Size()) //9 HDR
 
 	// Header structure Done Till here ----------------------------------------------------------------
 
@@ -556,44 +558,52 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_closed is :	%d ", eplm.serviceName, eplm.order_flag.Flg_closed)
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_fill_and_kill is :	%d ", eplm.serviceName, eplm.order_flag.Flg_fill_and_kill)
 
-	copy(eplm.net_hdr.C_checksum[:], "                ") // 16 spaces
-
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set C_checksum to a blank space]", eplm.serviceName)
+	copy(eplm.net_hdr.C_checksum[:], "                ")
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] Set C_checksum to blank space", eplm.serviceName)
 
 	tmpVar := eplm.GetResetSequence(db)
 	if tmpVar == -1 {
-		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Error: Failed to retrieve sequence number...]", eplm.serviceName)
-		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Returning from this function with error]", eplm.serviceName)
+		log.Printf("[%s] [fnPackOrdnryOrdToNse] Error: Failed to retrieve sequence number", eplm.serviceName)
 		return -1
-	} else {
-		eplm.net_hdr.I_seq_num = tmpVar
-		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set I_seq_num to: %d]", eplm.serviceName, eplm.net_hdr.I_seq_num)
+	}
+	eplm.net_hdr.I_seq_num = tmpVar
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] Set I_seq_num to: %d", eplm.serviceName, eplm.net_hdr.I_seq_num)
+
+	// Convert order request and network header to network order (NSE Order)
+	eplm.ConvertOrderReqResToNetworkOrder()
+	eplm.ConvertNetHeaderToNetworkOrder()
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] Converted net header to network order", eplm.serviceName)
+
+	buf := new(bytes.Buffer)
+
+	if err := writeAndCopy(buf, *eplm.int_header, eplm.oe_reqres.St_hdr[:]); err != nil {
+		log.Fatalf("[%s] Failed to write int_header: %v", eplm.serviceName, err)
 	}
 
-	eplm.q_packet.St_exch_msg_data = *eplm.exch_msg
-	// Packing the structures into St_oe_reqres is completed
-	eplm.ConvertOrderReqResToNetworkOrder()
+	if err := writeAndCopy(buf, *eplm.contract_desc, eplm.oe_reqres.St_con_desc[:]); err != nil {
+		log.Fatalf("[%s] Failed to write contract_desc: %v", eplm.serviceName, err)
+	}
 
-	eplm.q_packet.St_exch_msg_data.St_oe_res = *eplm.oe_reqres
-	eplm.q_packet.St_exch_msg_data.St_oe_res.St_hdr = *eplm.int_header
-	eplm.q_packet.St_exch_msg_data.St_oe_res.St_con_desc = *eplm.contract_desc
-	eplm.q_packet.St_exch_msg_data.St_oe_res.St_ord_flg = *eplm.order_flag
+	if err := writeAndCopy(buf, *eplm.order_flag, eplm.oe_reqres.St_ord_flg[:]); err != nil {
+		log.Fatalf("[%s] Failed to write order_flag: %v", eplm.serviceName, err)
+	}
 
-	// Convert the network header to the required network order format.
-	eplm.ConvertNetHeaderToNetworkOrder()
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Converted net header to network order]", eplm.serviceName)
+	if err := writeAndCopy(buf, *eplm.oe_reqres, eplm.exch_msg.St_oe_res[:]); err != nil {
+		log.Fatalf("[%s] Failed to write oe_reqres: %v", eplm.serviceName, err)
+	}
 
-	eplm.q_packet.St_exch_msg_data.St_net_header = *eplm.net_hdr
+	if err := writeAndCopy(buf, *eplm.net_hdr, eplm.exch_msg.St_net_header[:]); err != nil {
+		log.Fatalf("[%s] Failed to write net_hdr: %v", eplm.serviceName, err)
+	}
 
-	// Successfully packed the exchange message data.
+	if err := writeAndCopy(buf, *eplm.exch_msg, eplm.q_packet.St_exch_msg_data[:]); err != nil {
+		log.Fatalf("[%s] Failed to write exch_msg: %v", eplm.serviceName, err)
+	}
+
+	log.Printf("[%s] Data successfully packed", eplm.serviceName)
 
 	eplm.q_packet.L_msg_type = int64(models.BOARD_LOT_IN)
-
-	// Packed the exchange message data into the queue packet (St_req_q_data).
-
-	log.Printf("St_req_q_data : %v", eplm.q_packet)
-
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] Data Copied into Queue Packet", eplm.serviceName)
+	log.Printf("[%s] Data copied into Queue Packet", eplm.serviceName)
 
 	return 0
 }
@@ -814,4 +824,14 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func writeAndCopy(buf *bytes.Buffer, data interface{}, dest []byte) error {
+	buf.Reset()
+	err := binary.Write(buf, binary.LittleEndian, data)
+	if err != nil {
+		return err
+	}
+	copy(dest, buf.Bytes())
+	return nil
 }

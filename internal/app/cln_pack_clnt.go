@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	"gorm.io/gorm"
 )
@@ -266,7 +265,7 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 
 		log.Printf("[%s] [CLN_PACK_CLNT] Transaction committed successfully", client_pack_manager.ServiceName)
 
-		log.Printf(" ************ Printing the q_packet from CLN_PACK_CLNT : %v", client_pack_manager.q_packet)
+		// log.Printf(" ************ Printing the q_packet from CLN_PACK_CLNT : %v", client_pack_manager.q_packet)
 
 		// Writing the data fetched from 'fnGetNxtRec' to the system queue (Linux).
 		//here setting the data becasues initially i am getting all zeros .
@@ -289,12 +288,8 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 		log.Printf("[%s] [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", client_pack_manager.ServiceName, mtype, receivedType)
 
 		fmt.Println("Message Type:", receivedData.L_msg_type)
-		fmt.Println("Checksum:", receivedData.St_exch_msg_data.St_net_header.C_checksum)
-		fmt.Println("Sequence Number:", receivedData.St_exch_msg_data.St_net_header.I_seq_num)
-		fmt.Println("Message Length:", receivedData.St_exch_msg_data.St_net_header.S_message_length)
-		fmt.Println("Account Number:", receivedData.St_exch_msg_data.St_oe_res.C_account_number)
-		fmt.Println("Exchange Message Data:", receivedData.St_exch_msg_data.St_oe_res)
-		fmt.Printf("Size of receivedData: %d bytes\n", unsafe.Sizeof(receivedData))
+
+		log.Println("---------------------------------------------------- St_req_q_data ---------------------------------------------------- ")
 
 		mtype++
 

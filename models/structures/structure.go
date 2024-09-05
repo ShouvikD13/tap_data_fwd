@@ -1,6 +1,8 @@
 package structures
 
-import "DATA_FWD_TAP/models"
+import (
+	"DATA_FWD_TAP/models"
+)
 
 const (
 	Flg_ATO        uint16 = 1 << 0  // ATO is the 1st bit
@@ -174,12 +176,12 @@ type St_req_q_data struct {
 	1. it is changing, where we are packing the structure which is in "fn_pack_ordnry_ord_to_nse" here we are setting the the variable based on the request type like (if request is "new" then "li_msg_type = BOARD_LOT_IN")
 
 	*/
-	St_exch_msg_data St_exch_msg // in the original structure here a union is used . but i am directly using the structure.
+	St_exch_msg_data [338]byte // in the original structure here a union is used . but i am directly using the structure.
 }
 
 type St_exch_msg struct {
-	St_net_header St_net_hdr
-	St_oe_res     St_oe_reqres
+	St_net_header [22]byte  //St_net_hdr
+	St_oe_res     [316]byte //St_oe_reqres
 }
 
 type St_net_hdr struct { //correct size
@@ -200,9 +202,9 @@ Length = size of length field (2 bytes) +
 */
 
 type St_oe_reqres struct {
-	St_hdr                        St_int_header
-	C_participant_type            byte // byte
-	C_filler_1                    byte //byte
+	St_hdr                        [40]byte //St_hdr                        St_int_header
+	C_participant_type            byte     // byte
+	C_filler_1                    byte     //byte
 	Si_competitor_period          int16
 	Si_solicitor_period           int16
 	C_modified_cancelled_by       byte //byte
@@ -210,7 +212,7 @@ type St_oe_reqres struct {
 	Si_reason_code                int16
 	C_filler_3                    [4]byte
 	L_token_no                    int32
-	St_con_desc                   St_contract_desc
+	St_con_desc                   [28]byte //St_con_desc                        St_contract_desc
 	C_counter_party_broker_id     [models.LEN_BROKER_ID]byte
 	C_filler_4                    byte //byte
 	C_filler_5                    [2]byte
@@ -232,7 +234,7 @@ type St_oe_reqres struct {
 	Li_entry_date_time            int32
 	Li_minimum_fill_aon_volume    int32
 	Li_last_modified              int32
-	St_ord_flg                    St_order_flags
+	St_ord_flg                    [2]byte //St_ord_flg                    St_order_flags
 	Si_branch_id                  int16
 	Li_trader_id                  int32
 	C_broker_id                   [models.LEN_BROKER_ID]byte
@@ -360,7 +362,7 @@ type St_int_header struct { // correct size
 	C_filler_2          int64
 	C_time_stamp_1      [models.LEN_TIME_STAMP]byte // const models.LEN_TIME_STAMP untyped int = 8
 	C_time_stamp_2      [models.LEN_TIME_STAMP]byte // const models.LEN_TIME_STAMP untyped int = 8
-	Si_message_length   int16
+	Si_message_length   int16                       // 316 size
 }
 
 /* Structure Name: MESSAGE_HEADER
