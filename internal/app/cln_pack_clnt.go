@@ -88,9 +88,6 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 	client_pack_manager.order_flag = &structures.St_order_flags{}
 	client_pack_manager.Transaction_manager = models.NewTransactionManager(client_pack_manager.ServiceName, client_pack_manager.Config_manager)
 
-	client_pack_manager.Message_queue_manager.Req_q_data = client_pack_manager.q_packet
-	client_pack_manager.Message_queue_manager.ServiceName = client_pack_manager.ServiceName
-
 	log.Printf("[%s]  [Fn_bat_init] Entering Fn_bat_init", client_pack_manager.ServiceName)
 
 	// we are getting the 7 args
@@ -269,7 +266,13 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
 
 		log.Printf("[%s] [CLN_PACK_CLNT] Transaction committed successfully", client_pack_manager.ServiceName)
 
+		log.Printf(" ************ Printing the q_packet from CLN_PACK_CLNT : %v", client_pack_manager.q_packet)
+
 		// Writing the data fetched from 'fnGetNxtRec' to the system queue (Linux).
+		//here setting the data becasues initially i am getting all zeros .
+		client_pack_manager.Message_queue_manager.Req_q_data = *client_pack_manager.q_packet
+		client_pack_manager.Message_queue_manager.ServiceName = client_pack_manager.ServiceName
+
 		if client_pack_manager.Message_queue_manager.WriteToQueue(mtype) != 0 {
 			log.Printf("[%s] [CLN_PACK_CLNT] Error writing to queue with message type %d", client_pack_manager.ServiceName, mtype)
 			return -1

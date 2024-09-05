@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	"gorm.io/gorm"
 )
@@ -571,65 +570,28 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set I_seq_num to: %d]", eplm.serviceName, eplm.net_hdr.I_seq_num)
 	}
 
-	sizeNetHeader := unsafe.Sizeof(eplm.net_hdr)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_net_hdr with Data : %d]", eplm.serviceName, sizeNetHeader)
-
-	sizeOrdEnt := unsafe.Sizeof(eplm.oe_reqres)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres with Data : %d]", eplm.serviceName, sizeOrdEnt)
-
-	sizeHdr := unsafe.Sizeof(eplm.int_header)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_HDR with Data : %d]", eplm.serviceName, sizeHdr)
-
-	sizeContractDesc := unsafe.Sizeof(eplm.contract_desc)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_con_desc with Data : %d]", eplm.serviceName, sizeContractDesc)
-
-	sizeOrderFlag := unsafe.Sizeof(eplm.order_flag)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_ord_flg with Data : %d]", eplm.serviceName, sizeOrderFlag)
-
-	eplm.net_hdr.S_message_length = int16(sizeOrdEnt + sizeNetHeader)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set S_message_length with Data to: %d]", eplm.serviceName, eplm.net_hdr.S_message_length)
-
-	sizeNetHeader1 := unsafe.Sizeof(structures.St_net_hdr{})
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_net_hdr without_data : %d]", eplm.serviceName, sizeNetHeader1)
-
-	sizeOrdEnt1 := unsafe.Sizeof(structures.St_oe_reqres{})
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_oe_reqres without_data : %d]", eplm.serviceName, sizeOrdEnt1)
-
-	sizeHdr1 := unsafe.Sizeof(structures.St_int_header{})
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_HDR without_data : %d]", eplm.serviceName, sizeHdr1)
-
-	sizeContractDesc1 := unsafe.Sizeof(structures.St_contract_desc{})
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_con_desc without_data : %d]", eplm.serviceName, sizeContractDesc1)
-
-	sizeOrderFlag1 := unsafe.Sizeof(structures.St_order_flags{})
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Size of St_ord_flg without_data : %d]", eplm.serviceName, sizeOrderFlag1)
-
-	message_length := int16(sizeOrdEnt1 + sizeNetHeader1)
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Set S_message_length without_data to: %d]", eplm.serviceName, message_length)
-
-	eplm.oe_reqres.St_hdr = *eplm.int_header
-	eplm.oe_reqres.St_con_desc = *eplm.contract_desc
-	eplm.oe_reqres.St_ord_flg = *eplm.order_flag
-
+	eplm.q_packet.St_exch_msg_data = *eplm.exch_msg
 	// Packing the structures into St_oe_reqres is completed
 	eplm.ConvertOrderReqResToNetworkOrder()
 
-	eplm.exch_msg.St_oe_res = *eplm.oe_reqres
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Assigned oe_reqres to St_oe_res]", eplm.serviceName)
+	eplm.q_packet.St_exch_msg_data.St_oe_res = *eplm.oe_reqres
+	eplm.q_packet.St_exch_msg_data.St_oe_res.St_hdr = *eplm.int_header
+	eplm.q_packet.St_exch_msg_data.St_oe_res.St_con_desc = *eplm.contract_desc
+	eplm.q_packet.St_exch_msg_data.St_oe_res.St_ord_flg = *eplm.order_flag
 
 	// Convert the network header to the required network order format.
 	eplm.ConvertNetHeaderToNetworkOrder()
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] [Converted net header to network order]", eplm.serviceName)
 
-	eplm.exch_msg.St_net_header = *eplm.net_hdr
+	eplm.q_packet.St_exch_msg_data.St_net_header = *eplm.net_hdr
 
 	// Successfully packed the exchange message data.
 
 	eplm.q_packet.L_msg_type = int64(models.BOARD_LOT_IN)
 
-	eplm.q_packet.St_exch_msg_data = *eplm.exch_msg
-
 	// Packed the exchange message data into the queue packet (St_req_q_data).
+
+	log.Printf("St_req_q_data : %v", eplm.q_packet)
 
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Data Copied into Queue Packet", eplm.serviceName)
 
