@@ -4,7 +4,11 @@ import (
 	"DATA_FWD_TAP/models"
 	"DATA_FWD_TAP/models/structures"
 	"bytes"
+	"crypto/md5"
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"reflect"
 	"strconv"
@@ -558,9 +562,6 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_closed is :	%d ", eplm.serviceName, eplm.order_flag.Flg_closed)
 	// log.Printf("[%s] [fnPackOrdnryOrdToNse] flg_fill_and_kill is :	%d ", eplm.serviceName, eplm.order_flag.Flg_fill_and_kill)
 
-	copy(eplm.net_hdr.C_checksum[:], "                ")
-	log.Printf("[%s] [fnPackOrdnryOrdToNse] Set C_checksum to blank space", eplm.serviceName)
-
 	tmpVar := eplm.GetResetSequence(db)
 	if tmpVar == -1 {
 		log.Printf("[%s] [fnPackOrdnryOrdToNse] Error: Failed to retrieve sequence number", eplm.serviceName)
@@ -571,6 +572,23 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	// Convert order request and network header to network order (NSE Order)
 	eplm.ConvertOrderReqResToNetworkOrder()
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] Converted ST OE REQRES to network order", eplm.serviceName)
+
+	hasher := md5.New()
+
+	oeReqResString, err := json.Marshal(eplm.oe_reqres) // to convert the structure in string
+	if err != nil {
+		log.Fatalf("Failed to convert oe_reqres to string: %v", err)
+	}
+
+	io.WriteString(hasher, string(oeReqResString))
+
+	checksum := hasher.Sum(nil)
+
+	copy(eplm.net_hdr.C_checksum[:], fmt.Sprintf("%x", checksum)) // for Hexadecimal format
+
+	log.Printf("[%s] [fnPackOrdnryOrdToNse] Set C_checksum to computed MD5 hash: %x", eplm.serviceName, eplm.net_hdr.C_checksum[:])
+	log.Printf("checksum : %s", checksum)
 	eplm.ConvertNetHeaderToNetworkOrder()
 	log.Printf("[%s] [fnPackOrdnryOrdToNse] Converted net header to network order", eplm.serviceName)
 
