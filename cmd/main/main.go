@@ -1,9 +1,9 @@
 package main
 
 import (
-	"DATA_FWD_TAP/config"
 	"DATA_FWD_TAP/internal/app"
-	"DATA_FWD_TAP/models"
+	"DATA_FWD_TAP/internal/database"
+	"DATA_FWD_TAP/util"
 	"log"
 )
 
@@ -15,17 +15,25 @@ func main() {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
+	//Logger file
+
+	loggerManager := &util.LoggerManager{}
+	loggerManager.InitLogger()
+
+	// Get the logger instance
+	logger := loggerManager.GetLogger()
+
 	/* testing Eviroment.go
 	configFilePath := filepath.Join("config", "config.ini")
 
-	result := models.InitProcessSpace(configFilePath, "Server") // here
+	result := util.InitProcessSpace(configFilePath, "Server") // here
 	if result != 0 {
 		log.Fatalf("[%s] Failed to initialize process space: %d", serviceName, result)
 	}
 
 	// fmt.Println(result)
 
-	tokenValue := models.GetProcessSpaceValue("Host")
+	tokenValue := util.GetProcessSpaceValue("Host")
 	if tokenValue == "" {
 		log.Printf("[%s] Token not found", serviceName)
 	} else {
@@ -34,11 +42,11 @@ func main() {
 	*/
 	//----------------------------------------------
 
-	environmentManager := models.NewEnvironmentManager(serviceName, "/mnt/c/Users/devdu/go-workspace/data_fwd_tap/config/EnvConfig.ini")
+	environmentManager := util.NewEnvironmentManager(serviceName, "/mnt/c/Users/devdu/go-workspace/data_fwd_tap/internal/config/env_config.ini", loggerManager)
 
 	environmentManager.LoadIniFile()
 
-	configManager := config.NewConfigManager(serviceName, environmentManager)
+	configManager := database.NewConfigManager(serviceName, environmentManager, loggerManager)
 
 	if configManager.LoadPostgreSQLConfig() != 0 {
 		log.Fatalf("[%s] Failed to load PostgreSQL configuration: ", serviceName)
@@ -57,7 +65,7 @@ func main() {
 
 	// /*Tuxlib.go Testing
 
-	// txManager := &models.TransactionManager{DbAccessor: cfgManager} // This creates a variable of the structure defined in Tuxlib.go. The field in this structure is an instance of the database. Throughout the transaction, we have to use the same database instance.
+	// txManager := &util.TransactionManager{DbAccessor: cfgManager} // This creates a variable of the structure defined in Tuxlib.go. The field in this structure is an instance of the database. Throughout the transaction, we have to use the same database instance.
 
 	// tranType := txManager.FnBeginTran(serviceName) // transaction begins here. Here we are calling the "FnBeginTran()" of "Tuxlib.go".
 
@@ -129,17 +137,20 @@ func main() {
 	//=======================================================================================================
 
 	//=======================================================================================================
-	// // Testing "cln_pack_clnt.go"
+	//
+
+	// Testing "cln_pack_clnt.go"
 
 	VarClnPack := &app.ClnPackClntManager{
 		Enviroment_manager: environmentManager,
 		Config_manager:     configManager,
+		LoggerManager:      loggerManager,
 	}
 	resultTmp = VarClnPack.Fn_bat_init(args[1:], DB)
 
 	if resultTmp != 0 {
-		log.Printf("[%s] Fn_bat_init failed with result code: %d", serviceName, resultTmp)
-		log.Fatal("Shutting down due to error") // log.Fatal logs the message and exits with status 1
+		loggerManager.LogInfo(serviceName, " Fn_bat_init failed with result code: %d", resultTmp)
+		logger.Fatalf("Shutting down due to error in %s: result code %d", serviceName, resultTmp) // log.Fatal logs the message and exits with status 1
 	}
 
 	//=======================================================================================================
@@ -162,6 +173,6 @@ func main() {
 
 	//=======================================================================================================
 
-	log.Printf("[%s] Main Ended Here...", serviceName)
+	loggerManager.LogInfo(serviceName, " Main Ended Here...")
 
 }

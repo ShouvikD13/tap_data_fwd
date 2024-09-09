@@ -1,12 +1,13 @@
 package app
 
 import (
-	"DATA_FWD_TAP/MessageQueueDir"
-	"DATA_FWD_TAP/config"
-	"DATA_FWD_TAP/models"
-	"DATA_FWD_TAP/models/structures"
+	"DATA_FWD_TAP/internal/database"
+	"DATA_FWD_TAP/internal/models"
+	"DATA_FWD_TAP/util"
+	"DATA_FWD_TAP/util/MessageQueue"
+
 	"fmt"
-	"log"
+
 	"strconv"
 	"strings"
 	"time"
@@ -15,35 +16,36 @@ import (
 )
 
 type ClnPackClntManager struct {
-	ServiceName              string                    // Name of the service being managed
-	Xchngbook                *structures.Vw_xchngbook  // Pointer to the Vw_Xchngbook structure
-	orderbook                *structures.Vw_orderbook  // Pointer to the Vw_orderbook structure
-	contract                 *structures.Vw_contract   // we are updating it's value from orderbook
-	nse_contract             *structures.Vw_nse_cntrct // we are updating it in 'fn_get_ext_cnt'
-	pipe_mstr                *structures.St_opm_pipe_mstr
-	oe_reqres                *structures.St_oe_reqres
-	exch_msg                 *structures.St_exch_msg
-	net_hdr                  *structures.St_net_hdr
-	q_packet                 *structures.St_req_q_data
-	int_header               *structures.St_int_header
-	contract_desc            *structures.St_contract_desc
-	order_flag               *structures.St_order_flags
-	Order_conversion_manager *models.OrderConversionManager
+	ServiceName              string                // Name of the service being managed
+	Xchngbook                *models.Vw_xchngbook  // Pointer to the Vw_Xchngbook structure
+	orderbook                *models.Vw_orderbook  // Pointer to the Vw_orderbook structure
+	contract                 *models.Vw_contract   // we are updating it's value from orderbook
+	nse_contract             *models.Vw_nse_cntrct // we are updating it in 'fn_get_ext_cnt'
+	pipe_mstr                *models.St_opm_pipe_mstr
+	oe_reqres                *models.St_oe_reqres
+	exch_msg                 *models.St_exch_msg
+	net_hdr                  *models.St_net_hdr
+	q_packet                 *models.St_req_q_data
+	int_header               *models.St_int_header
+	contract_desc            *models.St_contract_desc
+	order_flag               *models.St_order_flags
+	Order_conversion_manager *util.OrderConversionManager
 	cPanNo                   string // Pan number, initialized in the 'fnRefToOrd' method
 	cLstActRef               string // Last activity reference, initialized in the 'fnRefToOrd' method
 	cEspID                   string // ESP ID, initialized in the 'fnRefToOrd' method
 	cAlgoID                  string // Algorithm ID, initialized in the 'fnRefToOrd' method
 	cSourceFlg               string // Source flag, initialized in the 'fnRefToOrd' method
 	cPrgmFlg                 string
-	Enviroment_manager       *models.EnvironmentManager
-	Message_queue_manager    *MessageQueueDir.MessageQueueManager
-	Transaction_manager      *models.TransactionManager
+	Enviroment_manager       *util.EnvironmentManager
+	Message_queue_manager    *MessageQueue.MessageQueueManager
+	Transaction_manager      *util.TransactionManager
 	Max_Pack_Val             int
-	Config_manager           *config.ConfigManager
+	Config_manager           *database.ConfigManager
+	LoggerManager            *util.LoggerManager
 }
 
 /***************************************************************************************
- * Fn_bat_init initializes the client package manager by setting up data structures,
+ * Fn_bat_init initializes the client package manager by setting up data models,
  * fetching configuration values, and preparing the environment for processing.
  * It ensures all prerequisites are met before the service starts.
  *
@@ -56,7 +58,7 @@ type ClnPackClntManager struct {
  *    int    - Returns 0 for success, or -1 if an error occurs.
  *
  * FUNCTIONAL FLOW:
- * 1. Initializes required structures and managers for the service.
+ * 1. Initializes required models and managers for the service.
  * 2. Validates command-line arguments to ensure all necessary parameters are present.
  * 3. Sets the pipe ID from the command-line argument and creates a message queue.
  * 4. Executes SQL queries to fetch and store necessary data such as exchange code,
@@ -66,68 +68,70 @@ type ClnPackClntManager struct {
  * 7. Returns a status code indicating the success or failure of the initialization.
  *
  ***********************************************************************************************/
-func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 
 	var temp_str string
 	var resultTmp int
-	client_pack_manager.ServiceName = "cln_pack_clnt"
-	client_pack_manager.Xchngbook = &structures.Vw_xchngbook{}
-	client_pack_manager.orderbook = &structures.Vw_orderbook{}
-	client_pack_manager.contract = &structures.Vw_contract{}
-	client_pack_manager.nse_contract = &structures.Vw_nse_cntrct{}
-	client_pack_manager.pipe_mstr = &structures.St_opm_pipe_mstr{}
-	client_pack_manager.oe_reqres = &structures.St_oe_reqres{}
-	client_pack_manager.exch_msg = &structures.St_exch_msg{}
-	client_pack_manager.Order_conversion_manager = &models.OrderConversionManager{}
-	client_pack_manager.net_hdr = &structures.St_net_hdr{}
-	client_pack_manager.q_packet = &structures.St_req_q_data{}
-	client_pack_manager.Message_queue_manager = &MessageQueueDir.MessageQueueManager{}
-	client_pack_manager.int_header = &structures.St_int_header{}
-	client_pack_manager.contract_desc = &structures.St_contract_desc{}
-	client_pack_manager.order_flag = &structures.St_order_flags{}
-	client_pack_manager.Transaction_manager = models.NewTransactionManager(client_pack_manager.ServiceName, client_pack_manager.Config_manager)
+	cpcm.ServiceName = "cln_pack_clnt"
+	cpcm.Xchngbook = &models.Vw_xchngbook{}
+	cpcm.orderbook = &models.Vw_orderbook{}
+	cpcm.contract = &models.Vw_contract{}
+	cpcm.nse_contract = &models.Vw_nse_cntrct{}
+	cpcm.pipe_mstr = &models.St_opm_pipe_mstr{}
+	cpcm.oe_reqres = &models.St_oe_reqres{}
+	cpcm.exch_msg = &models.St_exch_msg{}
+	cpcm.Order_conversion_manager = &util.OrderConversionManager{}
+	cpcm.net_hdr = &models.St_net_hdr{}
+	cpcm.q_packet = &models.St_req_q_data{}
+	cpcm.Message_queue_manager = &MessageQueue.MessageQueueManager{}
+	cpcm.int_header = &models.St_int_header{}
+	cpcm.contract_desc = &models.St_contract_desc{}
+	cpcm.order_flag = &models.St_order_flags{}
+	cpcm.Transaction_manager = util.NewTransactionManager(cpcm.ServiceName, cpcm.Config_manager, cpcm.LoggerManager)
 
-	log.Printf("[%s]  [Fn_bat_init] Entering Fn_bat_init", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "  [Fn_bat_init] Entering Fn_bat_init")
 
 	// we are getting the 7 args
 	if len(args) < 7 {
-		log.Printf("[%s] [Fn_bat_init] Error: insufficient arguments provided", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: insufficient arguments provided")
 		return -1
 	}
 
 	// setting pipe_id with command line argument (command line argument recieved from main)
 	// using Pipe_Id to fetch xchng_code
-	client_pack_manager.Xchngbook.C_pipe_id = args[3]
+	cpcm.Xchngbook.C_pipe_id = args[3]
 
 	/* Create a message queue using the CreateQueue function from MessageQueue.go file ().
 	This function is responsible for creating a system-level queue on Linux. */
-	if client_pack_manager.Message_queue_manager.CreateQueue(3) != 0 {
-		log.Printf("[%s] [Fn_bat_init] Returning from 'CreateQueue' with an Error... %s", client_pack_manager.ServiceName)
-		log.Printf("[%s] [Fn_bat_init] Exiting from function", client_pack_manager.ServiceName)
+
+	cpcm.Message_queue_manager.LoggerManager = cpcm.LoggerManager
+	if cpcm.Message_queue_manager.CreateQueue(3) != 0 {
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Returning from 'CreateQueue' with an Error... %s")
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init]  Exiting from function")
 	} else {
-		log.Printf("[%s] [Fn_bat_init] Created Message Queue SuccessFully", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Created Message Queue SuccessFully")
 	}
 
-	log.Printf("[%s] [Fn_bat_init] Copied pipe ID from args[3]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_pipe_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Copied pipe ID from args[3]: %s", cpcm.Xchngbook.C_pipe_id)
 
 	// Fetch exchange code from 'opm_ord_pipe_mstr'
 	queryForOpm_Xchng_Cd := `SELECT opm_xchng_cd
 				FROM opm_ord_pipe_mstr
 				WHERE opm_pipe_id = ?`
 
-	log.Printf("[%s] [Fn_bat_init] Executing query to fetch exchange code with pipe ID: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_pipe_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Executing query to fetch exchange code with pipe ID: %s", cpcm.Xchngbook.C_pipe_id)
 
-	row := Db.Raw(queryForOpm_Xchng_Cd, client_pack_manager.Xchngbook.C_pipe_id).Row()
+	row := Db.Raw(queryForOpm_Xchng_Cd, cpcm.Xchngbook.C_pipe_id).Row()
 	temp_str = ""
 	err := row.Scan(&temp_str)
 	if err != nil {
-		log.Printf("[%s] [Fn_bat_init] Error scanning row for exchange code: %v", client_pack_manager.Xchngbook.C_xchng_cd, err)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: scanning row for exchange code: %v", cpcm.Xchngbook.C_xchng_cd, err)
 		return -1
 	}
 
-	client_pack_manager.Xchngbook.C_xchng_cd = temp_str
+	cpcm.Xchngbook.C_xchng_cd = temp_str
 	temp_str = ""
-	log.Printf("[%s] [Fn_bat_init] Exchange code fetched: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Exchange code fetched: %s", cpcm.Xchngbook.C_xchng_cd)
 
 	/*here we are fetching the 'OPM_TRDR_ID' and 'OPM_BRNCH_ID' by using 'OPM_XCHNG_CD' and 'OPM_PIPE_ID'
 	which is fatched earlier */
@@ -136,17 +140,17 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 				FROM OPM_ORD_PIPE_MSTR
 				WHERE OPM_XCHNG_CD = ? AND OPM_PIPE_ID = ?`
 
-	log.Printf("[%s] [Fn_bat_init] Executing query to fetch trader and branch ID with exchange code: %s and pipe ID: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_cd, client_pack_manager.Xchngbook.C_pipe_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Executing query to fetch trader and branch ID with exchange code: %s and pipe ID: %s", cpcm.Xchngbook.C_xchng_cd, cpcm.Xchngbook.C_pipe_id)
 
-	rowQueryForTraderAndBranchID := Db.Raw(queryForTraderAndBranchID, client_pack_manager.Xchngbook.C_xchng_cd, client_pack_manager.Xchngbook.C_pipe_id).Row()
+	rowQueryForTraderAndBranchID := Db.Raw(queryForTraderAndBranchID, cpcm.Xchngbook.C_xchng_cd, cpcm.Xchngbook.C_pipe_id).Row()
 
-	errQueryForTraderAndBranchID := rowQueryForTraderAndBranchID.Scan(&client_pack_manager.pipe_mstr.C_opm_trdr_id, &client_pack_manager.pipe_mstr.L_opm_brnch_id)
+	errQueryForTraderAndBranchID := rowQueryForTraderAndBranchID.Scan(&cpcm.pipe_mstr.C_opm_trdr_id, &cpcm.pipe_mstr.L_opm_brnch_id)
 	if errQueryForTraderAndBranchID != nil {
-		log.Printf("[%s] [Fn_bat_init] Error scanning row for trader and branch ID: %v", client_pack_manager.ServiceName, errQueryForTraderAndBranchID)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] Error scanning row for trader and branch ID: %v", errQueryForTraderAndBranchID)
 		return -1
 	}
 
-	log.Printf("[%s] [Fn_bat_init] fetched trader ID: %s and branch ID : %d", client_pack_manager.ServiceName, client_pack_manager.pipe_mstr.C_opm_trdr_id, client_pack_manager.pipe_mstr.L_opm_brnch_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] fetched trader ID: %s and branch ID : %d", cpcm.pipe_mstr.C_opm_trdr_id, cpcm.pipe_mstr.L_opm_brnch_id)
 
 	// Fetch modification trade date from 'exg_xchng_mstr'
 
@@ -155,55 +159,55 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
 				FROM exg_xchng_mstr
 				WHERE exg_xchng_cd = ?`
 
-	log.Printf("[%s] [Fn_bat_init] Fetching trade date and broker ID with exchange code: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_cd)
-	row2 := Db.Raw(queryFor_exg_nxt_trd_dt, client_pack_manager.Xchngbook.C_xchng_cd).Row()
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Fetching trade date and broker ID with exchange code: %s", cpcm.Xchngbook.C_xchng_cd)
+	row2 := Db.Raw(queryFor_exg_nxt_trd_dt, cpcm.Xchngbook.C_xchng_cd).Row()
 
-	err2 := row2.Scan(&temp_str, &client_pack_manager.pipe_mstr.C_xchng_brkr_id)
+	err2 := row2.Scan(&temp_str, &cpcm.pipe_mstr.C_xchng_brkr_id)
 	if err2 != nil {
-		log.Printf("[%s] [Fn_bat_init] Error scanning trade date and broker ID: %v", client_pack_manager.ServiceName, err2)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: scanning trade date and broker ID: %v", err2)
 		return -1
 	}
 
-	client_pack_manager.Xchngbook.C_mod_trd_dt = temp_str
+	cpcm.Xchngbook.C_mod_trd_dt = temp_str
 
-	log.Printf("[%s] [Fn_bat_init] Fetched trade date : %s and broker ID : %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_mod_trd_dt, client_pack_manager.pipe_mstr.C_xchng_brkr_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Fetched trade date : %s and broker ID : %s", cpcm.Xchngbook.C_mod_trd_dt, cpcm.pipe_mstr.C_xchng_brkr_id)
 
-	client_pack_manager.Xchngbook.L_ord_seq = 0 // I am initially setting it to '0' because it was set that way in 'fn_bat_init' and I have not seen it getting changed anywhere. If I find it being changed somewhere, I will update it accordingly.
+	cpcm.Xchngbook.L_ord_seq = 0 // I am initially setting it to '0' because it was set that way in 'fn_bat_init' and I have not seen it getting changed anywhere. If I find it being changed somewhere, I will update it accordingly.
 
-	log.Printf("[%s] [Fn_bat_init] L_ord_seq initialized to %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ord_seq)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] L_ord_seq initialized to %d", cpcm.Xchngbook.L_ord_seq)
 
 	//here we are setting the S_user_typ_glb of 'St_opm_pipe_mstr' from the configuration file
-	userTypeStr := client_pack_manager.Enviroment_manager.GetProcessSpaceValue("UserSettings", "UserType")
+	userTypeStr := cpcm.Enviroment_manager.GetProcessSpaceValue("UserSettings", "UserType")
 	userType, err := strconv.Atoi(userTypeStr)
 	if err != nil {
-		log.Printf("[%s] [Fn_bat_init] Failed to convert UserType '%s' to integer: %v", client_pack_manager.ServiceName, userTypeStr, err)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Failed to convert UserType '%s' to integer: %v", userTypeStr, err)
 
 	}
-	client_pack_manager.pipe_mstr.S_user_typ_glb = userType
+	cpcm.pipe_mstr.S_user_typ_glb = userType
 
 	//this value also we are reding from configuration file "I have set the temp value in the configuration file for now"
-	maxPackValStr := client_pack_manager.Enviroment_manager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
+	maxPackValStr := cpcm.Enviroment_manager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
 	if maxPackValStr == "" {
-		log.Printf("[%s] [Fn_bat_init] 'PACK_VAL' not found in the configuration under 'PackingLimit'", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: 'PACK_VAL' not found in the configuration under 'PackingLimit'")
 	} else {
 		maxPackVal, err := strconv.Atoi(maxPackValStr)
 		if err != nil {
-			log.Printf("[%s] [Fn_bat_init] Failed to convert 'PACK_VAL' '%s' to integer: %v", client_pack_manager.ServiceName, maxPackValStr, err)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Failed to convert 'PACK_VAL' '%s' to integer: %v", maxPackValStr, err)
 			maxPackVal = 0
 		} else {
-			log.Printf("[%s] [Fn_bat_init] Fetched and converted 'PACK_VAL' from configuration: %d", client_pack_manager.ServiceName, maxPackVal)
+			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Fetched and converted 'PACK_VAL' from configuration: %d", maxPackVal)
 		}
-		client_pack_manager.Max_Pack_Val = maxPackVal
+		cpcm.Max_Pack_Val = maxPackVal
 	}
 
 	// finally we are calling the CLN_PACK_CLNT function (service)
-	resultTmp = client_pack_manager.CLN_PACK_CLNT(args, Db)
+	resultTmp = cpcm.CLN_PACK_CLNT(args, Db)
 	if resultTmp != 0 {
-		log.Printf("[%s] [Fn_bat_init] CLN_PACK_CLNT failed with result code: %d", client_pack_manager.ServiceName, resultTmp)
-		log.Printf("[%s] [Fn_bat_init] Returning to main from fn_bat_init", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: CLN_PACK_CLNT failed with result code: %d", resultTmp)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] [Error: Returning to main from fn_bat_init")
 		return -1
 	}
-	log.Printf("[%s] [Fn_bat_init] Exiting Fn_bat_init", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Exiting Fn_bat_init")
 	return 0
 }
 
@@ -229,97 +233,95 @@ func (client_pack_manager *ClnPackClntManager) Fn_bat_init(args []string, Db *go
  *
  ***********************************************************************************************/
 
-func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 	var resultTmp int
 	mtype := 1
 
-	log.Printf("[%s] [CLN_PACK_CLNT] Entering CLN_PACK_CLNT", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Entering CLN_PACK_CLNT")
 
 	// Setting up an infinite loop to keep the service running and continuously fetch newly created orders.
 	for {
 		// Beginning a local transaction for the service to perform fetch and update operations on the database.
-		resultTmp = client_pack_manager.Transaction_manager.FnBeginTran()
+		resultTmp = cpcm.Transaction_manager.FnBeginTran()
 		if resultTmp == -1 {
-			log.Printf("[%s] [CLN_PACK_CLNT] Transaction begin failed", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Transaction begin failed")
 			return -1
 		}
-		log.Printf("[%s] [CLN_PACK_CLNT] Transaction started with type: %d", client_pack_manager.ServiceName, client_pack_manager.Transaction_manager.TranType)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Transaction started with type: %d", cpcm.Transaction_manager.TranType)
 
 		// Calling the function to fetch the next order record.
-		resultTmp = client_pack_manager.fnGetNxtRec(Db)
+		resultTmp = cpcm.fnGetNxtRec(Db)
 		if resultTmp != 0 {
-			log.Printf("[%s] [CLN_PACK_CLNT] failed in getting the next record returning with result code: %d", client_pack_manager.ServiceName, resultTmp)
-			if client_pack_manager.Transaction_manager.FnAbortTran() == -1 {
-				log.Printf("[%s] [CLN_PACK_CLNT] Transaction abort failed", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: failed in getting the next record returning with result code: %d", resultTmp)
+			if cpcm.Transaction_manager.FnAbortTran() == -1 {
+				cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Transaction abort failed")
 				return -1
 			}
-			log.Printf("[%s] [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT with error", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT with error")
 			return -1
 		}
 
 		// Committing the transaction if it is a local transaction.
-		if client_pack_manager.Transaction_manager.FnCommitTran() == -1 {
-			log.Printf("[%s] [CLN_PACK_CLNT] Transaction commit failed", client_pack_manager.ServiceName)
+		if cpcm.Transaction_manager.FnCommitTran() == -1 {
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Transaction commit failed")
 			return -1
 		}
 
-		log.Printf("[%s] [CLN_PACK_CLNT] Transaction committed successfully", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Transaction committed successfully")
 
-		// log.Printf(" ************ Printing the q_packet from CLN_PACK_CLNT : %v", client_pack_manager.q_packet)
+		// cpcm.LoggerManager.LogInfo( cpcm.ServiceName ,"********* Printing the q_packet from CLN_PACK_CLNT : %v", cpcm.q_packet)
 
 		// Writing the data fetched from 'fnGetNxtRec' to the system queue (Linux).
 		//here setting the data becasues initially i am getting all zeros .
-		client_pack_manager.Message_queue_manager.Req_q_data = *client_pack_manager.q_packet
-		client_pack_manager.Message_queue_manager.ServiceName = client_pack_manager.ServiceName
+		cpcm.Message_queue_manager.Req_q_data = *cpcm.q_packet
+		cpcm.Message_queue_manager.ServiceName = cpcm.ServiceName
 
-		if client_pack_manager.Message_queue_manager.WriteToQueue(mtype) != 0 {
-			log.Printf("[%s] [CLN_PACK_CLNT] Error writing to queue with message type %d", client_pack_manager.ServiceName, mtype)
+		if cpcm.Message_queue_manager.WriteToQueue(mtype) != 0 {
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtype)
 			return -1
 		}
 
-		log.Printf("[%s] [CLN_PACK_CLNT] Successfully wrote to queue with message type %d", client_pack_manager.ServiceName, mtype)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully wrote to queue with message type %d", mtype)
 
 		// testing purposes (this will not be the part of actual code)
-		receivedData, receivedType, readErr := client_pack_manager.Message_queue_manager.ReadFromQueue(mtype)
+		receivedData, receivedType, readErr := cpcm.Message_queue_manager.ReadFromQueue(mtype)
 		if readErr != 0 {
-			log.Printf("[%s] [CLN_PACK_CLNT] Error reading from queue with message type %d: %d", client_pack_manager.ServiceName, mtype, readErr)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with message type %d: %d", mtype, readErr)
 			return -1
 		}
-		log.Printf("[%s] [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", client_pack_manager.ServiceName, mtype, receivedType)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", mtype, receivedType)
 
 		fmt.Println("Message Type:", receivedData.L_msg_type)
 
-		log.Println("---------------------------------------------------- St_req_q_data ---------------------------------------------------- ")
-
 		mtype++
 
-		if mtype > client_pack_manager.Max_Pack_Val {
+		if mtype > cpcm.Max_Pack_Val {
 			mtype = 1
 		}
 
 		TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
-                        SET fxb_plcd_stts = 'R'
-                        WHERE fxb_plcd_stts = 'Q'`
+		                SET fxb_plcd_stts = 'R'
+		                WHERE fxb_plcd_stts = 'Q'`
 
-		log.Printf("[%s] [CLN_PACK_CLNT] Executing update query to change status from 'Q' to 'R' in FXB_FO_XCHNG_BOOK", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Executing update query to change status from 'Q' to 'R' in FXB_FO_XCHNG_BOOK")
 
 		result := Db.Exec(TemporaryQueryForTesting)
 		if result.Error != nil {
-			log.Printf("[%s] [CLN_PACK_CLNT] Error executing update query: %v", client_pack_manager.ServiceName, result.Error)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Failed to execute update query: %v", result.Error)
 			return -1
 		}
 		rowsAffected := result.RowsAffected
-		log.Printf("[%s] [CLN_PACK_CLNT] Update query executed successfully, %d rows affected", client_pack_manager.ServiceName, rowsAffected)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT]  Update query executed successfully, %d rows affected", rowsAffected)
 
 	}
 
-	// log.Printf("[%s] [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT", client_pack_manager.ServiceName)
+	// cpcm.LoggerManager.LogInfo( cpcm.ServiceName ," [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT")
 	//return 0
 }
 
 /***************************************************************************************
  * fnGetNxtRec retrieves and processes the next record from the database based on its
- * status and type, then updates relevant structures and statuses. It handles extraction
+ * status and type, then updates relevant models and statuses. It handles extraction
  * of order data, updates database statuses, and packs the data for further processing.
  *
  * INPUT PARAMETERS:
@@ -344,132 +346,132 @@ func (client_pack_manager *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *
  *
  ***********************************************************************************************/
 
-func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
-	log.Printf("[%s] [fnGetNxtRec] Entering fnGetNxtRec", client_pack_manager.ServiceName)
+func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Entering fnGetNxtRec")
 
-	client_pack_manager.cPrgmFlg = "0"
+	cpcm.cPrgmFlg = "0"
 
 	// Calling the function 'fnSeqToOmd' to fetched the Records from the 'FXB_FO_XCHNG_BOOK'
-	resultTmp := client_pack_manager.fnSeqToOmd(Db)
+	resultTmp := cpcm.fnSeqToOmd(Db)
 	if resultTmp != 0 {
-		log.Printf("[%s] [fnGetNxtRec] Failed to fetch data into eXchngbook structure", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: Failed to fetch data into eXchngbook structure")
 		return -1
 	}
 
-	if client_pack_manager.Xchngbook == nil {
-		log.Printf("[%s] [fnGetNxtRec] Error: Xchngbook is nil", client_pack_manager.ServiceName)
+	if cpcm.Xchngbook == nil {
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: Xchngbook is nil")
 		return -1
 	}
 
-	if client_pack_manager.Xchngbook.C_rms_prcsd_flg == "P" {
-		log.Printf("[%s] [fnGetNxtRec] Order ref / Mod number = |%s| / |%d| Already Processed", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_ordr_rfrnc, client_pack_manager.Xchngbook.L_mdfctn_cntr)
+	if cpcm.Xchngbook.C_rms_prcsd_flg == "P" {
+		cpcm.LoggerManager.GetLogger().Warnf(cpcm.ServiceName, " [fnGetNxtRec] Order ref / Mod number = |%s| / |%d| Already Processed", cpcm.Xchngbook.C_ordr_rfrnc, cpcm.Xchngbook.L_mdfctn_cntr)
 
-		log.Printf("[%s] [fnGetNxtRec] Exiting from from 'fnGetNxtRec'", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Exiting from 'fnGetNxtRec' ")
 
 		return 0
 	}
 
-	if client_pack_manager.Xchngbook.C_plcd_stts != string(models.REQUESTED) {
-		log.Printf("[%s] [fnGetNxtRec] the Placed status is not requested . so we are we are not getting the record ", client_pack_manager.ServiceName)
+	if cpcm.Xchngbook.C_plcd_stts != string(util.REQUESTED) {
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: the Placed status is not requested . so we are we are not getting the record ")
 		return -1
 	}
 
 	// Checking the order type. Only fetch the order if it is of type 'Ordinary_Order'; otherwise, return without fetching.
-	if client_pack_manager.Xchngbook.C_ex_ordr_type == string(models.ORDINARY_ORDER) {
+	if cpcm.Xchngbook.C_ex_ordr_type == string(util.ORDINARY_ORDER) {
 
-		log.Printf("[%s] [fnGetNxtRec] Assigning C_ordr_rfrnc from eXchngbook to orderbook", client_pack_manager.ServiceName)
-		client_pack_manager.orderbook.C_ordr_rfrnc = client_pack_manager.Xchngbook.C_ordr_rfrnc
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Assigning C_ordr_rfrnc from eXchngbook to orderbook")
+		cpcm.orderbook.C_ordr_rfrnc = cpcm.Xchngbook.C_ordr_rfrnc
 
 		// Calling the function 'fnRefToOrd' to fetch orders from the 'fod_fo_ordr_dtls' table.
 
-		resultTmp = client_pack_manager.fnRefToOrd(Db)
+		resultTmp = cpcm.fnRefToOrd(Db)
 		if resultTmp != 0 {
-			log.Printf("[%s] [fnGetNxtRec] Failed to fetch data into orderbook structure", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: Failed to fetch data into orderbook structure")
 			return -1
 		}
 
 		// After fetching the records from 'order_book' and 'xchng_book', we check whether the values of 'L_mdfctn_cntr' from both tables are equal.
-		if client_pack_manager.Xchngbook.L_mdfctn_cntr != client_pack_manager.orderbook.L_mdfctn_cntr {
-			log.Printf("[%s] [fnGetNxtRec] L_mdfctn_cntr of both Xchngbook and order are not same", client_pack_manager.ServiceName)
-			log.Printf(" [fnGetNxtRec]  Exiting fnGetNxtRec")
+		if cpcm.Xchngbook.L_mdfctn_cntr != cpcm.orderbook.L_mdfctn_cntr {
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: L_mdfctn_cntr of both Xchngbook and order are not same")
+			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "GetNxtRec]  Exiting fnGetNxtRec")
 			return -1
 
 		}
 
 		// Here, we are updating the status of 'xchngbook' to reflect the change in 'FXB_FO_XCHNG_BOOK', indicating that the record has been read.
-		client_pack_manager.Xchngbook.C_plcd_stts = string(models.QUEUED)
-		client_pack_manager.Xchngbook.C_oprn_typ = string(models.UPDATION_ON_ORDER_FORWARDING)
+		cpcm.Xchngbook.C_plcd_stts = string(util.QUEUED)
+		cpcm.Xchngbook.C_oprn_typ = string(util.UPDATION_ON_ORDER_FORWARDING)
 
-		resultTmp = client_pack_manager.fnUpdXchngbk(Db)
+		resultTmp = cpcm.fnUpdXchngbk(Db)
 
 		if resultTmp != 0 {
-			log.Printf("[%s] [fnGetNxtRec] failed to update the status in Xchngbook", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: failed to update the status in Xchngbook")
 			return -1
 		}
 
-		client_pack_manager.orderbook.C_ordr_stts = string(models.QUEUED)
+		cpcm.orderbook.C_ordr_stts = string(util.QUEUED)
 		// Here, we are updating the status of the 'fod_fo_ordr_dtls' table to indicate that this record has been read and queued.
-		resultTmp = client_pack_manager.fnUpdOrdrbk(Db)
+		resultTmp = cpcm.fnUpdOrdrbk(Db)
 
 		if resultTmp != 0 {
-			log.Printf("[%s] failed to update the status in Order book", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: failed to update the status in Order book")
 			return -1
 		}
 
 		// here we are setting the contract data from orderbook structure
-		log.Printf("[%s]  [fnGetNxtRec] Setting contract data from orderbook structure", client_pack_manager.ServiceName)
-		client_pack_manager.contract.C_xchng_cd = client_pack_manager.orderbook.C_xchng_cd
-		client_pack_manager.contract.C_prd_typ = client_pack_manager.orderbook.C_prd_typ
-		client_pack_manager.contract.C_undrlyng = client_pack_manager.orderbook.C_undrlyng
-		client_pack_manager.contract.C_expry_dt = client_pack_manager.orderbook.C_expry_dt
-		client_pack_manager.contract.C_exrc_typ = client_pack_manager.orderbook.C_exrc_typ
-		client_pack_manager.contract.C_opt_typ = client_pack_manager.orderbook.C_opt_typ
-		client_pack_manager.contract.L_strike_prc = client_pack_manager.orderbook.L_strike_prc
-		client_pack_manager.contract.C_ctgry_indstk = client_pack_manager.orderbook.C_ctgry_indstk
-		// client_pack_manager.contract.L_ca_lvl = client_pack_manager.orderbook.L_ca_lvl
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "  [fnGetNxtRec] Setting contract data from orderbook structure")
+		cpcm.contract.C_xchng_cd = cpcm.orderbook.C_xchng_cd
+		cpcm.contract.C_prd_typ = cpcm.orderbook.C_prd_typ
+		cpcm.contract.C_undrlyng = cpcm.orderbook.C_undrlyng
+		cpcm.contract.C_expry_dt = cpcm.orderbook.C_expry_dt
+		cpcm.contract.C_exrc_typ = cpcm.orderbook.C_exrc_typ
+		cpcm.contract.C_opt_typ = cpcm.orderbook.C_opt_typ
+		cpcm.contract.L_strike_prc = cpcm.orderbook.L_strike_prc
+		cpcm.contract.C_ctgry_indstk = cpcm.orderbook.C_ctgry_indstk
+		// cpcm.contract.L_ca_lvl = cpcm.orderbook.L_ca_lvl
 
-		log.Printf("[%s] [fnGetNxtRec] contract.C_xchng_cd: %s ", client_pack_manager.ServiceName, client_pack_manager.contract.C_xchng_cd)
-		log.Printf("[%s] [fnGetNxtRec] contract.C_prd_typ: %s ", client_pack_manager.ServiceName, client_pack_manager.contract.C_prd_typ)
-		log.Printf("[%s] [fnGetNxtRec] contract.C_undrlyng: %s ", client_pack_manager.ServiceName, client_pack_manager.contract.C_undrlyng)
-		log.Printf("[%s] [fnGetNxtRec] contract.C_expry_dt: %s ", client_pack_manager.ServiceName, client_pack_manager.contract.C_expry_dt)
-		log.Printf("[%s] [fnGetNxtRec] contract.C_exrc_typ: %s ", client_pack_manager.ServiceName, client_pack_manager.contract.C_exrc_typ)
-		log.Printf("[%s] [fnGetNxtRec] contract.C_opt_typ: %s ", client_pack_manager.ServiceName, client_pack_manager.contract.C_opt_typ)
-		log.Printf("[%s] [fnGetNxtRec] contract.L_strike_prc: %d ", client_pack_manager.ServiceName, client_pack_manager.contract.L_strike_prc)
-		log.Printf("[%s] [fnGetNxtRec] contract.C_ctgry_indstk: %s ", client_pack_manager.ServiceName, client_pack_manager.contract.C_ctgry_indstk)
-		//log.Printf("[%s] contract.L_ca_lvl: |%d|", client_pack_manager.ServiceName, client_pack_manager.contract.L_ca_lvl)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.C_xchng_cd: %s ", cpcm.contract.C_xchng_cd)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.C_prd_typ: %s ", cpcm.contract.C_prd_typ)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.C_undrlyng: %s ", cpcm.contract.C_undrlyng)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.C_expry_dt: %s ", cpcm.contract.C_expry_dt)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.C_exrc_typ: %s ", cpcm.contract.C_exrc_typ)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.C_opt_typ: %s ", cpcm.contract.C_opt_typ)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.L_strike_prc: %d ", cpcm.contract.L_strike_prc)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] contract.C_ctgry_indstk: %s ", cpcm.contract.C_ctgry_indstk)
+		//cpcm.LoggerManager.LogInfo( cpcm.ServiceName ," contract.L_ca_lvl: |%d|",  cpcm.contract.L_ca_lvl)
 
-		if strings.TrimSpace(client_pack_manager.Xchngbook.C_xchng_cd) == "NFO" {
+		if strings.TrimSpace(cpcm.Xchngbook.C_xchng_cd) == "NFO" {
 
-			client_pack_manager.contract.C_rqst_typ = string(models.CONTRACT_TO_NSE_ID)
+			cpcm.contract.C_rqst_typ = string(util.CONTRACT_TO_NSE_ID)
 
 			// Calling this function to extract data from various tables and store it in the contract structure.
-			resultTmp = client_pack_manager.fnGetExtCnt(Db)
+			resultTmp = cpcm.fnGetExtCnt(Db)
 
 			if resultTmp != 0 {
-				log.Printf("[%s]  [fnGetNxtRec] failed to load data in NSE CNT ", client_pack_manager.ServiceName)
+				cpcm.LoggerManager.LogError(cpcm.ServiceName, "  [fnGetNxtRec] [Error: failed to load data in NSE CNT ")
 				return -1
 			}
 		} else {
-			log.Printf("[%s] [fnGetNxtRec] returning from 'fnGetNxtRec' because 'Xchngbook.C_xchng_cd' is not 'NFO' --> %s ", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_cd)
-			log.Printf("[%s] [fnGetNxtRec] returning with Error", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: returning from 'fnGetNxtRec' because 'Xchngbook.C_xchng_cd' is not 'NFO' --> %s ", cpcm.Xchngbook.C_xchng_cd)
+			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] returning with Error")
 			return -1
 		}
 
-		log.Printf("[%s] [fnGetNxtRec] Packing Ordinary Order STARTS ", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Packing Ordinary Order STARTS ")
 
 		// Checking if 'Token_id' is received from 'fnGetExtCnt'. If not, the record will be rejected.
 
-		if client_pack_manager.nse_contract.L_token_id == 0 {
-			log.Printf("[%s] [fnGetNxtRec] Token id for ordinary order is: %d", client_pack_manager.ServiceName, client_pack_manager.nse_contract.L_token_id)
+		if cpcm.nse_contract.L_token_id == 0 {
+			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Token id for ordinary order is: %d", cpcm.nse_contract.L_token_id)
 
-			log.Printf("[%s] [fnGetNxtRec] token id is not avialable so we are calling 'fn_rjct_rcrd' ", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: token id is not avialable so we are calling 'fn_rjct_rcrd' ")
 
 			// Calling 'fnRjctRcrd' to reject the record.
-			resultTmp = client_pack_manager.fnRjctRcrd(Db)
+			resultTmp = cpcm.fnRjctRcrd(Db)
 
 			if resultTmp != 0 {
-				log.Printf("[%s] [fnGetNxtRec] returned from 'fnRjctRcrd' with Error", client_pack_manager.ServiceName)
-				log.Printf("[%s] [fnGetNxtRec] Exiting from 'fnGetNxtRec' ", client_pack_manager.ServiceName)
+				cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetNxtRec] [Error: returned from 'fnRjctRcrd' with Error")
+				cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Exiting from 'fnGetNxtRec' ")
 				return -1
 			}
 
@@ -477,40 +479,41 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 
 		// here we are initialising the "ExchngPackLibMaster"
 		eplm := NewExchngPackLibMaster(
-			client_pack_manager.ServiceName,
-			client_pack_manager.Xchngbook,
-			client_pack_manager.orderbook,
-			client_pack_manager.pipe_mstr,
-			client_pack_manager.nse_contract,
-			client_pack_manager.oe_reqres,
-			client_pack_manager.exch_msg,
-			client_pack_manager.net_hdr,
-			client_pack_manager.q_packet,
-			client_pack_manager.int_header,
-			client_pack_manager.contract_desc,
-			client_pack_manager.order_flag,
-			client_pack_manager.Order_conversion_manager,
-			client_pack_manager.cPanNo,
-			client_pack_manager.cLstActRef,
-			client_pack_manager.cEspID,
-			client_pack_manager.cAlgoID,
-			client_pack_manager.cSourceFlg,
-			client_pack_manager.cPrgmFlg,
+			cpcm.ServiceName,
+			cpcm.Xchngbook,
+			cpcm.orderbook,
+			cpcm.pipe_mstr,
+			cpcm.nse_contract,
+			cpcm.oe_reqres,
+			cpcm.exch_msg,
+			cpcm.net_hdr,
+			cpcm.q_packet,
+			cpcm.int_header,
+			cpcm.contract_desc,
+			cpcm.order_flag,
+			cpcm.Order_conversion_manager,
+			cpcm.cPanNo,
+			cpcm.cLstActRef,
+			cpcm.cEspID,
+			cpcm.cAlgoID,
+			cpcm.cSourceFlg,
+			cpcm.cPrgmFlg,
+			cpcm.LoggerManager,
 		)
 
 		// Calling the function 'fnPackOrdnryOrdToNse' to pack the entire data into the final structure 'St_req_q_data'.
 		resultTmp = eplm.fnPackOrdnryOrdToNse(Db)
 
 		if resultTmp != 0 {
-			log.Printf("[%s]  [fnGetNxtRec] 'fnPackOrdnryOrdToNse' returned an error.", client_pack_manager.ServiceName)
-			log.Printf("[%s] [fnGetNxtRec] Exiting 'fnGetNxtRec'.", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, "  [fnGetNxtRec] [Error: 'fnPackOrdnryOrdToNse' returned an error.")
+			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Exiting 'fnGetNxtRec'.")
 		} else {
-			log.Printf("[%s] [fnGetNxtRec] Data successfully packed.", client_pack_manager.ServiceName)
+			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Data successfully packed.")
 		}
 
 	}
 
-	log.Printf("[%s] [fnGetNxtRec] Exiting fnGetNxtRec", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Exiting fnGetNxtRec")
 	return 0
 }
 
@@ -538,12 +541,12 @@ func (client_pack_manager *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
  *
  ***********************************************************************************************/
 
-func (client_pack_manager *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 	var c_ip_addrs string
 	var c_prcimpv_flg string
 
-	log.Printf("[%s][fnSeqToOmd] Entering fnSeqToOmd", client_pack_manager.ServiceName)
-	log.Printf("[%s][fnSeqToOmd] Before extracting the data from the 'fxb_ordr_rfrnc' and storing it in the 'Xchngbook' structure", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] Entering fnSeqToOmd")
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] Before extracting the data from the 'fxb_ordr_rfrnc' and storing it in the 'Xchngbook' structure")
 
 	query := `
 		SELECT fxb_ordr_rfrnc,
@@ -586,82 +589,82 @@ func (client_pack_manager *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
 
 	`
 
-	log.Printf("[%s][fnSeqToOmd] Executing query to fetch order details", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] Executing query to fetch order details")
 
-	log.Printf("[%s][fnSeqToOmd] C_xchng_cd: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_cd)
-	log.Printf("[%s][fnSeqToOmd] C_pipe_id: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_pipe_id)
-	log.Printf("[%s][fnSeqToOmd] C_mod_trd_dt: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_mod_trd_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] C_xchng_cd: %s", cpcm.Xchngbook.C_xchng_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] C_pipe_id: %s", cpcm.Xchngbook.C_pipe_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] C_mod_trd_dt: %s", cpcm.Xchngbook.C_mod_trd_dt)
 
 	row := db.Raw(query,
-		client_pack_manager.Xchngbook.C_xchng_cd,
-		client_pack_manager.Xchngbook.C_pipe_id,
-		client_pack_manager.Xchngbook.C_mod_trd_dt,
-		client_pack_manager.Xchngbook.C_xchng_cd,
-		client_pack_manager.Xchngbook.C_mod_trd_dt,
-		client_pack_manager.Xchngbook.C_pipe_id).Row()
+		cpcm.Xchngbook.C_xchng_cd,
+		cpcm.Xchngbook.C_pipe_id,
+		cpcm.Xchngbook.C_mod_trd_dt,
+		cpcm.Xchngbook.C_xchng_cd,
+		cpcm.Xchngbook.C_mod_trd_dt,
+		cpcm.Xchngbook.C_pipe_id).Row()
 
 	err := row.Scan(
-		&client_pack_manager.Xchngbook.C_ordr_rfrnc,    // fxb_ordr_rfrnc
-		&client_pack_manager.Xchngbook.C_slm_flg,       // fxb_lmt_mrkt_sl_flg
-		&client_pack_manager.Xchngbook.L_dsclsd_qty,    // fxb_dsclsd_qty
-		&client_pack_manager.Xchngbook.L_ord_tot_qty,   // fxb_ordr_tot_qty
-		&client_pack_manager.Xchngbook.L_ord_lmt_rt,    // fxb_lmt_rt
-		&client_pack_manager.Xchngbook.L_stp_lss_tgr,   // fxb_stp_lss_tgr
-		&client_pack_manager.Xchngbook.C_valid_dt,      // C_valid_dt (formatted as 'DD-Mon-YYYY')
-		&client_pack_manager.Xchngbook.C_ord_typ,       // C_ord_typ (transformed 'V' to 'T')
-		&client_pack_manager.Xchngbook.C_req_typ,       // C_req_typ
-		&client_pack_manager.Xchngbook.L_ord_seq,       // L_ord_seq
-		&c_ip_addrs,                                    // COALESCE(fxb_ip, 'NA')
-		&c_prcimpv_flg,                                 // COALESCE(fxb_prcimpv_flg, 'N')
-		&client_pack_manager.Xchngbook.C_ex_ordr_type,  // C_ex_ordr_type
-		&client_pack_manager.Xchngbook.C_plcd_stts,     // C_plcd_stts
-		&client_pack_manager.Xchngbook.L_mdfctn_cntr,   // L_mdfctn_cntr
-		&client_pack_manager.Xchngbook.C_frwrd_tm,      // C_frwrd_tm
-		&client_pack_manager.Xchngbook.D_jiffy,         // D_jiffy
-		&client_pack_manager.Xchngbook.C_xchng_rmrks,   // C_xchng_rmrks
-		&client_pack_manager.Xchngbook.C_rms_prcsd_flg, // C_rms_prcsd_flg
-		&client_pack_manager.Xchngbook.L_ors_msg_typ,   // L_ors_msg_typ
-		&client_pack_manager.Xchngbook.C_ack_tm,        // C_ack_tm
+		&cpcm.Xchngbook.C_ordr_rfrnc,    // fxb_ordr_rfrnc
+		&cpcm.Xchngbook.C_slm_flg,       // fxb_lmt_mrkt_sl_flg
+		&cpcm.Xchngbook.L_dsclsd_qty,    // fxb_dsclsd_qty
+		&cpcm.Xchngbook.L_ord_tot_qty,   // fxb_ordr_tot_qty
+		&cpcm.Xchngbook.L_ord_lmt_rt,    // fxb_lmt_rt
+		&cpcm.Xchngbook.L_stp_lss_tgr,   // fxb_stp_lss_tgr
+		&cpcm.Xchngbook.C_valid_dt,      // C_valid_dt (formatted as 'DD-Mon-YYYY')
+		&cpcm.Xchngbook.C_ord_typ,       // C_ord_typ (transformed 'V' to 'T')
+		&cpcm.Xchngbook.C_req_typ,       // C_req_typ
+		&cpcm.Xchngbook.L_ord_seq,       // L_ord_seq
+		&c_ip_addrs,                     // COALESCE(fxb_ip, 'NA')
+		&c_prcimpv_flg,                  // COALESCE(fxb_prcimpv_flg, 'N')
+		&cpcm.Xchngbook.C_ex_ordr_type,  // C_ex_ordr_type
+		&cpcm.Xchngbook.C_plcd_stts,     // C_plcd_stts
+		&cpcm.Xchngbook.L_mdfctn_cntr,   // L_mdfctn_cntr
+		&cpcm.Xchngbook.C_frwrd_tm,      // C_frwrd_tm
+		&cpcm.Xchngbook.D_jiffy,         // D_jiffy
+		&cpcm.Xchngbook.C_xchng_rmrks,   // C_xchng_rmrks
+		&cpcm.Xchngbook.C_rms_prcsd_flg, // C_rms_prcsd_flg
+		&cpcm.Xchngbook.L_ors_msg_typ,   // L_ors_msg_typ
+		&cpcm.Xchngbook.C_ack_tm,        // C_ack_tm
 	)
 
 	if err != nil {
-		log.Printf("[%s][fnSeqToOmd] Error scanning row: %v", client_pack_manager.ServiceName, err)
-		log.Printf("[%s][fnSeqToOmd] Exiting fnSeqToOmd with error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, "[fnSeqToOmd] [Error: Error scanning row: %v", err)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] Exiting fnSeqToOmd with error")
 		return -1
 	}
 
 	if c_prcimpv_flg == "Y" {
-		client_pack_manager.cPrgmFlg = "T"
+		cpcm.cPrgmFlg = "T"
 	} else {
-		client_pack_manager.cPrgmFlg = c_ip_addrs
+		cpcm.cPrgmFlg = c_ip_addrs
 	}
 
-	log.Printf("[%s][fnSeqToOmd] Data extracted and stored in the 'Xchngbook' structure:", client_pack_manager.ServiceName)
-	log.Printf("[%s][fnSeqToOmd]   C_ordr_rfrnc:     %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_ordr_rfrnc)
-	log.Printf("[%s][fnSeqToOmd]   C_slm_flg:        %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_slm_flg)
-	log.Printf("[%s][fnSeqToOmd]   L_dsclsd_qty:     %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_dsclsd_qty)
-	log.Printf("[%s][fnSeqToOmd]   L_ord_tot_qty:    %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ord_tot_qty)
-	log.Printf("[%s][fnSeqToOmd]   L_ord_lmt_rt:     %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ord_lmt_rt)
-	log.Printf("[%s][fnSeqToOmd]   L_stp_lss_tgr:    %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_stp_lss_tgr)
-	log.Printf("[%s][fnSeqToOmd]   C_valid_dt:       %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_valid_dt)
-	log.Printf("[%s][fnSeqToOmd]   C_ord_typ:        %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_ord_typ)
-	log.Printf("[%s][fnSeqToOmd]   C_req_typ:        %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_req_typ)
-	log.Printf("[%s][fnSeqToOmd]   L_ord_seq:        %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ord_seq)
-	log.Printf("[%s][fnSeqToOmd]   IpAddrs:          %s", client_pack_manager.ServiceName, c_ip_addrs)
-	log.Printf("[%s][fnSeqToOmd]   PrcimpvFlg:       %s", client_pack_manager.ServiceName, c_prcimpv_flg)
-	log.Printf("[%s][fnSeqToOmd]   C_ex_ordr_type:   %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_ex_ordr_type)
-	log.Printf("[%s][fnSeqToOmd]   C_plcd_stts:      %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_plcd_stts)
-	log.Printf("[%s][fnSeqToOmd]   L_mdfctn_cntr:    %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_mdfctn_cntr)
-	log.Printf("[%s][fnSeqToOmd]   C_frwrd_tm:       %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_frwrd_tm)
-	log.Printf("[%s][fnSeqToOmd]   D_jiffy:          %f", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.D_jiffy)
-	log.Printf("[%s][fnSeqToOmd]   C_xchng_rmrks:    %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_rmrks)
-	log.Printf("[%s][fnSeqToOmd]   C_rms_prcsd_flg:  %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_rms_prcsd_flg)
-	log.Printf("[%s][fnSeqToOmd]   L_ors_msg_typ:    %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ors_msg_typ)
-	log.Printf("[%s][fnSeqToOmd]   C_ack_tm:         %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_ack_tm)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] Data extracted and stored in the 'Xchngbook' structure:")
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_ordr_rfrnc:     %s", cpcm.Xchngbook.C_ordr_rfrnc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_slm_flg:        %s", cpcm.Xchngbook.C_slm_flg)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   L_dsclsd_qty:     %d", cpcm.Xchngbook.L_dsclsd_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   L_ord_tot_qty:    %d", cpcm.Xchngbook.L_ord_tot_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   L_ord_lmt_rt:     %d", cpcm.Xchngbook.L_ord_lmt_rt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   L_stp_lss_tgr:    %d", cpcm.Xchngbook.L_stp_lss_tgr)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_valid_dt:       %s", cpcm.Xchngbook.C_valid_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_ord_typ:        %s", cpcm.Xchngbook.C_ord_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_req_typ:        %s", cpcm.Xchngbook.C_req_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   L_ord_seq:        %d", cpcm.Xchngbook.L_ord_seq)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   IpAddrs:          %s", c_ip_addrs)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   PrcimpvFlg:       %s", c_prcimpv_flg)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_ex_ordr_type:   %s", cpcm.Xchngbook.C_ex_ordr_type)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_plcd_stts:      %s", cpcm.Xchngbook.C_plcd_stts)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   L_mdfctn_cntr:    %d", cpcm.Xchngbook.L_mdfctn_cntr)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_frwrd_tm:       %s", cpcm.Xchngbook.C_frwrd_tm)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   D_jiffy:          %f", cpcm.Xchngbook.D_jiffy)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_xchng_rmrks:    %s", cpcm.Xchngbook.C_xchng_rmrks)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_rms_prcsd_flg:  %s", cpcm.Xchngbook.C_rms_prcsd_flg)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   L_ors_msg_typ:    %d", cpcm.Xchngbook.L_ors_msg_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd]   C_ack_tm:         %s", cpcm.Xchngbook.C_ack_tm)
 
-	log.Printf("[%s][fnSeqToOmd] Data extracted and stored in the 'Xchngbook' structure successfully", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] Data extracted and stored in the 'Xchngbook' structure successfully")
 
-	log.Printf("[%s][fnSeqToOmd] Exiting fnSeqToOmd", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "[fnSeqToOmd] Exiting fnSeqToOmd")
 	return 0
 }
 
@@ -690,7 +693,7 @@ func (client_pack_manager *ClnPackClntManager) fnSeqToOmd(db *gorm.DB) int {
  *
  ***********************************************************************************************/
 
-func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 	/*
 		c_pan_no --> we are simply setting it to 0 using memset in the
 		MEMSET(c_ordr_rfrnc);
@@ -701,8 +704,8 @@ func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 		char c_source_flg = '\0';
 	*/
 
-	log.Printf("[%s] [fnRefToOrd]  Entering fnFetchOrderDetails", client_pack_manager.ServiceName)
-	log.Printf("[%s] [fnRefToOrd] Before extracting the data from the 'fod_fo_ordr_dtls' and storing it in the 'orderbook' structure", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]  Entering fnFetchOrderDetails")
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Before extracting the data from the 'fod_fo_ordr_dtls' and storing it in the 'orderbook' structure")
 
 	query := `
     SELECT
@@ -741,85 +744,85 @@ func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 
     `
 
-	log.Printf("[%s] [fnRefToOrd] Executing query to fetch order details", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Executing query to fetch order details")
 
-	log.Printf("[%s] [fnRefToOrd] Order Reference: %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ordr_rfrnc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Order Reference: %s", cpcm.orderbook.C_ordr_rfrnc)
 
-	row := db.Raw(query, strings.TrimSpace(client_pack_manager.orderbook.C_ordr_rfrnc)).Row()
+	row := db.Raw(query, strings.TrimSpace(cpcm.orderbook.C_ordr_rfrnc)).Row()
 
 	err := row.Scan(
-		&client_pack_manager.orderbook.C_cln_mtch_accnt,
-		&client_pack_manager.orderbook.C_ordr_flw,
-		&client_pack_manager.orderbook.L_ord_tot_qty,
-		&client_pack_manager.orderbook.L_exctd_qty,
-		&client_pack_manager.orderbook.L_exctd_qty_day,
-		&client_pack_manager.orderbook.C_settlor,
-		&client_pack_manager.orderbook.C_spl_flg,
-		&client_pack_manager.orderbook.C_ack_tm,
-		&client_pack_manager.orderbook.C_prev_ack_tm,
-		&client_pack_manager.orderbook.C_pro_cli_ind,
-		&client_pack_manager.orderbook.C_ctcl_id,
-		&client_pack_manager.cPanNo,
-		&client_pack_manager.cLstActRef,
-		&client_pack_manager.cEspID,
-		&client_pack_manager.cAlgoID,
-		&client_pack_manager.cSourceFlg,
-		&client_pack_manager.orderbook.L_mdfctn_cntr,
-		&client_pack_manager.orderbook.C_ordr_stts,
-		&client_pack_manager.orderbook.C_xchng_cd,
-		&client_pack_manager.orderbook.C_prd_typ,
-		&client_pack_manager.orderbook.C_undrlyng,
-		&client_pack_manager.orderbook.C_expry_dt,
-		&client_pack_manager.orderbook.C_exrc_typ,
-		&client_pack_manager.orderbook.C_opt_typ,
-		&client_pack_manager.orderbook.L_strike_prc,
-		&client_pack_manager.orderbook.C_ctgry_indstk,
-		&client_pack_manager.orderbook.C_xchng_ack,
+		&cpcm.orderbook.C_cln_mtch_accnt,
+		&cpcm.orderbook.C_ordr_flw,
+		&cpcm.orderbook.L_ord_tot_qty,
+		&cpcm.orderbook.L_exctd_qty,
+		&cpcm.orderbook.L_exctd_qty_day,
+		&cpcm.orderbook.C_settlor,
+		&cpcm.orderbook.C_spl_flg,
+		&cpcm.orderbook.C_ack_tm,
+		&cpcm.orderbook.C_prev_ack_tm,
+		&cpcm.orderbook.C_pro_cli_ind,
+		&cpcm.orderbook.C_ctcl_id,
+		&cpcm.cPanNo,
+		&cpcm.cLstActRef,
+		&cpcm.cEspID,
+		&cpcm.cAlgoID,
+		&cpcm.cSourceFlg,
+		&cpcm.orderbook.L_mdfctn_cntr,
+		&cpcm.orderbook.C_ordr_stts,
+		&cpcm.orderbook.C_xchng_cd,
+		&cpcm.orderbook.C_prd_typ,
+		&cpcm.orderbook.C_undrlyng,
+		&cpcm.orderbook.C_expry_dt,
+		&cpcm.orderbook.C_exrc_typ,
+		&cpcm.orderbook.C_opt_typ,
+		&cpcm.orderbook.L_strike_prc,
+		&cpcm.orderbook.C_ctgry_indstk,
+		&cpcm.orderbook.C_xchng_ack,
 	)
 
 	if err != nil {
-		log.Printf("[%s] [fnRefToOrd] Error scanning row: %v", client_pack_manager.ServiceName, err)
-		log.Printf("[%s] [fnRefToOrd] Exiting fnFetchOrderDetails with error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnRefToOrd] [Error: scanning row: %v", err)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Exiting fnFetchOrderDetails with error")
 		return -1
 	}
 
-	client_pack_manager.cPanNo = strings.TrimSpace(client_pack_manager.cPanNo)
-	client_pack_manager.cLstActRef = strings.TrimSpace(client_pack_manager.cLstActRef)
-	client_pack_manager.cEspID = strings.TrimSpace(client_pack_manager.cEspID)
-	client_pack_manager.cAlgoID = strings.TrimSpace(client_pack_manager.cAlgoID)
-	client_pack_manager.cSourceFlg = strings.TrimSpace(client_pack_manager.cSourceFlg)
+	cpcm.cPanNo = strings.TrimSpace(cpcm.cPanNo)
+	cpcm.cLstActRef = strings.TrimSpace(cpcm.cLstActRef)
+	cpcm.cEspID = strings.TrimSpace(cpcm.cEspID)
+	cpcm.cAlgoID = strings.TrimSpace(cpcm.cAlgoID)
+	cpcm.cSourceFlg = strings.TrimSpace(cpcm.cSourceFlg)
 
-	log.Printf("[%s] [fnRefToOrd] Data extracted and stored in the 'orderbook' structure:", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Data extracted and stored in the 'orderbook' structure:")
 
-	log.Printf("[%s] [fnRefToOrd]   C_cln_mtch_accnt:   %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_cln_mtch_accnt)
-	log.Printf("[%s] [fnRefToOrd]   C_ordr_flw:        %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ordr_flw)
-	log.Printf("[%s] [fnRefToOrd]   L_ord_tot_qty:     %d", client_pack_manager.ServiceName, client_pack_manager.orderbook.L_ord_tot_qty)
-	log.Printf("[%s] [fnRefToOrd]   L_exctd_qty:       %d", client_pack_manager.ServiceName, client_pack_manager.orderbook.L_exctd_qty)
-	log.Printf("[%s] [fnRefToOrd]   L_exctd_qty_day:   %d", client_pack_manager.ServiceName, client_pack_manager.orderbook.L_exctd_qty_day)
-	log.Printf("[%s] [fnRefToOrd]   C_settlor:         %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_settlor)
-	log.Printf("[%s] [fnRefToOrd]   C_spl_flg:         %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_spl_flg)
-	log.Printf("[%s] [fnRefToOrd]   C_ack_tm:          %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ack_tm)
-	log.Printf("[%s] [fnRefToOrd]   C_prev_ack_tm:     %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_prev_ack_tm)
-	log.Printf("[%s] [fnRefToOrd]   C_pro_cli_ind:     %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_pro_cli_ind)
-	log.Printf("[%s] [fnRefToOrd]   C_ctcl_id:         %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ctcl_id)
-	log.Printf("[%s] [fnRefToOrd]   C_pan_no:          %s", client_pack_manager.ServiceName, client_pack_manager.cPanNo)
-	log.Printf("[%s] [fnRefToOrd]   C_lst_act_ref_tmp: %s", client_pack_manager.ServiceName, client_pack_manager.cLstActRef)
-	log.Printf("[%s] [fnRefToOrd]   C_esp_id:          %s", client_pack_manager.ServiceName, client_pack_manager.cEspID)
-	log.Printf("[%s] [fnRefToOrd]   C_algo_id:         %s", client_pack_manager.ServiceName, client_pack_manager.cAlgoID)
-	log.Printf("[%s] [fnRefToOrd]   C_source_flg_tmp:  %s", client_pack_manager.ServiceName, client_pack_manager.cSourceFlg)
-	log.Printf("[%s] [fnRefToOrd]   L_mdfctn_cntr:     %d", client_pack_manager.ServiceName, client_pack_manager.orderbook.L_mdfctn_cntr)
-	log.Printf("[%s] [fnRefToOrd]   C_ordr_stts:       %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ordr_stts)
-	log.Printf("[%s] [fnRefToOrd]   C_xchng_cd:        %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_xchng_cd)
-	log.Printf("[%s] [fnRefToOrd]   C_prd_typ:         %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_prd_typ)
-	log.Printf("[%s] [fnRefToOrd]   C_undrlyng:        %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_undrlyng)
-	log.Printf("[%s] [fnRefToOrd]   C_expry_dt:        %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_expry_dt)
-	log.Printf("[%s] [fnRefToOrd]   C_exrc_typ:        %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_exrc_typ)
-	log.Printf("[%s] [fnRefToOrd]   C_opt_typ:         %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_opt_typ)
-	log.Printf("[%s] [fnRefToOrd]   L_strike_prc:      %d", client_pack_manager.ServiceName, client_pack_manager.orderbook.L_strike_prc)
-	log.Printf("[%s] [fnRefToOrd]   C_ctgry_indstk:    %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ctgry_indstk)
-	log.Printf("[%s] [fnRefToOrd]   C_xchng_ack	: 	   %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_xchng_ack)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_cln_mtch_accnt:   %s", cpcm.orderbook.C_cln_mtch_accnt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_ordr_flw:        %s", cpcm.orderbook.C_ordr_flw)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   L_ord_tot_qty:     %d", cpcm.orderbook.L_ord_tot_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   L_exctd_qty:       %d", cpcm.orderbook.L_exctd_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   L_exctd_qty_day:   %d", cpcm.orderbook.L_exctd_qty_day)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_settlor:         %s", cpcm.orderbook.C_settlor)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_spl_flg:         %s", cpcm.orderbook.C_spl_flg)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_ack_tm:          %s", cpcm.orderbook.C_ack_tm)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_prev_ack_tm:     %s", cpcm.orderbook.C_prev_ack_tm)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_pro_cli_ind:     %s", cpcm.orderbook.C_pro_cli_ind)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_ctcl_id:         %s", cpcm.orderbook.C_ctcl_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_pan_no:          %s", cpcm.cPanNo)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_lst_act_ref_tmp: %s", cpcm.cLstActRef)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_esp_id:          %s", cpcm.cEspID)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_algo_id:         %s", cpcm.cAlgoID)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_source_flg_tmp:  %s", cpcm.cSourceFlg)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   L_mdfctn_cntr:     %d", cpcm.orderbook.L_mdfctn_cntr)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_ordr_stts:       %s", cpcm.orderbook.C_ordr_stts)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_xchng_cd:        %s", cpcm.orderbook.C_xchng_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_prd_typ:         %s", cpcm.orderbook.C_prd_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_undrlyng:        %s", cpcm.orderbook.C_undrlyng)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_expry_dt:        %s", cpcm.orderbook.C_expry_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_exrc_typ:        %s", cpcm.orderbook.C_exrc_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_opt_typ:         %s", cpcm.orderbook.C_opt_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   L_strike_prc:      %d", cpcm.orderbook.L_strike_prc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_ctgry_indstk:    %s", cpcm.orderbook.C_ctgry_indstk)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd]   C_xchng_ack	: 	   %s", cpcm.orderbook.C_xchng_ack)
 
-	log.Printf("[%s] [fnRefToOrd] Data extracted and stored in the 'orderbook' structure successfully", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Data extracted and stored in the 'orderbook' structure successfully")
 
 	clmQuery := `
     SELECT
@@ -830,29 +833,29 @@ func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
 	WHERE
     CLM_MTCH_ACCNT = ?
     `
-	log.Printf("[%s] [fnRefToOrd] Executing query to fetch data from 'CLM_CLNT_MSTR' ", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Executing query to fetch data from 'CLM_CLNT_MSTR' ")
 
-	row = db.Raw(clmQuery, strings.TrimSpace(client_pack_manager.orderbook.C_cln_mtch_accnt)).Row()
+	row = db.Raw(clmQuery, strings.TrimSpace(cpcm.orderbook.C_cln_mtch_accnt)).Row()
 
 	var cCpCode, cUccCd string
 	err = row.Scan(&cCpCode, &cUccCd)
 
 	if err != nil {
-		log.Printf("[%s] [fnRefToOrd] Error scanning client details: %v", client_pack_manager.ServiceName, err)
-		log.Printf("[%s] [fnRefToOrd] Exiting fnRefToOrd with error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnRefToOrd] [Error: scanning client details: %v", err)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Exiting fnRefToOrd with error")
 		return -1
 	}
 
-	log.Printf("[%s] [fnRefToOrd] cCpCode : %s", client_pack_manager.ServiceName, cCpCode)
-	log.Printf("[%s] [fnRefToOrd] cUccCd : %s", client_pack_manager.ServiceName, cUccCd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] cCpCode : %s", cCpCode)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] cUccCd : %s", cUccCd)
 
-	log.Printf("[%s] [fnRefToOrd] Updating orderbook with client details", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Updating orderbook with client details")
 
-	client_pack_manager.orderbook.C_cln_mtch_accnt = strings.TrimSpace(cUccCd)
-	client_pack_manager.orderbook.C_settlor = strings.TrimSpace(cCpCode)
-	client_pack_manager.orderbook.C_ctcl_id = strings.TrimSpace(client_pack_manager.orderbook.C_ctcl_id)
+	cpcm.orderbook.C_cln_mtch_accnt = strings.TrimSpace(cUccCd)
+	cpcm.orderbook.C_settlor = strings.TrimSpace(cCpCode)
+	cpcm.orderbook.C_ctcl_id = strings.TrimSpace(cpcm.orderbook.C_ctcl_id)
 
-	log.Printf("[%s] [fnRefToOrd] Exiting fnFetchOrderDetails", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRefToOrd] Exiting fnFetchOrderDetails")
 	return 0
 }
 
@@ -877,10 +880,10 @@ func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
  * FUNCTIONAL FLOW:
 
  * 1. Based on the `C_oprn_typ` value in the `Xchngbook` structure:
- *    a. For **Order Forwarding** (`models.UPDATION_ON_ORDER_FORWARDING`):
+ *    a. For **Order Forwarding** (`util.UPDATION_ON_ORDER_FORWARDING`):
  *       - Constructs and executes a SQL query to update 'fxb_plcd_stts' and 'fxb_frwd_tm' fields
  *         for the record that matches 'fxb_ordr_rfrnc' and 'fxb_mdfctn_cntr'.
- *    b. For **Exchange Response** (`models.UPDATION_ON_EXCHANGE_RESPONSE`):
+ *    b. For **Exchange Response** (`util.UPDATION_ON_EXCHANGE_RESPONSE`):
  *       - Checks if the record should be processed based on the `L_dwnld_flg` value.
  *       - If processing is required, it verifies if a record already exists using the provided
  *         'fxb_jiffy', 'fxb_xchng_cd', and 'fxb_pipe_id'.
@@ -888,43 +891,43 @@ func (client_pack_manager *ClnPackClntManager) fnRefToOrd(db *gorm.DB) int {
  *         'fxb_plcd_stts', 'fxb_rms_prcsd_flg', 'fxb_ors_msg_typ', and 'fxb_ack_tm'.
  ***********************************************************************************************/
 
-func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 
 	var iRecExists int64
 
-	log.Printf("[%s] [fnUpdXchngbk] Entering fnUpdXchngbk", client_pack_manager.ServiceName)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_xchng_cd)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_ordr_rfrnc)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_pipe_id)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_mod_trd_dt)
-	log.Printf("[%s] [fnUpdXchngbk]: %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ord_seq)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_slm_flg)
-	log.Printf("[%s] [fnUpdXchngbk]: %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_dsclsd_qty)
-	log.Printf("[%s] [fnUpdXchngbk]: %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ord_tot_qty)
-	log.Printf("[%s] [fnUpdXchngbk]: %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_ord_lmt_rt)
-	log.Printf("[%s] [fnUpdXchngbk]: %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_stp_lss_tgr)
-	log.Printf("[%s] [fnUpdXchngbk]: %d", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.L_mdfctn_cntr)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_valid_dt)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_ord_typ)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_req_typ)
-	log.Printf("[%s] [fnUpdXchngbk]: %s", client_pack_manager.ServiceName, client_pack_manager.Xchngbook.C_plcd_stts)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] Entering fnUpdXchngbk")
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_xchng_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_ordr_rfrnc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_pipe_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_mod_trd_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_ord_seq)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_slm_flg)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_dsclsd_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_ord_tot_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_ord_lmt_rt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_stp_lss_tgr)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_mdfctn_cntr)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_valid_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_ord_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_req_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_plcd_stts)
 
-	switch client_pack_manager.Xchngbook.C_oprn_typ {
-	case string(models.UPDATION_ON_ORDER_FORWARDING):
+	switch cpcm.Xchngbook.C_oprn_typ {
+	case string(util.UPDATION_ON_ORDER_FORWARDING):
 
 		query1 := `UPDATE fxb_fo_xchng_book 
 				SET fxb_plcd_stts = ?, fxb_frwd_tm = CURRENT_TIMESTAMP
 				WHERE fxb_ordr_rfrnc = ? 
 				AND fxb_mdfctn_cntr = ?`
 
-		result := db.Exec(query1, client_pack_manager.Xchngbook.C_plcd_stts, client_pack_manager.Xchngbook.C_ordr_rfrnc, client_pack_manager.Xchngbook.L_mdfctn_cntr)
+		result := db.Exec(query1, cpcm.Xchngbook.C_plcd_stts, cpcm.Xchngbook.C_ordr_rfrnc, cpcm.Xchngbook.L_mdfctn_cntr)
 		if result.Error != nil {
-			log.Printf("[%s] [fnUpdXchngbk] Error updating order forwarding: %v", client_pack_manager.ServiceName, result.Error)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnUpdXchngbk] [Error: updating order forwarding: %v", result.Error)
 			return -1
 		}
 
-	case string(models.UPDATION_ON_EXCHANGE_RESPONSE):
-		if client_pack_manager.Xchngbook.L_dwnld_flg == models.DOWNLOAD {
+	case string(util.UPDATION_ON_EXCHANGE_RESPONSE):
+		if cpcm.Xchngbook.L_dwnld_flg == util.DOWNLOAD {
 
 			result := db.Raw(
 				`SELECT COUNT(*) 
@@ -932,20 +935,20 @@ func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 					WHERE fxb_jiffy = ? 
 					AND fxb_xchng_cd = ? 
 					AND fxb_pipe_id = ?`,
-				client_pack_manager.Xchngbook.D_jiffy, client_pack_manager.Xchngbook.C_xchng_cd, client_pack_manager.Xchngbook.C_pipe_id,
+				cpcm.Xchngbook.D_jiffy, cpcm.Xchngbook.C_xchng_cd, cpcm.Xchngbook.C_pipe_id,
 			).Scan(&iRecExists)
 			if result.Error != nil {
-				log.Printf("[%s] [fnUpdXchngbk] SQL error: %v", client_pack_manager.ServiceName, result.Error)
+				cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnUpdXchngbk] [Error: SQL error: %v", result.Error)
 				return -1
 			}
 
 			if iRecExists > 0 {
-				log.Printf("[%s] [fnUpdXchngbk] Record already processed", client_pack_manager.ServiceName)
+				cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] Record already processed")
 				return -1
 			}
 		}
 
-		c_xchng_rmrks := strings.TrimSpace(client_pack_manager.Xchngbook.C_xchng_rmrks)
+		c_xchng_rmrks := strings.TrimSpace(cpcm.Xchngbook.C_xchng_rmrks)
 
 		result := db.Exec(
 			`UPDATE fxb_fo_xchng_book 
@@ -957,26 +960,26 @@ func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
 					fxb_jiffy = ? 
 				WHERE fxb_ordr_rfrnc = ? 
 				AND fxb_mdfctn_cntr = ?`,
-			client_pack_manager.Xchngbook.C_plcd_stts,
-			client_pack_manager.Xchngbook.C_rms_prcsd_flg,
-			client_pack_manager.Xchngbook.L_ors_msg_typ,
-			client_pack_manager.Xchngbook.C_ack_tm,
+			cpcm.Xchngbook.C_plcd_stts,
+			cpcm.Xchngbook.C_rms_prcsd_flg,
+			cpcm.Xchngbook.L_ors_msg_typ,
+			cpcm.Xchngbook.C_ack_tm,
 			c_xchng_rmrks,
-			client_pack_manager.Xchngbook.D_jiffy,
-			client_pack_manager.Xchngbook.C_ordr_rfrnc,
-			client_pack_manager.Xchngbook.L_mdfctn_cntr,
+			cpcm.Xchngbook.D_jiffy,
+			cpcm.Xchngbook.C_ordr_rfrnc,
+			cpcm.Xchngbook.L_mdfctn_cntr,
 		)
 		if result.Error != nil {
-			log.Printf("[%s] [fnUpdXchngbk] Error updating exchange response: %v", client_pack_manager.ServiceName, result.Error)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnUpdXchngbk] [Error: updating exchange response: %v", result.Error)
 			return -1
 		}
 
 	default:
-		log.Printf("[%s] [fnUpdXchngbk] Invalid Operation Type", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnUpdXchngbk] [Error: Invalid Operation Type")
 		return -1
 	}
 
-	log.Printf("[%s] [fnUpdXchngbk] Exiting fnUpdXchngbk", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] Exiting fnUpdXchngbk")
 
 	return 0
 }
@@ -999,9 +1002,9 @@ func (client_pack_manager *ClnPackClntManager) fnUpdXchngbk(db *gorm.DB) int {
  *    'fod_fo_ordr_dtls' table where 'fod_ordr_rfrnc' matches the value from the `orderbook` structure.
  ***********************************************************************************************/
 
-func (client_pack_manager *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
 
-	log.Printf("[%s] [fnUpdOrdrbk] Starting 'fnUpdOrdbk' function", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdOrdrbk] Starting 'fnUpdOrdbk' function")
 
 	query := `
     UPDATE fod_fo_ordr_dtls
@@ -1009,22 +1012,22 @@ func (client_pack_manager *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
     WHERE fod_ordr_rfrnc = ?;
 	`
 
-	log.Printf("[%s] [fnUpdOrdrbk] Executing query to update order status", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdOrdrbk] Executing query to update order status")
 
-	log.Printf("[%s] [fnUpdOrdrbk] Order Reference: %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ordr_rfrnc)
-	log.Printf("[%s] [fnUpdOrdrbk]  Order Status: %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_ordr_stts)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdOrdrbk] Order Reference: %s", cpcm.orderbook.C_ordr_rfrnc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdOrdrbk]  Order Status: %s", cpcm.orderbook.C_ordr_stts)
 
-	result := db.Exec(query, client_pack_manager.orderbook.C_ordr_stts, strings.TrimSpace(client_pack_manager.orderbook.C_ordr_rfrnc))
+	result := db.Exec(query, cpcm.orderbook.C_ordr_stts, strings.TrimSpace(cpcm.orderbook.C_ordr_rfrnc))
 
 	if result.Error != nil {
-		log.Printf("[%s] [fnUpdOrdrbk] Error executing update query: %v", client_pack_manager.ServiceName, result.Error)
-		log.Printf("[%s] [fnUpdOrdrbk] Exiting 'fnUpdOrdbk' with error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnUpdOrdrbk] [Error: executing update query: %v", result.Error)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdOrdrbk] Exiting 'fnUpdOrdbk' with error")
 		return -1
 	}
 
-	log.Printf("[%s] [fnUpdOrdrbk] Order status updated successfully", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdOrdrbk] Order status updated successfully")
 
-	log.Printf("[%s] [fnUpdOrdrbk] returning from 'fnUpdOrdbk' function", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdOrdrbk] returning from 'fnUpdOrdbk' function")
 
 	return 0
 }
@@ -1036,7 +1039,7 @@ func (client_pack_manager *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
  *
  * The function performs the following operations:
  * 1. **Determine Entity Type**: Based on the value of `C_xchng_cd` in the `contract` structure,
- *    sets the `i_sem_entity` variable to either `models.NFO_ENTTY` or `models.BFO_ENTTY`.
+ *    sets the `i_sem_entity` variable to either `util.NFO_ENTTY` or `util.BFO_ENTTY`.
  *
  * 2. **Fetch Symbol**: Executes a query to fetch the stock symbol (`C_symbol`) from the
  *    'sem_stck_map' table using the stock code (`C_undrlyng`) and entity type.
@@ -1067,22 +1070,22 @@ func (client_pack_manager *ClnPackClntManager) fnUpdOrdrbk(db *gorm.DB) int {
  * 4. Updates the `nse_contract` structure with the fetched values.
  ***********************************************************************************************/
 
-func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	var i_sem_entity int
 	var c_stck_cd, c_symbl, c_exg_cd string
 
-	log.Printf("[%s] [fnGetExtCnt] Entering 'fnGetExtCnt' ", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Entering 'fnGetExtCnt' ")
 
-	if client_pack_manager.contract.C_xchng_cd == "NFO" {
-		i_sem_entity = models.NFO_ENTTY
+	if cpcm.contract.C_xchng_cd == "NFO" {
+		i_sem_entity = util.NFO_ENTTY
 	} else {
-		i_sem_entity = models.BFO_ENTTY
+		i_sem_entity = util.BFO_ENTTY
 	}
 
-	c_stck_cd = client_pack_manager.contract.C_undrlyng
+	c_stck_cd = cpcm.contract.C_undrlyng
 
 	c_stck_cd = strings.ToUpper(c_stck_cd)
-	log.Printf("[%s] [fnGetExtCnt] Converted 'c_stck_cd' to uppercase: %s", client_pack_manager.ServiceName, c_stck_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Converted 'c_stck_cd' to uppercase: %s", c_stck_cd)
 
 	query1 := `
 		SELECT TRIM(sem_map_vl)
@@ -1090,48 +1093,48 @@ func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 		WHERE sem_entty = ?
 		AND sem_stck_cd = ?;
 	`
-	log.Printf("[%s] [fnGetExtCnt] Executing query to fetch 'C_symbol'", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Executing query to fetch 'C_symbol'")
 
 	row1 := db.Raw(query1, i_sem_entity, c_stck_cd).Row()
 
 	err := row1.Scan(&c_symbl)
 
 	if err != nil {
-		log.Printf("[%s] [fnGetExtCnt] Error scanning row: %v", client_pack_manager.ServiceName, err)
-		log.Printf("[%s] [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetExtCnt] [Error:  scanning row: %v", err)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error")
 		return -1
 	}
 
-	log.Printf("[%s] [fnGetExtCnt] Value successfully fetched from the table 'sem_stck_map'", client_pack_manager.ServiceName)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_symbol is: %s", client_pack_manager.ServiceName, c_symbl)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Value successfully fetched from the table 'sem_stck_map'")
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_symbol is: %s", c_symbl)
 
 	// Assign values to the NSE contract structure
-	client_pack_manager.nse_contract.C_xchng_cd = client_pack_manager.contract.C_xchng_cd
-	client_pack_manager.nse_contract.C_prd_typ = client_pack_manager.contract.C_prd_typ
-	client_pack_manager.nse_contract.C_expry_dt = client_pack_manager.contract.C_expry_dt
-	client_pack_manager.nse_contract.C_exrc_typ = client_pack_manager.contract.C_exrc_typ
-	client_pack_manager.nse_contract.C_opt_typ = client_pack_manager.contract.C_opt_typ
-	client_pack_manager.nse_contract.L_strike_prc = client_pack_manager.contract.L_strike_prc
-	client_pack_manager.nse_contract.C_symbol = c_symbl
-	client_pack_manager.nse_contract.C_rqst_typ = client_pack_manager.contract.C_rqst_typ
-	client_pack_manager.nse_contract.C_ctgry_indstk = client_pack_manager.contract.C_ctgry_indstk
+	cpcm.nse_contract.C_xchng_cd = cpcm.contract.C_xchng_cd
+	cpcm.nse_contract.C_prd_typ = cpcm.contract.C_prd_typ
+	cpcm.nse_contract.C_expry_dt = cpcm.contract.C_expry_dt
+	cpcm.nse_contract.C_exrc_typ = cpcm.contract.C_exrc_typ
+	cpcm.nse_contract.C_opt_typ = cpcm.contract.C_opt_typ
+	cpcm.nse_contract.L_strike_prc = cpcm.contract.L_strike_prc
+	cpcm.nse_contract.C_symbol = c_symbl
+	cpcm.nse_contract.C_rqst_typ = cpcm.contract.C_rqst_typ
+	cpcm.nse_contract.C_ctgry_indstk = cpcm.contract.C_ctgry_indstk
 
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_xchng_cd is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_xchng_cd)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_prd_typ is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_prd_typ)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_expry_dt is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_expry_dt)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_exrc_typ is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_exrc_typ)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_opt_typ is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_opt_typ)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.L_strike_prc is: %d", client_pack_manager.ServiceName, client_pack_manager.nse_contract.L_strike_prc)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_symbol is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_symbol)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_ctgry_indstk is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_ctgry_indstk)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_rqst_typ is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_rqst_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_xchng_cd is: %s", cpcm.nse_contract.C_xchng_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_prd_typ is: %s", cpcm.nse_contract.C_prd_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_expry_dt is: %s", cpcm.nse_contract.C_expry_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_exrc_typ is: %s", cpcm.nse_contract.C_exrc_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_opt_typ is: %s", cpcm.nse_contract.C_opt_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.L_strike_prc is: %d", cpcm.nse_contract.L_strike_prc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_symbol is: %s", cpcm.nse_contract.C_symbol)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_ctgry_indstk is: %s", cpcm.nse_contract.C_ctgry_indstk)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_rqst_typ is: %s", cpcm.nse_contract.C_rqst_typ)
 
-	if client_pack_manager.contract.C_xchng_cd == "NFO" {
+	if cpcm.contract.C_xchng_cd == "NFO" {
 		c_exg_cd = "NSE"
-	} else if client_pack_manager.contract.C_xchng_cd == "BFO" {
+	} else if cpcm.contract.C_xchng_cd == "BFO" {
 		c_exg_cd = "BSE"
 	} else {
-		log.Printf("[%s] [fnGetExtCnt] Invalid option '%s' for 'client_pack_manager.contract.C_xchng_cd'. Exiting 'fnGetExtCnt'", client_pack_manager.ServiceName, client_pack_manager.contract.C_xchng_cd)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetExtCnt] [Error: Invalid option '%s' for 'cpcm.contract.C_xchng_cd'. Exiting 'fnGetExtCnt'", cpcm.contract.C_xchng_cd)
 		return -1
 	}
 
@@ -1142,20 +1145,20 @@ func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 		AND ess_xchng_cd = ?;
 	`
 
-	log.Printf("[%s] [fnGetExtCnt] Executing query to fetch 'C_series'", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Executing query to fetch 'C_series'")
 
-	row2 := db.Raw(query2, client_pack_manager.contract.C_undrlyng, c_exg_cd).Row()
+	row2 := db.Raw(query2, cpcm.contract.C_undrlyng, c_exg_cd).Row()
 
-	err2 := row2.Scan(&client_pack_manager.nse_contract.C_series)
+	err2 := row2.Scan(&cpcm.nse_contract.C_series)
 
 	if err2 != nil {
-		log.Printf("[%s] [fnGetExtCnt] Error scanning row: %v", client_pack_manager.ServiceName, err2)
-		log.Printf("[%s] [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetExtCnt] [Error: scanning row: %v", err2)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error")
 		return -1
 	}
 
-	log.Printf("[%s] [fnGetExtCnt] Value successfully fetched from the table 'ESS_SGMNT_STCK'", client_pack_manager.ServiceName)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.C_series is: %s", client_pack_manager.ServiceName, client_pack_manager.nse_contract.C_series)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Value successfully fetched from the table 'ESS_SGMNT_STCK'")
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.C_series is: %s", cpcm.nse_contract.C_series)
 
 	query3 := `
 		SELECT COALESCE(ftq_token_no, 0),
@@ -1170,20 +1173,20 @@ func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 		  AND ftq_strk_prc = ?;
 	`
 
-	log.Printf("[%s] [fnGetExtCnt] Executing query to fetch 'L_token_id' and 'L_ca_lvl'", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Executing query to fetch 'L_token_id' and 'L_ca_lvl'")
 
-	log.Printf("[%s] [fnGetExtCnt] C_xchng_cd: %s", client_pack_manager.ServiceName, client_pack_manager.contract.C_xchng_cd)
-	log.Printf("[%s] [fnGetExtCnt] C_prd_typ: %s", client_pack_manager.ServiceName, client_pack_manager.contract.C_prd_typ)
-	log.Printf("[%s] [fnGetExtCnt] C_undrlyng: %s", client_pack_manager.ServiceName, client_pack_manager.contract.C_undrlyng)
-	log.Printf("[%s] [fnGetExtCnt] C_expry_dt: %s", client_pack_manager.ServiceName, client_pack_manager.contract.C_expry_dt)
-	log.Printf("[%s] [fnGetExtCnt] C_exrc_typ: %s", client_pack_manager.ServiceName, client_pack_manager.contract.C_exrc_typ)
-	log.Printf("[%s] [fnGetExtCnt] C_opt_typ: %s", client_pack_manager.ServiceName, client_pack_manager.contract.C_opt_typ)
-	log.Printf("[%s] [fnGetExtCnt] L_strike_prc: %d", client_pack_manager.ServiceName, client_pack_manager.contract.L_strike_prc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] C_xchng_cd: %s", cpcm.contract.C_xchng_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] C_prd_typ: %s", cpcm.contract.C_prd_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] C_undrlyng: %s", cpcm.contract.C_undrlyng)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] C_expry_dt: %s", cpcm.contract.C_expry_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] C_exrc_typ: %s", cpcm.contract.C_exrc_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] C_opt_typ: %s", cpcm.contract.C_opt_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] L_strike_prc: %d", cpcm.contract.L_strike_prc)
 
-	parsedDate, err := time.Parse(time.RFC3339, client_pack_manager.contract.C_expry_dt)
+	parsedDate, err := time.Parse(time.RFC3339, cpcm.contract.C_expry_dt)
 	if err != nil {
-		log.Printf("[%s] [fnGetExtCnt] Error parsing date: %v", client_pack_manager.ServiceName, err)
-		log.Printf("[%s] [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetExtCnt] [Error: parsing date: %v", err)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error")
 		return -1
 	}
 
@@ -1191,41 +1194,41 @@ func (client_pack_manager *ClnPackClntManager) fnGetExtCnt(db *gorm.DB) int {
 	formattedDate := parsedDate.Format("02-Jan-2006")
 
 	row3 := db.Raw(query3,
-		client_pack_manager.contract.C_xchng_cd,
-		client_pack_manager.contract.C_prd_typ,
-		client_pack_manager.contract.C_undrlyng,
+		cpcm.contract.C_xchng_cd,
+		cpcm.contract.C_prd_typ,
+		cpcm.contract.C_undrlyng,
 		formattedDate,
-		client_pack_manager.contract.C_exrc_typ,
-		client_pack_manager.contract.C_opt_typ,
-		client_pack_manager.contract.L_strike_prc,
+		cpcm.contract.C_exrc_typ,
+		cpcm.contract.C_opt_typ,
+		cpcm.contract.L_strike_prc,
 	).Row()
 
-	err3 := row3.Scan(&client_pack_manager.nse_contract.L_token_id, &client_pack_manager.nse_contract.L_ca_lvl)
+	err3 := row3.Scan(&cpcm.nse_contract.L_token_id, &cpcm.nse_contract.L_ca_lvl)
 
 	if err3 != nil {
-		log.Printf("[%s] [fnGetExtCnt] Error scanning row: %v", client_pack_manager.ServiceName, err3)
-		log.Printf("[%s] [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnGetExtCnt] [Error: scanning row: %v", err3)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Exiting 'fnGetExtCnt' due to error")
 		return -1
 	}
 
-	log.Printf("[%s] [fnGetExtCnt] Values successfully fetched from the table 'ftq_fo_trd_qt'", client_pack_manager.ServiceName)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.L_token_id is: %d", client_pack_manager.ServiceName, client_pack_manager.nse_contract.L_token_id)
-	log.Printf("[%s] [fnGetExtCnt] client_pack_manager.nse_contract.L_ca_lvl is: %d", client_pack_manager.ServiceName, client_pack_manager.nse_contract.L_ca_lvl)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] Values successfully fetched from the table 'ftq_fo_trd_qt'")
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.L_token_id is: %d", cpcm.nse_contract.L_token_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetExtCnt] cpcm.nse_contract.L_ca_lvl is: %d", cpcm.nse_contract.L_ca_lvl)
 
 	return 0
 }
 
-func (client_pack_manager *ClnPackClntManager) fnRjctRcrd(db *gorm.DB) int {
+func (cpcm *ClnPackClntManager) fnRjctRcrd(db *gorm.DB) int {
 
 	var resultTmp int
 	var c_tm_stmp string
 
-	log.Printf("[%s] [fnRjctRcrd] Function 'fnRjctRcrd' starts", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] Function 'fnRjctRcrd' starts")
 
 	/*
-		// log.Printf("[%s] [fnRjctRcrd] Product type is : %s", client_pack_manager.ServiceName, client_pack_manager.orderbook.C_prd_typ)
+		// cpcm.LoggerManager.LogInfo( cpcm.ServiceName ," [fnRjctRcrd] Product type is : %s",  cpcm.orderbook.C_prd_typ)
 
-		// if client_pack_manager.orderbook.C_prd_typ == models.FUTURES {
+		// if cpcm.orderbook.C_prd_typ == util.FUTURES {
 		// 	svc = "SFO_FUT_ACK"
 		// } else {
 		// 	svc = "SFO_OPT_ACK"
@@ -1238,33 +1241,33 @@ func (client_pack_manager *ClnPackClntManager) fnRjctRcrd(db *gorm.DB) int {
 	err := row.Scan(&c_tm_stmp)
 
 	if err != nil {
-		log.Printf("[%s] [fnRjctRcrd] Error getting the system time: %v", client_pack_manager.ServiceName, err)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnRjctRcrd] [Error: getting the system time: %v", err)
 		return -1
 	}
 
 	c_tm_stmp = strings.TrimSpace(c_tm_stmp)
 
-	log.Printf("[%s] [fnRjctRcrd] Current timestamp: %s", client_pack_manager.ServiceName, c_tm_stmp)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] Current timestamp: %s", c_tm_stmp)
 
-	client_pack_manager.Xchngbook.C_plcd_stts = "REJECT"
-	client_pack_manager.Xchngbook.C_rms_prcsd_flg = "NOT_PROCESSED"
-	client_pack_manager.Xchngbook.L_ors_msg_typ = models.ORS_NEW_ORD_RJCT
-	client_pack_manager.Xchngbook.C_ack_tm = c_tm_stmp
-	client_pack_manager.Xchngbook.C_xchng_rmrks = "Token id not available"
-	client_pack_manager.Xchngbook.D_jiffy = 0
-	client_pack_manager.Xchngbook.C_oprn_typ = "UPDATION_ON_EXCHANGE_RESPONSE"
+	cpcm.Xchngbook.C_plcd_stts = "REJECT"
+	cpcm.Xchngbook.C_rms_prcsd_flg = "NOT_PROCESSED"
+	cpcm.Xchngbook.L_ors_msg_typ = util.ORS_NEW_ORD_RJCT
+	cpcm.Xchngbook.C_ack_tm = c_tm_stmp
+	cpcm.Xchngbook.C_xchng_rmrks = "Token id not available"
+	cpcm.Xchngbook.D_jiffy = 0
+	cpcm.Xchngbook.C_oprn_typ = "UPDATION_ON_EXCHANGE_RESPONSE"
 
-	log.Printf("[%s] [fnRjctRcrd] Before calling 'fnUpdXchngbk' on 'Reject Record' ", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] Before calling 'fnUpdXchngbk' on 'Reject Record' ")
 
-	resultTmp = client_pack_manager.fnUpdXchngbk(db)
+	resultTmp = cpcm.fnUpdXchngbk(db)
 
 	if resultTmp != 0 {
-		log.Printf("[%s] [fnRjctRcrd] returned from 'fnUpdXchngbk' with an Error", client_pack_manager.ServiceName)
-		log.Printf("[%s] [fnRjctRcrd] exiting from 'fnRjctRcrd'", client_pack_manager.ServiceName)
+		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [fnRjctRcrd] [Error: returned from 'fnUpdXchngbk' with an Error")
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] exiting from 'fnRjctRcrd'")
 		return -1
 	}
 
-	log.Printf("[%s] [fnRjctRcrd] Time Before calling 'fnUpdXchngbk' : %s ", client_pack_manager.ServiceName, c_tm_stmp)
-	log.Printf("[%s] [fnRjctRcrd] Function 'fnRjctRcrd' ends successfully", client_pack_manager.ServiceName)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] Time Before calling 'fnUpdXchngbk' : %s ", c_tm_stmp)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] Function 'fnRjctRcrd' ends successfully")
 	return 0
 }
