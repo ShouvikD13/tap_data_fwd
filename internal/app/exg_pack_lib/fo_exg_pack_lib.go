@@ -1,4 +1,4 @@
-package app
+package exg_pack_lib
 
 import (
 	"DATA_FWD_TAP/internal/models"
@@ -101,7 +101,7 @@ func NewExchngPackLibMaster(serviceName string,
 // There is an issue with the field `c_remark`. it is not being initialized anywhere in the original code.
 // In the NNF, `c_remark` is mentioned as 'cOrdFiller CHAR 24', but there is no description provided for it.
 
-func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
+func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
 
 	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] Inside 'fnPackOrdnryOrdToNse' ")
 
@@ -192,7 +192,7 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.int_header.Li_trader_id = int32(value) // 1 HDR
 
 	eplm.int_header.Li_log_time = 0                                                // 2 HDR
-	copyAndFormatSymbol(eplm.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ") // 3 HDR 'orstonse'
+	CopyAndFormatSymbol(eplm.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ") // 3 HDR 'orstonse'
 	eplm.int_header.Si_transaction_code = util.BOARD_LOT_IN                        // 4 HDR
 	eplm.int_header.C_filler_2 = ' '                                               // 5 HDR
 
@@ -234,13 +234,13 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.oe_reqres.C_filler_3 = [4]byte{' ', ' ', ' ', ' '}   //9 BDY
 	eplm.oe_reqres.L_token_no = eplm.nse_contract.L_token_id  //10 BDY
 
-	if eplm.fn_orstonse_cntrct_desc() != 0 { // contract_desc
-		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] returned from 'fn_orstonse_cntrct_desc()' with error ")
+	if eplm.Fn_orstonse_cntrct_desc() != 0 { // contract_desc
+		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] returned from 'Fn_orstonse_cntrct_desc()' with error ")
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] Exiting from 'fnPackOrdnryOrdToNse' ")
 		return -1
 	}
 
-	copyAndFormatSymbol(eplm.oe_reqres.C_counter_party_broker_id[:], util.LEN_BROKER_ID, " ") // 12 BDY
+	CopyAndFormatSymbol(eplm.oe_reqres.C_counter_party_broker_id[:], util.LEN_BROKER_ID, " ") // 12 BDY
 	eplm.oe_reqres.C_filler_4 = ' '                                                           // 13 BDY
 	eplm.oe_reqres.C_filler_5 = [2]byte{' ', ' '}                                             // 14 BDY
 	eplm.oe_reqres.C_closeout_flg = ' '                                                       // 15 BDY
@@ -258,7 +258,7 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 		}
 	}
 
-	copyAndFormatSymbol(eplm.oe_reqres.C_account_number[:], len(eplm.oe_reqres.C_account_number), eplm.orderbook.C_cln_mtch_accnt) //19 BDY
+	CopyAndFormatSymbol(eplm.oe_reqres.C_account_number[:], len(eplm.oe_reqres.C_account_number), eplm.orderbook.C_cln_mtch_accnt) //19 BDY
 
 	if eplm.xchngbook.C_slm_flg == "M" {
 		eplm.oe_reqres.Si_book_type = util.REGULAR_LOT_ORDER //20 BDY
@@ -359,7 +359,7 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	}
 	eplm.oe_reqres.Li_trader_id = int32(value1) // 34 BDY
 
-	copyAndFormatSymbol(eplm.oe_reqres.C_broker_id[:], len(eplm.oe_reqres.C_broker_id), eplm.pipe_mstr.C_xchng_brkr_id) //35 BDY
+	CopyAndFormatSymbol(eplm.oe_reqres.C_broker_id[:], len(eplm.oe_reqres.C_broker_id), eplm.pipe_mstr.C_xchng_brkr_id) //35 BDY
 
 	eplm.oe_reqres.I_order_seq = eplm.xchngbook.L_ord_seq // 36 BDY
 	eplm.oe_reqres.C_open_close = 'O'                     // 37 BDY
@@ -384,14 +384,14 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] ICD_CUST_TYPE: %s", icdCustType)
 	if icdCustType != "NRI" {
 		if eplm.orderbook.C_pro_cli_ind == string(util.BRKR_PLCD) {
-			copyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], util.LEN_SETTLOR, " ") // already set to zero now setting value
+			CopyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], util.LEN_SETTLOR, " ") // already set to zero now setting value
 			eplm.oe_reqres.Si_pro_client_indicator = util.NSE_PRO                   // 39 BDY
 		} else {
-			copyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], util.LEN_SETTLOR, eplm.pipe_mstr.C_xchng_brkr_id)
+			CopyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], util.LEN_SETTLOR, eplm.pipe_mstr.C_xchng_brkr_id)
 			eplm.oe_reqres.Si_pro_client_indicator = util.NSE_CLIENT
 		}
 	} else {
-		copyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], util.LEN_SETTLOR, eplm.orderbook.C_settlor)
+		CopyAndFormatSymbol(eplm.oe_reqres.C_settlor[:], util.LEN_SETTLOR, eplm.orderbook.C_settlor)
 		eplm.oe_reqres.Si_pro_client_indicator = util.NSE_CLIENT
 	}
 
@@ -456,7 +456,7 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.oe_reqres.D_nnf_field, err = strconv.ParseFloat(eplm.orderbook.C_ctcl_id, 64)
 	if err != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error in converting the 'C_ctcl_id' in float ... ")
-		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] Exiting from the function ")
+		eplm.LoggerManager.GetLogger().Warn(eplm.serviceName, " [fnPackOrdnryOrdToNse] Exiting from the function ")
 		return -1
 	}
 
@@ -546,18 +546,18 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'St_oe_reqres' C_reserved is :	%c ", eplm.oe_reqres.C_reserved)
 
 	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] Printing order flags structure for Ordinary Order....")
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_ato is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_ATO)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_market is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_Market)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_sl is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_SL)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_mit is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_MIT)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_day is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_Day)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_gtc is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_GTC)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_ioc is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_IOC)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_aon is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_AON)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_mf is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_MF)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_matched_ind is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_MatchedInd)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_traded is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_Traded)))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_modified is : %d", boolToInt(eplm.order_flag.GetFlagValue(models.Flg_Modified)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_ato is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_ATO)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_market is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_Market)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_sl is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_SL)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_mit is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_MIT)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_day is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_Day)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_gtc is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_GTC)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_ioc is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_IOC)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_aon is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_AON)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_mf is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_MF)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_matched_ind is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_MatchedInd)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_traded is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_Traded)))
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] 'order flags' flg_modified is : %d", BoolToInt(eplm.order_flag.GetFlagValue(models.Flg_Modified)))
 	// eplm.LoggerManager.LogInfo(eplm.serviceName , " [fnPackOrdnryOrdToNse] flg_cancelled is :	%d ", eplm.order_flag.Flg_cancelled)
 	// eplm.LoggerManager.LogInfo(eplm.serviceName , " [fnPackOrdnryOrdToNse] flg_cancel_pending is :	%d ", eplm.order_flag.Flg_cancel_pending)
 	// eplm.LoggerManager.LogInfo(eplm.serviceName , " [fnPackOrdnryOrdToNse] flg_closed is :	%d ", eplm.order_flag.Flg_closed)
@@ -596,32 +596,32 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	buf := new(bytes.Buffer)
 
 	// Write int_header and handle error
-	if err := writeAndCopy(buf, *eplm.int_header, eplm.oe_reqres.St_hdr[:]); err != nil {
+	if err := WriteAndCopy(buf, *eplm.int_header, eplm.oe_reqres.St_hdr[:]); err != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error: Failed to write int_header: %v", err)
 	}
 
 	// Write contract_desc and handle error
-	if err := writeAndCopy(buf, *eplm.contract_desc, eplm.oe_reqres.St_con_desc[:]); err != nil {
+	if err := WriteAndCopy(buf, *eplm.contract_desc, eplm.oe_reqres.St_con_desc[:]); err != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error: Failed to write contract_desc: %v", err)
 	}
 
 	// Write order_flag and handle error
-	if err := writeAndCopy(buf, *eplm.order_flag, eplm.oe_reqres.St_ord_flg[:]); err != nil {
+	if err := WriteAndCopy(buf, *eplm.order_flag, eplm.oe_reqres.St_ord_flg[:]); err != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error: Failed to write order_flag: %v", err)
 	}
 
 	// Write oe_reqres and handle error
-	if err := writeAndCopy(buf, *eplm.oe_reqres, eplm.exch_msg.St_oe_res[:]); err != nil {
+	if err := WriteAndCopy(buf, *eplm.oe_reqres, eplm.exch_msg.St_oe_res[:]); err != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [Error: Failed to write oe_reqres: %v", err)
 	}
 
 	// Write net_hdr and handle error
-	if err := writeAndCopy(buf, *eplm.net_hdr, eplm.exch_msg.St_net_header[:]); err != nil {
+	if err := WriteAndCopy(buf, *eplm.net_hdr, eplm.exch_msg.St_net_header[:]); err != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error: Failed to write net_hdr: %v", err)
 	}
 
 	// Write exch_msg and handle error
-	if err := writeAndCopy(buf, *eplm.exch_msg, eplm.q_packet.St_exch_msg_data[:]); err != nil {
+	if err := WriteAndCopy(buf, *eplm.exch_msg, eplm.q_packet.St_exch_msg_data[:]); err != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error: Failed to write exch_msg: %v", err)
 	}
 
@@ -632,8 +632,8 @@ func (eplm *ExchngPackLibMaster) fnPackOrdnryOrdToNse(db *gorm.DB) int {
 	return 0
 }
 
-func (eplm *ExchngPackLibMaster) fn_orstonse_cntrct_desc() int {
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " Entered in the function 'fn_orstonse_cntrct_desc'")
+func (eplm *ExchngPackLibMaster) Fn_orstonse_cntrct_desc() int {
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " Entered in the function 'Fn_orstonse_cntrct_desc'")
 
 	var instrumentName [6]byte
 
@@ -663,10 +663,10 @@ func (eplm *ExchngPackLibMaster) fn_orstonse_cntrct_desc() int {
 		return -1
 	}
 
-	copyAndFormatSymbol(eplm.contract_desc.C_symbol[:], len(eplm.contract_desc.C_symbol), eplm.nse_contract.C_symbol) // 1 contract_desc
+	CopyAndFormatSymbol(eplm.contract_desc.C_symbol[:], len(eplm.contract_desc.C_symbol), eplm.nse_contract.C_symbol) // 1 contract_desc
 
-	if eplm.longToTimeArr() != 0 { // 2 contract_desc
-		eplm.LoggerManager.LogError(eplm.serviceName, " [Error: Returned from 'longToTimeArr()' with an Error")
+	if eplm.LongToTimeArr() != 0 { // 2 contract_desc
+		eplm.LoggerManager.LogError(eplm.serviceName, " [Error: Returned from 'LongToTimeArr()' with an Error")
 		eplm.LoggerManager.LogError(eplm.serviceName, " [Error: Exiting  from 'fn_orstone_cntrct_desc' ")
 		return -1
 	}
@@ -698,12 +698,12 @@ func (eplm *ExchngPackLibMaster) fn_orstonse_cntrct_desc() int {
 
 	copy(eplm.contract_desc.C_instrument_name[:], instrumentName[:]) // 6 contract_desc
 
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " Exiting from 'fn_orstonse_cntrct_desc' after successfully packing the 'St_contract_desc'")
+	eplm.LoggerManager.LogInfo(eplm.serviceName, " Exiting from 'Fn_orstonse_cntrct_desc' after successfully packing the 'St_contract_desc'")
 
 	return 0
 }
 
-func copyAndFormatSymbol(dest []byte, destLen int, src string) { //'fn_orstonse_char'
+func CopyAndFormatSymbol(dest []byte, destLen int, src string) { //'fn_orstonse_char'
 
 	srcUpper := strings.ToUpper(src)
 
@@ -719,12 +719,12 @@ func copyAndFormatSymbol(dest []byte, destLen int, src string) { //'fn_orstonse_
 	}
 }
 
-func (eplm *ExchngPackLibMaster) longToTimeArr() int {
+func (eplm *ExchngPackLibMaster) LongToTimeArr() int {
 	// Parse the ISO 8601 date-time string to a time.Time object
 	layout := time.RFC3339
 	t, err := time.Parse(layout, eplm.nse_contract.C_expry_dt)
 	if err != nil {
-		eplm.LoggerManager.LogError(eplm.serviceName, " [longToTimeArr] [ERROR: error in parsing expiry date: %v", err)
+		eplm.LoggerManager.LogError(eplm.serviceName, " [LongToTimeArr] [ERROR: error in parsing expiry date: %v", err)
 		return -1
 	}
 
@@ -843,14 +843,14 @@ func (eplm *ExchngPackLibMaster) GetResetSequence(db *gorm.DB) int32 {
 	return seqNum
 }
 
-func boolToInt(value bool) int {
+func BoolToInt(value bool) int {
 	if value {
 		return 1
 	}
 	return 0
 }
 
-func writeAndCopy(buf *bytes.Buffer, data interface{}, dest []byte) error {
+func WriteAndCopy(buf *bytes.Buffer, data interface{}, dest []byte) error {
 	buf.Reset()
 	err := binary.Write(buf, binary.LittleEndian, data)
 	if err != nil {

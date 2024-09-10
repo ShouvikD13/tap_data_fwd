@@ -1,7 +1,7 @@
 package main
 
 import (
-	"DATA_FWD_TAP/internal/app"
+	"DATA_FWD_TAP/internal/app/pack_clnt"
 	"DATA_FWD_TAP/internal/database"
 	"DATA_FWD_TAP/util"
 	"log"
@@ -146,7 +146,7 @@ func main() {
 
 	// Testing "cln_pack_clnt.go"
 
-	VarClnPack := &app.ClnPackClntManager{
+	VarClnPack := &pack_clnt.ClnPackClntManager{
 		Enviroment_manager: environmentManager,
 		Config_manager:     configManager,
 		LoggerManager:      loggerManager,

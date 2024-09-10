@@ -1,6 +1,7 @@
-package app
+package pack_clnt
 
 import (
+	"DATA_FWD_TAP/internal/app/exg_pack_lib"
 	"DATA_FWD_TAP/internal/database"
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
@@ -478,7 +479,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		}
 
 		// here we are initialising the "ExchngPackLibMaster"
-		eplm := NewExchngPackLibMaster(
+		eplm := exg_pack_lib.NewExchngPackLibMaster(
 			cpcm.ServiceName,
 			cpcm.Xchngbook,
 			cpcm.orderbook,
@@ -502,7 +503,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 		)
 
 		// Calling the function 'fnPackOrdnryOrdToNse' to pack the entire data into the final structure 'St_req_q_data'.
-		resultTmp = eplm.fnPackOrdnryOrdToNse(Db)
+		resultTmp = eplm.FnPackOrdnryOrdToNse(Db)
 
 		if resultTmp != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, "  [fnGetNxtRec] [Error: 'fnPackOrdnryOrdToNse' returned an error.")
