@@ -1,6 +1,8 @@
 package util
 
 import (
+	"fmt"
+
 	"gopkg.in/ini.v1"
 )
 
@@ -31,48 +33,47 @@ const (
 )
 
 type EnvironmentManager struct {
-	ServiceName   string
-	FileName      string
-	cfg           *ini.File
-	LoggerManager *LoggerManager
+	ServiceName string
+	FileName    string
+	cfg         *ini.File
 }
 
-func NewEnvironmentManager(serviceName, fileName string, LM *LoggerManager) *EnvironmentManager {
+func NewEnvironmentManager(serviceName, fileName string) *EnvironmentManager {
 	return &EnvironmentManager{
-		ServiceName:   serviceName,
-		FileName:      fileName,
-		LoggerManager: LM,
+		ServiceName: serviceName,
+		FileName:    fileName,
 	}
 }
+
 func (Em *EnvironmentManager) LoadIniFile() int {
 	cfg, err := ini.Load(Em.FileName)
 	if err != nil {
-		Em.LoggerManager.LogError(Em.ServiceName, " Error loading INI file: %s, Error: %v", Em.FileName, err)
+		fmt.Printf("[ERROR] %s: Error loading INI file: %s, Error: %v\n", Em.ServiceName, Em.FileName, err)
 		return -1
 	}
-	Em.LoggerManager.LogInfo(Em.ServiceName, "Successfully loaded INI file: %s", Em.FileName)
+	fmt.Printf("[INFO] %s: Successfully loaded INI file: %s\n", Em.ServiceName, Em.FileName)
 	Em.cfg = cfg
 	return 0
 }
 
 func (Em *EnvironmentManager) GetProcessSpaceValue(ProcessName, tokenName string) string {
-	Em.LoggerManager.LogInfo(Em.ServiceName, "Initializing process space")
+	fmt.Printf("[INFO] %s: Initializing process space\n", Em.ServiceName)
 
 	section, err := Em.cfg.GetSection(ProcessName)
 	if err != nil {
-		Em.LoggerManager.LogError(Em.ServiceName, "[GetProcessSpaceValue] Section '%s' not specified in INI file: %s, Error: %v", ProcessName, Em.FileName, err)
+		fmt.Printf("[ERROR] %s: [GetProcessSpaceValue] Section '%s' not specified in INI file: %s, Error: %v\n", Em.ServiceName, ProcessName, Em.FileName, err)
 		return ""
 	}
-	Em.LoggerManager.LogInfo(Em.ServiceName, "[GetProcessSpaceValue] Successfully retrieved section: %s from INI file: %s", ProcessName, Em.FileName)
+	fmt.Printf("[INFO] %s: [GetProcessSpaceValue] Successfully retrieved section: %s from INI file: %s\n", Em.ServiceName, ProcessName, Em.FileName)
+
 	key, err := section.GetKey(tokenName)
 	if err != nil {
-		Em.LoggerManager.LogError(Em.ServiceName, "[GetProcessSpaceValue] Token '%s' not found in section '%s'", tokenName, ProcessName)
-
+		fmt.Printf("[ERROR] %s: [GetProcessSpaceValue] Token '%s' not found in section '%s'\n", Em.ServiceName, tokenName, ProcessName)
 		return ""
 	}
 	value := key.String()
 
-	Em.LoggerManager.LogInfo(Em.ServiceName, "[GetProcessSpaceValue] Retrieved value for token '%s': %s", tokenName, value)
+	fmt.Printf("[INFO] %s: [GetProcessSpaceValue] Retrieved value for token '%s': %s\n", Em.ServiceName, tokenName, value)
 
 	return value
 }
