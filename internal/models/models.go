@@ -452,3 +452,80 @@ func (o *St_order_flags) GetFlagValue(flag uint16) bool {
 // type St_addtnal_order_flags struct {  Not Used
 // 	C_cover_uncover string //byte
 // }
+
+//*******************************************************************************************************************
+//******************************************* LogOn Structures **************************************************
+
+type St_sign_on_req struct {
+	St_hdr                       St_int_header
+	Li_user_id                   int64
+	C_reserved_1                 [8]byte
+	C_password                   [util.LEN_PASSWORD]byte
+	C_reserved_2                 [8]byte
+	C_new_password               [util.LEN_PASSWORD]byte
+	C_trader_name                [util.LEN_TRADER_NAME]byte
+	Li_last_password_change_date int64
+	C_broker_id                  [util.LEN_BROKER_ID]byte
+	C_filler_1                   byte
+	Si_branch_id                 int16
+	Li_version_number            int64
+	Li_batch_2_start_time        int64
+	C_host_switch_context        byte
+	C_colour                     [util.LEN_COLOUR]byte
+	C_filler_2                   byte
+	Si_user_type                 int16
+	D_sequence_number            float64
+	C_ws_class_name              [util.LEN_WS_CLASS_NAME]byte
+	C_broker_status              byte
+	C_show_index                 byte
+	St_mkt_allwd_lst             St_broker_eligibility_per_mkt
+	Si_member_type               int16
+	C_clearing_status            byte
+	C_broker_name                [util.LEN_BROKER_NAME]byte
+	C_reserved_3                 [16]byte
+	C_reserved_4                 [16]byte
+	C_reserved_5                 [16]byte
+}
+
+type St_sign_on_res struct {
+	St_hdr                       St_int_header
+	Li_user_id                   int64
+	C_reserved_1                 [8]byte
+	C_password                   [util.LEN_PASSWORD]byte
+	C_reserved_2                 [8]byte
+	C_new_password               [util.LEN_PASSWORD]byte
+	C_trader_name                [util.LEN_TRADER_NAME]byte
+	Li_last_password_change_date int64
+	C_broker_id                  [util.LEN_BROKER_ID]byte
+	C_filler_1                   byte
+	Si_branch_id                 int16
+	Li_version_number            int64
+	Li_end_time                  int64
+	C_filler_2                   [52]byte
+	Si_user_type                 int16
+	D_sequence_number            float64
+	C_filler_3                   [14]byte
+	C_broker_status              byte
+	C_show_index                 byte
+	St_mkt_allwd_lst             St_broker_eligibility_per_mkt
+	Si_member_type               int16
+	C_clearing_status            byte
+	C_broker_name                [util.LEN_BROKER_NAME]byte
+	C_reserved_3                 [16]byte
+	C_reserved_4                 [16]byte
+	C_reserved_5                 [16]byte
+}
+
+type St_broker_eligibility_per_mkt struct {
+	Flg_normal_mkt  uint32 `bitfield:"1"`
+	Flg_oddlot_mkt  uint32 `bitfield:"1"`
+	Flg_spot_mkt    uint32 `bitfield:"1"`
+	Flg_auction_mkt uint32 `bitfield:"1"`
+	Flg_filler1     uint32 `bitfield:"4"`
+	Flg_filler2     uint32 `bitfield:"8"`
+}
+
+type St_exch_snd_msg struct {
+	St_signon_req St_sign_on_req
+	St_oe_res     St_oe_reqres
+}

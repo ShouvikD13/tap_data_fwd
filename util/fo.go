@@ -36,6 +36,11 @@ const (
 	ORS_NEW_ORD_RJCT = 5304
 
 	//length
+	LEN_PASSWORD        = 8
+	LEN_TRADER_NAME     = 26
+	LEN_BROKER_NAME     = 25
+	LEN_COLOUR          = 50
+	LEN_WS_CLASS_NAME   = 14
 	LEN_ALPHA_CHAR      = 2
 	LEN_SETTLOR         = 12
 	LEN_BROKER_ID       = 5
