@@ -21,6 +21,8 @@ type FoExgConLibManager struct {
 }
 
 func (FECLM *FoExgConLibManager) LogOnToTap() int {
+	// 1. we are checking the ESR Status
+
 	// Query for checking if ESR is running
 	query := `
 		SELECT bps_stts
