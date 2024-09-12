@@ -2,18 +2,24 @@ package util
 
 import (
 	"crypto/rand"
+	"fmt"
 	"math/big"
+	"os"
 	"strings"
+	"time"
 )
 
-type PasswordUtilManger struct{}
+type PasswordUtilManger struct {
+	LM *LoggerManager
+}
 
-func (PUM *PasswordUtilManger) FngetPassword(oldPassword string, passwordLength int) (string, error) {
+func (PUM *PasswordUtilManger) FngenerateNewPassword(oldPassword string) (string, error) {
 	letters := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	lowerLetters := "abcdefghijklmnopqrstuvwxy"
 	numbers := "123456789"
 	specialChars := "@/#$%&*"
 
+	passwordLength := CRNT_PSSWD_LEN
 	passwordLength -= 3
 
 	var password strings.Builder
@@ -49,7 +55,7 @@ func (PUM *PasswordUtilManger) FngetPassword(oldPassword string, passwordLength 
 	shuffledPassword := PUM.FnshuffleString(password.String())
 
 	if shuffledPassword == oldPassword {
-		return PUM.FngetPassword(oldPassword, passwordLength+3) // Recursively generate a new password
+		return PUM.FngenerateNewPassword(oldPassword) // Recursively generate a new password
 	}
 
 	return shuffledPassword, nil
@@ -95,4 +101,29 @@ func (PUM *PasswordUtilManger) Fndecrypt(encrypted string) string {
 		}
 	}
 	return decrypted.String()
+}
+
+func (PUM *PasswordUtilManger) FnwritePasswordChangeToFile(IpPipeID, newPassword string) error {
+	filePath := "/mnt/c/Users/devdu/go-workspace/data_fwd_tap/logs/password_changes.log"
+
+	// Attempt to open or create the log file
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	if err != nil {
+		PUM.LM.LogError("PasswordChange", "Error opening or creating file: %v", err)
+		return fmt.Errorf("error opening or creating file: %v", err)
+	}
+	defer file.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logEntry := fmt.Sprintf("Timestamp: %s | IpPipeID: %s | New Password: %s\n", timestamp, IpPipeID, newPassword)
+
+	if _, err := file.WriteString(logEntry); err != nil {
+		PUM.LM.LogError("PasswordChange", "Error writing to file: %v", err)
+		return fmt.Errorf("error writing to file: %v", err)
+	}
+
+	// Log success
+	PUM.LM.LogInfo("PasswordChange", "Successfully wrote password change to file for IpPipeID: %s", IpPipeID)
+
+	return nil
 }

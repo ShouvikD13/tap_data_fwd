@@ -1,8 +1,6 @@
 package models
 
-import (
-	"DATA_FWD_TAP/util"
-)
+import "DATA_FWD_TAP/util"
 
 const (
 	Flg_ATO        uint16 = 1 << 0  // ATO is the 1st bit
@@ -359,7 +357,7 @@ type St_int_header struct { // correct size
 	C_alpha_char        [util.LEN_ALPHA_CHAR]byte // const util.LEN_ALPHA_CHAR untyped int = 2
 	Li_trader_id        int32
 	Si_error_code       int16
-	C_filler_2          int64
+	C_filler_2          [8]byte
 	C_time_stamp_1      [util.LEN_TIME_STAMP]byte // const util.LEN_TIME_STAMP untyped int = 8
 	C_time_stamp_2      [util.LEN_TIME_STAMP]byte // const util.LEN_TIME_STAMP untyped int = 8
 	Si_message_length   int16                     // 316 size

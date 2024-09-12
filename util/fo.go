@@ -99,6 +99,11 @@ const (
 	FO_FOGTT_ALG_CAT_ID     = 1
 
 	MAX_SEQ_NUM = 2147483647
+
+	// LOGON
+	MAX_PSSWD_LEN      = 10
+	CRNT_PSSWD_LEN     = 8
+	SIGN_ON_REQUEST_IN = 2300
 )
 
 /*********************************************************************/

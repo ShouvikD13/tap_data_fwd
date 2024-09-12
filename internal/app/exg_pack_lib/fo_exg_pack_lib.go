@@ -194,7 +194,7 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.int_header.Li_log_time = 0                                                // 2 HDR
 	CopyAndFormatSymbol(eplm.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ") // 3 HDR 'orstonse'
 	eplm.int_header.Si_transaction_code = util.BOARD_LOT_IN                        // 4 HDR
-	eplm.int_header.C_filler_2 = ' '                                               // 5 HDR
+	copy(eplm.int_header.C_filler_2[:], "        ")                                // 5 HDR
 
 	eplm.int_header.Si_error_code = 0 // 6 HDR
 	/*
