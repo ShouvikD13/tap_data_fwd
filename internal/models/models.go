@@ -3,20 +3,29 @@ package models
 import "DATA_FWD_TAP/util"
 
 const (
-	Flg_ATO        uint16 = 1 << 0  // ATO is the 1st bit
-	Flg_Market     uint16 = 1 << 1  // Market is the 2nd bit
-	Flg_SL         uint16 = 1 << 2  // SL is the 3rd bit
-	Flg_MIT        uint16 = 1 << 3  // MIT is the 4th bit
-	Flg_Day        uint16 = 1 << 4  // Day is the 5th bit
-	Flg_GTC        uint16 = 1 << 5  // GTC is the 6th bit
-	Flg_IOC        uint16 = 1 << 6  // IOC is the 7th bit
-	Flg_AON        uint16 = 1 << 7  // AON is the 8th bit
-	Flg_MF         uint16 = 1 << 8  // MF is the 9th bit
-	Flg_MatchedInd uint16 = 1 << 9  // MatchedInd is the 10th bit
-	Flg_Traded     uint16 = 1 << 10 // Traded is the 11th bit
-	Flg_Modified   uint16 = 1 << 11 // Modified is the 12th bit
-	Flg_Frozen     uint16 = 1 << 12 // Frozen is the 13th bit
-	Flg_Filler1    uint16 = 7 << 13 // Filler1 is the 14th, 15th, and 16th bits (3 bits)
+	// ---------------------- for order flags -----------------------
+	Flg_ATO          uint16 = 1 << 0  // ATO is the 1st bit
+	Flg_Market       uint16 = 1 << 1  // Market is the 2nd bit
+	Flg_SL           uint16 = 1 << 2  // SL is the 3rd bit
+	Flg_MIT          uint16 = 1 << 3  // MIT is the 4th bit
+	Flg_Day          uint16 = 1 << 4  // Day is the 5th bit
+	Flg_GTC          uint16 = 1 << 5  // GTC is the 6th bit
+	Flg_IOC          uint16 = 1 << 6  // IOC is the 7th bit
+	Flg_AON          uint16 = 1 << 7  // AON is the 8th bit
+	Flg_MF           uint16 = 1 << 8  // MF is the 9th bit
+	Flg_MatchedInd   uint16 = 1 << 9  // MatchedInd is the 10th bit
+	Flg_Traded       uint16 = 1 << 10 // Traded is the 11th bit
+	Flg_Modified     uint16 = 1 << 11 // Modified is the 12th bit
+	Flg_Frozen       uint16 = 1 << 12 // Frozen is the 13th bit
+	Flg_OrderFiller1 uint16 = 7 << 13 // Filler1 is the 14th, 15th, and 16th bits (3 bits)
+
+	// ------------------------ for St_broker_eligibility_per_mkt ------------------------
+	Flg_NormalMkt     uint16 = 1 << 0    // Normal market is the 1st bit
+	Flg_OddlotMkt     uint16 = 1 << 1    // Oddlot market is the 2nd bit
+	Flg_SpotMkt       uint16 = 1 << 2    // Spot market is the 3rd bit
+	Flg_AuctionMkt    uint16 = 1 << 3    // Auction market is the 4th bit
+	Flg_BrokerFiller1 uint16 = 0xF << 4  // Filler1 is the 5th to 8th bits (4 bits)
+	Flg_BrokerFiller2 uint16 = 0xFF << 8 // Filler2 is the 9th to 16th bits (8 bits)
 )
 
 type Vw_xchngbook struct {
@@ -515,12 +524,19 @@ type St_sign_on_res struct {
 }
 
 type St_broker_eligibility_per_mkt struct {
-	Flg_normal_mkt  uint32 `bitfield:"1"`
-	Flg_oddlot_mkt  uint32 `bitfield:"1"`
-	Flg_spot_mkt    uint32 `bitfield:"1"`
-	Flg_auction_mkt uint32 `bitfield:"1"`
-	Flg_filler1     uint32 `bitfield:"4"`
-	Flg_filler2     uint32 `bitfield:"8"`
+	Flags uint16
+}
+
+func (b *St_broker_eligibility_per_mkt) SetFlag(flag uint16) {
+	b.Flags |= flag
+}
+
+func (b *St_broker_eligibility_per_mkt) ClearFlag(flag uint16) {
+	b.Flags &^= flag
+}
+
+func (b *St_broker_eligibility_per_mkt) GetFlagValue(flag uint16) bool {
+	return b.Flags&flag != 0
 }
 
 type St_exch_snd_msg struct {

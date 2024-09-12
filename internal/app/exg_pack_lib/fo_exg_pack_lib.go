@@ -348,7 +348,7 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.order_flag.ClearFlag(models.Flg_Frozen)     // 14 FLG
 
 	// Clear bits 13, 14, and 15 in Flags using Flg_Filler1 bitmask.
-	eplm.order_flag.Flags &^= models.Flg_Filler1 // 15 FLG
+	eplm.order_flag.Flags &^= models.Flg_OrderFiller1 // 15 FLG
 
 	eplm.oe_reqres.Si_branch_id = int16(eplm.pipe_mstr.L_opm_brnch_id) //33 BDY
 

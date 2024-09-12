@@ -16,17 +16,18 @@ import (
 const defaultTimeStamp = "0"
 
 type FoExgConLibManager struct {
-	St_sign_on_req *models.St_sign_on_req
-	St_req_q_data  *models.St_req_q_data
-	St_exch_msg    *models.St_exch_msg
-	int_header     *models.St_int_header
-
-	PUM           *util.PasswordUtilManger // initialize it where ever you are initializing 'FECLM'
-	DB            *gorm.DB
-	LoggerManager *util.LoggerManager
-	ServiceName   string
-	IpPipeID      string
-	UserID        int64
+	St_sign_on_req             *models.St_sign_on_req
+	St_req_q_data              *models.St_req_q_data
+	St_exch_msg                *models.St_exch_msg
+	int_header                 *models.St_int_header
+	St_BrokerEligibilityPerMkt *models.St_broker_eligibility_per_mkt
+	EM                         *util.EnvironmentManager
+	PUM                        *util.PasswordUtilManger // initialize it where ever you are initializing 'FECLM'
+	DB                         *gorm.DB
+	LoggerManager              *util.LoggerManager
+	ServiceName                string
+	IpPipeID                   string
+	UserID                     int64
 	//----------------------------------
 	Opm_loginStatus    int
 	Opm_userID         int64
@@ -252,7 +253,8 @@ func (FECLM *FoExgConLibManager) LogOnToTap() int {
 	}
 
 	// Step 5 : assigning the values to the header (int_header)
-
+	/********************** Body Starts ********************/
+	/********************** Header Starts ********************/
 	traderID, err := strconv.ParseInt(FECLM.Opm_TrdrID, 10, 32)
 	if err != nil {
 		FECLM.LoggerManager.LogError(FECLM.ServiceName, "Failed to convert Opm_TrdrID to int32: %v", err)
@@ -268,70 +270,78 @@ func (FECLM *FoExgConLibManager) LogOnToTap() int {
 	copy(FECLM.int_header.C_time_stamp_2[:], defaultTimeStamp)                              // 8 HDR
 	FECLM.int_header.Si_message_length = int16(reflect.TypeOf(FECLM.St_sign_on_req).Size()) // 9 HDR
 
-	//********************** Header Done Till Here ********************/
+	/********************** Header Done ********************/
 
-	FECLM.St_sign_on_req.Li_user_id = FECLM.Opm_userID                                                     // 1 BDY
-	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_reserved_1[:], 8, " ")                                      // 2 BDY
-	CopyAndFormatPassword(FECLM.St_sign_on_req.C_password[:], util.LEN_PASSWORD, FECLM.Opm_existingPasswd) // 3 BDY
-	CopyAndFormatPassword(FECLM.St_sign_on_req.C_new_password[:], util.LEN_PASSWORD, FECLM.Opm_newPasswd)  // 4 BDY
-	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_trader_name[:], util.LEN_TRADER_NAME, FECLM.Opm_TrdrID)     // 5 BDY
-	FECLM.St_sign_on_req.Li_last_password_change_date = 0                                                  // 6 BDY
-	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_broker_id[:], util.LEN_BROKER_ID, FECLM.Exg_BrkrID)         // 7 BDY
-	FECLM.St_sign_on_req.C_filler_1 = ' '                                                                  // 8 BDY
-	FECLM.St_sign_on_req.Si_branch_id = int16(FECLM.Opm_BrnchID)                                           // 9 BDY
+	FECLM.St_sign_on_req.Li_user_id = FECLM.Opm_userID                                                           // 1 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_reserved_1[:], 8, " ")                                            // 2 BDY
+	CopyAndFormatPassword(FECLM.St_sign_on_req.C_password[:], util.LEN_PASSWORD, FECLM.Opm_existingPasswd)       // 3 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_reserved_2[:], 8, " ")                                            // 4 BDY
+	CopyAndFormatPassword(FECLM.St_sign_on_req.C_new_password[:], util.LEN_PASSWORD, FECLM.Opm_newPasswd.String) // 5 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_trader_name[:], util.LEN_TRADER_NAME, FECLM.Opm_TrdrID)           // 6 BDY
+	FECLM.St_sign_on_req.Li_last_password_change_date = 0                                                        // 7 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_broker_id[:], util.LEN_BROKER_ID, FECLM.Exg_BrkrID)               // 8 BDY
+	FECLM.St_sign_on_req.C_filler_1 = ' '                                                                        // 9 BDY
+	FECLM.St_sign_on_req.Si_branch_id = int16(FECLM.Opm_BrnchID)                                                 // 10 BDY
 
-	// Logging for debug
-	if FECLM.DebugMsgLevel >= 3 {
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Sign-on request message length: %d", FECLM.St_sign_on_req.St_hdr.Si_message_length)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "User ID: %d", FECLM.St_sign_on_req.Li_user_id)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Password: %s", FECLM.St_sign_on_req.C_password)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "New Password: %s", FECLM.St_sign_on_req.C_new_password)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Trader Name: %s", FECLM.St_sign_on_req.C_trader_name)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Last Password Change Date: %d", FECLM.St_sign_on_req.Li_last_password_change_date)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Broker ID: %s", FECLM.St_sign_on_req.C_broker_id)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Filler 1: %c", FECLM.St_sign_on_req.C_filler_1)
-		FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Branch ID: %d", FECLM.St_sign_on_req.Si_branch_id)
-	}
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Sign-on request message length: %d", FECLM.St_sign_on_req.St_hdr.Si_message_length)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "User ID: %d", FECLM.St_sign_on_req.Li_user_id)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Password: %s", FECLM.St_sign_on_req.C_password)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "New Password: %s", FECLM.St_sign_on_req.C_new_password)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Trader Name: %s", FECLM.St_sign_on_req.C_trader_name)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Last Password Change Date: %d", FECLM.St_sign_on_req.Li_last_password_change_date)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Broker ID: %s", FECLM.St_sign_on_req.C_broker_id)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Filler 1: %c", FECLM.St_sign_on_req.C_filler_1)
+	FECLM.LoggerManager.LogInfo(FECLM.ServiceName, "Branch ID: %d", FECLM.St_sign_on_req.Si_branch_id)
 
-	// Fetch version number
-	versionStr := FECLM.FetchProcessSpace(FECLM.ServiceName, "VERSION_NUMBER")
+	versionStr := FECLM.EM.GetProcessSpaceValue("version", "VERSION_NUMBER")
 	if versionStr == "" {
 		FECLM.LoggerManager.LogError(FECLM.ServiceName, "Failed to retrieve VERSION_NUMBER")
 		return -1
 	}
-	FECLM.St_sign_on_req.Li_version_number, _ = strconv.ParseInt(versionStr, 10, 64)
+	FECLM.St_sign_on_req.Li_version_number, _ = strconv.ParseInt(versionStr, 10, 64) // 11 BDY
+	FECLM.St_sign_on_req.Li_batch_2_start_time = 0                                   // 12 BDY
+	FECLM.St_sign_on_req.C_host_switch_context = ' '                                 // 13 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_colour[:], util.LEN_COLOUR, " ")      // 14 BDY
+	FECLM.St_sign_on_req.C_filler_2 = ' '                                            // 15 BDY
 
-	// Set default values
-	FECLM.St_sign_on_req.Li_batch_2_start_time = 0
-	FECLM.St_sign_on_req.C_host_switch_context = ' '
-
-	// Format color field
-	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_colour[:], LEN_COLOUR, " ")
-
-	// Set second filler
-	FECLM.St_sign_on_req.C_filler_2 = ' '
-
-	// Fetch and set user type
-	userTypeStr := FECLM.FetchProcessSpace(FECLM.ServiceName, "USER_TYPE")
-	if userTypeStr == "" {
-		FECLM.LoggerManager.LogError(FECLM.ServiceName, "Failed to retrieve USER_TYPE")
+	userTypeStr := FECLM.EM.GetProcessSpaceValue("UserSettings", "USER_TYPE")
+	userType, err := strconv.Atoi(userTypeStr)
+	if err != nil {
+		FECLM.LoggerManager.LogError(FECLM.ServiceName, "Failed to convert USER_TYPE to int: %v", err)
 		return -1
 	}
-	FECLM.St_sign_on_req.Si_user_type, _ = strconv.Atoi(userTypeStr)
 
-	// Set sequence number
-	FECLM.St_sign_on_req.D_sequence_number = 0
+	FECLM.St_sign_on_req.Si_user_type = int16(userType) // 16 BDY
+	FECLM.St_sign_on_req.D_sequence_number = 0          // 17 BDY
 
-	// Fetch and set workstation class name
-	wsClassName := FECLM.FetchProcessSpace(FECLM.ServiceName, "WSC_NAME")
+	wsClassName := FECLM.EM.GetProcessSpaceValue("Service", "WSC_NAME")
 	if wsClassName == "" {
 		FECLM.LoggerManager.LogError(FECLM.ServiceName, "Failed to retrieve WSC_NAME")
 		return -1
 	}
-	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_ws_class_name[:], LEN_WS_CLASS_NAME, wsClassName)
 
-	// Set broker status
-	FECLM.St_sign_on_req.C_broker_status = ' '
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_ws_class_name[:], util.LEN_WS_CLASS_NAME, wsClassName) // 18 BDY
+	FECLM.St_sign_on_req.C_broker_status = ' '                                                        // 19 BDY
+	FECLM.St_sign_on_req.C_show_index = 'T'                                                           // 20 BDY
+
+	/***************************** St_broker_eligibility_per_mkt Configuration ***************************************/
+
+	FECLM.St_BrokerEligibilityPerMkt.ClearFlag(models.Flg_NormalMkt)
+	FECLM.St_BrokerEligibilityPerMkt.ClearFlag(models.Flg_OddlotMkt)
+	FECLM.St_BrokerEligibilityPerMkt.ClearFlag(models.Flg_SpotMkt)
+	FECLM.St_BrokerEligibilityPerMkt.ClearFlag(models.Flg_AuctionMkt)
+	FECLM.St_BrokerEligibilityPerMkt.ClearFlag(models.Flg_BrokerFiller1)
+	FECLM.St_BrokerEligibilityPerMkt.ClearFlag(models.Flg_BrokerFiller2)
+
+	/***************************** End of St_broker_eligibility_per_mkt Configuration *********************************/
+
+	FECLM.St_sign_on_req.Si_member_type = 0      // 21 BDY
+	FECLM.St_sign_on_req.C_clearing_status = ' ' // 22 BDY
+
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_broker_name[:], util.LEN_BROKER_NAME, FECLM.Exg_BrkrName) // 23 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_reserved_3[:], 16, " ")                                   // 24 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_reserved_4[:], 16, " ")                                   // 25 BDY
+	CopyAndFormatSymbol(FECLM.St_sign_on_req.C_reserved_5[:], 16, " ")                                   // 26 BDY
 
 	return 0
 }
@@ -348,6 +358,17 @@ func CopyAndFormatSymbol(dest []byte, destLen int, src string) { //'fn_orstonse_
 	copy(dest, srcUpper[:copyLen])
 
 	for i := copyLen; i < destLen; i++ {
+		dest[i] = ' '
+	}
+}
+
+func CopyAndFormatPassword(dest []byte, destLen int, src string) {
+
+	for i := 0; i < len(src) && i < destLen; i++ {
+		dest[i] = src[i]
+	}
+
+	for i := len(src); i < destLen; i++ {
 		dest[i] = ' '
 	}
 }
