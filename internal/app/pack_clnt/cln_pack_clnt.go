@@ -281,6 +281,11 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 
 		mtype := *cpcm.Mtype
 
+		if cpcm.Message_queue_manager.FnCanWriteToQueue() != 0 {
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, "[CLN_PACK_CLNT] [Error: Queue is Full %d", mtype)
+			return -1
+		}
+
 		if cpcm.Message_queue_manager.WriteToQueue(mtype) != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtype)
 			return -1

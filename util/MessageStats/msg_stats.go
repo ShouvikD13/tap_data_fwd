@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+type MessageStatManager struct {
+}
+
 // MsgQueueStats wraps the C MsgQueueStats struct
 type MsgQueueStats struct {
 	MsgStime  time.Time
@@ -24,7 +27,7 @@ type MsgQueueStats struct {
 }
 
 // GetMsgQueueStats gets the message queue statistics
-func GetMsgQueueStats(key int) (*MsgQueueStats, error) {
+func (MSM *MessageStatManager) GetMsgQueueStats(key int) (*MsgQueueStats, error) {
 	var stats C.MsgQueueStats
 
 	// Call the C function to fetch message queue stats
@@ -44,22 +47,3 @@ func GetMsgQueueStats(key int) (*MsgQueueStats, error) {
 		MsgLrpid:  int32(stats.msg_lrpid),
 	}, nil
 }
-
-// func main() {
-// 	key := 1
-// 	stats, err := GetMsgQueueStats(key)
-// 	if err != nil {
-// 		fmt.Println("Error:", err)
-// 		return
-// 	}
-
-// 	fmt.Println("Message Queue Statistics:")
-// 	fmt.Printf("  Last msgsnd time: %s\n", stats.MsgStime.Format("2006-01-02 15:04:05 MST"))
-// 	fmt.Printf("  Last msgrcv time: %s\n", stats.MsgRtime.Format("2006-01-02 15:04:05 MST"))
-// 	fmt.Printf("  Last change time: %s\n", stats.MsgCtime.Format("2006-01-02 15:04:05 MST"))
-// 	fmt.Printf("  Current number of bytes on queue: %d\n", stats.MsgCbytes)
-// 	fmt.Printf("  Number of messages currently on queue: %d\n", stats.MsgQnum)
-// 	fmt.Printf("  Max number of bytes allowed on queue: %d\n", stats.MsgQbytes)
-// 	fmt.Printf("  PID of last msgsnd: %d\n", stats.MsgLspid)
-// 	fmt.Printf("  PID of last msgrcv: %d\n", stats.MsgLrpid)
-// }

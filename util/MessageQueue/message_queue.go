@@ -3,6 +3,7 @@ package MessageQueue
 import (
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
+	MessageStat "DATA_FWD_TAP/util/MessageStats"
 	"bytes"
 	"encoding/binary"
 	"fmt"
@@ -17,6 +18,7 @@ type MessageQueueManager struct {
 	Req_q_data    models.St_req_q_data
 	mq            *sysv_mq.MessageQueue
 	LoggerManager *util.LoggerManager
+	MSM           *MessageStat.MessageStatManager
 }
 
 func (MQM *MessageQueueManager) pack(data models.St_req_q_data) ([]byte, error) {
@@ -85,6 +87,9 @@ func UnpackPointerField(buf *bytes.Reader, field interface{}) error {
 }
 
 func (MQM *MessageQueueManager) CreateQueue(key int) int {
+	// Initialize MessageStatManager instance and assign it to MQM.MSM
+	// This sets up the MessageStatManager for managing message queue statistics
+	MQM.MSM = &MessageStat.MessageStatManager{}
 	mq, err := sysv_mq.NewMessageQueue(&sysv_mq.QueueConfig{
 		Key:     key,
 		MaxSize: 1024 * 3,
@@ -144,12 +149,12 @@ func (MQM *MessageQueueManager) DestroyQueue() int {
 	return 0
 }
 
-func (MQM *MessageQueueManager) canWriteToQueue() int {
+func (MQM *MessageQueueManager) FnCanWriteToQueue() int {
 
 	key := util.ORDINARY_ORDER_QUEUE_ID
 
 	// Call GetMsgQueueStats to get the message queue stats
-	stats, err := GetMsgQueueStats(key)
+	stats, err := MQM.MSM.GetMsgQueueStats(key)
 	if err != nil {
 		MQM.LoggerManager.LogError(MQM.ServiceName, "[canWriteToQueue] [Error: failed to get message queue stats: %v", err)
 		return -1
