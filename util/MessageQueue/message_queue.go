@@ -143,3 +143,22 @@ func (MQM *MessageQueueManager) DestroyQueue() int {
 	}
 	return 0
 }
+
+func (MQM *MessageQueueManager) canWriteToQueue() int {
+
+	key := util.ORDINARY_ORDER_QUEUE_ID
+
+	// Call GetMsgQueueStats to get the message queue stats
+	stats, err := GetMsgQueueStats(key)
+	if err != nil {
+		MQM.LoggerManager.LogError(MQM.ServiceName, "[canWriteToQueue] [Error: failed to get message queue stats: %v", err)
+		return -1
+	}
+
+	if stats.MsgQnum < 10 { //Here, I am setting the maximum number of messages that can be present in the queue. Based on my system, this number is 10.
+		return 0
+	}
+
+	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[canWriteToQueue] Queue is full, current message count: %d", stats.MsgQnum)
+	return -1
+}

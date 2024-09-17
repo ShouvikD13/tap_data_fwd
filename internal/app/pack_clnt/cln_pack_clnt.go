@@ -6,6 +6,8 @@ import (
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
+	"DATA_FWD_TAP/util/OrderConversion"
+	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 
 	"fmt"
 
@@ -30,7 +32,7 @@ type ClnPackClntManager struct {
 	int_header               *models.St_int_header
 	contract_desc            *models.St_contract_desc
 	order_flag               *models.St_order_flags
-	Order_conversion_manager *util.OrderConversionManager
+	Order_conversion_manager *OrderConversion.OrderConversionManager
 	cPanNo                   string // Pan number, initialized in the 'fnRefToOrd' method
 	cLstActRef               string // Last activity reference, initialized in the 'fnRefToOrd' method
 	cEspID                   string // ESP ID, initialized in the 'fnRefToOrd' method
@@ -43,6 +45,8 @@ type ClnPackClntManager struct {
 	Max_Pack_Val             int
 	Config_manager           *database.ConfigManager
 	LoggerManager            *util.LoggerManager
+	TCUM                     *typeconversionutil.TypeConversionUtilManager
+	Mtype                    *int
 }
 
 /***************************************************************************************
@@ -81,7 +85,7 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 	cpcm.pipe_mstr = &models.St_opm_pipe_mstr{}
 	cpcm.oe_reqres = &models.St_oe_reqres{}
 	cpcm.exch_msg = &models.St_exch_msg{}
-	cpcm.Order_conversion_manager = &util.OrderConversionManager{}
+	cpcm.Order_conversion_manager = &OrderConversion.OrderConversionManager{}
 	cpcm.net_hdr = &models.St_net_hdr{}
 	cpcm.q_packet = &models.St_req_q_data{}
 	cpcm.Message_queue_manager = &MessageQueue.MessageQueueManager{}
@@ -89,7 +93,6 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 	cpcm.contract_desc = &models.St_contract_desc{}
 	cpcm.order_flag = &models.St_order_flags{}
 	cpcm.Transaction_manager = util.NewTransactionManager(cpcm.ServiceName, cpcm.Config_manager, cpcm.LoggerManager)
-
 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "  [Fn_bat_init] Entering Fn_bat_init")
 
 	// we are getting the 7 args
@@ -106,7 +109,7 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 	This function is responsible for creating a system-level queue on Linux. */
 
 	cpcm.Message_queue_manager.LoggerManager = cpcm.LoggerManager
-	if cpcm.Message_queue_manager.CreateQueue(3) != 0 {
+	if cpcm.Message_queue_manager.CreateQueue(util.ORDINARY_ORDER_QUEUE_ID) != 0 {
 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Returning from 'CreateQueue' with an Error... %s")
 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init]  Exiting from function")
 	} else {
@@ -236,7 +239,6 @@ func (cpcm *ClnPackClntManager) Fn_bat_init(args []string, Db *gorm.DB) int {
 
 func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 	var resultTmp int
-	mtype := 1
 
 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Entering CLN_PACK_CLNT")
 
@@ -277,6 +279,8 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 		cpcm.Message_queue_manager.Req_q_data = *cpcm.q_packet
 		cpcm.Message_queue_manager.ServiceName = cpcm.ServiceName
 
+		mtype := *cpcm.Mtype
+
 		if cpcm.Message_queue_manager.WriteToQueue(mtype) != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtype)
 			return -1
@@ -294,10 +298,10 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 
 		fmt.Println("Message Type:", receivedData.L_msg_type)
 
-		mtype++
+		*cpcm.Mtype++
 
-		if mtype > cpcm.Max_Pack_Val {
-			mtype = 1
+		if *cpcm.Mtype > cpcm.Max_Pack_Val {
+			*cpcm.Mtype = 1
 		}
 
 		TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
@@ -500,6 +504,8 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec(Db *gorm.DB) int {
 			cpcm.cSourceFlg,
 			cpcm.cPrgmFlg,
 			cpcm.LoggerManager,
+			cpcm.TCUM,
+			cpcm.Mtype,
 		)
 
 		// Calling the function 'fnPackOrdnryOrdToNse' to pack the entire data into the final structure 'St_req_q_data'.

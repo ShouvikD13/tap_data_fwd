@@ -464,7 +464,7 @@ func (o *St_order_flags) GetFlagValue(flag uint16) bool {
 //******************************************* LogOn Structures **************************************************
 
 type St_sign_on_req struct {
-	St_hdr                       St_int_header
+	St_hdr                       St_int_header // byte array
 	Li_user_id                   int64
 	C_reserved_1                 [8]byte
 	C_password                   [util.LEN_PASSWORD]byte
@@ -485,7 +485,7 @@ type St_sign_on_req struct {
 	C_ws_class_name              [util.LEN_WS_CLASS_NAME]byte
 	C_broker_status              byte
 	C_show_index                 byte
-	St_mkt_allwd_lst             St_broker_eligibility_per_mkt
+	St_mkt_allwd_lst             St_broker_eligibility_per_mkt // 2byte array
 	Si_member_type               int16
 	C_clearing_status            byte
 	C_broker_name                [util.LEN_BROKER_NAME]byte

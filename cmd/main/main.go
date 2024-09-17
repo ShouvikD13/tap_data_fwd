@@ -4,6 +4,7 @@ import (
 	"DATA_FWD_TAP/internal/app/pack_clnt"
 	"DATA_FWD_TAP/internal/database"
 	"DATA_FWD_TAP/util"
+	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"log"
 )
 
@@ -11,6 +12,9 @@ func main() {
 	// args := os.Args
 	args := []string{"main", "arg1", "arg2", "arg3", "P1", "arg5", "arg6", "arg7"}
 	serviceName := args[0]
+	var mtype int
+	mtype = 1
+
 	var resultTmp int
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
@@ -143,6 +147,9 @@ func main() {
 
 	//=======================================================================================================
 	//
+	TCUM := &typeconversionutil.TypeConversionUtilManager{
+		LoggerManager: loggerManager,
+	}
 
 	// Testing "cln_pack_clnt.go"
 
@@ -150,6 +157,8 @@ func main() {
 		Enviroment_manager: environmentManager,
 		Config_manager:     configManager,
 		LoggerManager:      loggerManager,
+		TCUM:               TCUM,
+		Mtype:              &mtype,
 	}
 	resultTmp = VarClnPack.Fn_bat_init(args[1:], DB)
 

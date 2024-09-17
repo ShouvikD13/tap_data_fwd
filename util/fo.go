@@ -53,7 +53,9 @@ const (
 	LEN_OPTION_TYPE     = 2
 	LEN_PAN             = 10 // this value i have deduce from original C code "char c_pan[10];				  /*** Ver 2.7 ***/"
 	// Order & Trade management
-	BOARD_LOT_IN = 2000
+	BOARD_LOT_IN                 = 2000
+	LOGIN_WITHOUT_OPEN_ORDR_DTLS = 5105
+	SIGN_OFF_REQUEST_IN          = 2320
 
 	TRADER            = 'T'
 	CORPORATE_MANAGER = 'M'
@@ -104,6 +106,14 @@ const (
 	MAX_PSSWD_LEN      = 10
 	CRNT_PSSWD_LEN     = 8
 	SIGN_ON_REQUEST_IN = 2300
+
+	/**** SFO_GET_SEQ ****/
+	GET_PLACED_SEQ = 'P'
+
+	/**** Temporary Message Queue ID's ****/
+	ORDINARY_ORDER_QUEUE_ID = 1
+	LOGON_QUEUE_ID          = 2
+	LOGOFF_QUEUE_ID         = 3
 )
 
 /*********************************************************************/
