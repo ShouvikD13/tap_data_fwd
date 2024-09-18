@@ -1,6 +1,7 @@
 package foexgconlib
 
 import (
+	"bytes"
 	"crypto/md5"
 	"database/sql"
 	"encoding/json"
@@ -11,10 +12,11 @@ import (
 	"strings"
 	"unsafe"
 
-	ordercinversion "DATA_FWD_TAP/internal/OrderConversion"
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
+	"DATA_FWD_TAP/util/OrderConversion"
+	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 
 	"gorm.io/gorm"
 )
@@ -25,20 +27,22 @@ type LogOnToTapManager struct {
 	ServiceName                string
 	St_sign_on_req             *models.St_sign_on_req
 	St_req_q_data              *models.St_req_q_data
-	St_exch_msg                *models.St_exch_msg
+	St_exch_msg_Log_On         *models.St_exch_msg_Log_On
 	int_header                 *models.St_int_header
 	St_net_hdr                 *models.St_net_hdr
 	St_BrokerEligibilityPerMkt *models.St_broker_eligibility_per_mkt
-	MQM                        *MessageQueue.MessageQueueManager
 	EM                         *util.EnvironmentManager
 	PUM                        *util.PasswordUtilManger // initialize it where ever you are initializing 'LOTTM'
 	DB                         *gorm.DB
 	LoggerManager              *util.LoggerManager
-	OCM                        *ordercinversion.OrderConversionManager
+	OCM                        *OrderConversion.OrderConversionManager
+	TCUM                       *typeconversionutil.TypeConversionUtilManager
+	Message_queue_manager      *MessageQueue.MessageQueueManager
 	Ser                        string
 	C_pipe_id                  string
 	UserID                     int64
-	mtype                      *int64
+	Mtype                      *int
+	Max_Pack_Val               int
 	//----------------------------------
 	Opm_loginStatus    int
 	Opm_userID         int64
@@ -271,30 +275,30 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "Failed to convert Opm_TrdrID to int32: %v", err)
 		return -1
 	}
-	LOTTM.int_header.Li_trader_id = int32(traderID)                                         // 1 HDR
-	LOTTM.int_header.Li_log_time = 0                                                        // 2 HDR
-	CopyAndFormatSymbol(LOTTM.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ")         // 3 HDR
-	LOTTM.int_header.Si_transaction_code = util.SIGN_ON_REQUEST_IN                          // 4 HDR
-	LOTTM.int_header.Si_error_code = 0                                                      // 5 HDR
-	copy(LOTTM.int_header.C_filler_2[:], "        ")                                        // 6 HDR
-	copy(LOTTM.int_header.C_time_stamp_1[:], defaultTimeStamp)                              // 7 HDR
-	copy(LOTTM.int_header.C_time_stamp_2[:], defaultTimeStamp)                              // 8 HDR
-	LOTTM.int_header.Si_message_length = int16(reflect.TypeOf(LOTTM.St_sign_on_req).Size()) // 9 HDR
+	LOTTM.int_header.Li_trader_id = int32(traderID)                                            // 1 HDR
+	LOTTM.int_header.Li_log_time = 0                                                           // 2 HDR
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ") // 3 HDR
+	LOTTM.int_header.Si_transaction_code = util.SIGN_ON_REQUEST_IN                             // 4 HDR
+	LOTTM.int_header.Si_error_code = 0                                                         // 5 HDR
+	copy(LOTTM.int_header.C_filler_2[:], "        ")                                           // 6 HDR
+	copy(LOTTM.int_header.C_time_stamp_1[:], defaultTimeStamp)                                 // 7 HDR
+	copy(LOTTM.int_header.C_time_stamp_2[:], defaultTimeStamp)                                 // 8 HDR
+	LOTTM.int_header.Si_message_length = int16(reflect.TypeOf(LOTTM.St_sign_on_req).Size())    // 9 HDR
 
 	/********************** Header Done ********************/
 
-	LOTTM.St_sign_on_req.Li_user_id = LOTTM.Opm_userID                                                           // 1 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_1[:], 8, " ")                                            // 2 BDY
-	CopyAndFormatPassword(LOTTM.St_sign_on_req.C_password[:], util.LEN_PASSWORD, LOTTM.Opm_existingPasswd)       // 3 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_2[:], 8, " ")                                            // 4 BDY
-	CopyAndFormatPassword(LOTTM.St_sign_on_req.C_new_password[:], util.LEN_PASSWORD, LOTTM.Opm_newPasswd.String) // 5 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_trader_name[:], util.LEN_TRADER_NAME, LOTTM.Opm_TrdrID)           // 6 BDY
-	LOTTM.St_sign_on_req.Li_last_password_change_date = 0                                                        // 7 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_broker_id[:], util.LEN_BROKER_ID, LOTTM.Exg_BrkrID)               // 8 BDY
-	LOTTM.St_sign_on_req.C_filler_1 = ' '                                                                        // 9 BDY
-	LOTTM.St_sign_on_req.Si_branch_id = int16(LOTTM.Opm_BrnchID)                                                 // 10 BDY
+	LOTTM.St_sign_on_req.Li_user_id = LOTTM.Opm_userID                                                                     // 1 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_1[:], 8, " ")                                           // 2 BDY
+	LOTTM.PUM.CopyAndFormatPassword(LOTTM.St_sign_on_req.C_password[:], util.LEN_PASSWORD, LOTTM.Opm_existingPasswd)       // 3 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_2[:], 8, " ")                                           // 4 BDY
+	LOTTM.PUM.CopyAndFormatPassword(LOTTM.St_sign_on_req.C_new_password[:], util.LEN_PASSWORD, LOTTM.Opm_newPasswd.String) // 5 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_trader_name[:], util.LEN_TRADER_NAME, LOTTM.Opm_TrdrID)          // 6 BDY
+	LOTTM.St_sign_on_req.Li_last_password_change_date = 0                                                                  // 7 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_broker_id[:], util.LEN_BROKER_ID, LOTTM.Exg_BrkrID)              // 8 BDY
+	LOTTM.St_sign_on_req.C_filler_1 = ' '                                                                                  // 9 BDY
+	LOTTM.St_sign_on_req.Si_branch_id = int16(LOTTM.Opm_BrnchID)                                                           // 10 BDY
 
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Sign-on request message length: %d", LOTTM.St_sign_on_req.St_hdr.Si_message_length)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Sign-on request message length: %d", LOTTM.int_header.Si_message_length)
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "User ID: %d", LOTTM.St_sign_on_req.Li_user_id)
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Password: %s", LOTTM.St_sign_on_req.C_password)
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "New Password: %s", LOTTM.St_sign_on_req.C_new_password)
@@ -309,16 +313,23 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "Failed to retrieve VERSION_NUMBER")
 		return -1
 	}
-	LOTTM.St_sign_on_req.Li_version_number, _ = strconv.ParseInt(versionStr, 10, 64) // 11 BDY
-	LOTTM.St_sign_on_req.Li_batch_2_start_time = 0                                   // 12 BDY
-	LOTTM.St_sign_on_req.C_host_switch_context = ' '                                 // 13 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_colour[:], util.LEN_COLOUR, " ")      // 14 BDY
-	LOTTM.St_sign_on_req.C_filler_2 = ' '                                            // 15 BDY
+
+	parsedValue, err := strconv.ParseInt(versionStr, 10, 64)
+	if err != nil {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[[LogOnToTap]] [Error: Failed to parse version number: %v", err)
+		return -1
+	}
+
+	LOTTM.St_sign_on_req.Li_version_number = int32(parsedValue)                            // 11 BDY
+	LOTTM.St_sign_on_req.Li_batch_2_start_time = 0                                         // 12 BDY
+	LOTTM.St_sign_on_req.C_host_switch_context = ' '                                       // 13 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_colour[:], util.LEN_COLOUR, " ") // 14 BDY
+	LOTTM.St_sign_on_req.C_filler_2 = ' '                                                  // 15 BDY
 
 	userTypeStr := LOTTM.EM.GetProcessSpaceValue("UserSettings", "USER_TYPE")
 	userType, err := strconv.Atoi(userTypeStr)
 	if err != nil {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "Failed to convert USER_TYPE to int: %v", err)
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[LogOnToTap] [Error: Failed to convert USER_TYPE to int: %v", err)
 		return -1
 	}
 
@@ -327,13 +338,13 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 
 	wsClassName := LOTTM.EM.GetProcessSpaceValue("Service", "WSC_NAME")
 	if wsClassName == "" {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "Failed to retrieve WSC_NAME")
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[LogOnToTap] [Error: Failed to retrieve WSC_NAME")
 		return -1
 	}
 
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_ws_class_name[:], util.LEN_WS_CLASS_NAME, wsClassName) // 18 BDY
-	LOTTM.St_sign_on_req.C_broker_status = ' '                                                        // 19 BDY
-	LOTTM.St_sign_on_req.C_show_index = 'T'                                                           // 20 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_ws_class_name[:], util.LEN_WS_CLASS_NAME, wsClassName) // 18 BDY
+	LOTTM.St_sign_on_req.C_broker_status = ' '                                                                   // 19 BDY
+	LOTTM.St_sign_on_req.C_show_index = 'T'                                                                      // 20 BDY
 
 	/***************************** St_broker_eligibility_per_mkt Configuration ***************************************/
 
@@ -349,55 +360,103 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	LOTTM.St_sign_on_req.Si_member_type = 0      // 21 BDY
 	LOTTM.St_sign_on_req.C_clearing_status = ' ' // 22 BDY
 
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_broker_name[:], util.LEN_BROKER_NAME, LOTTM.Exg_BrkrName) // 23 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_3[:], 16, " ")                                   // 24 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_4[:], 16, " ")                                   // 25 BDY
-	CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_5[:], 16, " ")                                   // 26 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_broker_name[:], util.LEN_BROKER_NAME, LOTTM.Exg_BrkrName) // 23 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_3[:], 16, " ")                                   // 24 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_4[:], 16, " ")                                   // 25 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_5[:], 16, " ")                                   // 26 BDY
 
-	LOTTM.ConvertSignOnReqToNetworkOrder() // Here we are converting all the numbers to Network Order
+	LOTTM.OCM.ConvertSignOnReqToNetworkOrder(LOTTM.St_sign_on_req, LOTTM.int_header) // Here we are converting all the numbers to Network Order
 
 	LOTTM.St_net_hdr.S_message_length = int16(unsafe.Sizeof(LOTTM.St_sign_on_req) + unsafe.Sizeof(LOTTM.St_net_hdr)) // 1 NET_FDR
-	LOTTM.St_net_hdr.I_seq_num = LOTTM.GetResetSequence()                                                            // 2 NET_HDR
+	LOTTM.St_net_hdr.I_seq_num = LOTTM.TCUM.GetResetSequence(LOTTM.DB, LOTTM.C_pipe_id, LOTTM.Exg_NxtTrdDate)        // 2 NET_HDR
 
 	hasher := md5.New()
 
 	oeReqResString, err := json.Marshal(LOTTM.St_sign_on_req) // to convert the structure in string
 	if err != nil {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [ Error: failed to convert St_sign_on_req to string: %v", err)
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: failed to convert St_sign_on_req to string: %v", err)
 	}
 	io.WriteString(hasher, string(oeReqResString))
 
 	checksum := hasher.Sum(nil)
 	copy(LOTTM.St_net_hdr.C_checksum[:], fmt.Sprintf("%x", checksum)) // 3 NET_FDR
 
+	buf := new(bytes.Buffer)
+
+	// Write int_header and handle error
+	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.int_header, LOTTM.St_sign_on_req.St_hdr[:]); err != nil {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write int_header: %v", err)
+	}
+
+	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_BrokerEligibilityPerMkt, LOTTM.St_sign_on_req.St_mkt_allwd_lst[:]); err != nil {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write St_mkt_allwd_lst: %v", err)
+	}
+
+	// Write St_sign_on_req and handle error
+	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_sign_on_req, LOTTM.St_exch_msg_Log_On.St_sign_on_req[:]); err != nil {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write St_sign_on_req: %v", err)
+	}
+
+	// Write net_hdr and handle error
+	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_net_hdr, LOTTM.St_exch_msg_Log_On.St_net_header[:]); err != nil {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write net_hdr: %v", err)
+	}
+
+	// Write exch_msg and handle error
+	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_exch_msg_Log_On, LOTTM.St_req_q_data.St_exch_msg_data[:]); err != nil {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write exch_msg: %v", err)
+	}
+
+	// Set L_msg_type and log success message
 	LOTTM.St_req_q_data.L_msg_type = util.LOGIN_WITHOUT_OPEN_ORDR_DTLS // 1 St_req_q
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "[LogOnToTap] Data copied into Queue Packet")
+
+	/* Create a message queue using the CreateQueue function from MessageQueue.go file ().
+	This function is responsible for creating a system-level queue on Linux. */
+
+	LOTTM.Message_queue_manager.LoggerManager = LOTTM.LoggerManager
+	if LOTTM.Message_queue_manager.CreateQueue(util.ORDINARY_ORDER_QUEUE_ID) != 0 { // here we are giving the value of queue id as 'util.ORDINARY_ORDER_QUEUE_ID' because we are going to create only one queue for all the services. (Ordinary order , LogOn , LogOff)
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Returning from 'CreateQueue' with an Error ")
+		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap]  Exiting from function")
+	} else {
+		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] Created Message Queue SuccessFully")
+	}
+
+	for {
+		if LOTTM.Message_queue_manager.FnCanWriteToQueue() != 0 {
+			LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[LogOnToTap] [Error: Queue is Full ")
+
+			continue
+		} else {
+			break
+		}
+	}
+
+	mtype := *LOTTM.Mtype
+
+	if LOTTM.Message_queue_manager.WriteToQueue(mtype) != 0 {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error:  Failed to write to queue with message type %d", mtype)
+		return -1
+	}
+
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] Successfully wrote to queue with message type %d", mtype)
+
+	/********************* Below Code is only for Testing remove that after Testing*************/
+
+	receivedData, receivedType, readErr := LOTTM.Message_queue_manager.ReadFromQueue(mtype)
+	if readErr != 0 {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with message type %d: %d", mtype, readErr)
+		return -1
+	}
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", mtype, receivedType)
+
+	fmt.Println("Message Type:", receivedData.L_msg_type)
+
+	*LOTTM.Mtype++
+
+	if *LOTTM.Mtype > LOTTM.Max_Pack_Val {
+		*LOTTM.Mtype = 1
+	}
 
 	return 0
-}
-
-func CopyAndFormatSymbol(dest []byte, destLen int, src string) { //'fn_orstonse_char'
-
-	srcUpper := strings.ToUpper(src)
-
-	copyLen := len(srcUpper)
-	if copyLen > destLen {
-		copyLen = destLen
-	}
-
-	copy(dest, srcUpper[:copyLen])
-
-	for i := copyLen; i < destLen; i++ {
-		dest[i] = ' '
-	}
-}
-
-func CopyAndFormatPassword(dest []byte, destLen int, src string) {
-
-	for i := 0; i < len(src) && i < destLen; i++ {
-		dest[i] = src[i]
-	}
-
-	for i := len(src); i < destLen; i++ {
-		dest[i] = ' '
-	}
 }

@@ -1,7 +1,10 @@
 package foexgconlib
 
 import (
+	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
+	"DATA_FWD_TAP/util/MessageQueue"
+	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
@@ -10,20 +13,36 @@ import (
 	"strconv"
 	"strings"
 	"unsafe"
+
+	"gorm.io/gorm"
 )
 
-type LogOffFromTapManager struct{}
+type LogOffFromTapManager struct {
+	DB                    *gorm.DB
+	LoggerManager         *util.LoggerManager
+	ServiceName           string
+	C_pipe_id             string
+	Mtype                 *int
+	int_header            *models.St_int_header
+	St_net_hdr            *models.St_net_hdr
+	St_req_q_data         *models.St_req_q_data
+	TCUM                  *typeconversionutil.TypeConversionUtilManager
+	Message_queue_manager *MessageQueue.MessageQueueManager
+	//--------------------------------
+	Opm_XchngCd string
+	Opm_TrdrID  string
+	//---------------------------------------
+	Exg_NxtTrdDate string
+}
 
 func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
-	var sql_c_opm_xchng_cd, sql_c_exg_trdr_id string
-	var sql_c_nxt_trd_date string
 
 	// Fetch opm_xchng_cd and opm_trdr_id
 	query1 := `
 		SELECT opm_xchng_cd, opm_trdr_id
 		FROM opm_ord_pipe_mstr
 		WHERE opm_pipe_id = ?`
-	err1 := LOFTM.DB.Raw(query1, LOFTM.C_pipe_id).Row().Scan(&sql_c_opm_xchng_cd, &sql_c_exg_trdr_id).Error
+	err1 := LOFTM.DB.Raw(query1, LOFTM.C_pipe_id).Row().Scan(&LOFTM.Opm_XchngCd, &LOFTM.Opm_TrdrID).Error
 	if err1 != nil {
 		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[Fn_logoff_from_TAP] Error fetching opm_xchng_cd: %v", err1)
 		return -1
@@ -34,35 +53,35 @@ func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
 		SELECT exg_nxt_trd_dt
 		FROM exg_xchng_mstr
 		WHERE exg_xchng_cd = ?`
-	err2 := LOFTM.DB.Raw(query2, sql_c_opm_xchng_cd).Scan(&sql_c_nxt_trd_date).Error
+	err2 := LOFTM.DB.Raw(query2, LOFTM.Opm_XchngCd).Scan(&LOFTM.Exg_NxtTrdDate).Error
 	if err2 != nil {
 		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[Fn_logoff_from_TAP] Error fetching exg_nxt_trd_dt: %v", err2)
 		return -1
 	}
 
-	LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[Fn_logoff_from_TAP] The Trade date is: %s", sql_c_nxt_trd_date)
+	LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[Fn_logoff_from_TAP] The Trade date is: %s", LOFTM.Exg_NxtTrdDate)
 
-	value, err := strconv.Atoi(strings.TrimSpace(sql_c_exg_trdr_id))
+	value, err := strconv.Atoi(strings.TrimSpace(LOFTM.Opm_TrdrID))
 	if err != nil {
 		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[fFn_logoff_from_TAP] ERROR: Failed to convert Trader ID to int: %v", err)
 		return -1
 	}
 
-	LOFTM.int_header.Li_trader_id = int32(value)                                        // 1 HDR
-	LOFTM.int_header.Li_log_time = 0                                                    // 2 HDR
-	CopyAndFormatSymbol(LOFTM.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ")     // 3 HDR
-	LOFTM.int_header.Si_transaction_code = util.SIGN_OFF_REQUEST_IN                     // 4 HDR
-	LOFTM.int_header.Si_error_code = 0                                                  // 5 HDR
-	copy(LOFTM.int_header.C_filler_2[:], "        ")                                    // 6 HDR
-	copy(LOFTM.int_header.C_time_stamp_1[:], defaultTimeStamp)                          // 7 HDR
-	copy(LOFTM.int_header.C_time_stamp_2[:], defaultTimeStamp)                          // 8 HDR
-	LOFTM.int_header.Si_message_length = int16(reflect.TypeOf(LOFTM.int_header).Size()) // 9 HDR
+	LOFTM.int_header.Li_trader_id = int32(value)                                               // 1 HDR
+	LOFTM.int_header.Li_log_time = 0                                                           // 2 HDR
+	LOFTM.TCUM.CopyAndFormatSymbol(LOFTM.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ") // 3 HDR
+	LOFTM.int_header.Si_transaction_code = util.SIGN_OFF_REQUEST_IN                            // 4 HDR
+	LOFTM.int_header.Si_error_code = 0                                                         // 5 HDR
+	copy(LOFTM.int_header.C_filler_2[:], "        ")                                           // 6 HDR
+	copy(LOFTM.int_header.C_time_stamp_1[:], defaultTimeStamp)                                 // 7 HDR
+	copy(LOFTM.int_header.C_time_stamp_2[:], defaultTimeStamp)                                 // 8 HDR
+	LOFTM.int_header.Si_message_length = int16(reflect.TypeOf(LOFTM.int_header).Size())        // 9 HDR
 
 	// Generate the sequence number
-	LOFTM.Exg_NxtTrdDate = strings.TrimSpace(sql_c_nxt_trd_date)
+	LOFTM.Exg_NxtTrdDate = strings.TrimSpace(LOFTM.Exg_NxtTrdDate)
 
 	LOFTM.St_net_hdr.S_message_length = int16(unsafe.Sizeof(LOFTM.St_net_hdr) + unsafe.Sizeof(LOFTM.int_header)) // 1 NET_FDR
-	LOFTM.St_net_hdr.I_seq_num = LOFTM.GetResetSequence()                                                        // 2 NET_HDR
+	LOFTM.St_net_hdr.I_seq_num = LOFTM.TCUM.GetResetSequence(LOFTM.DB, LOFTM.C_pipe_id, LOFTM.Exg_NxtTrdDate)    // 2 NET_HDR
 
 	hasher := md5.New()
 	int_headerString, err := json.Marshal(LOFTM.int_header) // to convert the structure in string
@@ -80,24 +99,32 @@ func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
 	// Here I have to write Another field on St_Req_data for Log_Off
 
 	// Write to message queue
-	if LOFTM.MQM.CreateQueue(util.LOGOFF_QUEUE_ID) != 0 {
-		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, " [Fn_logoff_from_TAP] [Error: Returning from 'CreateQueue' with an Error... %s")
-		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, " [Fn_logoff_from_TAP]  Exiting from function")
+	LOFTM.Message_queue_manager.LoggerManager = LOFTM.LoggerManager
+	if LOFTM.Message_queue_manager.CreateQueue(util.ORDINARY_ORDER_QUEUE_ID) != 0 { // here we are giving the value of queue id as 'util.ORDINARY_ORDER_QUEUE_ID' because we are going to create only one queue for all the services. (Ordinary order , LogOn , LogOff)
+		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, " [LogOffFromTap] [Error: Returning from 'CreateQueue' with an Error ")
+		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, " [LogOffFromTap]  Exiting from function")
 	} else {
-		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, " [Fn_logoff_from_TAP] Created Message Queue SuccessFully")
+		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, " [LogOffFromTap] Created Message Queue SuccessFully")
 	}
 
-	if LOFTM.MQM.WriteToQueue(mtype) != 0 {
-		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtype)
+	for {
+		if LOFTM.Message_queue_manager.FnCanWriteToQueue() != 0 {
+			LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[LogOffFromTap] [Error: Queue is Full ")
+
+			continue
+		} else {
+			break
+		}
+	}
+
+	mtype := *LOFTM.Mtype
+
+	if LOFTM.Message_queue_manager.WriteToQueue(mtype) != 0 {
+		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, " [LogOffFromTap] [Error:  Failed to write to queue with message type %d", mtype)
 		return -1
 	}
 
-	// err = LOFTM.fn_write_msg_q(i_send_qid, LOFTM.St_req_q_data)
-	// if err != nil {
-	// 	LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[Fn_logoff_from_TAP] Failed to write in Transmit queue: %v", err)
-	// 	*c_err_msg = fmt.Sprintf("Failed to write in Transmit queue: %v", err)
-	// 	return -1
-	// }
+	LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, " [LogOffFromTap] Successfully wrote to queue with message type %d", mtype)
 
 	return 0
 }

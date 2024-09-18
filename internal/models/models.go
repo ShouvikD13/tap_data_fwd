@@ -191,16 +191,6 @@ type St_exch_msg struct {
 	St_oe_res     [316]byte //St_oe_reqres
 }
 
-type St_exch_msg_Log_On struct {
-	St_net_header  [22]byte  //St_net_hdr
-	St_sign_on_req [316]byte //St_oe_reqres
-}
-
-type St_exch_msg_Log_Off struct {
-	St_net_header [22]byte  //St_net_hdr
-	St_oe_res     [316]byte //St_oe_reqres
-}
-
 type St_net_hdr struct { //correct size
 	S_message_length int16
 	I_seq_num        int32
@@ -474,7 +464,7 @@ func (o *St_order_flags) GetFlagValue(flag uint16) bool {
 //******************************************* LogOn Structures **************************************************
 
 type St_sign_on_req struct {
-	St_hdr                       St_int_header // byte array
+	St_hdr                       [40]byte //St_int_header
 	Li_user_id                   int64
 	C_reserved_1                 [8]byte
 	C_password                   [util.LEN_PASSWORD]byte
@@ -495,7 +485,7 @@ type St_sign_on_req struct {
 	C_ws_class_name              [util.LEN_WS_CLASS_NAME]byte
 	C_broker_status              byte
 	C_show_index                 byte
-	St_mkt_allwd_lst             St_broker_eligibility_per_mkt // 2byte array
+	St_mkt_allwd_lst             [2]byte //St_broker_eligibility_per_mkt // 2byte array
 	Si_member_type               int16
 	C_clearing_status            byte
 	C_broker_name                [util.LEN_BROKER_NAME]byte
@@ -623,3 +613,13 @@ Reserved Byte                   BYTE        1              1
 
 Total Packet Length: 2 bytes
 */
+
+type St_exch_msg_Log_On struct {
+	St_net_header  [22]byte  //St_net_hdr
+	St_sign_on_req [278]byte //St_sign_on_req
+}
+
+type St_exch_msg_Log_Off struct {
+	St_net_header [22]byte  //St_net_hdr
+	St_oe_res     [316]byte //St_oe_reqres
+}

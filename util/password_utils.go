@@ -127,3 +127,14 @@ func (PUM *PasswordUtilManger) FnwritePasswordChangeToFile(IpPipeID, newPassword
 
 	return nil
 }
+
+func (PUM *PasswordUtilManger) CopyAndFormatPassword(dest []byte, destLen int, src string) {
+
+	for i := 0; i < len(src) && i < destLen; i++ {
+		dest[i] = src[i]
+	}
+
+	for i := len(src); i < destLen; i++ {
+		dest[i] = ' '
+	}
+}
