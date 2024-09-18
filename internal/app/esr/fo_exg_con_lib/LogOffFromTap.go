@@ -119,7 +119,7 @@ func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
 
 	mtype := *LOFTM.Mtype
 
-	if LOFTM.Message_queue_manager.WriteToQueue(mtype) != 0 {
+	if LOFTM.Message_queue_manager.WriteToQueue(mtype, *LOFTM.St_req_q_data) != 0 {
 		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, " [LogOffFromTap] [Error:  Failed to write to queue with message type %d", mtype)
 		return -1
 	}

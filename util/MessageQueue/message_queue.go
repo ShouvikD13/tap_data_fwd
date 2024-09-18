@@ -103,7 +103,8 @@ func (MQM *MessageQueueManager) CreateQueue(key int) int {
 	return 0
 }
 
-func (MQM *MessageQueueManager) WriteToQueue(mtype int) int {
+func (MQM *MessageQueueManager) WriteToQueue(mtype int, St_req_q models.St_req_q_data) int {
+	MQM.Req_q_data = St_req_q
 	packedData, err := MQM.pack(MQM.Req_q_data)
 	if err != nil {
 		MQM.LoggerManager.LogError(MQM.ServiceName, "[writeToQueue] [Error: failed to pack data in Message Queue: %v", err)

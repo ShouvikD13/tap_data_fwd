@@ -283,12 +283,11 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 
 		// Writing the data fetched from 'fnGetNxtRec' to the system queue (Linux).
 		//here setting the data becasues initially i am getting all zeros .
-		cpcm.Message_queue_manager.Req_q_data = *cpcm.q_packet
 		cpcm.Message_queue_manager.ServiceName = cpcm.ServiceName
 
 		mtype := *cpcm.Mtype
 
-		if cpcm.Message_queue_manager.WriteToQueue(mtype) != 0 {
+		if cpcm.Message_queue_manager.WriteToQueue(mtype, *cpcm.q_packet) != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtype)
 			return -1
 		}
