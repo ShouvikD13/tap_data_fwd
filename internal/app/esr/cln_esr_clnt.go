@@ -1,345 +1,492 @@
 package app
 
-// import (
-// 	//"bytes"
-// 	//"encoding/binary"
-// 	"DATA_FWD_TAP/models"
-// 	"DATA_FWD_TAP/models/structures"
-// 	"bytes"
-// 	"encoding/binary"
-// 	"fmt"
-// 	"log"
-// 	"net"
-// 	"sync"
-// 	"time"
+import (
+	//"bytes"
+	//"encoding/binary"
+	"DATA_FWD_TAP/internal/models"
+	"DATA_FWD_TAP/util"
+	"DATA_FWD_TAP/util/MessageQueue"
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"sync"
 
-// 	"unsafe"
-// )
+	"time"
 
-// type ESRManger struct {
-// 	req_q_data   *structures.St_req_q_data
-// 	ServiceName  string
-// 	st_exch_msg  *structures.St_exch_msg
-// 	st_net_hdr   *structures.St_net_hdr
-// 	st_oe_reqres *structures.St_oe_reqres
-// 	ENVM         *models.EnvironmentManager
-// }
+	"unsafe"
+)
 
-// var li_send_tap_msg_size int64
-// var li_business_data_size int64
+type ESRManger struct {
+	req_q_data   *models.St_req_q_data
+	ServiceName  string
+	st_exch_msg  *models.St_exch_msg
+	st_net_hdr   *models.St_net_hdr
+	st_oe_reqres *models.St_oe_reqres
+	ENVM         *util.EnvironmentManager
+	req_q_data1  models.St_req_q_data
+	// st_exch_msg_so        *models.St_exch_msg_so
+	st_sign_on_req        *models.St_sign_on_req
+	PUM                   *util.PasswordUtilManger
+	Message_queue_manager *MessageQueue.MessageQueueManager
+	LoggerManager         *util.LoggerManager
+	TM                    *util.TransactionManager
+	Mtype                 *int
+	Max_Pack_Val          int
+}
 
-// var (
-// 	messageQueue = make(chan structures.St_req_q_data, 20)
-// 	wg           sync.WaitGroup
-// )
+var li_send_tap_msg_size int64
+var li_business_data_size int64
+var c_rqst_for_open_ordr byte
 
-// type Config struct {
-// 	IP            string
-// 	Port          string
-// 	AutoReconnect bool
-// }
+var (
+	messageQueue      = make(chan models.St_req_q_data, 20)
+	logonResponseChan = make(chan models.St_exch_msg_so)
+	wg                sync.WaitGroup
+	exitcount         int64
+)
 
-// /*
-// type exch_msg struct {
-// 	TestData1 int64
-// 	TestData2 byte
-// 	TestData3 [20]byte // Fixed-size byte array for the string
-// }
+type Config struct {
+	IP            string
+	Port          string
+	AutoReconnect bool
+}
 
-// type req_q_data struct {
-// 	li_msg_type   int64
-// 	exch_msg_data exch_msg
-// } */
+/*
+type exch_msg struct {
+	TestData1 int64
+	TestData2 byte
+	TestData3 [20]byte // Fixed-size byte array for the string
+}
 
-// func (ESRM *ESRManger) loadConfig() (Config, error) {
-// 	// cfg, err := ini.Load("EnvConfig.ini")
-// 	// if err != nil {
-// 	// 	return Config{}, fmt.Errorf("failed to read config file: %v", err)
-// 	// }
+type req_q_data struct {
+	li_msg_type   int64
+	exch_msg_data exch_msg
+} */
 
-// 	autoReconnect := false //ESRM.ENVM.GetProcessSpaceValue("server", "auto_reconnect")
-// 	// if err != nil {
-// 	// 	return Config{}, fmt.Errorf("failed to read auto_reconnect config: %v", err)
-// 	// }
+func (ESRM *ESRManger) loadConfig() (Config, error) {
+	// cfg, err := ini.Load("EnvConfig.ini")
+	// if err != nil {
+	// 	return Config{}, fmt.Errorf("failed to read config file: %v", err)
+	// }
 
-// 	config := Config{
-// 		IP:            ESRM.ENVM.GetProcessSpaceValue("server", "ip"),
-// 		Port:          ESRM.ENVM.GetProcessSpaceValue("server", "port"),
-// 		AutoReconnect: autoReconnect, // strconv.ParseBool(autoReconnect)
-// 	}
-// 	return config, nil
-// }
+	autoReconnect := false //ESRM.ENVM.GetProcessSpaceValue("server", "auto_reconnect")
+	// if err != nil {
+	// 	return Config{}, fmt.Errorf("failed to read auto_reconnect config: %v", err)
+	// }
 
-// func (ESRM *ESRManger) crt_tap_con() (net.Conn, error) {
-// 	config, err := ESRM.loadConfig()
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error loading config: %v", err)
-// 	}
-// 	// Ensure the format specifier matches the type of the values being logged
-// 	log.Printf("[%s] [crt_tap_con] IP for TAP socket: %s", ESRM.ServiceName, config.IP)
-// 	log.Printf("[%s] [crt_tap_con] Port for TAP socket: %s", ESRM.ServiceName, config.Port)
-// 	log.Printf("[%s] [crt_tap_con] Auto Reconnect status: %v", ESRM.ServiceName, config.AutoReconnect)
+	config := Config{
+		IP:            ESRM.ENVM.GetProcessSpaceValue("server", "ip"),
+		Port:          ESRM.ENVM.GetProcessSpaceValue("server", "port"),
+		AutoReconnect: autoReconnect, // strconv.ParseBool(autoReconnect)
+	}
+	return config, nil
+}
 
-// 	log.Println("Starting Connection to TAP")
+func (ESRM *ESRManger) crt_tap_con() (net.Conn, error) {
+	config, err := ESRM.loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("error loading config: %v", err)
+	}
+	log.Printf("[%s] []IP for TAP socket: %v", config.IP)
+	log.Printf("[%s] []Port for TAP socket: %v", config.Port)
+	log.Printf("[%s] []Auto Reconnect status: %v", config.AutoReconnect)
 
-// 	address := net.JoinHostPort(config.IP, config.Port)
-// 	conn, err := net.Dial("tcp", address)
-// 	if err != nil {
-// 		log.Println("Error connecting:", err)
-// 		if config.AutoReconnect {
-// 			log.Println("Disconnected. Auto Reconnecting...")
-// 			return nil, nil
-// 		} else {
-// 			log.Println("Auto Reconnect is disabled.")
-// 			return nil, err
-// 		}
-// 	}
+	log.Printf("Starting Connection to TAP")
 
-// 	log.Println("Connected to TAP at", address)
-// 	return conn, nil
-// }
+	address := net.JoinHostPort(config.IP, config.Port)
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		log.Printf("Error connecting:", err)
+		if config.AutoReconnect {
+			log.Printf("Disconnected. Auto Reconnecting...")
+			return nil, nil
+		} else {
+			log.Printf("Auto Reconnect is disabled.")
+			return nil, err
+		}
+	}
 
-// func (ESRM *ESRManger) send_thrd(conn net.Conn) {
-// 	defer wg.Done()
+	log.Printf("Connected to TAP at", address)
+	return conn, nil
+}
 
-// 	for msg := range messageQueue {
-// 		// Check if li_msg_type is "2000"
-// 		if msg.L_msg_type == models.BOARD_LOT_IN {
-// 			log.Println("Message type is c0rrect")
+func (ESRM *ESRManger) send_thrd(conn net.Conn) {
+	//defer wg.Done()
+	mtype := *ESRM.Mtype
 
-// 			li_business_data_size = int64(unsafe.Sizeof(structures.St_oe_reqres{}))                      // will use st_oe_reqres in actrual implementation.
-// 			li_send_tap_msg_size = int64(unsafe.Sizeof(structures.St_net_hdr{})) + li_business_data_size // will use size of net header here in implementation.
-// 			log.Println("TAP message size:", li_send_tap_msg_size)
-// 			log.Println("Busniness Data Size:", li_business_data_size)
-// 			// Call fn_writen to write exch_msg_data to TCP connection
-// 			if err := ESRM.fn_writen(conn, msg.St_exch_msg_data, li_send_tap_msg_size); err != nil {
-// 				log.Printf("[%s] []Failed to send exch_msg_data: %v", err)
-// 				return
-// 			}
+	for msg := range messageQueue {
+		receivedData, receivedType, readErr := ESRM.Message_queue_manager.ReadFromQueue(mtype)
+		if readErr != 0 {
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, " [send_thrd] [Error:  Failed to read from queue with message type %d: %d", mtype, readErr)
+		}
+		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, " [send_thrd] Successfully read from queue with message type %d, received type: %d", mtype, receivedType)
 
-// 		} else {
-// 			log.Printf("[%s] [send_thrd] Skipped message with li_msg_type: %d", ESRM.ServiceName, msg.L_msg_type)
-// 		}
-// 	}
+		fmt.Println("Message Type:", receivedData.L_msg_type)
 
-// 	log.Println("Message queue closed, send thread exiting")
+		*ESRM.Mtype++
 
-// }
+		if *ESRM.Mtype > ESRM.Max_Pack_Val {
+			*ESRM.Mtype = 1
+		}
 
-// func (ESRM *ESRManger) fn_writen(conn net.Conn, msg structures.St_exch_msg, msg_size int64) error {
-// 	var buf bytes.Buffer
+		// Check if li_msg_type is "2000"
+		if msg.L_msg_type == util.LOGIN_WITH_OPEN_ORDR_DTLS || msg.L_msg_type == util.LOGIN_WITHOUT_OPEN_ORDR_DTLS {
+			log.Printf("Message Type is LOGIN")
 
-// 	// Serialize the exch_msg structure into the buffer
-// 	if err := binary.Write(&buf, binary.BigEndian, msg); err != nil {
-// 		return err
-// 	}
+			if msg.L_msg_type == models.LOGIN_WITH_OPEN_ORDR_DTLS {
+				c_rqst_for_open_ordr = 'G'
+			} else {
+				c_rqst_for_open_ordr = 'N'
+			}
 
-// 	dsize := buf.Len()
+			log.Printf("c_rqst_for_open_ordr:", c_rqst_for_open_ordr)
 
-// 	log.Println("Size of binary data:", dsize)
+			//Call_Do_xchng_logon to start the sign on process
+			if err := ESRM.Do_xchng_logon(msg.St_exch_msg_so, conn); err != nil {
+				log.Printf("[%s] []Failed to send exch_msg_data: %v", err)
+				return
+			}
 
-// 	data := buf.Bytes()
+		} else if msg.L_msg_type == util.BOARD_LOT_IN {
+			log.Printf("Message type is BOARD LOT IN")
 
-// 	// Restrict the message size if it exceeds the given msg_size
-// 	if int64(len(data)) > msg_size {
-// 		data = data[:msg_size]
-// 	}
+			li_business_data_size = int64(unsafe.Sizeof(models.St_oe_reqres{}))                      // will use st_oe_reqres in actrual implementation.
+			li_send_tap_msg_size = int64(unsafe.Sizeof(models.St_net_hdr{})) + li_business_data_size // will use size of net header here in implementation.
+			log.Printf("Busniness Data Size: %v", li_business_data_size)
+			log.Printf("TAP message size: %v", li_send_tap_msg_size)
 
-// 	totalWritten := 0
+			// Call fn_writen to write exch_msg_data to TCP connection
+			/* if err := ESRM.fn_writen(conn, msg.St_exch_msg_data, li_send_tap_msg_size); err != nil {
+				log.Printf("[%s] []Failed to send exch_msg_data: %v", err)
+				return
+			} */
 
-// 	for totalWritten < len(data) {
-// 		log.Printf("[%s] []Attempting to write: totalWritten=%d, data_len=%d", totalWritten, len(data))
-// 		written, err := conn.Write(data[totalWritten:])
-// 		if err != nil {
-// 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-// 				log.Println("Temporary network error, retrying...")
-// 				time.Sleep(100 * time.Millisecond)
-// 				continue
-// 			}
-// 			log.Printf("[%s] []Write failed: %v\n", err)
-// 			return err
-// 		}
+		} else {
+			log.Printf("[%s] [send_thrd] Skipped message with li_msg_type: %d", ESRM.ServiceName, msg.L_msg_type)
+		}
+	}
 
-// 		if written == 0 {
-// 			// If no bytes are written, the connection might be stalled or closed.
-// 			log.Println("No bytes written; connection may be stalled or closed.")
-// 			return net.ErrWriteToConnected
-// 		}
+	log.Printf("Message queue closed, send thread exiting")
+	exitcount += 1
 
-// 		totalWritten += written
+}
 
-// 		log.Printf("[%s] []Written: %d bytes, Total Written: %d bytes", written, totalWritten)
+func (ESRM *ESRManger) fn_writen(conn net.Conn, msg interface{}, msg_size int64) error {
+	var buf bytes.Buffer
 
-// 		if totalWritten < len(data) {
-// 			// Small delay to help with buffer recovery
-// 			time.Sleep(50 * time.Millisecond)
-// 		}
-// 	}
+	// Use a switch to handle different message types
+	switch m := msg.(type) {
+	case models.St_exch_msg:
+		// Serialize St_exch_msg
+		if err := binary.Write(&buf, binary.BigEndian, m); err != nil {
+			return err
+		}
+	case models.St_exch_msg_so:
+		// Serialize St_exch_msg_so
+		if err := binary.Write(&buf, binary.BigEndian, m); err != nil {
+			return err
+		}
+	default:
+		return errors.New("unsupported message type")
+	}
+	dsize := buf.Len()
 
-// 	log.Printf("[%s] []Successfully sent exch_msg: %+v", msg)
-// 	return nil
-// }
+	log.Printf("Size of binary data: %v", dsize)
 
-// /* func (ESRM *ESRManger) rcv_thrd(conn net.Conn) {
-// 	defer wg.Done()
+	data := buf.Bytes()
 
-// 	for {
-// 		var tmp_buf_dat exch_msg
+	// Restrict the message size if it exceeds the given msg_size
+	if int64(len(data)) > msg_size {
+		data = data[:msg_size]
+	}
 
-// 		li_len_buf := int(unsafe.Sizeof(tmp_buf_dat))
-// 		c_ptr_data := make([]byte, li_len_buf) //Will use MAX_SCK_MSG in actual implementation
+	totalWritten := 0
 
-// 		// Read data from the socket
-// 		if _, err := conn.Read(c_ptr_data); err != nil {
-// 			log.Printf("[%s] []Error reading from socket: %v", err)
-// 			return
-// 		}
+	for totalWritten < len(data) {
+		log.Printf("[%s] [fn_writen]Attempting to write: totalWritten=%d, data_len=%d", totalWritten, len(data))
+		written, err := conn.Write(data[totalWritten:])
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				log.Printf("Temporary network error, retrying...")
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			log.Printf("[%s] []Write failed: %v\n", err)
+			return err
+		}
 
-// 		// Unmarshal the data into the tmp_buf_dat struct
-// 		buf := bytes.NewBuffer(c_ptr_data)
-// 		if err := binary.Read(buf, binary.BigEndian, &tmp_buf_dat); err != nil {
-// 			log.Printf("[%s] []Failed to decode exch_msg_data: %v", err)
-// 			return
-// 		}
+		if written == 0 {
+			// If no bytes are written, the connection might be stalled or closed.
+			log.Printf("No bytes written; connection may be stalled or closed.")
+			return net.ErrWriteToConnected
+		}
 
-// 		// Here you would typically perform your validation and processing
-// 		// For example, validating the transaction code:
-// 		// tmp_buf_dat.st_hdr.si_transaction_code = ntohs(tmp_buf_dat.st_hdr.si_transaction_code)
+		totalWritten += written
 
-// 		log.Printf("[%s] []Message received from exchange: %+v", tmp_buf_dat)
-// 	}
-// } */
+		log.Printf("[%s] [fn_writen]Written: %d bytes, Total Written: %d bytes", written, totalWritten)
 
-// /* func (ESRM *ESRManger) ClnEsrClnt() {
-// 	conn, err := ESRM.crt_tap_con()
-// 	if err != nil {
-// 		log.Fatalf("Error in crt_tap_con: %v", err)
-// 	}
-// 	defer conn.Close()
+		if totalWritten < len(data) {
+			// Small delay to help with buffer recovery
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 
-// 	wg.Add(1)
-// 	go ESRM.send_thrd(conn)
-// 	//go ESRM.rcv_thrd(conn)
+	//log.Printf("[%s] []Successfully sent exch_msg: %+v", msg)
+	log.Printf("[%s]Successfully sent exch_msg")
+	return nil
+}
 
-// 	time.Sleep(100 * time.Millisecond)
+func (ESRM *ESRManger) rcv_thrd(conn net.Conn) {
+	defer wg.Done()
 
-// 	// Enqueue messages
-// 	for i := 1; i <= 10; i++ {
-// 		ex_msg := exch_msg{
-// 			TestData1: int64(i),
-// 			TestData2: byte(i + 1),
-// 		}
-// 		copy(ex_msg.TestData3[:], "Message "+string(rune('A'+i-1))) // Copy string into fixed-size array
+	for {
+		// Read the message from the socket using readXchngSocket function
+		msgData, err := ESRM.readXchngSocket(conn, 0) // Pass appropriate timeout here
+		if err != nil {
+			log.Printf("Error reading from socket: %v", err)
+			return
+		}
 
-// 		msg := req_q_data{
-// 			li_msg_type:   1, // li_msg_type is set to 1 for all messages
-// 			exch_msg_data: ex_msg,
-// 		}
+		// Unmarshal the data into the exch_msg struct
 
-// 		messageQueue <- msg
-// 		log.Printf("[%s] []Queued message: %+v", msg)
-// 		time.Sleep(10 * time.Millisecond)
-// 	}
+		// Dynamically determine the structure based on the message length
+		switch len(msgData) {
+		case int(unsafe.Sizeof(models.St_exch_msg_so{})):
+			var tmp_buf_dat models.St_exch_msg_so
+			buf := bytes.NewBuffer(msgData)
+			if err := binary.Read(buf, binary.BigEndian, &tmp_buf_dat); err != nil {
+				log.Printf("Failed to decode exch_msg_data: %v", err)
+				return
+			}
+			log.Println("Sign On response received by rcv_thrd")
 
-// 	// Optionally close the queue when you're done
-// 	close(messageQueue)
+			//Call_Do_xchng_logon to start the sign on process
+			if err := ESRM.Fn_sign_on_request_out(tmp_buf_dat.St_sign_on_req); err != nil {
+				log.Printf("[%s] []Failed to send exch_msg_data: %v", err)
+				return
+			}
 
-// 	wg.Wait()
-// } */
+			// Send the logon response to the `Do_xchng_logon` function
+			logonResponseChan <- tmp_buf_dat
 
-// func (ESRM *ESRManger) ClnEsrClnt() {
-// 	conn, err := ESRM.crt_tap_con()
-// 	if err != nil {
-// 		log.Fatalf("Error in crt_tap_con: %v", err)
-// 	}
-// 	defer conn.Close()
+		case int(unsafe.Sizeof(models.St_exch_msg{})):
+			var tmp_buf_dat models.St_exch_msg
+			buf := bytes.NewBuffer(msgData)
+			if err := binary.Read(buf, binary.BigEndian, &tmp_buf_dat); err != nil {
+				log.Printf("Failed to decode exch_msg_so_data: %v", err)
+				return
+			}
 
-// 	wg.Add(1)
-// 	go ESRM.send_thrd(conn)
-// 	// go ESRM.rcv_thrd(conn)
+			switch tmp_buf_dat.St_oe_res.St_hdr.Si_transaction_code { //using %2 for now to simulate PRICE OUT AND CONFIRMATION OUT
+			case util.PRICE_CONFIRMATION:
+				log.Println("PRICE RESPONSE")
+				log.Println("PRICE RESPONSE")
 
-// 	time.Sleep(100 * time.Millisecond)
+			case models.ORDER_CONFIRMATION_OUT:
+				log.Println("CONFRIM RESPONSE")
+				log.Println("CONFRIM RESPONSE")
+				log.Println("Exchange Response Recieved:")
+				log.Println("Transaction Id:", tmp_buf_dat.St_oe_res.St_hdr.Si_transaction_code)
+				log.Println("IOC Flag Value:", tmp_buf_dat.St_oe_res.St_ord_flg.Flg_ioc)
+				log.Println("Error Code:", tmp_buf_dat.St_oe_res.St_hdr.Si_error_code)
+			}
 
-// 	// Create three distinct messages
-// 	for i := 1; i <= 3; i++ {
-// 		// Initialize the St_req_q_data structure
-// 		reqData := structures.St_req_q_data{
-// 			L_msg_type: 2000, // All messages have the same L_msg_type
-// 			St_exch_msg_data: structures.St_exch_msg{
-// 				St_net_header: structures.St_net_hdr{
-// 					S_message_length: int16(i * 10),
-// 					I_seq_num:        int32(i),
-// 					C_checksum:       [16]byte{}, // Fixed-size byte array
-// 				},
-// 				St_oe_res: structures.St_oe_reqres{
-// 					St_hdr: &structures.St_int_header{
-// 						Si_transaction_code: int16(i),
-// 						Li_log_time:         int32(i * 1000),
-// 						C_alpha_char:        [models.LEN_ALPHA_CHAR]byte{'A' + byte(i), 'B' + byte(i)},
-// 						Li_trader_id:        int32(i * 200),
-// 						Si_error_code:       int16(i),
+		default:
+			log.Printf("Unexpected message size: %v bytes", len(msgData))
+			return
+		}
 
-// 						C_filler_2:        0,
-// 						C_time_stamp_1:    [models.LEN_TIME_STAMP]byte{'T', 'S', '1', byte(i + '0'), ' ', ' ', ' ', ' '},
-// 						C_time_stamp_2:    [models.LEN_TIME_STAMP]byte{'T', 'S', '2', byte(i + '0'), ' ', ' ', ' ', ' '},
-// 						Si_message_length: int16(i * 100),
-// 					},
-// 					C_participant_type:      byte('A' + i),
-// 					Si_competitor_period:    int16(i),
-// 					Si_solicitor_period:     int16(i),
-// 					C_modified_cancelled_by: byte(0),
-// 					C_filler_2:              byte(0),
-// 					Si_reason_code:          int16(i * 2),
-// 					L_token_no:              int32(i * 3000),
-// 					St_con_desc: &structures.St_contract_desc{
-// 						C_instrument_name: [models.LEN_INSTRUMENT_NAME]byte{'I', 'N', 'S', byte(i + '0')},
-// 						C_symbol:          [models.LEN_SYMBOL_NSE]byte{'S', 'Y', 'M', byte(i + '0')},
-// 						Li_expiry_date:    int32(i * 10000),
-// 						Li_strike_price:   int32(i * 50000),
+		//log.Printf("Message received from exchange: %+v", tmp_buf_dat)
 
-// 						C_option_type: [models.LEN_OPTION_TYPE]byte{'O', 'T'},
-// 						Si_ca_level:   int16(i * 10),
-// 					},
-// 					St_ord_flg: &structures.St_order_flags{
+		if exitcount == 1 {
+			break
+		}
 
-// 						Flg_ato:         uint16(1),
-// 						Flg_market:      uint16(0),
-// 						Flg_sl:          uint16(1),
-// 						Flg_mit:         uint16(0),
-// 						Flg_day:         uint16(1),
-// 						Flg_gtc:         uint16(0),
-// 						Flg_ioc:         uint16(1),
-// 						Flg_aon:         uint16(0),
-// 						Flg_mf:          uint16(1),
-// 						Flg_matched_ind: uint16(0),
-// 						Flg_traded:      uint16(1),
-// 						Flg_modified:    uint16(0),
-// 						Flg_frozen:      uint16(1),
-// 						Flg_filler1:     uint16(0),
-// 					},
-// 					Si_order_type:      int16(i),
-// 					D_order_number:     float64(i) * 1.1,
-// 					Li_volume:          int32(i * 400),
-// 					Si_branch_id:       int16(i * 5),
-// 					Li_trader_id:       int32(i * 500),
-// 					C_broker_id:        [models.LEN_BROKER_ID]byte{'B', 'R', 'K', byte('0' + i)},
-// 					C_account_number:   [models.LEN_ACCOUNT_NUMBER]byte{'A', 'C', 'C', byte('0' + i)},
-// 					L_algo_id:          int32(i * 6000),
-// 					Ll_lastactivityref: int64(i * 7000),
+	}
+}
 
-// 					C_reserved: byte(0),
-// 				},
-// 			},
-// 		}
+func (ESRM *ESRManger) readXchngSocket(conn net.Conn, timeout time.Duration) ([]byte, error) {
+	// Set the header size based on the size of the NetHdr struct
+	headerSize := int(unsafe.Sizeof(models.St_net_hdr{}))
+	headerData, err := ESRM.readNBytes(conn, headerSize, timeout)
+	if err != nil {
+		return nil, err
+	}
 
-// 		// Enqueue the message
-// 		messageQueue <- reqData
-// 		log.Printf("[Message %d] Queued message: %+v", i, reqData)
-// 		time.Sleep(10 * time.Millisecond)
-// 	}
+	var header models.St_net_hdr
+	buf := bytes.NewBuffer(headerData)
+	if err := binary.Read(buf, binary.BigEndian, &header); err != nil {
+		return nil, err
+	}
 
-// 	// Optionally close the queue when done
-// 	close(messageQueue)
+	// Calculate the length of the remainder of the message
+	remainingLength := int(header.S_message_length) - headerSize
 
-// 	wg.Wait()
-// }
+	// Read the remaining message
+	var messageData []byte
+	if remainingLength > 0 {
+		messageData, err = ESRM.readNBytes(conn, remainingLength, timeout)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Combine header and message into one slice
+	fullMessage := append(headerData, messageData...)
+
+	return fullMessage, nil
+}
+
+func (ESRM *ESRManger) readNBytes(conn net.Conn, li_len int, timeout time.Duration) ([]byte, error) {
+	buffer := make([]byte, li_len)
+	read := 0
+
+	// Set the read deadline based on the timeout value
+	if timeout > 0 {
+		conn.SetReadDeadline(time.Now().Add(timeout))
+	} else {
+		conn.SetReadDeadline(time.Time{}) // No timeout
+	}
+
+	for read < li_len {
+		n, err := conn.Read(buffer[read:])
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Handle timeout
+				return nil, errors.New("read timeout")
+			}
+			return nil, err
+		}
+
+		if n == 0 {
+			// Socket closed by the other end
+			return nil, errors.New("socket closed by peer")
+		}
+
+		read += n
+	}
+
+	// Clear the deadline
+	if timeout > 0 {
+		conn.SetReadDeadline(time.Time{}) // Remove timeout after successful read
+	}
+
+	return buffer, nil
+}
+
+func (ESRM *ESRManger) ClnEsrClnt() {
+	ESRM.Message_queue_manager = &MessageQueue.MessageQueueManager{}
+	conn, err := ESRM.crt_tap_con()
+	if err != nil {
+		log.Fatalf("Error in crt_tap_con: %v", err)
+	}
+	defer conn.Close()
+
+	wg.Add(1)
+	go ESRM.send_thrd(conn)
+	log.Printf("Send Routine Initialized")
+	go ESRM.rcv_thrd(conn)
+	log.Printf("Recieve Routine Initialized")
+
+	time.Sleep(100 * time.Millisecond)
+
+	/* 	// Create three distinct messages
+	   	for i := 1; i <= 5; i++ {
+	   		var transactionCode int16
+
+	   		if i%2 == 1 {
+	   			transactionCode = 2073 // Odd i
+	   		} else {
+	   			transactionCode = 2012 // Even i
+	   		}
+	   		// Initialize the St_int_header structure locally
+
+	   		stIntHeader := models.St_int_header{
+	   			Si_transaction_code: transactionCode,
+	   			Li_log_time:         int32(i * 1000),
+	   			C_alpha_char:        [models.LEN_ALPHA_CHAR]byte{'A' + byte(i), 'B' + byte(i)},
+	   			Li_trader_id:        int32(i * 200),
+	   			Si_error_code:       int16(i),
+	   			C_filler_2:          byte(0),
+	   			C_time_stamp_1:      [models.LEN_TIME_STAMP]byte{'T', 'S', '1', byte(i + '0'), ' ', ' ', ' ', ' '},
+	   			C_time_stamp_2:      [models.LEN_TIME_STAMP]byte{'T', 'S', '2', byte(i + '0'), ' ', ' ', ' ', ' '},
+	   			Si_message_length:   int32(i * 100),
+	   		}
+
+	   		// Initialize the St_contract_desc structure locally
+	   		stContractDesc := models.St_contract_desc{
+	   			C_instrument_name: [models.LEN_INSTRUMENT_NAME]byte{'I', 'N', 'S', byte(i + '0')},
+	   			C_symbol:          [models.LEN_SYMBOL_NSE]byte{'S', 'Y', 'M', byte(i + '0')},
+	   			Li_expiry_date:    int32(i * 10000),
+	   			Li_strike_price:   int64(i * 50000),
+	   			C_option_type:     [models.LEN_OPTION_TYPE]byte{'O', 'T'},
+	   			Si_ca_level:       int16(i * 10),
+	   		}
+
+	   		// Initialize the St_order_flags structure locally
+	   		stOrderFlags := models.St_order_flags{
+	   			Flg_ato:         uint32(1),
+	   			Flg_market:      uint32(0),
+	   			Flg_sl:          uint32(1),
+	   			Flg_mit:         uint32(0),
+	   			Flg_day:         uint32(1),
+	   			Flg_gtc:         uint32(0),
+	   			Flg_ioc:         uint32(1),
+	   			Flg_aon:         uint32(0),
+	   			Flg_mf:          uint32(1),
+	   			Flg_matched_ind: uint32(0),
+	   			Flg_traded:      uint32(1),
+	   			Flg_modified:    uint32(0),
+	   			Flg_frozen:      uint32(1),
+	   			Flg_filler1:     uint32(0),
+	   		}
+
+	   		// Initialize the main St_req_q_data structure using the local variables
+	   		reqData := models.St_req_q_data{
+	   			L_msg_type: 2000,
+	   			St_exch_msg_data: models.St_exch_msg{
+	   				/* St_net_header: models.St_net_hdr{
+	   					S_message_length: 336,
+	   					I_seq_num:        int32(i),
+	   					C_checksum:       [16]byte{},
+	   				} */
+	/*St_oe_res: models.St_oe_reqres{
+				St_hdr:                  stIntHeader,
+				C_participant_type:      byte('A' + i),
+				Si_competitor_period:    int16(i),
+				Si_solicitor_period:     int16(i),
+				C_modified_cancelled_by: byte(0),
+				C_filler_2:              byte(0),
+				Si_reason_code:          int16(i * 2),
+				L_token_no:              int32(i * 3000),
+				St_con_desc:             stContractDesc,
+				St_ord_flg:              stOrderFlags,
+				Si_order_type:           int16(i),
+				D_order_number:          float64(i) * 1.1,
+				Li_volume:               int32(i * 400),
+				Si_branch_id:            int16(i * 5),
+				Li_trader_id:            int32(i * 500),
+				C_broker_id:             [models.LEN_BROKER_ID]byte{'B', 'R', 'K', byte('0' + i)},
+				C_account_number:        [models.LEN_ACCOUNT_NUMBER]byte{'A', 'C', 'C', byte('0' + i)},
+				L_algo_id:               int32(i * 6000),
+				Ll_lastactivityref:      int64(i * 7000),
+				C_reserved:              byte(0),
+			},
+		},
+	}
+
+	// Enqueue the message
+
+	// Enqueue the message */
+	messageQueue <- reqData
+	//log.Printf("[Message %d] Queued message:", i, reqData)
+	time.Sleep(50 * time.Millisecond)
+
+	// Optionally close the queue when done
+	close(messageQueue)
+
+	wg.Wait()
+}
