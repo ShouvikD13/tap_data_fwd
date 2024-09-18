@@ -244,6 +244,13 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 
 	// Setting up an infinite loop to keep the service running and continuously fetch newly created orders.
 	for {
+
+		if cpcm.Message_queue_manager.FnCanWriteToQueue() != 0 {
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, "[CLN_PACK_CLNT] [Error: Queue is Full ")
+
+			continue
+		}
+
 		// Beginning a local transaction for the service to perform fetch and update operations on the database.
 		resultTmp = cpcm.Transaction_manager.FnBeginTran()
 		if resultTmp == -1 {
@@ -280,11 +287,6 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 		cpcm.Message_queue_manager.ServiceName = cpcm.ServiceName
 
 		mtype := *cpcm.Mtype
-
-		if cpcm.Message_queue_manager.FnCanWriteToQueue() != 0 {
-			cpcm.LoggerManager.LogError(cpcm.ServiceName, "[CLN_PACK_CLNT] [Error: Queue is Full %d", mtype)
-			return -1
-		}
 
 		if cpcm.Message_queue_manager.WriteToQueue(mtype) != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtype)

@@ -459,12 +459,12 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
 		eplm.orderbook.C_ctcl_id = eplm.orderbook.C_ctcl_id + "100"
 	}
 
-	eplm.oe_reqres.D_nnf_field, err = strconv.ParseFloat(eplm.orderbook.C_ctcl_id, 64)
-	if err != nil {
-		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error in converting the 'C_ctcl_id' in float ... ")
-		eplm.LoggerManager.GetLogger().Warn(eplm.serviceName, " [fnPackOrdnryOrdToNse] Exiting from the function ")
-		return -1
-	}
+	// eplm.oe_reqres.D_nnf_field, err = strconv.ParseFloat(eplm.orderbook.C_ctcl_id, 64)
+	// if err != nil {
+	// 	eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error in converting the 'C_ctcl_id' in float ... ")
+	// 	eplm.LoggerManager.GetLogger().Warn(eplm.serviceName, " [fnPackOrdnryOrdToNse] Exiting from the function ")
+	// 	return -1
+	// }
 
 	cPanNoStr := strings.TrimSpace(strings.ToUpper(string(eplm.cPanNo[:])))
 
@@ -600,7 +600,7 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
 	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] Converted net header to network order")
 
 	eplm.net_hdr.S_message_length = int16(unsafe.Sizeof(eplm.net_hdr) + unsafe.Sizeof(eplm.oe_reqres))
-	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] Calculated message length: ", eplm.net_hdr.S_message_length)
+	eplm.LoggerManager.LogInfo(eplm.serviceName, fmt.Sprintf("[fnPackOrdnryOrdToNse] Calculated message length: %d", eplm.net_hdr.S_message_length))
 
 	buf := new(bytes.Buffer)
 

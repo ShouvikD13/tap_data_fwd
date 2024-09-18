@@ -191,6 +191,16 @@ type St_exch_msg struct {
 	St_oe_res     [316]byte //St_oe_reqres
 }
 
+type St_exch_msg_Log_On struct {
+	St_net_header  [22]byte  //St_net_hdr
+	St_sign_on_req [316]byte //St_oe_reqres
+}
+
+type St_exch_msg_Log_Off struct {
+	St_net_header [22]byte  //St_net_hdr
+	St_oe_res     [316]byte //St_oe_reqres
+}
+
 type St_net_hdr struct { //correct size
 	S_message_length int16
 	I_seq_num        int32
@@ -475,8 +485,8 @@ type St_sign_on_req struct {
 	C_broker_id                  [util.LEN_BROKER_ID]byte
 	C_filler_1                   byte
 	Si_branch_id                 int16
-	Li_version_number            int64
-	Li_batch_2_start_time        int64
+	Li_version_number            int32
+	Li_batch_2_start_time        int32
 	C_host_switch_context        byte
 	C_colour                     [util.LEN_COLOUR]byte
 	C_filler_2                   byte
@@ -493,6 +503,47 @@ type St_sign_on_req struct {
 	C_reserved_4                 [16]byte
 	C_reserved_5                 [16]byte
 }
+
+/*
+Structure Name: MS_SIGNON
+Packet Length: 278 bytes
+Transaction Code: SIGN_ON_REQUEST_IN (2300)
+
+Field Breakdown:
+------------------------------------------------
+Field Name                       	Data Type   	Size (Bytes)   Offset
+------------------------------------------------
+MESSAGE_HEADER (Refer to Message Header)     STRUCT           40             0
+UserID                                LONG             4             40
+Reserved                              CHAR             8             44
+Password                              CHAR             8             52
+Reserved                              CHAR             8             60
+NewPassword                           CHAR             8             68
+TraderName                            CHAR             26            76
+LastPasswordChangeDate                LONG             4             102
+BrokerID                              CHAR             5             106
+Reserved                              CHAR             1             111
+BranchID                              SHORT            2             112
+VersionNumber                         LONG             4             114
+Batch2StartTime                       LONG             4             118
+HostSwitchContext                     CHAR             1             122
+Colour                                CHAR             50            123
+Reserved                              CHAR             1             173
+UserType                              SHORT            2             174
+SequenceNumber                        DOUBLE           8             176
+WsClassName                           CHAR             14            184
+BrokerStatus                          CHAR             1             198
+ShowIndex                             CHAR             1             199
+ST_BROKER_ELIGIBILITY_PER_MKT         STRUCT           2             200
+MemberType                            SHORT            2             202
+ClearingStatus                        CHAR             1             204
+BrokerName                            CHAR             25            205
+Reserved                              CHAR             16            230
+Reserved                              CHAR             16            246
+Reserved                              CHAR             16            262
+
+Total Packet Length: 278 bytes
+*/
 
 type St_sign_on_res struct {
 	St_hdr                       St_int_header
@@ -543,3 +594,32 @@ type St_exch_snd_msg struct {
 	St_signon_req St_sign_on_req
 	St_oe_res     St_oe_reqres
 }
+
+/*
+Structure Name: ST_BROKER_ELIGIBILITY_PER_MKT
+Packet Length: 2 bytes
+
+Field Breakdown (For Small Endian Machines):
+------------------------------------------------
+Field Name                     Data Type   Size (Bytes)   Offset
+------------------------------------------------
+Reserved                        BIT         4              0
+Auction Market                  BIT         1              0
+Spot Market                     BIT         1              0
+Oddlot Market                   BIT         1              0
+Normal Market                   BIT         1              0
+Reserved Byte                   BYTE        1              1
+
+Field Breakdown (For Big Endian Machines):
+------------------------------------------------
+Field Name                     Data Type   Size (Bytes)   Offset
+------------------------------------------------
+Normal Market                   BIT         1              0
+Oddlot Market                   BIT         1              0
+Spot Market                     BIT         1              0
+Auction Market                  BIT         1              0
+Reserved                        BIT         4              0
+Reserved Byte                   BYTE        1              1
+
+Total Packet Length: 2 bytes
+*/
