@@ -287,7 +287,7 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 
 		mtype := *cpcm.Mtype
 
-		if cpcm.Message_queue_manager.WriteToQueue(mtype, *cpcm.q_packet) != 0 {
+		if cpcm.Message_queue_manager.WriteToQueue(mtype, cpcm.q_packet) != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtype)
 			return -1
 		}
@@ -295,14 +295,14 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT(args []string, Db *gorm.DB) int {
 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully wrote to queue with message type %d", mtype)
 
 		// testing purposes (this will not be the part of actual code)
-		receivedData, receivedType, readErr := cpcm.Message_queue_manager.ReadFromQueue(mtype)
+		receivedData, exchng_struct, readErr := cpcm.Message_queue_manager.ReadFromQueue(mtype)
 		if readErr != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with message type %d: %d", mtype, readErr)
 			return -1
 		}
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", mtype, receivedType)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with message type %d, received structure as byte array: %d", mtype, exchng_struct)
 
-		fmt.Println("Message Type:", receivedData.L_msg_type)
+		fmt.Println("Li Message Type:", receivedData)
 
 		*cpcm.Mtype++
 

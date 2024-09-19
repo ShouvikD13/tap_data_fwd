@@ -1,6 +1,8 @@
 package models
 
-import "DATA_FWD_TAP/util"
+import (
+	"DATA_FWD_TAP/util"
+)
 
 const (
 	// ---------------------- for order flags -----------------------
@@ -178,12 +180,8 @@ type St_opm_pipe_mstr struct {
 // ================================ till now all the strctures we are getting as parameters ========================
 
 type St_req_q_data struct {
-	L_msg_type int64
-	/* we are changeing this field multiple times.
-	1. it is changing, where we are packing the structure which is in "fn_pack_ordnry_ord_to_nse" here we are setting the the variable based on the request type like (if request is "new" then "li_msg_type = BOARD_LOT_IN")
-
-	*/
-	St_exch_msg_data [338]byte // in the original structure here a union is used . but i am directly using the structure.
+	L_msg_type       int64
+	St_exch_msg_data [338]byte
 }
 
 type St_exch_msg struct {
@@ -460,7 +458,7 @@ func (o *St_order_flags) GetFlagValue(flag uint16) bool {
 // 	C_cover_uncover string //byte
 // }
 
-//*******************************************************************************************************************
+//***************************************************************************************************************
 //******************************************* LogOn Structures **************************************************
 
 type St_sign_on_req struct {
@@ -620,6 +618,45 @@ type St_exch_msg_Log_On struct {
 }
 
 type St_exch_msg_Log_Off struct {
-	St_net_header [22]byte  //St_net_hdr
-	St_oe_res     [316]byte //St_oe_reqres
+	St_net_header [22]byte //St_net_hdr
+	St_int_header [40]byte //St_int_header
 }
+
+type St_req_q_data_Log_On struct {
+	L_msg_type         int64
+	St_exch_msg_Log_On [300]byte
+}
+
+type St_req_q_data_Log_Off struct {
+	L_msg_type          int64
+	St_exch_msg_Log_Off [62]byte
+}
+
+//----------------------- Functions For implementation of Message Queue---------------------
+
+// For St_req_q_data
+func (data *St_req_q_data) GetMsgType() int64 {
+	return data.L_msg_type
+}
+
+// func (data *St_req_q_data) SetMsgType(msgType int64) {
+// 	data.L_msg_type = msgType
+// }
+
+// For St_req_q_data_Log_On
+func (data *St_req_q_data_Log_On) GetMsgType() int64 {
+	return data.L_msg_type
+}
+
+// func (data *St_req_q_data_Log_On) SetMsgType(msgType int64) {
+// 	data.L_msg_type = msgType
+// }
+
+// For St_req_q_data_Log_Off
+func (data *St_req_q_data_Log_Off) GetMsgType() int64 {
+	return data.L_msg_type
+}
+
+// func (data *St_req_q_data_Log_Off) SetMsgType(msgType int64) {
+// 	data.L_msg_type = msgType
+// }

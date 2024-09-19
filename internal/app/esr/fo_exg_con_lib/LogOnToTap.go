@@ -272,7 +272,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	// Step 5 : assigning the values to the the 'St_sign_on_req'
 
 	/********************** Header Starts ********************/
-	traderID, err := strconv.ParseInt(LOTTM.Opm_TrdrID, 10, 32)
+	traderID, err := strconv.ParseInt(LOTTM.Opm_TrdrID, 10, 64)
 	if err != nil {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "Failed to convert Opm_TrdrID to int32: %v", err)
 		return -1
@@ -483,7 +483,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 
 	mtype := *LOTTM.Mtype
 
-	if LOTTM.Message_queue_manager.WriteToQueue(mtype, *LOTTM.St_req_q_data) != 0 {
+	if LOTTM.Message_queue_manager.WriteToQueue(mtype, LOTTM.St_req_q_data) != 0 {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error:  Failed to write to queue with message type %d", mtype)
 		return -1
 	}
@@ -492,14 +492,14 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 
 	/********************* Below Code is only for Testing remove that after Testing*************/
 
-	receivedData, receivedType, readErr := LOTTM.Message_queue_manager.ReadFromQueue(mtype)
+	R_L_msg_type, receivedType, readErr := LOTTM.Message_queue_manager.ReadFromQueue(mtype)
 	if readErr != 0 {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with message type %d: %d", mtype, readErr)
 		return -1
 	}
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", mtype, receivedType)
 
-	fmt.Println("Message Type:", receivedData.L_msg_type)
+	fmt.Println("Li Message Type:", R_L_msg_type)
 
 	*LOTTM.Mtype++
 
