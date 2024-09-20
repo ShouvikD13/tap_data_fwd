@@ -109,9 +109,10 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	queryForExgMaxPswdVldDays := `
 		SELECT exg_max_pswd_vld_days
 		FROM opm_ord_pipe_mstr, exg_xchng_mstr
-		WHERE opm_pipe_id = ?
+		WHERE opm_pipe_id = 'P1'
 		AND opm_xchng_cd = exg_xchng_cd
-		AND exg_max_pswd_vld_days > (date_trunc('day', current_date) - opm_lst_pswd_chg_dt)
+		AND exg_max_pswd_vld_days > (current_date - opm_lst_pswd_chg_dt);
+
 	`
 	errForExgMaxPswdVldDays := LOTTM.DB.Raw(queryForExgMaxPswdVldDays, LOTTM.C_pipe_id).Scan(&exgMaxPswdVldDays).Error
 
