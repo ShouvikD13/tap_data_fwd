@@ -1,4 +1,4 @@
-package foexgconlib
+package exchange_connection
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ type LogOnToTapManager struct {
 	St_sign_on_req             *models.St_sign_on_req
 	St_req_q_data              *models.St_req_q_data
 	St_exch_msg_Log_On         *models.St_exch_msg_Log_On
-	int_header                 *models.St_int_header
+	Int_header                 *models.St_int_header
 	St_net_hdr                 *models.St_net_hdr
 	St_BrokerEligibilityPerMkt *models.St_broker_eligibility_per_mkt
 	EM                         *util.EnvironmentManager
@@ -38,10 +38,9 @@ type LogOnToTapManager struct {
 	OCM                        *OrderConversion.OrderConversionManager
 	TCUM                       *typeconversionutil.TypeConversionUtilManager
 	Message_queue_manager      *MessageQueue.MessageQueueManager
-	Ser                        string
 	C_pipe_id                  string
 	UserID                     int64
-	Mtype                      *int
+	MtypeWrite                 *int
 	Max_Pack_Val               int
 	//----------------------------------
 	Opm_loginStatus    int
@@ -57,6 +56,8 @@ type LogOnToTapManager struct {
 	Exg_NxtTrdDate string // <--
 	Exg_BrkrName   string
 	Exg_BrkrStts   string
+	//-----------------------
+	Args []string
 }
 
 func (LOTTM *LogOnToTapManager) LogOnToTap() int {
@@ -77,6 +78,8 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	//	Step 7: Write the final structure to the message queue.
 
 	//	Step 1:  Query for checking if ESR is running
+
+	LOTTM.C_pipe_id = LOTTM.Args[3] // temporary
 	queryForBPS_Stts := `
 		SELECT bps_stts
 		FROM bps_btch_pgm_stts
@@ -109,7 +112,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	queryForExgMaxPswdVldDays := `
 		SELECT exg_max_pswd_vld_days
 		FROM opm_ord_pipe_mstr, exg_xchng_mstr
-		WHERE opm_pipe_id = 'P1'
+		WHERE opm_pipe_id = ?
 		AND opm_xchng_cd = exg_xchng_cd
 		AND exg_max_pswd_vld_days > (current_date - opm_lst_pswd_chg_dt);
 
@@ -253,14 +256,14 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	queryForExgXchngMstr := `
 		SELECT exg_brkr_id, 
 		       exg_nxt_trd_dt, 
-		       nvl(exg_brkr_name, ' '), 
+		       COALESCE(exg_brkr_name, ' ') AS exg_brkr_name, 
 		       exg_brkr_stts 
 		FROM exg_xchng_mstr 
 		WHERE exg_xchng_cd = ?
-	`
+		`
 	rowExg := LOTTM.DB.Raw(queryForExgXchngMstr, LOTTM.Opm_XchngCd).Row()
 
-	errForExgXchngMstr := rowExg.Scan(LOTTM.Exg_BrkrID, LOTTM.Exg_NxtTrdDate, LOTTM.Exg_BrkrName, LOTTM.Exg_BrkrStts)
+	errForExgXchngMstr := rowExg.Scan(&LOTTM.Exg_BrkrID, &LOTTM.Exg_NxtTrdDate, &LOTTM.Exg_BrkrName, &LOTTM.Exg_BrkrStts)
 	if errForExgXchngMstr != nil {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "SQL Error: %v", errForExgXchngMstr)
 		return -1
@@ -278,25 +281,25 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "Failed to convert Opm_TrdrID to int32: %v", err)
 		return -1
 	}
-	LOTTM.int_header.Li_trader_id = int32(traderID)                                            // 1 HDR
-	LOTTM.int_header.Li_log_time = 0                                                           // 2 HDR
-	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ") // 3 HDR
-	LOTTM.int_header.Si_transaction_code = util.SIGN_ON_REQUEST_IN                             // 4 HDR
-	LOTTM.int_header.Si_error_code = 0                                                         // 5 HDR
-	copy(LOTTM.int_header.C_filler_2[:], "        ")                                           // 6 HDR
-	copy(LOTTM.int_header.C_time_stamp_1[:], defaultTimeStamp)                                 // 7 HDR
-	copy(LOTTM.int_header.C_time_stamp_2[:], defaultTimeStamp)                                 // 8 HDR
-	LOTTM.int_header.Si_message_length = int16(reflect.TypeOf(LOTTM.St_sign_on_req).Size())    // 9 HDR
+	LOTTM.Int_header.Li_trader_id = int32(traderID)                                            // 1 HDR
+	LOTTM.Int_header.Li_log_time = 0                                                           // 2 HDR
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.Int_header.C_alpha_char[:], util.LEN_ALPHA_CHAR, " ") // 3 HDR
+	LOTTM.Int_header.Si_transaction_code = util.SIGN_ON_REQUEST_IN                             // 4 HDR
+	LOTTM.Int_header.Si_error_code = 0                                                         // 5 HDR
+	copy(LOTTM.Int_header.C_filler_2[:], "        ")                                           // 6 HDR
+	copy(LOTTM.Int_header.C_time_stamp_1[:], defaultTimeStamp)                                 // 7 HDR
+	copy(LOTTM.Int_header.C_time_stamp_2[:], defaultTimeStamp)                                 // 8 HDR
+	LOTTM.Int_header.Si_message_length = int16(reflect.TypeOf(LOTTM.St_sign_on_req).Size())    // 9 HDR
 
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` Li_trader_id: %d", LOTTM.int_header.Li_trader_id)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` Li_log_time: %d", LOTTM.int_header.Li_log_time)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` C_alpha_char: %s", LOTTM.int_header.C_alpha_char)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` Si_transaction_code: %d", LOTTM.int_header.Si_transaction_code)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` Si_error_code: %d", LOTTM.int_header.Si_error_code)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` C_filler_2: %s", LOTTM.int_header.C_filler_2)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` C_time_stamp_1: %s", LOTTM.int_header.C_time_stamp_1)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` C_time_stamp_2: %s", LOTTM.int_header.C_time_stamp_2)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `int_header` Si_message_length: %d", LOTTM.int_header.Si_message_length)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` Li_trader_id: %d", LOTTM.Int_header.Li_trader_id)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` Li_log_time: %d", LOTTM.Int_header.Li_log_time)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` C_alpha_char: %s", LOTTM.Int_header.C_alpha_char)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` Si_transaction_code: %d", LOTTM.Int_header.Si_transaction_code)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` Si_error_code: %d", LOTTM.Int_header.Si_error_code)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` C_filler_2: %s", LOTTM.Int_header.C_filler_2)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` C_time_stamp_1: %s", LOTTM.Int_header.C_time_stamp_1)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` C_time_stamp_2: %s", LOTTM.Int_header.C_time_stamp_2)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `Int_header` Si_message_length: %d", LOTTM.Int_header.Si_message_length)
 
 	/********************** Header Done ********************/
 
@@ -393,7 +396,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` C_colour: %s", string(LOTTM.St_sign_on_req.C_colour[:]))
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` C_filler_2: %c", LOTTM.St_sign_on_req.C_filler_2)
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` Si_user_type: %d", LOTTM.St_sign_on_req.Si_user_type)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` D_sequence_number: %d", LOTTM.St_sign_on_req.D_sequence_number)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` D_sequence_number: %f", LOTTM.St_sign_on_req.D_sequence_number)
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` C_ws_class_name: %s", string(LOTTM.St_sign_on_req.C_ws_class_name[:]))
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` C_broker_status: %c", LOTTM.St_sign_on_req.C_broker_status)
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_sign_on_req` C_show_index: %c", LOTTM.St_sign_on_req.C_show_index)
@@ -407,7 +410,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	/********************** Body Done ********************/
 
 	/********************** Net_Hdr Starts ********************/
-	LOTTM.OCM.ConvertSignOnReqToNetworkOrder(LOTTM.St_sign_on_req, LOTTM.int_header) // Here we are converting all the numbers to Network Order
+	LOTTM.OCM.ConvertSignOnReqToNetworkOrder(LOTTM.St_sign_on_req, LOTTM.Int_header) // Here we are converting all the numbers to Network Order
 
 	LOTTM.St_net_hdr.S_message_length = int16(unsafe.Sizeof(LOTTM.St_sign_on_req) + unsafe.Sizeof(LOTTM.St_net_hdr)) // 1 NET_FDR
 	LOTTM.St_net_hdr.I_seq_num = LOTTM.TCUM.GetResetSequence(LOTTM.DB, LOTTM.C_pipe_id, LOTTM.Exg_NxtTrdDate)        // 2 NET_HDR
@@ -433,9 +436,9 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 
 	buf := new(bytes.Buffer)
 
-	// Write int_header and handle error
-	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.int_header, LOTTM.St_sign_on_req.St_hdr[:]); err != nil {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write int_header: %v", err)
+	// Write Int_header and handle error
+	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.Int_header, LOTTM.St_sign_on_req.St_hdr[:]); err != nil {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write Int_header: %v", err)
 	}
 
 	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_BrokerEligibilityPerMkt, LOTTM.St_sign_on_req.St_mkt_allwd_lst[:]); err != nil {
@@ -482,7 +485,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		}
 	}
 
-	mtype := *LOTTM.Mtype
+	mtype := *LOTTM.MtypeWrite
 
 	if LOTTM.Message_queue_manager.WriteToQueue(mtype, LOTTM.St_req_q_data) != 0 {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error:  Failed to write to queue with message type %d", mtype)
@@ -502,10 +505,10 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 
 	fmt.Println("Li Message Type:", R_L_msg_type)
 
-	*LOTTM.Mtype++
+	*LOTTM.MtypeWrite++
 
-	if *LOTTM.Mtype > LOTTM.Max_Pack_Val {
-		*LOTTM.Mtype = 1
+	if *LOTTM.MtypeWrite > LOTTM.Max_Pack_Val {
+		*LOTTM.MtypeWrite = 1
 	}
 
 	return 0

@@ -6,6 +6,7 @@ package MessageStat
 #include "msg_queue_wrapper.h"
 */
 import "C"
+
 import (
 	"fmt"
 	"time"

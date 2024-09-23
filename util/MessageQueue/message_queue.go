@@ -21,6 +21,10 @@ type MessageQueueManager struct {
 	MSM                *MessageStat.MessageStatManager
 }
 
+func NewMessageQueueManager(ServiceName string, mq *sysv_mq.MessageQueue) {
+
+}
+
 type WriteQueueMessage interface {
 	GetMsgType() int64
 }
@@ -56,7 +60,6 @@ func (MQM *MessageQueueManager) pack(message WriteQueueMessage) ([]byte, error) 
 func (MQM *MessageQueueManager) CreateQueue(key int) int {
 	// Initialize MessageStatManager instance and assign it to MQM.MSM
 	// This sets up the MessageStatManager for managing message queue statistics
-	MQM.MSM = &MessageStat.MessageStatManager{}
 	mq, err := sysv_mq.NewMessageQueue(&sysv_mq.QueueConfig{
 		Key:     key,
 		MaxSize: 1024 * 3,

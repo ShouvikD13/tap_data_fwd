@@ -1,8 +1,9 @@
-// msg_queue_wrapper.h
 #ifndef MSG_QUEUE_WRAPPER_H
 #define MSG_QUEUE_WRAPPER_H
 
 #include <sys/types.h>
+#include <time.h> // Include this for time_t
+#include <unistd.h> // Optional, include if you use pid_t
 
 #ifdef __cplusplus
 extern "C" {

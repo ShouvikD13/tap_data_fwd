@@ -1,4 +1,4 @@
-package exg_pack_lib
+package packing_service
 
 import (
 	"DATA_FWD_TAP/internal/models"
@@ -46,6 +46,7 @@ type ExchngPackLibMaster struct {
 	LoggerManager *util.LoggerManager
 	TCUM          *typeconversionutil.TypeConversionUtilManager
 	Mtype         *int
+	Db            *gorm.DB
 }
 
 // constructor function
@@ -62,7 +63,11 @@ func NewExchngPackLibMaster(serviceName string,
 	contract_desc *models.St_contract_desc,
 	order_flag *models.St_order_flags,
 	OCM *OrderConversion.OrderConversionManager,
-	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string, Log *util.LoggerManager, TCUM *typeconversionutil.TypeConversionUtilManager, mtype *int) *ExchngPackLibMaster {
+	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string,
+	Log *util.LoggerManager,
+	TCUM *typeconversionutil.TypeConversionUtilManager,
+	mtype *int,
+	Db *gorm.DB) *ExchngPackLibMaster {
 
 	var (
 		bPanNo     [10]byte
@@ -101,13 +106,14 @@ func NewExchngPackLibMaster(serviceName string,
 		LoggerManager: Log,
 		TCUM:          TCUM,
 		Mtype:         mtype,
+		Db:            Db,
 	}
 }
 
 // There is an issue with the field `c_remark`. it is not being initialized anywhere in the original code.
 // In the NNF, `c_remark` is mentioned as 'cOrdFiller CHAR 24', but there is no description provided for it.
 
-func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
+func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse() int {
 
 	eplm.LoggerManager.LogInfo(eplm.serviceName, " [fnPackOrdnryOrdToNse] Inside 'fnPackOrdnryOrdToNse' ")
 
@@ -381,7 +387,7 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
 		WHERE IAI_MATCH_ACCOUNT_NO = ?
 	`
 	var icdCustType string
-	result := db.Raw(query, eplm.orderbook.C_cln_mtch_accnt).Scan(&icdCustType)
+	result := eplm.Db.Raw(query, eplm.orderbook.C_cln_mtch_accnt).Scan(&icdCustType)
 	if result.Error != nil {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] [Error executing query: ... %v", result.Error)
 		return -1
@@ -569,7 +575,7 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse(db *gorm.DB) int {
 	// eplm.LoggerManager.LogInfo(eplm.serviceName , " [fnPackOrdnryOrdToNse] flg_closed is :	%d ", eplm.order_flag.Flg_closed)
 	// eplm.LoggerManager.LogInfo(eplm.serviceName , " [fnPackOrdnryOrdToNse] flg_fill_and_kill is :	%d ", eplm.order_flag.Flg_fill_and_kill)
 
-	tmpVar := eplm.TCUM.GetResetSequence(db, eplm.xchngbook.C_pipe_id, eplm.xchngbook.C_mod_trd_dt)
+	tmpVar := eplm.TCUM.GetResetSequence(eplm.Db, eplm.xchngbook.C_pipe_id, eplm.xchngbook.C_mod_trd_dt)
 	if tmpVar == -1 {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] Error: Failed to retrieve sequence number")
 		return -1

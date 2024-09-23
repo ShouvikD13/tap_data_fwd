@@ -1,0 +1,153 @@
+package initializers
+
+import (
+	"DATA_FWD_TAP/internal/database"
+	"DATA_FWD_TAP/internal/models"
+	"DATA_FWD_TAP/util"
+	"DATA_FWD_TAP/util/MessageQueue"
+	MessageStat "DATA_FWD_TAP/util/MessageStats"
+	"DATA_FWD_TAP/util/OrderConversion"
+	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
+	"log"
+)
+
+func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int) *MainContainer {
+
+	log.Printf("[%s] Program %s starts", serviceName, args[0])
+
+	utilContainer := NewUtilContainer(serviceName, args, mTypeRead, mTypeWrite)
+	clientContainer := NewClientContainer()
+	logOnContainer := NewLogOnContainer()
+	logOffContainer := NewLogOffContainer()
+	clientGlobalValueContainer := NewClientGlobalValueContainer(args)
+	logOnGlobalValueContainer := NewLogOnGlobalValueContainer(args)
+	logOffGlobalValueContainer := NewLogOffGlobalValueContainer(args)
+	return &MainContainer{
+		UtilContainer:              utilContainer,
+		ClientContainer:            clientContainer,
+		LogOnContainer:             logOnContainer,
+		LogOffContainer:            logOffContainer,
+		ClientGlobalValueContainer: clientGlobalValueContainer,
+		LogOnGlobalValueContainer:  logOnGlobalValueContainer,
+		LogOffGlobalValueContainer: logOffGlobalValueContainer,
+	}
+}
+
+func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int) *UtilContainer {
+
+	log.Printf("[%s] Program %s starts", serviceName, args[0])
+
+	environmentManager := util.NewEnvironmentManager(serviceName, "/mnt/c/Users/devdu/go-workspace/data_fwd_tap/internal/config/env_config.ini")
+
+	environmentManager.LoadIniFile()
+
+	//Logger file
+
+	loggerManager := &util.LoggerManager{}
+	loggerManager.InitLogger(environmentManager)
+
+	// Get the logger instance
+	logger := loggerManager.GetLogger()
+
+	loggerManager.LogInfo(serviceName, "Program %s starts", args[0])
+
+	configManager := database.NewConfigManager(serviceName, environmentManager, loggerManager)
+
+	if configManager.LoadPostgreSQLConfig() != 0 {
+		loggerManager.LogError(serviceName, "Failed to load PostgreSQL configuration")
+		logger.Fatalf("[%s] Failed to load PostgreSQL configuration", serviceName)
+	}
+
+	if configManager.GetDatabaseConnection() != 0 {
+		loggerManager.LogError(serviceName, "Failed to connect to the database")
+		logger.Fatalf("[%s] Failed to connect to database", serviceName)
+	}
+
+	DB := configManager.GetDB()
+	if DB == nil {
+		loggerManager.LogError(serviceName, "Database connection is nil. Failed to get the database instance.")
+		logger.Fatalf("[%s] Database connection is nil.", serviceName)
+	}
+
+	logger.Info(DB)
+
+	TCUM := &typeconversionutil.TypeConversionUtilManager{
+		LoggerManager: loggerManager,
+	}
+
+	return &UtilContainer{
+		ServiceName:               serviceName,
+		OrderConversionManager:    &OrderConversion.OrderConversionManager{},
+		EnvironmentManager:        environmentManager,
+		MaxPackVal:                100,
+		ConfigManager:             configManager,
+		LoggerManager:             loggerManager,
+		TypeConversionUtilManager: TCUM,
+		TransactionManager:        util.NewTransactionManager(serviceName, configManager, loggerManager),
+		PasswordUtilManager:       &util.PasswordUtilManger{LM: loggerManager},
+		MessageQueueManager: &MessageQueue.MessageQueueManager{
+			ServiceName:   serviceName,
+			LoggerManager: loggerManager,
+			MSM:           &MessageStat.MessageStatManager{},
+		},
+		DB:         DB,
+		MTypeRead:  mTypeRead,
+		MTypeWrite: mTypeWrite,
+	}
+
+}
+
+func NewClientContainer() *ClientContainer {
+	return &ClientContainer{
+		Xchngbook:    &models.Vw_xchngbook{},
+		Orderbook:    &models.Vw_orderbook{},
+		Contract:     &models.Vw_contract{},
+		NseContract:  &models.Vw_nse_cntrct{},
+		PipeMaster:   &models.St_opm_pipe_mstr{},
+		OeReqres:     &models.St_oe_reqres{},
+		ExchMsg:      &models.St_exch_msg{},
+		NetHdr:       &models.St_net_hdr{},
+		QPacket:      &models.St_req_q_data{},
+		IntHeader:    &models.St_int_header{},
+		ContractDesc: &models.St_contract_desc{},
+		OrderFlag:    &models.St_order_flags{},
+	}
+}
+
+func NewClientGlobalValueContainer(args []string) *ClientGlobalValueContainer {
+
+	return &ClientGlobalValueContainer{
+		Args: args,
+	}
+}
+
+func NewLogOnContainer() *LogOnContainer {
+	return &LogOnContainer{
+		StSignOnReq:               &models.St_sign_on_req{},
+		StReqQData:                &models.St_req_q_data{},
+		StExchMsgLogOn:            &models.St_exch_msg_Log_On{},
+		IntHeader:                 &models.St_int_header{},
+		StNetHdr:                  &models.St_net_hdr{},
+		StBrokerEligibilityPerMkt: &models.St_broker_eligibility_per_mkt{},
+	}
+}
+
+func NewLogOnGlobalValueContainer(args []string) *LogOnGlobalValueContainer {
+	return &LogOnGlobalValueContainer{
+		Args: args,
+	}
+}
+
+func NewLogOffContainer() *LogOffContainer {
+	return &LogOffContainer{
+		IntHeader:  &models.St_int_header{},
+		StNetHdr:   &models.St_net_hdr{},
+		StReqQData: &models.St_req_q_data{},
+	}
+}
+
+func NewLogOffGlobalValueContainer(args []string) *LogOffGlobalValueContainer {
+	return &LogOffGlobalValueContainer{
+		Args: args,
+	}
+}
