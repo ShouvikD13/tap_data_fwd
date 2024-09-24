@@ -26,7 +26,7 @@ const defaultTimeStamp = "0"
 type LogOnToTapManager struct {
 	ServiceName                string
 	St_sign_on_req             *models.St_sign_on_req
-	St_req_q_data              *models.St_req_q_data
+	St_req_q_data              *models.St_req_q_data_Log_On
 	St_exch_msg_Log_On         *models.St_exch_msg_Log_On
 	Int_header                 *models.St_int_header
 	St_net_hdr                 *models.St_net_hdr
@@ -456,7 +456,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	}
 
 	// Write exch_msg and handle error
-	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_exch_msg_Log_On, LOTTM.St_req_q_data.St_exch_msg_data[:]); err != nil {
+	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_exch_msg_Log_On, LOTTM.St_req_q_data.St_exch_msg_Log_On[:]); err != nil {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write exch_msg: %v", err)
 	}
 

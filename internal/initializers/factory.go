@@ -9,6 +9,7 @@ import (
 	"DATA_FWD_TAP/util/OrderConversion"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"log"
+	"strconv"
 )
 
 func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int) *MainContainer {
@@ -69,17 +70,31 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		logger.Fatalf("[%s] Database connection is nil.", serviceName)
 	}
 
-	logger.Info(DB)
-
 	TCUM := &typeconversionutil.TypeConversionUtilManager{
 		LoggerManager: loggerManager,
+	}
+
+	//this value also we are reding from configuration file "I have set the temp value in the configuration file for now"
+	maxPackValStr := environmentManager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
+	var maxPackVal int
+	if maxPackValStr == "" {
+		loggerManager.LogError(serviceName, " [Fn_bat_init] [Error: 'PACK_VAL' not found in the configuration under 'PackingLimit'")
+	} else {
+		maxPackVal, err := strconv.Atoi(maxPackValStr)
+		if err != nil {
+			loggerManager.LogError(serviceName, " [Fn_bat_init] [Error: Failed to convert 'PACK_VAL' '%s' to integer: %v", maxPackValStr, err)
+			maxPackVal = 0
+		} else {
+			loggerManager.LogInfo(serviceName, " [Fn_bat_init] Fetched and converted 'PACK_VAL' from configuration: %d", maxPackVal)
+		}
+
 	}
 
 	return &UtilContainer{
 		ServiceName:               serviceName,
 		OrderConversionManager:    &OrderConversion.OrderConversionManager{},
 		EnvironmentManager:        environmentManager,
-		MaxPackVal:                100,
+		MaxPackVal:                maxPackVal,
 		ConfigManager:             configManager,
 		LoggerManager:             loggerManager,
 		TypeConversionUtilManager: TCUM,
@@ -124,7 +139,7 @@ func NewClientGlobalValueContainer(args []string) *ClientGlobalValueContainer {
 func NewLogOnContainer() *LogOnContainer {
 	return &LogOnContainer{
 		StSignOnReq:               &models.St_sign_on_req{},
-		StReqQData:                &models.St_req_q_data{},
+		StReqQData:                &models.St_req_q_data_Log_On{},
 		StExchMsgLogOn:            &models.St_exch_msg_Log_On{},
 		IntHeader:                 &models.St_int_header{},
 		StNetHdr:                  &models.St_net_hdr{},
@@ -140,9 +155,10 @@ func NewLogOnGlobalValueContainer(args []string) *LogOnGlobalValueContainer {
 
 func NewLogOffContainer() *LogOffContainer {
 	return &LogOffContainer{
-		IntHeader:  &models.St_int_header{},
-		StNetHdr:   &models.St_net_hdr{},
-		StReqQData: &models.St_req_q_data{},
+		IntHeader:       &models.St_int_header{},
+		StNetHdr:        &models.St_net_hdr{},
+		StExchMsgLogOff: &models.St_exch_msg_Log_Off{},
+		StReqQData:      &models.St_req_q_data_Log_Off{},
 	}
 }
 

@@ -55,7 +55,7 @@ type ClientGlobalValueContainer struct {
 
 type LogOnContainer struct {
 	StSignOnReq               *models.St_sign_on_req
-	StReqQData                *models.St_req_q_data
+	StReqQData                *models.St_req_q_data_Log_On
 	StExchMsgLogOn            *models.St_exch_msg_Log_On
 	IntHeader                 *models.St_int_header
 	StNetHdr                  *models.St_net_hdr
@@ -82,9 +82,10 @@ type LogOnGlobalValueContainer struct {
 }
 
 type LogOffContainer struct {
-	IntHeader  *models.St_int_header
-	StNetHdr   *models.St_net_hdr
-	StReqQData *models.St_req_q_data
+	IntHeader       *models.St_int_header
+	StNetHdr        *models.St_net_hdr
+	StExchMsgLogOff *models.St_exch_msg_Log_Off
+	StReqQData      *models.St_req_q_data_Log_Off
 }
 
 type LogOffGlobalValueContainer struct {

@@ -29,12 +29,11 @@ func main() {
 	// 	logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
 	// }
 
-	// // LogOnToTap initialization
-	// if initResult := serviceInitManager.LogOnToTapInitialization(); initResult != 0 {
-	// 	logger.Fatalf("[Fatal: Shutting down due to error in %s: LogOnToTapInitialization failed with result code %d", serviceName, initResult)
-	// }
+	// LogOnToTap initialization
+	if initResult := serviceInitManager.LogOnToTapInitialization(); initResult != 0 {
+		logger.Fatalf("[Fatal: Shutting down due to error in %s: LogOnToTapInitialization failed with result code %d", serviceName, initResult)
+	}
 
-	// LogOffFromTap initialization (usually called at the end)
 	if initResult := serviceInitManager.LogOffFromTapInitialization(); initResult != 0 {
 		logger.Fatalf("[Fatal: Shutting down due to error in %s: LogOffFromTapInitialization failed with result code %d", serviceName, initResult)
 	}

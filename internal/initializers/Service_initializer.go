@@ -107,6 +107,7 @@ func (SIM *ServiceInitializationManager) LogOffFromTapInitialization() int {
 		MtypeWrite:            SIM.MainContainer.UtilContainer.MTypeWrite,
 		Int_header:            SIM.MainContainer.LogOffContainer.IntHeader,
 		St_net_hdr:            SIM.MainContainer.LogOffContainer.StNetHdr,
+		Exch_msg_Log_Off:      SIM.MainContainer.LogOffContainer.StExchMsgLogOff,
 		St_req_q_data:         SIM.MainContainer.LogOffContainer.StReqQData,
 		TCUM:                  SIM.MainContainer.UtilContainer.TypeConversionUtilManager,
 		Message_queue_manager: SIM.MainContainer.UtilContainer.MessageQueueManager,
@@ -115,17 +116,13 @@ func (SIM *ServiceInitializationManager) LogOffFromTapInitialization() int {
 		Exg_NxtTrdDate:        SIM.MainContainer.LogOffGlobalValueContainer.ExgNxtTrdDate,
 		C_pipe_id:             SIM.MainContainer.LogOffGlobalValueContainer.C_pipe_id,
 		Args:                  SIM.MainContainer.LogOffGlobalValueContainer.Args,
+		Max_Pack_Val:          SIM.MainContainer.UtilContainer.MaxPackVal,
 	}
-
-	SIM.MainContainer.UtilContainer.LoggerManager.LogError(SIM.MainContainer.UtilContainer.ServiceName, " Printing the object of 'SIM.MainContainer.UtilContainer.DB' %v  ", SIM.MainContainer.UtilContainer.DB)
-
-	SIM.MainContainer.UtilContainer.LoggerManager.LogError(SIM.MainContainer.UtilContainer.ServiceName, " Printing the object of 'VarLogOff.DB' %v  ", VarLogOff.DB)
 
 	initResult := VarLogOff.Fn_logoff_from_TAP()
 
 	if initResult != 0 {
 		SIM.MainContainer.UtilContainer.LoggerManager.LogInfo(SIM.MainContainer.UtilContainer.ServiceName, " Fn_logoff_from_TAP() failed with result code: %d", initResult)
-
 		return -1
 	}
 

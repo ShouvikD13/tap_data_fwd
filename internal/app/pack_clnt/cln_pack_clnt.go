@@ -177,20 +177,21 @@ func (cpcm *ClnPackClntManager) Fn_bat_init() int {
 	}
 	cpcm.Pipe_mstr.S_user_typ_glb = userType
 
+	// 'Below code is moved to 'Factory.go''
 	//this value also we are reding from configuration file "I have set the temp value in the configuration file for now"
-	maxPackValStr := cpcm.Enviroment_manager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
-	if maxPackValStr == "" {
-		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: 'PACK_VAL' not found in the configuration under 'PackingLimit'")
-	} else {
-		maxPackVal, err := strconv.Atoi(maxPackValStr)
-		if err != nil {
-			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Failed to convert 'PACK_VAL' '%s' to integer: %v", maxPackValStr, err)
-			maxPackVal = 0
-		} else {
-			cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Fetched and converted 'PACK_VAL' from configuration: %d", maxPackVal)
-		}
-		cpcm.Max_Pack_Val = maxPackVal
-	}
+	// maxPackValStr := cpcm.Enviroment_manager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
+	// if maxPackValStr == "" {
+	// 	cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: 'PACK_VAL' not found in the configuration under 'PackingLimit'")
+	// } else {
+	// 	maxPackVal, err := strconv.Atoi(maxPackValStr)
+	// 	if err != nil {
+	// 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Failed to convert 'PACK_VAL' '%s' to integer: %v", maxPackValStr, err)
+	// 		maxPackVal = 0
+	// 	} else {
+	// 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Fetched and converted 'PACK_VAL' from configuration: %d", maxPackVal)
+	// 	}
+	// 	cpcm.Max_Pack_Val = maxPackVal
+	// }
 
 	// finally we are calling the CLN_PACK_CLNT function (service)
 	resultTmp = cpcm.CLN_PACK_CLNT()
