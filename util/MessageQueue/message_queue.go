@@ -71,6 +71,8 @@ func (MQM *MessageQueueManager) CreateQueue(key int) int {
 	}
 	MQM.mq = mq
 	return 0
+
+	// this funtion should call the function 'int create_message_queue(int *queue_id) ' of MessageQueue.c
 }
 
 func (MQM *MessageQueueManager) WriteToQueue(mId int, message WriteQueueMessage) int {
@@ -88,6 +90,8 @@ func (MQM *MessageQueueManager) WriteToQueue(mId int, message WriteQueueMessage)
 		return -1
 	}
 	return 0
+
+	// This function should call the 'int send_message_to_queue(int queue_id, void *message, long message_length)'
 }
 
 func (MQM *MessageQueueManager) ReadFromQueue(mId int) (int64, []byte, int) {
@@ -116,6 +120,8 @@ func (MQM *MessageQueueManager) ReadFromQueue(mId int) (int64, []byte, int) {
 	}
 
 	return Li_msg_type, byteArray, 0
+
+	// this function should call 'receive_message_from_queue(int queue_id, void *buffer, long *buffer_length)'
 }
 
 func (MQM *MessageQueueManager) DestroyQueue() int {
@@ -125,6 +131,7 @@ func (MQM *MessageQueueManager) DestroyQueue() int {
 		return -1
 	}
 	return 0
+	// this function should call 'void destroy_message_queue(int queue_id)'
 }
 
 func (MQM *MessageQueueManager) FnCanWriteToQueue() int {
@@ -144,6 +151,12 @@ func (MQM *MessageQueueManager) FnCanWriteToQueue() int {
 
 	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[canWriteToQueue] Queue is full, current message count: %d", stats.MsgQnum)
 	return -1
+
+	// This function should call 'get_queue_message_count(int queue_id, unsigned int *message_count)'
 }
 
-// -----------------------------
+func (MQM *MessageQueueManager) FnFlushQueue() int {
+	return 0
+
+	// This Function should call 'int flush_message_queue(int queue_id) '
+}
