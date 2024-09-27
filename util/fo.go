@@ -57,6 +57,24 @@ const (
 	LOGIN_WITHOUT_OPEN_ORDR_DTLS = 5105
 	SIGN_OFF_REQUEST_IN          = 2320
 
+	LOGIN_WITH_OPEN_ORDR_DTLS = 5104 //For testing only
+
+	PRICE_CONFIRMATION     = 2012
+	ORDER_CONFIRMATION_OUT = 2073
+	LEN_PASS_WD            = 8 + 1
+	LEN_DT                 = 12
+	LEN_ERROR_MESSAGE      = 128
+	LEN_ERROR_KEY          = 14
+	ACTIVE                 = 'A'
+	CLOSE_OUT              = 'C'
+	SYSTEM_ERROR           = -100
+	SIGN_ON_REQUEST_OUT    = 2301
+	PRE_OPEN               = 0
+	OPEN                   = 1
+	CLOSED                 = 2
+	PRE_OPEN_ENDED         = 3
+	POST_CLOSE             = 4
+
 	TRADER            = 'T'
 	CORPORATE_MANAGER = 'M'
 	BRANCH_MANAGER    = 'B'

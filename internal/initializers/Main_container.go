@@ -8,4 +8,6 @@ type MainContainer struct {
 	LogOnGlobalValueContainer  *LogOnGlobalValueContainer
 	LogOffContainer            *LogOffContainer
 	LogOffGlobalValueContainer *LogOffGlobalValueContainer
+	ESRContainer               *ESRContainer
+	ESRGlobalValueContainer    *ESRGlobalValueContainer
 }

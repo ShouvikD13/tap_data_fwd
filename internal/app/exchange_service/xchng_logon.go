@@ -1,5 +1,6 @@
-package app
+package esr
 
+/*
 import (
 	//"bytes"
 	//"encoding/binary"
@@ -41,3 +42,4 @@ func (ESRM *ESRManger) Do_xchng_logon(st_exch_msg models.St_exch_msg_so, Conn ne
 
 	return nil
 }
+*/

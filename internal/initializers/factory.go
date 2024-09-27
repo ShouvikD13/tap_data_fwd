@@ -23,6 +23,9 @@ func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 	clientGlobalValueContainer := NewClientGlobalValueContainer(args)
 	logOnGlobalValueContainer := NewLogOnGlobalValueContainer(args)
 	logOffGlobalValueContainer := NewLogOffGlobalValueContainer(args)
+	ESRGlobalValueContainer := NewESRGlobalValueContainer()
+	ESRContainer := NewESRContainer()
+
 	return &MainContainer{
 		UtilContainer:              utilContainer,
 		ClientContainer:            clientContainer,
@@ -31,6 +34,8 @@ func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		ClientGlobalValueContainer: clientGlobalValueContainer,
 		LogOnGlobalValueContainer:  logOnGlobalValueContainer,
 		LogOffGlobalValueContainer: logOffGlobalValueContainer,
+		ESRContainer:               ESRContainer,
+		ESRGlobalValueContainer:    ESRGlobalValueContainer,
 	}
 }
 
@@ -38,7 +43,7 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	environmentManager := util.NewEnvironmentManager(serviceName, "/mnt/c/Users/devdu/go-workspace/data_fwd_tap/internal/config/env_config.ini")
+	environmentManager := util.NewEnvironmentManager(serviceName, "/mnt/c/Users/devdu/OneDrive/Desktop/test/DATA_FWD_TAP/internal/config/env_config.ini")
 
 	environmentManager.LoadIniFile()
 
@@ -78,17 +83,18 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 	maxPackValStr := environmentManager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
 	var maxPackVal int
 	if maxPackValStr == "" {
-		loggerManager.LogError(serviceName, " [Fn_bat_init] [Error: 'PACK_VAL' not found in the configuration under 'PackingLimit'")
+		loggerManager.LogError(serviceName, " [Factory] [Error: 'PACK_VAL' not found in the configuration under 'PackingLimit'")
 	} else {
 		maxPackVal, err := strconv.Atoi(maxPackValStr)
 		if err != nil {
-			loggerManager.LogError(serviceName, " [Fn_bat_init] [Error: Failed to convert 'PACK_VAL' '%s' to integer: %v", maxPackValStr, err)
+			loggerManager.LogError(serviceName, " [Factory] [Error: Failed to convert 'PACK_VAL' '%s' to integer: %v", maxPackValStr, err)
 			maxPackVal = 0
 		} else {
-			loggerManager.LogInfo(serviceName, " [Fn_bat_init] Fetched and converted 'PACK_VAL' from configuration: %d", maxPackVal)
+			loggerManager.LogInfo(serviceName, " [Factory] Fetched and converted 'PACK_VAL' from configuration: %d", maxPackVal)
 		}
 
 	}
+	loggerManager.LogInfo(serviceName, " [Factory]****************** TESTING 1 **************************")
 
 	return &UtilContainer{
 		ServiceName:               serviceName,
@@ -166,4 +172,21 @@ func NewLogOffGlobalValueContainer(args []string) *LogOffGlobalValueContainer {
 	return &LogOffGlobalValueContainer{
 		Args: args,
 	}
+}
+
+func NewESRContainer() *ESRContainer {
+	return &ESRContainer{
+		Req_q_data:             &models.St_req_q_data{},
+		St_exch_msg:            &models.St_exch_msg{},
+		St_net_hdr:             &models.St_net_hdr{},
+		St_oe_reqres:           &models.St_oe_reqres{},
+		St_sign_on_req:         &models.St_sign_on_req{},
+		St_exch_msg_Log_on:     &models.St_exch_msg_Log_On{},
+		St_exch_msg_Log_on_use: &models.St_exch_msg_Log_On_use{},
+		St_exch_msg_resp:       &models.St_exch_msg_resp{},
+	}
+}
+
+func NewESRGlobalValueContainer() *ESRGlobalValueContainer {
+	return &ESRGlobalValueContainer{}
 }

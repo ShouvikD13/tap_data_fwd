@@ -2,6 +2,7 @@ package initializers
 
 import (
 	"DATA_FWD_TAP/internal/app/exchange_connection"
+	esr "DATA_FWD_TAP/internal/app/exchange_service"
 	"DATA_FWD_TAP/internal/app/pack_clnt"
 )
 
@@ -128,4 +129,36 @@ func (SIM *ServiceInitializationManager) LogOffFromTapInitialization() int {
 
 	return 0
 
+}
+
+func (SIM *ServiceInitializationManager) ESRInitialization() int {
+
+	VarEsr := &esr.ESRManager{
+		Req_q_data:             SIM.MainContainer.ESRContainer.Req_q_data,
+		St_exch_msg:            SIM.MainContainer.ESRContainer.St_exch_msg,
+		St_net_hdr:             SIM.MainContainer.ESRContainer.St_net_hdr,
+		St_oe_reqres:           SIM.MainContainer.ESRContainer.St_oe_reqres,
+		St_sign_on_req:         SIM.MainContainer.ESRContainer.St_sign_on_req,
+		St_exch_msg_Log_on:     SIM.MainContainer.ESRContainer.St_exch_msg_Log_on,
+		St_exch_msg_Log_on_use: SIM.MainContainer.ESRContainer.St_exch_msg_Log_on_use,
+		St_exch_msg_resp:       SIM.MainContainer.ESRContainer.St_exch_msg_resp,
+		ENVM:                   SIM.MainContainer.UtilContainer.EnvironmentManager,
+		Req_q_data1:            *SIM.MainContainer.ESRContainer.Req_q_data,
+		PUM:                    SIM.MainContainer.UtilContainer.PasswordUtilManager,
+		Message_queue_manager:  SIM.MainContainer.UtilContainer.MessageQueueManager,
+		TCUM:                   SIM.MainContainer.UtilContainer.TypeConversionUtilManager,
+		LoggerManager:          SIM.MainContainer.UtilContainer.TransactionManager.LoggerManager,
+		TM:                     SIM.MainContainer.UtilContainer.TransactionManager,
+		Mtype:                  SIM.MainContainer.UtilContainer.MTypeRead,
+		Max_Pack_Val:           SIM.MainContainer.ESRGlobalValueContainer.Max_Pack_Val,
+		Db:                     SIM.MainContainer.UtilContainer.DB,
+	}
+
+	initResult := VarEsr.ClnEsrClnt()
+	if initResult != 0 {
+		SIM.MainContainer.UtilContainer.LoggerManager.LogError(SIM.MainContainer.UtilContainer.ServiceName, " Fn_logoff_from_TAP() failed with result code: %d", initResult)
+		return -1
+	}
+
+	return 0
 }

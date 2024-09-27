@@ -1,34 +1,40 @@
-package app
+package esr
 
-import (
-	"database/sql"
+/* import (
+	"DATA_FWD_TAP/internal/models"
+	"DATA_FWD_TAP/util"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"unsafe"
+
+	"gorm.io/gorm"
 )
 
-var C_msg [256]byte                      // Equivalent to char[256], represented as a Go string
-var CMessage [256]byte                   // Equivalent to char[256], also a Go string
-var CBrkrStts byte                       // Equivalent to char (single byte)
-var CTmStmp [30]byte                     // Equivalent to char[30], represented as a Go string
-var CClrMemStts byte                     // Equivalent to char (single byte)
-var CNewGenPasswd [util.LEN_PASS_WD]byte // Equivalent to char[LEN_PASS_WD], represented as a fixed-size byte array
-var IChVal int                           // Equivalent to int
+var C_msg [256]byte    // Equivalent to char[256], represented as a Go string
+var CMessage [256]byte // Equivalent to char[256], also a Go string
+var CBrkrStts byte     // Equivalent to char (single byte)
+var CTmStmp [30]byte   // Equivalent to char[30], represented as a Go string
+var CClrMemStts byte   // Equivalent to char (single byte)
+// var CNewGenPasswd [util.LEN_PASS_WD]byte // Equivalent to char[LEN_PASS_WD], represented as a fixed-size byte array
+var IChVal int // Equivalent to int
 var ITrnsctn int
 var C_err_msg [256]byte
+var C_new_gen_password [util.LEN_PASS_WD]byte
 
 var sql_passwd_lst_updt_dt [util.LEN_DT]byte
 var sql_lst_mkt_cls_dt [util.LEN_DT]byte
 var sql_exch_tm [util.LEN_DT]byte
 
-func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res) error {
-	st_msg := models.VwMktMsg{}
+func (ESRM *ESRManager) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_req_use) error {
+	st_msg := models.Vw_mkt_msg{}
 	ACTIVE := util.ACTIVE
 	CLOSE_OUT := util.CLOSE_OUT
 	SYSTEM_ERROR := util.SYSTEM_ERROR
 
-	// Connection string
+	/* // Connection string
 	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
 		host, port, user, password, dbname)
 
@@ -43,66 +49,71 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 	err = db.Ping()
 	if err != nil {
 		log.Fatal(err)
+	} */
+
+/*if sign_on_resp.St_hdr.Si_error_code != 0 {
+
+ptr_sign_on_resp := &sign_on_resp
+
+//ptr_st_err_res := (*&models.St_err_rspns{})(unsafe.Pointer(ptr_sign_on_resp))
+ptr_st_err_res := (*models.St_err_rspns)(unsafe.Pointer(ptr_sign_on_resp))
+
+//C_err_msg = ptr_st_err_res.CErrorMessage
+copy(C_err_msg[:], ptr_st_err_res.CErrorMessage[:])
+
+err := ESRM.Db.Raw("SELECT to_char(current_timestamp, 'dd-Mon-yyyy hh24:mi:ss')").Scan(&st_msg.CTmStmp)
+if err != nil {
+	log.Printf("Failed to fetch current timestamp: %v", err)
+	return fmt.Errorf("system error: %d", fmt.Errorf("system error: %d", SYSTEM_ERROR))
+}
+
+C_msg := fmt.Sprintf("|%s|%d- %s|", st_msg.CTmStmp, sign_on_resp.St_hdr.Si_error_code, C_err_msg)
+
+//---------------------------------------------------------------------------------------------------//
+//st_msg.CXchngCd = sql_c_xchng_cd// need to find out what is in xchng_cd and how it gets that
+
+copy(st_msg.CMsg[:], []byte(C_msg))
+
+//---------------------------------------------------------------------------------------------------//
+//st_msg.c_msg_id = TRADER_MSG// need to find
+
+query := "SELECT exg_brkr_id FROM exg_xchng_mstr WHERE exg_xchng_cd = ?"
+result := ESRM.Db.Raw(query, st_msg.CXchngCd).Scan(&st_msg.CBrkrId)
+
+if result.Error != nil {
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		// Handle no rows returned
+		log.Printf("S31190: No broker found")
+	} else {
+		log.Printf("S31190: SQL execution error: %v", result.Error)
+		return result.Error // Return the error for further handling
 	}
 
-	if sign_on_resp.St_hdr.Si_error_code != 0 {
+	return nil
+}
+//---------------------------------------------------------------------------------------------------//
+/* if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31190", SQLMSG, c_err_msg);
+      return ( -1 );
 
-		/* ptr_sign_on_resp := &sign_on_resp
-
-		ptr_st_err_res := (*&StErrorResponse{})(unsafe.Pointer(ptr_sign_on_resp)) */
-
-		ptr_sign_on_resp := unsafe.Pointer(&sign_on_resp)
-		ptr_st_err_res := (*models.StErrorResponse)(ptr_sign_on_resp)
-
-		//C_err_msg = ptr_st_err_res.CErrorMessage
-		copy(C_err_msg[:], ptr_st_err_res.CErrorMessage[:])
-
-		err = db.QueryRow("SELECT to_char(current_timestamp, 'dd-Mon-yyyy hh24:mi:ss')").Scan(&st_msg.CTmStmp)
-		if err != nil {
-			log.Fatal(err)
+	} */
+// Look into this what is SQLCODE?
+//---------------------------------------------------------------------------------------------------//
+//fn_cpy_ddr
+//fn_acall_svc
+/*iChVal := ESRM.Fn_AcallSvc_Sfo_Udp_Msg(&st_msg)
+		if iChVal != nil {
+			fnErrLog("SFO_UPD_MSG", "S31005", "LIBMSG", iChVal.Error())
+			return iChVal
 		}
-
-		C_msg := fmt.Sprintf("|%s|%d- %s|", st_msg.CTmStmp, sign_on_resp.St_hdr.Si_error_code, C_err_msg)
-
-		//---------------------------------------------------------------------------------------------------//
-		//st_msg.CXchngCd = sql_c_xchng_cd// need to find out what is in xchng_cd and how it gets that
-
-		copy(st_msg.CMsg[:], []byte(C_msg))
-
-		//---------------------------------------------------------------------------------------------------//
-		//st_msg.c_msg_id = TRADER_MSG// need to find
-
-		query := "SELECT exg_brkr_id FROM exg_xchng_mstr WHERE exg_xchng_cd = $1"
-		err = db.QueryRow(query, st_msg.CXchngCd).Scan(&st_msg.CBrkrId)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				// Handle no rows returned
-				log.Printf("S31190", "No broker found", err.Error())
-			} else {
-				log.Printf("S31190", "SQL execution error", err.Error())
-			}
-
-			return nil
-		}
-
-		//---------------------------------------------------------------------------------------------------//
-		/* if ( SQLCODE != 0 )
-		    {
-		      fn_errlog(c_ServiceName,"S31190", SQLMSG, c_err_msg);
-		      return ( -1 );
-
-			} */
-		// Look into this what is SQLCODE?
-		//---------------------------------------------------------------------------------------------------//
-		//fn_cpy_ddr
-		//fn_acall_svc
 
 		log.Printf("st_sign_on_resp->St_Hdr.Si_error_code::", sign_on_resp.St_hdr.Si_error_code)
 
 		if sign_on_resp.St_hdr.Si_error_code == 16053 {
 
 			// Auto password change functionality
-			iChVal1 := fnChangeExpiredPasswordReq(sql_c_pipe_id, CNewGenPasswd, cServiceName, cErrMsg)
+			iChVal1 := ESRM.Fn_chng_exp_passwd_req(sql_c_pipe_id, &C_new_gen_password, C_err_msg, sql_c_xchng_cd)
 			//sql_c_pipe_id another global variable to be found.
 			if iChVal1 == -1 {
 				log.Printf("L31085", "LIBMSG", *&C_err_msg)
@@ -113,10 +124,9 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 			}
 
 			// Message processing
-			copy(st_msg.CMsg[:], fmt.Sprintf("|%s- %s %s|", st_msg.CTmStmp, "Your password has been regenerated, Please relogin. New pwd is", CNewGenPasswd))
+			copy(st_msg.CMsg[:], fmt.Sprintf("|%s- %s %s|", st_msg.CTmStmp, "Your password has been regenerated, Please relogin. New pwd is", C_new_gen_password))
 
-			iChVal2 := fnAcallSvc(cServiceName, C_err_msg, &st_msg, "vw_mkt_msg", unsafe.Sizeof(st_msg), true, "SFO_UPD_MSG")
-
+			iChVal2 := ESRM.Fn_AcallSvc_Sfo_Udp_Msg(&st_msg)
 			if iChVal2 == fmt.Errorf("system error: %d", SYSTEM_ERROR) {
 				fnErrLog(cServiceName, "S31005", "LIBMSG", cErrMsg)
 				return nil
@@ -131,27 +141,27 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 		var cMessage strings.Builder
 		cMessage.WriteString("Logon Successful")
 
-		if sign_on_resp.C_broker_status == CLOSE_OUT {
+		if sign_on_resp.C_broker_status == byte(CLOSE_OUT) {
 			cMsg := fmt.Sprintf("|%s| - Logon successful, Broker ClosedOut|", st_msg.CTmStmp)
 			cMessage.Reset()
 			cMessage.WriteString("Logon Successful, Broker ClosedOut")
 			log.Printf("Message Is: %s", cMsg)
 		}
 
-		if sign_on_resp.C_broker_status != ACTIVE && sign_on_resp.C_broker_status != CLOSE_OUT {
+		if sign_on_resp.C_broker_status != byte(ACTIVE) && sign_on_resp.C_broker_status != byte(CLOSE_OUT) {
 			cMsg := fmt.Sprintf("|%s| - Logon successful, Broker suspended|", st_msg.CTmStmp)
 			cMessage.Reset()
 			cMessage.WriteString("Logon Successful, Broker Suspended")
 			log.Printf("Message Is: %s", cMsg)
 		}
 
-		if sign_on_resp.C_clearing_status != ACTIVE {
+		if sign_on_resp.C_clearing_status != byte(ACTIVE) {
 			cMsg := fmt.Sprintf("|%s| - Logon successful, Clearing member suspended|", st_msg.CTmStmp)
 			cMessage.Reset()
 			cMessage.WriteString("Logon Successful, Clearing member suspended")
 			log.Printf("Message Is: %s", cMsg)
 		}
-		err := db.QueryRow("SELECT to_char(current_timestamp, 'dd-Mon-yyyy hh24:mi:ss')").Scan(&st_msg.CTmStmp)
+		err := ESRM.Db.Raw("SELECT to_char(current_timestamp, 'dd-Mon-yyyy hh24:mi:ss')").Scan(&st_msg.CTmStmp)
 		if err != nil {
 			log.Printf("Failed to fetch current timestamp: %v", err)
 			return fmt.Errorf("system error: %d", fmt.Errorf("system error: %d", SYSTEM_ERROR))
@@ -178,10 +188,10 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 
 		// Query for broker ID
 		query := "SELECT exg_brkr_id FROM exg_xchng_mstr WHERE exg_xchng_cd = $1"
-		err = db.QueryRow(query, st_msg.CXchngCd).Scan(&st_msg.CBrkrId)
+		err = ESRM.Db.Raw(query, st_msg.CXchngCd).Scan(&st_msg.CBrkrId)
 		if err != nil {
 			log.Printf("%s: Error while fetching broker ID: %v", cServiceName, err)
-			fnErrLog(cServiceName, "S31190", "SQLMSG", cErrMsg)
+			fnErrLog(cServiceName, "S31190", "SQLMSG", C_err_msg)
 			return fmt.Errorf("system error: %d", SYSTEM_ERROR)
 		}
 
@@ -198,7 +208,7 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 		//-------------------------------------------------------------------------------------//
 
 		// Service call
-		iChVal := fnAcallSvc(cServiceName, cErrMsg, &st_msg, "vw_mkt_msg", unsafe.Sizeof(st_msg), true, "SFO_UPD_MSG")
+		iChVal := ESRM.Fn_AcallSvc_Sfo_Udp_Msg(&st_msg)
 		if iChVal == fmt.Errorf("system error: %d", SYSTEM_ERROR) {
 			fnErrLog(cServiceName, "S31005", "LIBMSG", cErrMsg)
 			return fmt.Errorf("system error: %d", SYSTEM_ERROR)
@@ -207,19 +217,24 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 		// Post to trigger
 		//fnPstTrg(cServiceName, "TRG_ORS_CON", cMsg, sqlCPipeID)// NOT TO BE IMPLENETED
 
-		// Convert timestamps to time arrays
-		fnLongToTimeArr(sqlPasswdLstUpdtDt[:], ptrStLogonRes.LiLastPasswordChangeDate)
-		fnLongToTimeArr(sqlLstMktClsDt[:], int64(ptrStLogonRes.St_hdr.Li_log_time))
-		fnLongToTimeArr(sqlExchTm[:], ptrStLogonRes.LiEndTime)
+		// Convert timestamps to int32
+		_, temp_lst_updt_dt := ESRM.TCUM.LongToTimeArr(string(sign_on_resp.Li_last_password_change_date))
+		_, temp_mkt_cls_dt := ESRM.TCUM.LongToTimeArr(string(sign_on_resp.St_hdr.Li_log_time))
+		_, temp_sql_exch_tm := ESRM.TCUM.LongToTimeArr(string(sign_on_resp.Li_end_time))
+
+		//convert to bianry arrays for actual use
+		binary.BigEndian.PutUint32(sql_passwd_lst_updt_dt[:], uint32(temp_lst_updt_dt))
+		binary.BigEndian.PutUint32(sql_lst_mkt_cls_dt[:], uint32(temp_mkt_cls_dt))
+		binary.BigEndian.PutUint32(sql_exch_tm[:], uint32(temp_sql_exch_tm))
 
 		// Log the converted times
-		log.Printf("%s: Password Last Change Date Is: %s", cServiceName, sqlPasswdLstUpdtDt)
-		log.Printf("%s: Market Closing Date Is: %s", cServiceName, sqlLstMktClsDt)
-		log.Printf("%s: Exchange Time Is: %s", cServiceName, sqlExchTm)
+		log.Printf("%s: Password Last Change Date Is: %s", cServiceName, sql_passwd_lst_updt_dt)
+		log.Printf("%s: Market Closing Date Is: %s", cServiceName, sql_lst_mkt_cls_dt)
+		log.Printf("%s: Exchange Time Is: %s", cServiceName, sql_exch_tm)
 
 	}
 	// Start transaction
-	iTrnsctn := fnBeginTran(cServiceName, &cErrMsg)
+	iTrnsctn := ESRM.TM.FnBeginTran(&cErrMsg)
 	if iTrnsctn == -1 {
 		fnErrLog(cServiceName, "L31090", "LIBMSG", &cErrMsg)
 		return -1
@@ -227,13 +242,14 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 
 	// Execute the first SQL update statement
 	updateStmt := `
-		UPDATE OPM_ORD_PIPE_MSTR
-		SET OPM_EXG_PWD = OPM_NEW_EXG_PWD, OPM_NEW_EXG_PWD = NULL
-		WHERE OPM_PIPE_ID = $1 AND OPM_XCHNG_CD = $2 AND OPM_NEW_EXG_PWD IS NOT NULL`
-	_, err := db.Exec(updateStmt, sqlCPipeID, sqlCXchngCd)
-	if err != nil {
+	UPDATE OPM_ORD_PIPE_MSTR
+	SET OPM_EXG_PWD = OPM_NEW_EXG_PWD, OPM_NEW_EXG_PWD = NULL
+	WHERE OPM_PIPE_ID = ? AND OPM_XCHNG_CD = ? AND OPM_NEW_EXG_PWD IS NOT NULL`
+
+	result := ESRM.Db.Exec(updateStmt, sql_c_pipe_id, sql_c_xchng_cd)
+	if result.Error != nil {
 		fnErrLog(cServiceName, "L31095", "SQLMSG", &cErrMsg)
-		fnAbortTran(cServiceName, iTrnsctn, &cErrMsg)
+		ESRM.TM.FnAbortTran(cServiceName, iTrnsctn, &cErrMsg)
 		return -1
 	}
 
@@ -241,13 +257,13 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 	if sign_on_resp.C_broker_status == 'A' {
 		updateStmt = `
 			UPDATE OPM_ORD_PIPE_MSTR
-			SET OPM_LST_PSWD_CHG_DT = TO_TIMESTAMP($1, 'DD-Mon-YYYY HH24:MI:SS'),
+			SET OPM_LST_PSWD_CHG_DT = TO_TIMESTAMP(?, 'DD-Mon-YYYY HH24:MI:SS'),
 				OPM_LOGIN_STTS = 1
-			WHERE OPM_PIPE_ID = $2`
-		_, err = db.Exec(updateStmt, string(sqlPasswdLstUpdtDt[:]), sqlCPipeID)
-		if err != nil {
-			fnErrLog(cServiceName, "L31100", "SQLMSG", &cErrMsg)
-			fnAbortTran(cServiceName, iTrnsctn, &cErrMsg)
+			WHERE OPM_PIPE_ID = ?`
+		result = ESRM.Db.Exec(updateStmt, string(sql_passwd_lst_updt_dt[:]), sql_c_pipe_id)
+		if result.Error != nil {
+			fnErrLog(cServiceName, "L31095", "SQLMSG", &cErrMsg)
+			ESRM.TM.FnAbortTran(cServiceName, iTrnsctn, &cErrMsg)
 			return -1
 		}
 	}
@@ -256,18 +272,18 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 	if sign_on_resp.C_broker_status == 'A' || sign_on_resp.C_broker_status == 'C' || sign_on_resp.C_broker_status == 'S' {
 		updateStmt = `
 			UPDATE EXG_XCHNG_MSTR
-			SET EXG_BRKR_STTS = $1
-			WHERE EXG_XCHNG_CD = $2`
-		_, err = db.Exec(updateStmt, sign_on_resp.C_broker_status, sqlCXchngCd)
-		if err != nil {
-			fnErrLog(cServiceName, "L31105", "SQLMSG", &cErrMsg)
-			fnAbortTran(cServiceName, iTrnsctn, &cErrMsg)
-			return nil
+			SET EXG_BRKR_STTS = ?
+			WHERE EXG_XCHNG_CD = ?`
+		result = ESRM.Db.Exec(updateStmt, sign_on_resp.C_broker_status, sql_c_xchng_cd)
+		if result.Error != nil {
+			fnErrLog(cServiceName, "L31095", "SQLMSG", &cErrMsg)
+			ESRM.TM.FnAbortTran(cServiceName, iTrnsctn, &cErrMsg)
+			return -1
 		}
 	}
 
 	// Commit transaction
-	iChVal := fnCommitTran(cServiceName, iTrnsctn, &cErrMsg)
+	iChVal := ESRM.TM.FnCommitTran(cServiceName, iTrnsctn, &cErrMsg)
 	if iChVal == -1 {
 		fnErrLog(cServiceName, "L31110", "LIBMSG", &cErrMsg)
 		return -1
@@ -277,3 +293,30 @@ func (ESRM *ESRManger) Fn_sign_on_request_out(sign_on_resp models.St_sign_on_res
 	fnUserLog(cServiceName, "Sign On Successful: Checking Other Details Finished")
 	return nil
 }
+
+func (ESRM *ESRManager) Fn_AcallSvc_Sfo_Udp_Msg(mkt_msg *models.Vw_mkt_msg) error {
+
+	// Start a transaction
+
+	// Insert the record into FTM_FO_TRD_MSG table
+	query := `
+		INSERT INTO FTM_FO_TRD_MSG
+			(FTM_XCHNG_CD, FTM_BRKR_CD, FTM_MSG_ID, FTM_MSG, FTM_TM)
+		VALUES (:1, :2, :3, :4, TO_DATE(:5, 'DD-Mon-YYYY HH24:MI:SS'))
+	`
+	result := ESRM.Db.Exec(query, mkt_msg.CXchngCd, mkt_msg.CBrkrId, mkt_msg.CMsgId, mkt_msg.CMsg, mkt_msg.CTmStmp)
+	if result.Error != nil {
+		fnErrLog(cServiceName, "L31095", "SQLMSG", &cErrMsg)
+		ESRM.TM.FnAbortTran(cServiceName, iTrnsctn, &cErrMsg)
+		return -1
+	}
+
+	// Commit the transaction
+
+	log.Println("Transaction committed successfully")
+
+	log.Printf("Sign On Successful : Checking Other Details Finished")
+
+	return nil
+}
+*/
