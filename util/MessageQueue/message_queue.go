@@ -145,3 +145,5 @@ func (MQM *MessageQueueManager) FnCanWriteToQueue() int {
 	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[canWriteToQueue] Queue is full, current message count: %d", stats.MsgQnum)
 	return -1
 }
+
+// -----------------------------
