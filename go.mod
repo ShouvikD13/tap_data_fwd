@@ -10,7 +10,6 @@ require (
 
 require (
 	github.com/Shopify/sysv_mq v0.0.0-20240802160215-0dbf2a356098
-	github.com/lib/pq v1.10.9
 	github.com/sirupsen/logrus v1.9.3
 )
 
