@@ -632,34 +632,20 @@ type St_req_q_data_Log_Off struct {
 	St_exch_msg_Log_Off [62]byte
 }
 
-//----------------------- Functions For implementation of Message Queue---------------------
-
-// For St_req_q_data
-func (data *St_req_q_data) GetMsgType() int64 {
-	return data.L_msg_type
+// ----------------------- Functions For implementation of Message Queue---------------------
+func (data *St_req_q_data) GetMessageData() (int64, []byte) {
+	return data.L_msg_type, data.St_exch_msg_data[:]
 }
-
-// func (data *St_req_q_data) SetMsgType(msgType int64) {
-// 	data.L_msg_type = msgType
-// }
 
 // For St_req_q_data_Log_On
-func (data *St_req_q_data_Log_On) GetMsgType() int64 {
-	return data.L_msg_type
+func (data *St_req_q_data_Log_On) GetMessageData() (int64, []byte) {
+	return data.L_msg_type, data.St_exch_msg_Log_On[:]
 }
-
-// func (data *St_req_q_data_Log_On) SetMsgType(msgType int64) {
-// 	data.L_msg_type = msgType
-// }
 
 // For St_req_q_data_Log_Off
-func (data *St_req_q_data_Log_Off) GetMsgType() int64 {
-	return data.L_msg_type
+func (data *St_req_q_data_Log_Off) GetMessageData() (int64, []byte) {
+	return data.L_msg_type, data.St_exch_msg_Log_Off[:]
 }
-
-// func (data *St_req_q_data_Log_Off) SetMsgType(msgType int64) {
-// 	data.L_msg_type = msgType
-// }
 
 //----------------- ESR
 

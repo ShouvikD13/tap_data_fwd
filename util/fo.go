@@ -16,12 +16,13 @@ const (
 	FOR_NORM = 'N'
 
 	/*placed status*/
-	REQUESTED = 'R'
-	QUEUED    = 'Q'
-	CANCELLED = 'C'
-
-	DOWNLOAD     = 10
-	NOT_DOWNLOAD = 20
+	REQUESTED     = 'R'
+	QUEUED        = 'Q'
+	CANCELLED     = 'C'
+	REJECT        = 'J'
+	DOWNLOAD      = 10
+	NOT_DOWNLOAD  = 20
+	NOT_PROCESSED = 'N'
 
 	CONTRACT_TO_NSE_ID = 'N'
 
@@ -54,8 +55,8 @@ const (
 	LEN_PAN             = 10 // this value i have deduce from original C code "char c_pan[10];				  /*** Ver 2.7 ***/"
 	// Order & Trade management
 	BOARD_LOT_IN                 = 2000
-	LOGIN_WITHOUT_OPEN_ORDR_DTLS = 5105
-	SIGN_OFF_REQUEST_IN          = 2320
+	LOGIN_WITHOUT_OPEN_ORDR_DTLS = 5105 //LogON
+	SIGN_OFF_REQUEST_IN          = 2320 //LogOff
 
 	LOGIN_WITH_OPEN_ORDR_DTLS = 5104 //For testing only
 
@@ -129,9 +130,7 @@ const (
 	GET_PLACED_SEQ = 'P'
 
 	/**** Temporary Message Queue ID's ****/
-	ORDINARY_ORDER_QUEUE_ID = 1
-	LOGON_QUEUE_ID          = 2
-	LOGOFF_QUEUE_ID         = 3
+	INITIAL_QUEUE_ID = 1
 )
 
 /*********************************************************************/

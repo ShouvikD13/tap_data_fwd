@@ -26,6 +26,8 @@ type UtilContainer struct {
 	DB                        *gorm.DB
 	MTypeRead                 *int
 	MTypeWrite                *int
+	InitialQId                *int
+	GlobalQId                 *int
 }
 
 type ClientContainer struct {
@@ -44,13 +46,15 @@ type ClientContainer struct {
 }
 
 type ClientGlobalValueContainer struct {
-	CPanNo      string
-	CLastActRef string
-	CEspID      string
-	CAlgoID     string
-	CSourceFlg  string
-	CPrgmFlg    string
-	Args        []string
+	InitialQueueId *int
+	GlobalQueueId  *int
+	CPanNo         string
+	CLastActRef    string
+	CEspID         string
+	CAlgoID        string
+	CSourceFlg     string
+	CPrgmFlg       string
+	Args           []string
 }
 
 type LogOnContainer struct {
@@ -79,6 +83,8 @@ type LogOnGlobalValueContainer struct {
 	ExgBrkrName       string
 	ExgBrkrStts       string
 	Args              []string
+	InitialQueueId    *int
+	GlobalQueueId     *int
 }
 
 type LogOffContainer struct {
@@ -89,11 +95,13 @@ type LogOffContainer struct {
 }
 
 type LogOffGlobalValueContainer struct {
-	OpmXchngCd    string
-	OpmTrdrID     string
-	ExgNxtTrdDate string
-	C_pipe_id     string
-	Args          []string
+	OpmXchngCd     string
+	OpmTrdrID      string
+	ExgNxtTrdDate  string
+	C_pipe_id      string
+	Args           []string
+	InitialQueueId *int
+	GlobalQueueId  *int
 }
 
 type ESRContainer struct {
@@ -108,5 +116,7 @@ type ESRContainer struct {
 }
 
 type ESRGlobalValueContainer struct {
-	Max_Pack_Val int
+	Max_Pack_Val   int
+	InitialQueueId *int
+	GlobalQueueId  *int
 }

@@ -44,6 +44,8 @@ type ESRManager struct {
 	Mtype                 *int
 	Max_Pack_Val          int
 	Db                    *gorm.DB
+	InitialQId            *int
+	GlobalQId             *int
 }
 
 var li_send_tap_msg_size int64

@@ -42,6 +42,8 @@ func (SIM *ServiceInitializationManager) ClnPackClntInitialization() int {
 		MtypeWrite:               SIM.MainContainer.UtilContainer.MTypeWrite,
 		Args:                     SIM.MainContainer.ClientGlobalValueContainer.Args,
 		Db:                       SIM.MainContainer.UtilContainer.DB,
+		InitialQId:               SIM.MainContainer.UtilContainer.InitialQId,
+		GlobalQId:                SIM.MainContainer.UtilContainer.GlobalQId,
 	}
 
 	initResult := VarClnPack.Fn_bat_init()
@@ -87,6 +89,8 @@ func (SIM *ServiceInitializationManager) LogOnToTapInitialization() int {
 		Exg_BrkrName:               SIM.MainContainer.LogOnGlobalValueContainer.ExgBrkrName,
 		Exg_BrkrStts:               SIM.MainContainer.LogOnGlobalValueContainer.ExgBrkrStts,
 		Args:                       SIM.MainContainer.LogOnGlobalValueContainer.Args,
+		InitialQId:                 SIM.MainContainer.UtilContainer.InitialQId,
+		GlobalQId:                  SIM.MainContainer.UtilContainer.GlobalQId,
 	}
 
 	initResult := VarLogOn.LogOnToTap()
@@ -118,6 +122,8 @@ func (SIM *ServiceInitializationManager) LogOffFromTapInitialization() int {
 		C_pipe_id:             SIM.MainContainer.LogOffGlobalValueContainer.C_pipe_id,
 		Args:                  SIM.MainContainer.LogOffGlobalValueContainer.Args,
 		Max_Pack_Val:          SIM.MainContainer.UtilContainer.MaxPackVal,
+		InitialQId:            SIM.MainContainer.UtilContainer.InitialQId,
+		GlobalQId:             SIM.MainContainer.UtilContainer.GlobalQId,
 	}
 
 	initResult := VarLogOff.Fn_logoff_from_TAP()
@@ -152,6 +158,8 @@ func (SIM *ServiceInitializationManager) ESRInitialization() int {
 		Mtype:                  SIM.MainContainer.UtilContainer.MTypeRead,
 		Max_Pack_Val:           SIM.MainContainer.ESRGlobalValueContainer.Max_Pack_Val,
 		Db:                     SIM.MainContainer.UtilContainer.DB,
+		InitialQId:             SIM.MainContainer.UtilContainer.InitialQId,
+		GlobalQId:              SIM.MainContainer.UtilContainer.GlobalQId,
 	}
 
 	initResult := VarEsr.ClnEsrClnt()

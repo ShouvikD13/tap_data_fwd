@@ -12,11 +12,11 @@ import (
 	"strconv"
 )
 
-func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int) *MainContainer {
+func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int, InitialQId *int, GlobalQId *int) *MainContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	utilContainer := NewUtilContainer(serviceName, args, mTypeRead, mTypeWrite)
+	utilContainer := NewUtilContainer(serviceName, args, mTypeRead, mTypeWrite, InitialQId, GlobalQId)
 	clientContainer := NewClientContainer()
 	logOnContainer := NewLogOnContainer()
 	logOffContainer := NewLogOffContainer()
@@ -39,7 +39,7 @@ func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 	}
 }
 
-func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int) *UtilContainer {
+func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int, InitialQId *int, GlobalQId *int) *UtilContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
@@ -94,7 +94,6 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		}
 
 	}
-	loggerManager.LogInfo(serviceName, " [Factory]****************** TESTING 1 **************************")
 
 	return &UtilContainer{
 		ServiceName:               serviceName,
@@ -114,6 +113,8 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		DB:         DB,
 		MTypeRead:  mTypeRead,
 		MTypeWrite: mTypeWrite,
+		InitialQId: InitialQId,
+		GlobalQId:  GlobalQId,
 	}
 
 }
@@ -188,5 +189,6 @@ func NewESRContainer() *ESRContainer {
 }
 
 func NewESRGlobalValueContainer() *ESRGlobalValueContainer {
+
 	return &ESRGlobalValueContainer{}
 }

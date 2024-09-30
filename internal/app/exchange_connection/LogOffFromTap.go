@@ -38,6 +38,8 @@ type LogOffFromTapManager struct {
 	Exg_NxtTrdDate string
 	Args           []string
 	Max_Pack_Val   int // Maximum number of message that can be written to a queue .
+	InitialQId     *int
+	GlobalQId      *int
 }
 
 func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
@@ -164,7 +166,7 @@ func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
 
 	// Create message queue
 	LOFTM.Message_queue_manager.LoggerManager = LOFTM.LoggerManager
-	if LOFTM.Message_queue_manager.CreateQueue(util.ORDINARY_ORDER_QUEUE_ID) != 0 {
+	if LOFTM.Message_queue_manager.CreateQueue(LOFTM.MqKey) != 0 {
 		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[LogOffFromTap] [Error: Returning from 'CreateQueue' with an Error")
 		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[LogOffFromTap] Exiting from function")
 		return -1

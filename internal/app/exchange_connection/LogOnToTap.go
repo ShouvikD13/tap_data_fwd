@@ -57,7 +57,9 @@ type LogOnToTapManager struct {
 	Exg_BrkrName   string
 	Exg_BrkrStts   string
 	//-----------------------
-	Args []string
+	Args       []string
+	InitialQId *int
+	GlobalQId  *int
 }
 
 func (LOTTM *LogOnToTapManager) LogOnToTap() int {
@@ -468,7 +470,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	This function is responsible for creating a system-level queue on Linux. */
 
 	LOTTM.Message_queue_manager.LoggerManager = LOTTM.LoggerManager
-	if LOTTM.Message_queue_manager.CreateQueue(util.ORDINARY_ORDER_QUEUE_ID) != 0 { // here we are giving the value of queue id as 'util.ORDINARY_ORDER_QUEUE_ID' because we are going to create only one queue for all the services. (Ordinary order , LogOn , LogOff)
+	if LOTTM.Message_queue_manager.CreateQueue(LOTTM.MqKey) != 0 { // here we are giving the value of queue id as 'util.ORDINARY_ORDER_QUEUE_ID' because we are going to create only one queue for all the services. (Ordinary order , LogOn , LogOff)
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Returning from 'CreateQueue' with an Error ")
 		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap]  Exiting from function")
 	} else {

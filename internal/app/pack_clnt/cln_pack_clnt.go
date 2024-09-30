@@ -50,6 +50,8 @@ type ClnPackClntManager struct {
 	Args                     []string
 	Db                       *gorm.DB
 	QueueId                  int
+	InitialQId               *int
+	GlobalQId                *int
 }
 
 /***************************************************************************************
@@ -97,10 +99,13 @@ func (cpcm *ClnPackClntManager) Fn_bat_init() int {
 	This function is responsible for creating a system-level queue on Linux. */
 
 	cpcm.Message_queue_manager.LoggerManager = cpcm.LoggerManager
-	if cpcm.Message_queue_manager.CreateQueue(util.ORDINARY_ORDER_QUEUE_ID) != 0 {
+	var tempQResult int
+	tempQResult = cpcm.Message_queue_manager.CreateQueue(*cpcm.InitialQueueId)
+	if tempQResult == -1 {
 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Returning from 'CreateQueue' with an Error... %s")
 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init]  Exiting from function")
 	} else {
+		cpcm.GlobalQueueId = &tempQResult
 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Created Message Queue SuccessFully")
 	}
 
@@ -1252,13 +1257,13 @@ func (cpcm *ClnPackClntManager) fnRjctRcrd() int {
 
 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] Current timestamp: %s", c_tm_stmp)
 
-	cpcm.Xchngbook.C_plcd_stts = "REJECT"
-	cpcm.Xchngbook.C_rms_prcsd_flg = "NOT_PROCESSED"
+	cpcm.Xchngbook.C_plcd_stts = string(util.REJECT)
+	cpcm.Xchngbook.C_rms_prcsd_flg = string(util.NOT_PROCESSED)
 	cpcm.Xchngbook.L_ors_msg_typ = util.ORS_NEW_ORD_RJCT
 	cpcm.Xchngbook.C_ack_tm = c_tm_stmp
 	cpcm.Xchngbook.C_xchng_rmrks = "Token id not available"
 	cpcm.Xchngbook.D_jiffy = 0
-	cpcm.Xchngbook.C_oprn_typ = "UPDATION_ON_EXCHANGE_RESPONSE"
+	cpcm.Xchngbook.C_oprn_typ = string(util.UPDATION_ON_EXCHANGE_RESPONSE)
 
 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnRjctRcrd] Before calling 'fnUpdXchngbk' on 'Reject Record' ")
 
