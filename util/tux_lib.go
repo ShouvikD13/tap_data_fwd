@@ -61,8 +61,7 @@ func (tm *TransactionManager) FnBeginTran() int {
 	// Check if a transaction is already active (GORM does not provide tpgetlev equivalent, manage this externally if needed)
 
 	db := tm.DbAccessor.GetDB() // Get the database instance on this instance we will check if there is any active transaction.
-	fmt.Println(tm.DbAccessor)
-	fmt.Println(db)
+
 	err := tm.PingDatabase(db) // Use PingDatabase to check if there is any active transaction.
 
 	if err == nil {

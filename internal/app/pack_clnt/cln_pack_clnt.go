@@ -8,7 +8,6 @@ import (
 	"DATA_FWD_TAP/util/MessageQueue"
 	"DATA_FWD_TAP/util/OrderConversion"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
-	"unsafe"
 
 	"strconv"
 	"strings"
@@ -284,37 +283,37 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT() int {
 		}
 
 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully wrote to queue with GlobalQueueId: %d", *cpcm.GlobalQId)
-
-		// testing purposes (this will not be the part of actual code)
-		receivedData, exchng_struct, readErr := cpcm.Message_queue_manager.ReadFromQueue(*cpcm.GlobalQId)
-		if readErr != 0 {
-			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId: %d", *cpcm.GlobalQId)
-			return -1
-		}
-
-		exchngStructSize := unsafe.Sizeof(exchng_struct)
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId: %d, received structure as byte array: %d", *cpcm.GlobalQId, exchng_struct)
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Li Message Type: %d", receivedData)
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Size of exchng_struct: %d bytes", exchngStructSize)
-
-		TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
-		                SET fxb_plcd_stts = 'R'
-		                WHERE fxb_plcd_stts = 'Q'`
-
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Executing update query to change status from 'Q' to 'R' in FXB_FO_XCHNG_BOOK")
-
-		result := cpcm.Db.Exec(TemporaryQueryForTesting)
-		if result.Error != nil {
-			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Failed to execute update query: %v", result.Error)
-			return -1
-		}
-		rowsAffected := result.RowsAffected
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT]  Update query executed successfully, %d rows affected", rowsAffected)
-
 	}
+	// testing purposes (this will not be the part of actual code)
+	// 	receivedData, exchng_struct, readErr := cpcm.Message_queue_manager.ReadFromQueue(*cpcm.GlobalQId)
+	// 	if readErr != 0 {
+	// 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId: %d", *cpcm.GlobalQId)
+	// 		return -1
+	// 	}
 
-	// cpcm.LoggerManager.LogInfo( cpcm.ServiceName ," [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT")
-	//return 0
+	// 	exchngStructSize := len(exchng_struct)
+	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId: %d, received structure as byte array: %d", *cpcm.GlobalQId, exchng_struct)
+	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Li Message Type: %d", receivedData)
+	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Size of exchng_struct: %d bytes", exchngStructSize)
+
+	// 	TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
+	// 	                SET fxb_plcd_stts = 'R'
+	// 	                WHERE fxb_plcd_stts = 'Q'`
+
+	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Executing update query to change status from 'Q' to 'R' in FXB_FO_XCHNG_BOOK")
+
+	// 	result := cpcm.Db.Exec(TemporaryQueryForTesting)
+	// 	if result.Error != nil {
+	// 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Failed to execute update query: %v", result.Error)
+	// 		return -1
+	// 	}
+	// 	rowsAffected := result.RowsAffected
+	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT]  Update query executed successfully, %d rows affected", rowsAffected)
+
+	// }
+
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT")
+	return 0
 }
 
 /***************************************************************************************

@@ -167,7 +167,6 @@ func (MQM *MessageQueueManager) ReadFromQueue(GlobalQId int) (int64, []byte, int
 		reqData.L_msg_type = liMsg
 		copiedSize := copy(reqData.St_exch_msg_data[:], buffer[8:346]) // 8 + 338 = 346
 		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] Copied %d bytes from buffer[8:346]", copiedSize)
-		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] *****Size of Exchng Structure %d", unsafe.Sizeof(buffer))
 		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] board_lot_in message received successfully")
 		return reqData.L_msg_type, reqData.St_exch_msg_data[:], 0
 
