@@ -5,7 +5,6 @@ import (
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
-	MessageStat "DATA_FWD_TAP/util/MessageStats"
 	"DATA_FWD_TAP/util/OrderConversion"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"log"
@@ -108,7 +107,6 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		MessageQueueManager: &MessageQueue.MessageQueueManager{
 			ServiceName:   serviceName,
 			LoggerManager: loggerManager,
-			MSM:           &MessageStat.MessageStatManager{},
 		},
 		DB:         DB,
 		MTypeRead:  mTypeRead,

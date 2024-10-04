@@ -34,7 +34,7 @@ int create_message_queue(int *initial_queue_id);
 int destroy_message_queue(int global_queue_id);
 int send_message_to_queue(int global_queue_id, void *message, long message_length);
 int receive_message_from_queue(int global_queue_id, void *buffer, long *buffer_length);
-int get_queue_message_count(int global_queue_id, unsigned int *message_count);
+int get_queue_message_count(int global_queue_id, unsigned long *message_count);
 int flush_message_queue(int global_queue_id);
 int send_board_lot_message(int global_queue_id, struct message_board_lot_in *message);
 int send_log_on_message(int global_queue_id, struct message_log_on *message);

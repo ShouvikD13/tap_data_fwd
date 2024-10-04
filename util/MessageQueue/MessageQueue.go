@@ -9,7 +9,7 @@ import "C"
 import (
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
-	MessageStat "DATA_FWD_TAP/util/MessageStats"
+
 	"unsafe"
 
 	"github.com/Shopify/sysv_mq"
@@ -22,10 +22,9 @@ type MessageQueueManager struct {
 	Req_q_data_Log_Off models.St_req_q_data_Log_Off
 	mq                 *sysv_mq.MessageQueue
 	LoggerManager      *util.LoggerManager
-	MSM                *MessageStat.MessageStatManager
 }
 
-func NewMessageQueueManager(ServiceName string, mq *sysv_mq.MessageQueue) {
+func NewMessageQueueManager(ServiceName string) {
 
 }
 
@@ -33,23 +32,37 @@ type WriteQueueMessage interface {
 	GetMessageData() (int64, []byte)
 }
 
-func (MQM *MessageQueueManager) CreateQueue(Initial_Q_Id int) int {
+func (MQM *MessageQueueManager) CreateQueue(initial_QId *int) int {
 
-	if initResult := C.create_message_queue(&Initial_Q_Id); initResult != -1 {
-		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[CreateQueue] Created the Message Queue SuccessFully With QueueId Provided by system : %d ", initResult)
-		return initResult
-	} else {
-		MQM.LoggerManager.LogError(MQM.ServiceName, "[CreateQueue] Failed to create the message Queue. Returned with error code : %d ", initResult)
-		return initResult
+	initialQId := *initial_QId
+	cInitialQId := C.int(initialQId)
+	ptr := (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(cInitialQId))))
+	if ptr == nil {
+		MQM.LoggerManager.LogError(MQM.ServiceName, "[CreateQueue] Failed to allocate memory for initialQueueId")
+		return -1
 	}
+	defer C.free(unsafe.Pointer(ptr))
 
-	// this funtion should call the function 'int create_message_queue(int *queue_id) ' of MessageQueue.c
+	*ptr = cInitialQId
+
+	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[CreateQueue] Initial queue ID (constant): %d", initialQId)
+	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[CreateQueue] Address of Initial queue ID (from Go): %p, Address passed to C: %p", &cInitialQId, ptr)
+
+	initResult := C.create_message_queue(ptr)
+
+	if initResult != -1 {
+		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[CreateQueue] Created the Message Queue Successfully With QueueId Provided by system : %d ", int(initResult))
+		return int(initResult)
+	} else {
+		MQM.LoggerManager.LogError(MQM.ServiceName, "[CreateQueue] Failed to create the message Queue. Returned with error code : %d ", int(initResult))
+		return -1
+	}
 }
 
 func (MQM *MessageQueueManager) WriteToQueue(GlobalQId int, message WriteQueueMessage) int {
 	switch msg := message.(type) {
 	case *models.St_req_q_data:
-		var boardLotMsg C.message_board_lot_in
+		var boardLotMsg C.struct_message_board_lot_in
 		boardLotMsg.li_msg = C.int64_t(msg.L_msg_type)
 
 		if len(msg.St_exch_msg_data) > len(boardLotMsg.board_lot_in) {
@@ -64,13 +77,13 @@ func (MQM *MessageQueueManager) WriteToQueue(GlobalQId int, message WriteQueueMe
 		initResult := C.send_board_lot_message(C.int(GlobalQId), &boardLotMsg)
 		if initResult != 0 {
 			MQM.LoggerManager.LogError(MQM.ServiceName, "[WriteToQueue] Failed to Write to Queue. Received error from `send_board_lot_message()`")
-			return initResult
+			return int(initResult)
 		} else {
 			MQM.LoggerManager.LogInfo(MQM.ServiceName, "[WriteToQueue] Message sent successfully")
 		}
 
 	case *models.St_req_q_data_Log_On:
-		var logOnMsg C.message_log_on
+		var logOnMsg C.struct_message_log_on
 		logOnMsg.li_msg = C.int64_t(msg.L_msg_type)
 
 		if len(msg.St_exch_msg_Log_On) > len(logOnMsg.log_on) {
@@ -85,13 +98,13 @@ func (MQM *MessageQueueManager) WriteToQueue(GlobalQId int, message WriteQueueMe
 		initResult := C.send_log_on_message(C.int(GlobalQId), &logOnMsg)
 		if initResult != 0 {
 			MQM.LoggerManager.LogError(MQM.ServiceName, "[WriteToQueue] Failed to Write to Queue. Received error from `send_log_on_message()`")
-			return initResult
+			return int(initResult)
 		} else {
 			MQM.LoggerManager.LogInfo(MQM.ServiceName, "[WriteToQueue] Log On message sent successfully")
 		}
 
 	case *models.St_req_q_data_Log_Off:
-		var logOffMsg C.message_log_off
+		var logOffMsg C.struct_message_log_off
 		logOffMsg.li_msg = C.int64_t(msg.L_msg_type)
 
 		if len(msg.St_exch_msg_Log_Off) > len(logOffMsg.log_off) {
@@ -106,7 +119,7 @@ func (MQM *MessageQueueManager) WriteToQueue(GlobalQId int, message WriteQueueMe
 		initResult := C.send_log_off_message(C.int(GlobalQId), &logOffMsg)
 		if initResult != 0 {
 			MQM.LoggerManager.LogError(MQM.ServiceName, "[WriteToQueue] Failed to Write to Queue. Received error from `send_log_off_message()`")
-			return initResult
+			return int(initResult)
 		} else {
 			MQM.LoggerManager.LogInfo(MQM.ServiceName, "[WriteToQueue] Log Off message sent successfully")
 		}
@@ -122,15 +135,18 @@ func (MQM *MessageQueueManager) WriteToQueue(GlobalQId int, message WriteQueueMe
 }
 
 func (MQM *MessageQueueManager) ReadFromQueue(GlobalQId int) (int64, []byte, int) {
-	size := 400
+	size := C.long(400)
 	buffer := make([]byte, size)
 
-	result := C.receive_message_from_queue(C.int(GlobalQId), unsafe.Pointer(&buffer[0]), C.int(size))
+	result := C.receive_message_from_queue(C.int(GlobalQId), unsafe.Pointer(&buffer[0]), &size)
 
 	if result != 0 {
 		MQM.LoggerManager.LogError(MQM.ServiceName, "[Error Received from `receive_message_from_queue`, Exiting ]")
 		return 0, nil, -1
 	}
+
+	bufferSize := len(buffer)
+	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] Buffer size after receiving data: %d", bufferSize)
 
 	if len(buffer) < 8 {
 		MQM.LoggerManager.LogError(MQM.ServiceName, "Received buffer is too small to contain li_msg")
@@ -149,8 +165,9 @@ func (MQM *MessageQueueManager) ReadFromQueue(GlobalQId int) (int64, []byte, int
 
 		var reqData models.St_req_q_data
 		reqData.L_msg_type = liMsg
-		copy(reqData.St_exch_msg_data[:], buffer[8:346]) // 8 + 338 = 346
-
+		copiedSize := copy(reqData.St_exch_msg_data[:], buffer[8:346]) // 8 + 338 = 346
+		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] Copied %d bytes from buffer[8:346]", copiedSize)
+		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] *****Size of Exchng Structure %d", unsafe.Sizeof(buffer))
 		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] board_lot_in message received successfully")
 		return reqData.L_msg_type, reqData.St_exch_msg_data[:], 0
 
@@ -163,7 +180,8 @@ func (MQM *MessageQueueManager) ReadFromQueue(GlobalQId int) (int64, []byte, int
 
 		var logOnData models.St_req_q_data_Log_On
 		logOnData.L_msg_type = liMsg
-		copy(logOnData.St_exch_msg_Log_On[:], buffer[8:308]) // 8 + 300 = 308
+		copiedSize := copy(logOnData.St_exch_msg_Log_On[:], buffer[8:308]) // 8 + 300 = 308
+		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] Copied %d bytes from buffer[8:308]", copiedSize)
 
 		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] log_on message received successfully")
 		return logOnData.L_msg_type, logOnData.St_exch_msg_Log_On[:], 0
@@ -177,7 +195,8 @@ func (MQM *MessageQueueManager) ReadFromQueue(GlobalQId int) (int64, []byte, int
 
 		var logOffData models.St_req_q_data_Log_Off
 		logOffData.L_msg_type = liMsg
-		copy(logOffData.St_exch_msg_Log_Off[:], buffer[8:70]) // 8 + 62 = 70
+		copiedSize := copy(logOffData.St_exch_msg_Log_Off[:], buffer[8:70]) // 8 + 62 = 70
+		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] Copied %d bytes from buffer[8:70]", copiedSize)
 
 		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] log_off message received successfully")
 		return logOffData.L_msg_type, logOffData.St_exch_msg_Log_Off[:], 0
@@ -192,7 +211,7 @@ func (MQM *MessageQueueManager) ReadFromQueue(GlobalQId int) (int64, []byte, int
 
 func (MQM *MessageQueueManager) DestroyQueue(GlobalQId int) int {
 
-	initResult := destroy_message_queue(C.int(GlobalQId))
+	initResult := C.destroy_message_queue(C.int(GlobalQId))
 	if initResult != 0 {
 		MQM.LoggerManager.LogError(MQM.ServiceName, "[destroyQueue] [Error:  failed to destroy message queue: ")
 		return -1
@@ -204,19 +223,19 @@ func (MQM *MessageQueueManager) DestroyQueue(GlobalQId int) int {
 }
 
 func (MQM *MessageQueueManager) FnCanWriteToQueue(GlobalQId int) int {
-	var MessageNumber C.unsigned_int
+	var messageNumber C.ulong
 
-	initResult := C.get_queue_message_count(C.int(GlobalQId), &MessageNumber)
+	initResult := C.get_queue_message_count(C.int(GlobalQId), &messageNumber)
 	if initResult != 0 {
 		MQM.LoggerManager.LogError(MQM.ServiceName, "[canWriteToQueue] [Error: failed to get message queue stats]")
 		return -1
 	}
 
-	if MessageNumber < 10 { // Here, I am setting the maximum number of messages that can be present in the queue.
+	if uint(messageNumber) < 10 { // Here, I am setting the maximum number of messages that can be present in the queue.
 		return 0
 	}
 
-	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[canWriteToQueue] Queue is full, current message count: %d", MessageNumber)
+	MQM.LoggerManager.LogInfo(MQM.ServiceName, "[canWriteToQueue] Queue is full, current message count: %d", uint(messageNumber))
 	return -1
 }
 
@@ -230,6 +249,11 @@ func (MQM *MessageQueueManager) FnFlushQueue(GlobalQId int) int {
 	return 0
 }
 
+// # Compile Log.c into an object file
+// gcc -c -fPIC Log.c -o Log.o
+
+// # Compile message_queue.c into an object file
 // gcc -c -fPIC message_queue.c -o message_queue.o
 
-// gcc -shared -o libmylib.so mylib.o
+// # Create the shared library (libmessagequeue.so)
+// gcc -shared -o libmessagequeue.so Log.o message_queue.o

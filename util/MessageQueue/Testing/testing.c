@@ -30,18 +30,18 @@ void log_info(const char *file, const char *func, const char *fmt, ...) {
 }
 
 int main() {
-    key_t key = ftok("msg_queue_file", 65); // Generate a unique key
-    int msgid = msgget(key, 0666 | IPC_CREAT); // Create a message queue
+    key_t key = ftok("msg_queue_file", 65); 
+    int msgid = msgget(key, 0666 | IPC_CREAT); 
 
     if (msgid == -1) {
         perror("msgget failed");
         return 1;
     }
 
-    // Adding messages to the queue
+   
     struct message msg;
-    for (int i = 1; i <= 5; i++) { // Add 5 messages
-        msg.msg_type = 1; // Set message type
+    for (int i = 1; i <= 5; i++) { 
+        msg.msg_type = 1; 
         snprintf(msg.msg_text, sizeof(msg.msg_text), "Message %d", i);
         if (msgsnd(msgid, &msg, sizeof(msg.msg_text), 0) == -1) {
             perror("msgsnd failed");

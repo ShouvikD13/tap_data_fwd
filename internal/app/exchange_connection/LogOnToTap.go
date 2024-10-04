@@ -470,15 +470,16 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	This function is responsible for creating a system-level queue on Linux. */
 
 	LOTTM.Message_queue_manager.LoggerManager = LOTTM.LoggerManager
-	if LOTTM.Message_queue_manager.CreateQueue(LOTTM.MqKey) != 0 { // here we are giving the value of queue id as 'util.ORDINARY_ORDER_QUEUE_ID' because we are going to create only one queue for all the services. (Ordinary order , LogOn , LogOff)
+	if initResult := LOTTM.Message_queue_manager.CreateQueue(LOTTM.InitialQId); initResult != -1 { // here we are giving the value of queue id as 'util.ORDINARY_ORDER_QUEUE_ID' because we are going to create only one queue for all the services. (Ordinary order , LogOn , LogOff)
+		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] Created Message Queue SuccessFully with InitialQueueId : %d , Recieved the GlobalQueueId : %d ", *LOTTM.InitialQId, initResult)
+		*LOTTM.GlobalQId = initResult
+	} else {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Returning from 'CreateQueue' with an Error ")
 		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap]  Exiting from function")
-	} else {
-		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] Created Message Queue SuccessFully")
 	}
 
 	for {
-		if LOTTM.Message_queue_manager.FnCanWriteToQueue() != 0 {
+		if LOTTM.Message_queue_manager.FnCanWriteToQueue(*LOTTM.GlobalQId) != 0 {
 			LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[LogOnToTap] [Error: Queue is Full ")
 
 			continue
@@ -487,31 +488,23 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		}
 	}
 
-	mtype := *LOTTM.MtypeWrite
-
-	if LOTTM.Message_queue_manager.WriteToQueue(mtype, LOTTM.St_req_q_data) != 0 {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error:  Failed to write to queue with message type %d", mtype)
+	if LOTTM.Message_queue_manager.WriteToQueue(*LOTTM.GlobalQId, LOTTM.St_req_q_data) != 0 {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error:  Failed to write to queue with GlobalQueueId %d", *LOTTM.GlobalQId)
 		return -1
 	}
 
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] Successfully wrote to queue with message type %d", mtype)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] Successfully wrote to queue with GlobalQueueId %d", *LOTTM.GlobalQId)
 
 	/********************* Below Code is only for Testing remove that after Testing*************/
 
-	R_L_msg_type, receivedType, readErr := LOTTM.Message_queue_manager.ReadFromQueue(mtype)
+	R_L_msg_type, receivedType, readErr := LOTTM.Message_queue_manager.ReadFromQueue(*LOTTM.GlobalQId)
 	if readErr != 0 {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with message type %d: %d", mtype, readErr)
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId %d", *LOTTM.GlobalQId)
 		return -1
 	}
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with message type %d, received type: %d", mtype, receivedType)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId %d: received type: %v", *LOTTM.GlobalQId, receivedType)
 
 	fmt.Println("Li Message Type:", R_L_msg_type)
-
-	*LOTTM.MtypeWrite++
-
-	if *LOTTM.MtypeWrite > LOTTM.Max_Pack_Val {
-		*LOTTM.MtypeWrite = 1
-	}
 
 	return 0
 }

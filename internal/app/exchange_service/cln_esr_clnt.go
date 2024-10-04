@@ -41,7 +41,6 @@ type ESRManager struct {
 	TCUM                  *typeconversionutil.TypeConversionUtilManager
 	LoggerManager         *util.LoggerManager
 	TM                    *util.TransactionManager
-	Mtype                 *int
 	Max_Pack_Val          int
 	Db                    *gorm.DB
 	InitialQId            *int
@@ -64,18 +63,6 @@ type Config struct {
 	Port          string
 	AutoReconnect bool
 }
-
-/*
-type exch_msg struct {
-	TestData1 int64
-	TestData2 byte
-	TestData3 [20]byte // Fixed-size byte array for the string
-}
-
-type req_q_data struct {
-	li_msg_type   int64
-	exch_msg_data exch_msg
-} */
 
 func (ESRM *ESRManager) loadConfig() (Config, error) {
 	// cfg, err := ini.Load("EnvConfig.ini")
@@ -128,21 +115,21 @@ func (ESRM *ESRManager) crt_tap_con() (net.Conn, error) {
 
 func (ESRM *ESRManager) send_thrd(conn net.Conn) {
 	//defer wg.Done()
-	mtype := *ESRM.Mtype
+
 	log.Printf("Inside Send Routine STARTS HERE")
 
 	for {
 		// Log before reading from the queue
-		log.Printf("Attempting to read from queue with message type: %d", mtype)
+		log.Printf("Attempting to read from queue with Global queue Id: %d", *ESRM.GlobalQId)
 
-		R_L_msg_type, receivedexchngMsg, readErr := ESRM.Message_queue_manager.ReadFromQueue(mtype)
+		R_L_msg_type, receivedexchngMsg, readErr := ESRM.Message_queue_manager.ReadFromQueue(*ESRM.GlobalQId)
 		if readErr != 0 {
-			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[send_thrd] [Error: Failed to read from queue with message type %d: %d", mtype, readErr)
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[send_thrd] [Error: Failed to read from queue with GlobalQueueId... %d: ", *ESRM.GlobalQId)
 			continue // Skip to the next iteration to avoid potential nil dereference
 		}
 
 		// Log received message details
-		log.Printf("[send_thrd] Successfully read from queue: message type: %d, received data: %d", mtype, receivedexchngMsg)
+		log.Printf("[send_thrd] Successfully read from queue eith GlobalQueueId: %d, received data: %v", *ESRM.GlobalQId, receivedexchngMsg)
 
 		fmt.Println("Message Type:", R_L_msg_type)
 

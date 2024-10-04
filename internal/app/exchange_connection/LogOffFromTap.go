@@ -166,17 +166,19 @@ func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
 
 	// Create message queue
 	LOFTM.Message_queue_manager.LoggerManager = LOFTM.LoggerManager
-	if LOFTM.Message_queue_manager.CreateQueue(LOFTM.MqKey) != 0 {
+	if initResult := LOFTM.Message_queue_manager.CreateQueue(LOFTM.InitialQId); initResult != -1 {
+		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[LogOffFromTap] Created Message Queue Successfully With Initial Queue Id : %d and returned Global queue Id : %d ", *LOFTM.InitialQId, initResult)
+		*LOFTM.GlobalQId = initResult
+
+	} else {
 		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[LogOffFromTap] [Error: Returning from 'CreateQueue' with an Error")
 		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[LogOffFromTap] Exiting from function")
 		return -1
-	} else {
-		LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[LogOffFromTap] Created Message Queue Successfully")
 	}
 
 	// Wait for queue to be writable
 	for {
-		if LOFTM.Message_queue_manager.FnCanWriteToQueue() != 0 {
+		if LOFTM.Message_queue_manager.FnCanWriteToQueue(*LOFTM.GlobalQId) != 0 {
 			LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[LogOffFromTap] [Error: Queue is Full")
 			continue
 		} else {
@@ -185,38 +187,26 @@ func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
 	}
 
 	// Check if mTypeWrite is nil
-	if LOFTM.MtypeWrite == nil {
-		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[Error: LOFTM.MtypeWrite is nil]")
-		return -1
-	}
-
-	mtype := *LOFTM.MtypeWrite
 
 	// Write to queue
-	if LOFTM.Message_queue_manager.WriteToQueue(mtype, LOFTM.St_req_q_data) != 0 {
-		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[LogOffFromTap] [Error: Failed to write to queue with message type %d", mtype)
+	if LOFTM.Message_queue_manager.WriteToQueue(*LOFTM.GlobalQId, LOFTM.St_req_q_data) != 0 {
+		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[LogOffFromTap] [Error: Failed to write to queue with GlobalQueueId %d", *LOFTM.GlobalQId)
 		return -1
 	}
 
 	log.Println(LOFTM.St_req_q_data)
-	LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[LogOffFromTap] Successfully wrote to queue with message type %d", mtype)
+	LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, "[LogOffFromTap] Successfully wrote to queue with GlobalQueueId %d", *LOFTM.GlobalQId)
 
 	/********************* Below Code is only for Testing remove that after Testing*************/
 
-	R_L_msg_type, receivedType, readErr := LOFTM.Message_queue_manager.ReadFromQueue(mtype)
+	R_L_msg_type, receivedType, readErr := LOFTM.Message_queue_manager.ReadFromQueue(*LOFTM.GlobalQId)
 	if readErr != 0 {
-		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, " [Fn_logoff_from_TAP] [Error:  Failed to read from queue with message type %d: %d", mtype, readErr)
+		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, " [Fn_logoff_from_TAP] [Error:  Failed to read from queue with GlobalQueueId %d", *LOFTM.GlobalQId)
 		return -1
 	}
-	LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, " [Fn_logoff_from_TAP] Successfully read from queue with message type %d, received type: %d", mtype, receivedType)
+	LOFTM.LoggerManager.LogInfo(LOFTM.ServiceName, " [Fn_logoff_from_TAP] Successfully read from queue with GlobalQueueId %d and recieve type is : %v ", *LOFTM.GlobalQId, receivedType)
 
 	fmt.Println("Li Message Type:", R_L_msg_type)
-
-	*LOFTM.MtypeWrite++
-
-	if *LOFTM.MtypeWrite > LOFTM.Max_Pack_Val {
-		*LOFTM.MtypeWrite = 1
-	}
 
 	return 0
 }

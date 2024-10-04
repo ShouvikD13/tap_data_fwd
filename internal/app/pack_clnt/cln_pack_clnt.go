@@ -8,8 +8,7 @@ import (
 	"DATA_FWD_TAP/util/MessageQueue"
 	"DATA_FWD_TAP/util/OrderConversion"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
-
-	"fmt"
+	"unsafe"
 
 	"strconv"
 	"strings"
@@ -100,13 +99,13 @@ func (cpcm *ClnPackClntManager) Fn_bat_init() int {
 
 	cpcm.Message_queue_manager.LoggerManager = cpcm.LoggerManager
 	var tempQResult int
-	tempQResult = cpcm.Message_queue_manager.CreateQueue(*cpcm.InitialQueueId)
+	tempQResult = cpcm.Message_queue_manager.CreateQueue(cpcm.InitialQId)
 	if tempQResult == -1 {
 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [Fn_bat_init] [Error: Returning from 'CreateQueue' with an Error... %s")
 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init]  Exiting from function")
 	} else {
-		cpcm.GlobalQueueId = &tempQResult
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Created Message Queue SuccessFully")
+		*cpcm.GlobalQId = tempQResult
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Created Message Queue SuccessFully With InitialQueueId: %d", *cpcm.InitialQId)
 	}
 
 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [Fn_bat_init] Copied pipe ID from cpcm.Args[3]: %s", cpcm.Xchngbook.C_pipe_id)
@@ -239,7 +238,7 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT() int {
 	// Setting up an infinite loop to keep the service running and continuously fetch newly created orders.
 	for {
 
-		if cpcm.Message_queue_manager.FnCanWriteToQueue() != 0 {
+		if cpcm.Message_queue_manager.FnCanWriteToQueue(*cpcm.GlobalQId) != 0 {
 			cpcm.LoggerManager.LogError(cpcm.ServiceName, "[CLN_PACK_CLNT] [Error: Queue is Full ")
 
 			continue
@@ -279,30 +278,24 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT() int {
 		//here setting the data becasues initially i am getting all zeros .
 		cpcm.Message_queue_manager.ServiceName = cpcm.ServiceName
 
-		mtypeWrite := *cpcm.MtypeWrite
-
-		if cpcm.Message_queue_manager.WriteToQueue(mtypeWrite, cpcm.Q_packet) != 0 {
-			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with message type %d", mtypeWrite)
+		if cpcm.Message_queue_manager.WriteToQueue(*cpcm.GlobalQId, cpcm.Q_packet) != 0 {
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to write to queue with GlobalQueueId: %d", *cpcm.GlobalQId)
 			return -1
 		}
 
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully wrote to queue with message type %d", mtypeWrite)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully wrote to queue with GlobalQueueId: %d", *cpcm.GlobalQId)
 
 		// testing purposes (this will not be the part of actual code)
-		receivedData, exchng_struct, readErr := cpcm.Message_queue_manager.ReadFromQueue(mtypeWrite)
+		receivedData, exchng_struct, readErr := cpcm.Message_queue_manager.ReadFromQueue(*cpcm.GlobalQId)
 		if readErr != 0 {
-			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with message type %d: %d", mtypeWrite, readErr)
+			cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId: %d", *cpcm.GlobalQId)
 			return -1
 		}
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with message type %d, received structure as byte array: %d", mtypeWrite, exchng_struct)
 
-		fmt.Println("Li Message Type:", receivedData)
-
-		*cpcm.MtypeWrite++
-
-		if *cpcm.MtypeWrite > cpcm.Max_Pack_Val {
-			*cpcm.MtypeWrite = 1
-		}
+		exchngStructSize := unsafe.Sizeof(exchng_struct)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId: %d, received structure as byte array: %d", *cpcm.GlobalQId, exchng_struct)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Li Message Type: %d", receivedData)
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Size of exchng_struct: %d bytes", exchngStructSize)
 
 		TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
 		                SET fxb_plcd_stts = 'R'

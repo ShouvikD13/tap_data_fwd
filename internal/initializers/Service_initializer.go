@@ -155,7 +155,6 @@ func (SIM *ServiceInitializationManager) ESRInitialization() int {
 		TCUM:                   SIM.MainContainer.UtilContainer.TypeConversionUtilManager,
 		LoggerManager:          SIM.MainContainer.UtilContainer.TransactionManager.LoggerManager,
 		TM:                     SIM.MainContainer.UtilContainer.TransactionManager,
-		Mtype:                  SIM.MainContainer.UtilContainer.MTypeRead,
 		Max_Pack_Val:           SIM.MainContainer.ESRGlobalValueContainer.Max_Pack_Val,
 		Db:                     SIM.MainContainer.UtilContainer.DB,
 		InitialQId:             SIM.MainContainer.UtilContainer.InitialQId,

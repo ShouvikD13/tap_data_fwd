@@ -4,7 +4,6 @@ import (
 	"DATA_FWD_TAP/internal/initializers"
 	"DATA_FWD_TAP/util"
 	"log"
-	"sync"
 )
 
 func main() {
@@ -34,28 +33,25 @@ func main() {
 	// }
 
 	// LogOnToTap initialization
-	var wg sync.WaitGroup // WaitGroup to wait for the Go routines
+	// var wg sync.WaitGroup // WaitGroup to wait for the Go routines
 
 	// ClnPackClnt initialization using a Go routine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
-			logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
-		}
-	}()
+
+	if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
+		logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
+	}
 
 	// ESR function initialization using a Go routine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if initResult := serviceInitManager.ESRInitialization(); initResult != 0 {
-			logger.Fatalf("[Fatal: Shutting down due to error in %s: ESRInitialization failed with result code %d", serviceName, initResult)
-		}
-	}()
+	// wg.Add(1)
+	// go func() {
+	// 	defer wg.Done()
+	// 	if initResult := serviceInitManager.ESRInitialization(); initResult != 0 {
+	// 		logger.Fatalf("[Fatal: Shutting down due to error in %s: ESRInitialization failed with result code %d", serviceName, initResult)
+	// 	}
+	// }()
 
-	// Wait for both Go routines to finish
-	wg.Wait()
+	// // Wait for both Go routines to finish
+	// wg.Wait()
 
 	// if initResult := serviceInitManager.ESRInitialization(); initResult != 0 {
 	// 	logger.Fatalf("[Fatal: Shutting down due to error in %s: ESRInitialization failed with result code %d", serviceName, initResult)
