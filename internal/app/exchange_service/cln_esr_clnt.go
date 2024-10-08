@@ -160,7 +160,7 @@ func (ESRM *ESRManager) send_thrd(conn net.Conn) {
 			log.Printf("[send_thrd] Message type is BOARD LOT IN")
 
 			li_business_data_size := int64(unsafe.Sizeof(models.St_oe_reqres{}))
-			li_send_tap_msg_size := /*int64(unsafe.Sizeof(models.St_net_hdr{})) +*/ int64(unsafe.Sizeof(receivedexchngMsg))
+			li_send_tap_msg_size := /*int64(unsafe.Sizeof(models.St_net_hdr{})) +*/ int64(len(receivedexchngMsg))
 			log.Printf("[send_thrd] Business Data Size: %v", li_business_data_size)
 			log.Printf("[send_thrd] TAP message size: %v", li_send_tap_msg_size)
 
