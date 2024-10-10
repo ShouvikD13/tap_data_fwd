@@ -42,7 +42,7 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	environmentManager := util.NewEnvironmentManager(serviceName, "/mnt/c/Users/devdu/OneDrive/Desktop/test/DATA_FWD_TAP/internal/config/env_config.ini")
+	environmentManager := util.NewEnvironmentManager(serviceName, "/home/devasheesh/Desktop/go-workspace/data_fwd_tap/internal/config/env_config.ini")
 
 	environmentManager.LoadIniFile()
 

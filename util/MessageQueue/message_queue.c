@@ -20,7 +20,8 @@ int create_message_queue(int *initial_queue_id)
         return -1;
     }
 
-    key = ftok("/mnt/c/Users/devdu/go-workspace/data_fwd_tap/cmd/main/mq_key_file", 'A');
+    key = *initial_queue_id;
+    // key = ftok("/mnt/c/Users/devdu/go-workspace/data_fwd_tap/cmd/main/mq_key_file", 'A');
 
     if(key == -1 ){
         fprintf(stderr, "message_queue.c: create_message_queue: Failed to get the unique key id using 'ftok': %s\n", strerror(errno));
@@ -58,7 +59,7 @@ int create_message_queue(int *initial_queue_id)
     } else {
         printf("message_queue.c: create_message_queue: Message queue created successfully with ID: %d\n", temp_global_queue_id);
     }
-
+    
     return temp_global_queue_id;
 }
 

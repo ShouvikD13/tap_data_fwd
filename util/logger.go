@@ -21,7 +21,7 @@ func (LM *LoggerManager) InitLogger(envManager *EnvironmentManager) {
 	LM.log = logrus.New()
 	LM.envManager = envManager
 
-	logDir := filepath.Join("/mnt/c/Users/devdu/go-workspace/data_fwd_tap", "logs")
+	logDir := filepath.Join("/home/devasheesh/Desktop/go-workspace/data_fwd_tap", "logs")
 
 	if _, err := os.Stat(logDir); os.IsNotExist(err) {
 		err := os.MkdirAll(logDir, os.ModePerm)

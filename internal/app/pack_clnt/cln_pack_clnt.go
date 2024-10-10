@@ -283,34 +283,34 @@ func (cpcm *ClnPackClntManager) CLN_PACK_CLNT() int {
 		}
 
 		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully wrote to queue with GlobalQueueId: %d", *cpcm.GlobalQId)
+
+		//**************testing purposes (this will not be the part of actual code)
+		// receivedData, exchng_struct, readErr := cpcm.Message_queue_manager.ReadFromQueue(*cpcm.GlobalQId)
+		// if readErr != 0 {
+		// 	cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId: %d", *cpcm.GlobalQId)
+		// 	return -1
+		// }
+
+		// exchngStructSize := len(exchng_struct)
+		// cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId: %d, received structure as byte array: %d", *cpcm.GlobalQId, exchng_struct)
+		// cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Li Message Type: %d", receivedData)
+		// cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Size of exchng_struct: %d bytes", exchngStructSize)
+
+		// TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
+		//                 SET fxb_plcd_stts = 'R'
+		//                 WHERE fxb_plcd_stts = 'Q'`
+
+		// cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Executing update query to change status from 'Q' to 'R' in FXB_FO_XCHNG_BOOK")
+
+		// result := cpcm.Db.Exec(TemporaryQueryForTesting)
+		// if result.Error != nil {
+		// 	cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Failed to execute update query: %v", result.Error)
+		// 	return -1
+		// }
+		// rowsAffected := result.RowsAffected
+		// cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT]  Update query executed successfully, %d rows affected", rowsAffected)
+
 	}
-	// testing purposes (this will not be the part of actual code)
-	// 	receivedData, exchng_struct, readErr := cpcm.Message_queue_manager.ReadFromQueue(*cpcm.GlobalQId)
-	// 	if readErr != 0 {
-	// 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId: %d", *cpcm.GlobalQId)
-	// 		return -1
-	// 	}
-
-	// 	exchngStructSize := len(exchng_struct)
-	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId: %d, received structure as byte array: %d", *cpcm.GlobalQId, exchng_struct)
-	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Li Message Type: %d", receivedData)
-	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Size of exchng_struct: %d bytes", exchngStructSize)
-
-	// 	TemporaryQueryForTesting := `UPDATE FXB_FO_XCHNG_BOOK
-	// 	                SET fxb_plcd_stts = 'R'
-	// 	                WHERE fxb_plcd_stts = 'Q'`
-
-	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Executing update query to change status from 'Q' to 'R' in FXB_FO_XCHNG_BOOK")
-
-	// 	result := cpcm.Db.Exec(TemporaryQueryForTesting)
-	// 	if result.Error != nil {
-	// 		cpcm.LoggerManager.LogError(cpcm.ServiceName, " [CLN_PACK_CLNT] [Error: Failed to execute update query: %v", result.Error)
-	// 		return -1
-	// 	}
-	// 	rowsAffected := result.RowsAffected
-	// 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT]  Update query executed successfully, %d rows affected", rowsAffected)
-
-	// }
 
 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [CLN_PACK_CLNT] Exiting CLN_PACK_CLNT")
 	return 0
@@ -416,7 +416,7 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec() int {
 		}
 
 		// here we are setting the contract data from orderbook structure
-		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, "  [fnGetNxtRec] Setting contract data from orderbook structure")
+		cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnGetNxtRec] Setting contract data from orderbook structure")
 		cpcm.Contract.C_xchng_cd = cpcm.Orderbook.C_xchng_cd
 		cpcm.Contract.C_prd_typ = cpcm.Orderbook.C_prd_typ
 		cpcm.Contract.C_undrlyng = cpcm.Orderbook.C_undrlyng
@@ -896,21 +896,21 @@ func (cpcm *ClnPackClntManager) fnUpdXchngbk() int {
 	var iRecExists int64
 
 	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] Entering fnUpdXchngbk")
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_xchng_cd)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_ordr_rfrnc)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_pipe_id)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_mod_trd_dt)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_ord_seq)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_slm_flg)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_dsclsd_qty)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_ord_tot_qty)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_ord_lmt_rt)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_stp_lss_tgr)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %d", cpcm.Xchngbook.L_mdfctn_cntr)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_valid_dt)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_ord_typ)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_req_typ)
-	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk]: %s", cpcm.Xchngbook.C_plcd_stts)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_xchng_cd : %s", cpcm.Xchngbook.C_xchng_cd)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_ordr_rfrnc : %s", cpcm.Xchngbook.C_ordr_rfrnc)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_pipe_id : %s", cpcm.Xchngbook.C_pipe_id)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_mod_trd_dt : %s", cpcm.Xchngbook.C_mod_trd_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] L_ord_seq : %d", cpcm.Xchngbook.L_ord_seq)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_slm_flg : %s", cpcm.Xchngbook.C_slm_flg)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] L_dsclsd_qty : %d", cpcm.Xchngbook.L_dsclsd_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] L_ord_tot_qty : %d", cpcm.Xchngbook.L_ord_tot_qty)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] L_ord_lmt_rt : %d", cpcm.Xchngbook.L_ord_lmt_rt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] L_stp_lss_tgr : %d", cpcm.Xchngbook.L_stp_lss_tgr)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] L_mdfctn_cntr : %d", cpcm.Xchngbook.L_mdfctn_cntr)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_valid_dt : %s", cpcm.Xchngbook.C_valid_dt)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_ord_typ : %s", cpcm.Xchngbook.C_ord_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_req_typ : %s", cpcm.Xchngbook.C_req_typ)
+	cpcm.LoggerManager.LogInfo(cpcm.ServiceName, " [fnUpdXchngbk] C_plcd_stts : %s", cpcm.Xchngbook.C_plcd_stts)
 
 	switch cpcm.Xchngbook.C_oprn_typ {
 	case string(util.UPDATION_ON_ORDER_FORWARDING):
