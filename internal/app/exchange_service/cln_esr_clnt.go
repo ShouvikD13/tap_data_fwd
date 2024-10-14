@@ -45,6 +45,9 @@ type ESRManager struct {
 	Db                    *gorm.DB
 	InitialQId            *int
 	GlobalQId             *int
+	IP                    string
+	Port                  string
+	AutoReconnect         *bool
 }
 
 var li_send_tap_msg_size int64
@@ -53,9 +56,8 @@ var c_rqst_for_open_ordr byte
 
 var (
 	messageQueue = make(chan models.St_req_q_data, 20)
-	//logonResponseChan = make(chan models.St_exch_msg_so)
-	wg        sync.WaitGroup
-	exitcount int64
+	wg           sync.WaitGroup
+	exitcount    int64
 )
 
 type Config struct {
@@ -65,16 +67,8 @@ type Config struct {
 }
 
 func (ESRM *ESRManager) loadConfig() (Config, error) {
-	// cfg, err := ini.Load("EnvConfig.ini")
-	// if err != nil {
-	// 	return Config{}, fmt.Errorf("failed to read config file: %v", err)
-	// }
 
-	autoReconnect := false //ESRM.ENVM.GetProcessSpaceValue("server", "auto_reconnect")
-	// if err != nil {
-	// 	return Config{}, fmt.Errorf("failed to read auto_reconnect config: %v", err)
-	// }
-
+	autoReconnect := false
 	config := Config{
 		IP:            ESRM.ENVM.GetProcessSpaceValue("server", "ip"),
 		Port:          ESRM.ENVM.GetProcessSpaceValue("server", "port"),
@@ -83,14 +77,14 @@ func (ESRM *ESRManager) loadConfig() (Config, error) {
 	return config, nil
 }
 
-func (ESRM *ESRManager) crt_tap_con() (net.Conn, error) {
+func (ESRM *ESRManager) Fn_crt_tap_con() (net.Conn, error) {
 	config, err := ESRM.loadConfig()
 	if err != nil {
 		return nil, fmt.Errorf("error loading config: %v", err)
 	}
-	log.Printf("[%s] []IP for TAP socket: %v", ESRM.ServiceName, config.IP)
-	log.Printf("[%s] []Port for TAP socket: %v", ESRM.ServiceName, config.Port)
-	log.Printf("[%s] []Auto Reconnect status: %v", ESRM.ServiceName, config.AutoReconnect)
+	log.Printf("[%s] [crt_tap_con] IP for TAP socket: %v", ESRM.ServiceName, config.IP)
+	log.Printf("[%s] [crt_tap_con] Port for TAP socket: %v", ESRM.ServiceName, config.Port)
+	log.Printf("[%s] [crt_tap_con] Auto Reconnect status: %v", ESRM.ServiceName, config.AutoReconnect)
 
 	log.Printf("Starting Connection to TAP")
 
@@ -114,12 +108,11 @@ func (ESRM *ESRManager) crt_tap_con() (net.Conn, error) {
 }
 
 func (ESRM *ESRManager) send_thrd(conn net.Conn) {
-	//defer wg.Done()
 
 	log.Printf("Inside Send Routine STARTS HERE")
 
 	for {
-		// Log before reading from the queue
+
 		log.Printf("Attempting to read from queue with Global queue Id: %d", *ESRM.GlobalQId)
 
 		R_L_msg_type, receivedexchngMsg, readErr := ESRM.Message_queue_manager.ReadFromQueue(*ESRM.GlobalQId)
@@ -133,40 +126,35 @@ func (ESRM *ESRManager) send_thrd(conn net.Conn) {
 
 		fmt.Println("Message Type:", R_L_msg_type)
 
-		// *ESRM.Mtype++
-		// if *ESRM.Mtype > ESRM.Max_Pack_Val {
-		// 	*ESRM.Mtype = 1
-		// }
-
 		// Check if R_L_msg_type is "2000"
-		if R_L_msg_type == util.LOGIN_WITH_OPEN_ORDR_DTLS || R_L_msg_type == util.LOGIN_WITHOUT_OPEN_ORDR_DTLS {
+		if R_L_msg_type == util.LOGIN_WITHOUT_OPEN_ORDR_DTLS {
 			log.Printf("[send_thrd] Message Type is LOGIN")
 
-			if R_L_msg_type == util.LOGIN_WITH_OPEN_ORDR_DTLS {
-				c_rqst_for_open_ordr = 'G'
-			} else {
-				c_rqst_for_open_ordr = 'N'
-			}
+			// if R_L_msg_type == util.LOGIN_WITH_OPEN_ORDR_DTLS {
+			// 	c_rqst_for_open_ordr = 'G'
+			// } else {
+			// 	c_rqst_for_open_ordr = 'N'
+			// }
 
 			log.Printf("[send_thrd] c_rqst_for_open_ordr: %c", c_rqst_for_open_ordr)
 
 			// Call Do_xchng_logon to start the sign-on process
-			/* if err := ESRM.Do_xchng_logon(msg.St_exch_msg_so, conn); err != nil {
+			if err := ESRM.Do_xchng_logon(msg.St_exch_msg_so, conn); err != nil {
 				log.Printf("[%s] Failed to send exch_msg_data: %v", err)
 				return
-			} */
+			}
 
 		} else if R_L_msg_type == util.BOARD_LOT_IN {
 			log.Printf("[send_thrd] Message type is BOARD LOT IN")
 
 			li_business_data_size := int64(unsafe.Sizeof(models.St_oe_reqres{}))
-			li_send_tap_msg_size := /*int64(unsafe.Sizeof(models.St_net_hdr{})) +*/ int64(len(receivedexchngMsg))
+			li_send_tap_msg_size := int64(len(receivedexchngMsg))
 			log.Printf("[send_thrd] Business Data Size: %v", li_business_data_size)
 			log.Printf("[send_thrd] TAP message size: %v", li_send_tap_msg_size)
 
 			// Call fn_writen to write exch_msg_data to TCP connection
 			if err := ESRM.fn_writen(conn, receivedexchngMsg, li_send_tap_msg_size); err != nil {
-				log.Printf("[%s] Failed to send exch_msg_data: %v", err)
+				log.Printf("[%s] [send_thrd] Failed to send exch_msg_data: %v", ESRM.ServiceName, err)
 				return
 			}
 
@@ -411,7 +399,7 @@ func (ESRM *ESRManager) ClnEsrClnt() int {
 
 	ESRM.TM = &util.TransactionManager{}
 
-	conn, err := ESRM.crt_tap_con()
+	conn, err := ESRM.Fn_crt_tap_con()
 	if err != nil {
 		log.Fatalf("Error in crt_tap_con: %v", err)
 	}
@@ -427,4 +415,34 @@ func (ESRM *ESRManager) ClnEsrClnt() int {
 
 	wg.Wait()
 	return 0
+}
+
+func (ESRM *ESRManager) Do_xchng_logon(st_exch_msg models.St_exch_msg_so, Conn net.Conn) error {
+	li_business_data_size = int64(unsafe.Sizeof(models.St_sign_on_req{}))
+	li_send_tap_msg_size = int64(unsafe.Sizeof(models.St_net_hdr{})) + li_business_data_size
+
+	// Send the logon message
+	if err := ESRM.fn_writen(Conn, st_exch_msg, li_send_tap_msg_size); err != nil {
+		log.Printf("[%s] []Failed to send exch_msg_data: %v", err)
+		return err
+	}
+
+	// Wait for the logon response from the receive thread
+	log.Printf("Waiting for logon response...")
+	logonResponse := <-logonResponseChan // Block until logon response is received
+	log.Printf("Logon response received, processing...")
+
+	// Process the logon response (example)
+	log.Printf("Transaction Code: %v", logonResponse.St_sign_on_req.StHdr.Si_transaction_code)
+	log.Printf("Error Code: %v", logonResponse.St_sign_on_req.StHdr.Si_error_code)
+
+	// Return if error code in logon response indicates failure
+	if logonResponse.St_sign_on_req.StHdr.Si_error_code != 0 {
+		return fmt.Errorf("logon failed with error code: %v", logonResponse.St_sign_on_req.StHdr.Si_error_code)
+	}
+
+	// Logon success
+	log.Printf("Logon successful, continuing...")
+
+	return nil
 }

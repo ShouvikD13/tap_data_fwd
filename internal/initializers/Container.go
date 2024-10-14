@@ -6,6 +6,7 @@ import (
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
 	"DATA_FWD_TAP/util/OrderConversion"
+	socket "DATA_FWD_TAP/util/Socket"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"database/sql"
 
@@ -23,6 +24,7 @@ type UtilContainer struct {
 	TypeConversionUtilManager *typeconversionutil.TypeConversionUtilManager
 	TransactionManager        *util.TransactionManager
 	PasswordUtilManager       *util.PasswordUtilManger
+	SocketManager             *socket.SocketManager
 	DB                        *gorm.DB
 	MTypeRead                 *int
 	MTypeWrite                *int
@@ -119,4 +121,7 @@ type ESRGlobalValueContainer struct {
 	Max_Pack_Val   int
 	InitialQueueId *int
 	GlobalQueueId  *int
+	IP             string
+	Port           string
+	AutoReconnect  *bool
 }

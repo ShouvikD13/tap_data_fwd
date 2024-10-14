@@ -6,6 +6,7 @@ import (
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
 	"DATA_FWD_TAP/util/OrderConversion"
+	socket "DATA_FWD_TAP/util/Socket"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"log"
 	"strconv"
@@ -94,6 +95,20 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 
 	}
 
+	// Now i have to initalize the scket manager . here i am establising the connect with tap (). so for that i have to read the ip and post from the ini file and after successful connectiom  set  the  connection globally.
+	// for Socket connection
+	Ip := environmentManager.GetProcessSpaceValue("server", "ip")
+	Port := environmentManager.GetProcessSpaceValue("server", "port")
+	//	AutoReconnect := environmentManager.GetProcessSpaceValue("server", "auto_reconnect")
+	// AutoReconnect Logic is not clear yet.
+
+	socketManager := socket.NewSocketManager(loggerManager, serviceName)
+
+	if initResult := socketManager.Connect(Ip, Port); initResult != nil {
+		logger.Fatalf("[%s] [NewUtilContainer] Failed to connect to Socket", serviceName)
+	}
+	loggerManager.LogInfo(serviceName, "[NewUtilContainer] Connected With Tap...")
+
 	return &UtilContainer{
 		ServiceName:               serviceName,
 		OrderConversionManager:    &OrderConversion.OrderConversionManager{},
@@ -108,11 +123,12 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 			ServiceName:   serviceName,
 			LoggerManager: loggerManager,
 		},
-		DB:         DB,
-		MTypeRead:  mTypeRead,
-		MTypeWrite: mTypeWrite,
-		InitialQId: InitialQId,
-		GlobalQId:  GlobalQId,
+		SocketManager: socketManager,
+		DB:            DB,
+		MTypeRead:     mTypeRead,
+		MTypeWrite:    mTypeWrite,
+		InitialQId:    InitialQId,
+		GlobalQId:     GlobalQId,
 	}
 
 }

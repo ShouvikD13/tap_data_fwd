@@ -1,6 +1,6 @@
 package esr
 
-/* import (
+import (
 	//"bytes"
 	//"encoding/binary"
 
@@ -9,6 +9,7 @@ package esr
 	"errors"
 	"fmt"
 	"log"
+	"os/exec"
 	"strings"
 	//_ "github.com/lib/pq"
 )
@@ -108,21 +109,20 @@ func (ESRM *ESRManager) Fn_chng_exp_passwd_req(pipe_id Sql_c_pipe_id, new_gen_pa
 		return -1
 	}
 
-	/*	// Decrypt the new password
-		decryptedC_new_passwd := fnDecrypt(C_new_passwd[:])
-		copy(C_new_passwd[:], decryptedC_new_passwd)
+	// Decrypt the new password
+	decryptedC_new_passwd := fnDecrypt(C_new_passwd[:])
+	copy(C_new_passwd[:], decryptedC_new_passwd)
 
-		// Create the command for sending the password change email
-		char = '"'
-		commandStr := fmt.Sprintf(`ksh snd_passwd_chng_mail.sh %s '%c%s%c'`, pipeID, char, C_new_passwd, char)
-		cmd := exec.Command("sh", "-c", commandStr)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to execute command: %v", err)
-		} */
+	// Create the command for sending the password change email
+	char = '"'
+	commandStr := fmt.Sprintf(`ksh snd_passwd_chng_mail.sh %s '%c%s%c'`, pipeID, char, C_new_passwd, char)
+	cmd := exec.Command("sh", "-c", commandStr)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to execute command: %v", err)
+	}
 
-// Copy the new password to newGenPasswd
-/*copy(new_gen_passwd[:], C_new_passwd[:9])
+	// Copy the new password to newGenPasswd
+	copy(new_gen_passwd[:], C_new_passwd[:9])
 
 	return nil
 }
-*/
