@@ -95,7 +95,8 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 
 	}
 
-	// Now i have to initalize the scket manager . here i am establising the connect with tap (). so for that i have to read the ip and post from the ini file and after successful connectiom  set  the  connection globally.
+	// Now i have to initalize the scket manager . here i am establising the connect with tap ().
+	// so for that i have to read the ip and post from the ini file and after successful connectiom  set  the  connection globally.
 	// for Socket connection
 	Ip := environmentManager.GetProcessSpaceValue("server", "ip")
 	Port := environmentManager.GetProcessSpaceValue("server", "port")

@@ -25,7 +25,7 @@ func NewSocketManager(lm *util.LoggerManager, serviceName string) *SocketManager
 	}
 }
 
-func (sm *SocketManager) Connect(ip, port string) error {
+func (sm *SocketManager) ConnectToTAP(ip, port string) error {
 	address := fmt.Sprintf("%s:%s", ip, port)
 	connection, err := net.Dial("tcp", address)
 	if err != nil {
@@ -41,7 +41,7 @@ func (sm *SocketManager) Connect(ip, port string) error {
 	return nil
 }
 
-func (sm *SocketManager) Write(data []byte) error {
+func (sm *SocketManager) WriteOnTapSocket(net_header []byte, message []byte) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -50,17 +50,30 @@ func (sm *SocketManager) Write(data []byte) error {
 		return fmt.Errorf("socket connection is not established")
 	}
 
-	n, err := sm.SocConnection.Write(data)
-	if err != nil {
-		sm.LM.LogError(sm.ServiceName, "Write: Error writing to socket: %v", err)
-		return fmt.Errorf("error writing to socket: %w", err)
+	// Step 1: Send HDR (the 22-byte net_header)
+	if len(net_header) != 22 {
+		return fmt.Errorf("invalid net_header size, expected 22 bytes, got %d", len(net_header))
 	}
 
-	sm.LM.LogInfo(sm.ServiceName, "Write: Successfully wrote %d bytes to socket.", n)
+	n, err := sm.SocConnection.Write(net_header)
+	if err != nil {
+		sm.LM.LogError(sm.ServiceName, "Write: Error writing net_header to socket: %v", err)
+		return fmt.Errorf("error writing net_header to socket: %w", err)
+	}
+	sm.LM.LogInfo(sm.ServiceName, "Write: Successfully wrote %d bytes of net_header to socket.", n)
+
+	// Step 2: Send Actual Message (For ordinay order , LogOn , LogOff)
+	n, err = sm.SocConnection.Write(message)
+	if err != nil {
+		sm.LM.LogError(sm.ServiceName, "Write: Error writing message to socket: %v", err)
+		return fmt.Errorf("error writing message to socket: %w", err)
+	}
+	sm.LM.LogInfo(sm.ServiceName, "Write: Successfully wrote %d bytes of message to socket.", n)
+
 	return nil
 }
 
-func (sm *SocketManager) Read(bufferSize int) ([]byte, error) {
+func (sm *SocketManager) ReadFromTapSocket(bufferSize int) ([]byte, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 

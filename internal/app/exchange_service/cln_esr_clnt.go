@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sync"
 
 	"time"
 
@@ -50,64 +49,28 @@ type ESRManager struct {
 	AutoReconnect         *bool
 }
 
-var li_send_tap_msg_size int64
-var li_business_data_size int64
-var c_rqst_for_open_ordr byte
+// func (ESRM *ESRManager) Fn_crt_tap_con() (net.Conn, error) {
 
-var (
-	messageQueue = make(chan models.St_req_q_data, 20)
-	wg           sync.WaitGroup
-	exitcount    int64
-)
+// 	// address := net.JoinHostPort(config.IP, config.Port)
+// 	// log.Printf("After join host port")
+// 	// conn, err := net.Dial("tcp", address)
+// 	// log.Printf("after dialing to")
+// 	// if err != nil {
+// 	// 	log.Printf("Error connecting:", err)
+// 	// 	if config.AutoReconnect {
+// 	// 		log.Printf("Disconnected. Auto Reconnecting...")
+// 	// 		return nil, nil
+// 	// 	} else {
+// 	// 		log.Printf("Auto Reconnect is disabled.")
+// 	// 		return nil, err
+// 	// 	}
+// 	// }
 
-type Config struct {
-	IP            string
-	Port          string
-	AutoReconnect bool
-}
+// 	// log.Printf("Connected to TAP at", address)
+// 	// return conn, nil
+// }
 
-func (ESRM *ESRManager) loadConfig() (Config, error) {
-
-	autoReconnect := false
-	config := Config{
-		IP:            ESRM.ENVM.GetProcessSpaceValue("server", "ip"),
-		Port:          ESRM.ENVM.GetProcessSpaceValue("server", "port"),
-		AutoReconnect: autoReconnect, // strconv.ParseBool(autoReconnect)
-	}
-	return config, nil
-}
-
-func (ESRM *ESRManager) Fn_crt_tap_con() (net.Conn, error) {
-	config, err := ESRM.loadConfig()
-	if err != nil {
-		return nil, fmt.Errorf("error loading config: %v", err)
-	}
-	log.Printf("[%s] [crt_tap_con] IP for TAP socket: %v", ESRM.ServiceName, config.IP)
-	log.Printf("[%s] [crt_tap_con] Port for TAP socket: %v", ESRM.ServiceName, config.Port)
-	log.Printf("[%s] [crt_tap_con] Auto Reconnect status: %v", ESRM.ServiceName, config.AutoReconnect)
-
-	log.Printf("Starting Connection to TAP")
-
-	address := net.JoinHostPort(config.IP, config.Port)
-	log.Printf("After join host port")
-	conn, err := net.Dial("tcp", address)
-	log.Printf("after dialing to")
-	if err != nil {
-		log.Printf("Error connecting:", err)
-		if config.AutoReconnect {
-			log.Printf("Disconnected. Auto Reconnecting...")
-			return nil, nil
-		} else {
-			log.Printf("Auto Reconnect is disabled.")
-			return nil, err
-		}
-	}
-
-	log.Printf("Connected to TAP at", address)
-	return conn, nil
-}
-
-func (ESRM *ESRManager) send_thrd(conn net.Conn) {
+func (ESRM *ESRManager) FnSendThread(conn net.Conn) {
 
 	log.Printf("Inside Send Routine STARTS HERE")
 
@@ -118,10 +81,9 @@ func (ESRM *ESRManager) send_thrd(conn net.Conn) {
 		R_L_msg_type, receivedexchngMsg, readErr := ESRM.Message_queue_manager.ReadFromQueue(*ESRM.GlobalQId)
 		if readErr != 0 {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[send_thrd] [Error: Failed to read from queue with GlobalQueueId... %d: ", *ESRM.GlobalQId)
-			continue // Skip to the next iteration to avoid potential nil dereference
+			continue
 		}
 
-		// Log received message details
 		log.Printf("[send_thrd] Successfully read from queue eith GlobalQueueId: %d, received data: %v", *ESRM.GlobalQId, receivedexchngMsg)
 
 		fmt.Println("Message Type:", R_L_msg_type)
@@ -130,15 +92,6 @@ func (ESRM *ESRManager) send_thrd(conn net.Conn) {
 		if R_L_msg_type == util.LOGIN_WITHOUT_OPEN_ORDR_DTLS {
 			log.Printf("[send_thrd] Message Type is LOGIN")
 
-			// if R_L_msg_type == util.LOGIN_WITH_OPEN_ORDR_DTLS {
-			// 	c_rqst_for_open_ordr = 'G'
-			// } else {
-			// 	c_rqst_for_open_ordr = 'N'
-			// }
-
-			log.Printf("[send_thrd] c_rqst_for_open_ordr: %c", c_rqst_for_open_ordr)
-
-			// Call Do_xchng_logon to start the sign-on process
 			if err := ESRM.Do_xchng_logon(msg.St_exch_msg_so, conn); err != nil {
 				log.Printf("[%s] Failed to send exch_msg_data: %v", err)
 				return

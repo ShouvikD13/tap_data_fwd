@@ -1,9 +1,6 @@
 package esr
 
 import (
-	//"bytes"
-	//"encoding/binary"
-
 	"DATA_FWD_TAP/util"
 	"database/sql"
 	"errors"
@@ -11,7 +8,6 @@ import (
 	"log"
 	"os/exec"
 	"strings"
-	//_ "github.com/lib/pq"
 )
 
 func (ESRM *ESRManager) Fn_chng_exp_passwd_req(pipe_id Sql_c_pipe_id, new_gen_passwd *[9]byte, c_err_msg [256]byte, xchng_cd sql_c_xchng_cd) error {
