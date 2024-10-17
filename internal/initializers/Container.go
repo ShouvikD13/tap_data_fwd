@@ -6,9 +6,10 @@ import (
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
 	"DATA_FWD_TAP/util/OrderConversion"
-	socket "DATA_FWD_TAP/util/Socket"
+	socket "DATA_FWD_TAP/util/TapSocket"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"database/sql"
+	"net"
 
 	"gorm.io/gorm"
 )
@@ -121,6 +122,7 @@ type ESRGlobalValueContainer struct {
 	Max_Pack_Val   int
 	InitialQueueId *int
 	GlobalQueueId  *int
+	SocConnection  *net.Conn
 	IP             string
 	Port           string
 	AutoReconnect  *bool

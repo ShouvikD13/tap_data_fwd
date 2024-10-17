@@ -8,12 +8,12 @@ import (
 )
 
 const (
-	DefaultBufferSize = 400
+	DefaultBufferSize = 400 // i have create this buffer because maximum size of all structure is 400
 )
 
 type SocketManager struct {
 	LM            *util.LoggerManager
-	SocConnection net.Conn
+	SocConnection *net.Conn
 	ServiceName   string
 	mu            sync.Mutex
 }
@@ -25,20 +25,16 @@ func NewSocketManager(lm *util.LoggerManager, serviceName string) *SocketManager
 	}
 }
 
-func (sm *SocketManager) ConnectToTAP(ip, port string) error {
+func (sm *SocketManager) ConnectToTAP(ip, port string) (net.Conn, error) {
 	address := fmt.Sprintf("%s:%s", ip, port)
 	connection, err := net.Dial("tcp", address)
 	if err != nil {
 		sm.LM.LogError(sm.ServiceName, "Connect: Failed to connect to socket %s: %v", address, err)
-		return fmt.Errorf("failed to connect to socket %s: %w", address, err)
+		return nil, fmt.Errorf("failed to connect to socket %s: %w", address, err)
 	}
 
-	sm.mu.Lock()
-	sm.SocConnection = connection // setting the connection instance globally
-	sm.mu.Unlock()
-
 	sm.LM.LogInfo(sm.ServiceName, "Connect: Successfully connected to socket %s.", address)
-	return nil
+	return connection, nil
 }
 
 func (sm *SocketManager) WriteOnTapSocket(net_header []byte, message []byte) error {

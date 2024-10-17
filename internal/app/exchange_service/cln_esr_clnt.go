@@ -7,6 +7,7 @@ import (
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
+	socket "DATA_FWD_TAP/util/TapSocket"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"bytes"
 	"encoding/binary"
@@ -40,6 +41,7 @@ type ESRManager struct {
 	TCUM                  *typeconversionutil.TypeConversionUtilManager
 	LoggerManager         *util.LoggerManager
 	TM                    *util.TransactionManager
+	SCM                   *socket.SocketManager
 	Max_Pack_Val          int
 	Db                    *gorm.DB
 	InitialQId            *int

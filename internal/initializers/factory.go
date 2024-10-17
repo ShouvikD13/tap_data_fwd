@@ -6,7 +6,7 @@ import (
 	"DATA_FWD_TAP/util"
 	"DATA_FWD_TAP/util/MessageQueue"
 	"DATA_FWD_TAP/util/OrderConversion"
-	socket "DATA_FWD_TAP/util/Socket"
+	socket "DATA_FWD_TAP/util/TapSocket"
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"log"
 	"strconv"
@@ -104,10 +104,11 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 	// AutoReconnect Logic is not clear yet.
 
 	socketManager := socket.NewSocketManager(loggerManager, serviceName)
-
-	if initResult := socketManager.Connect(Ip, Port); initResult != nil {
+	Socket, err := socketManager.ConnectToTAP(Ip, Port)
+	if err != nil {
 		logger.Fatalf("[%s] [NewUtilContainer] Failed to connect to Socket", serviceName)
 	}
+	socketManager.SocConnection = &Socket
 	loggerManager.LogInfo(serviceName, "[NewUtilContainer] Connected With Tap...")
 
 	return &UtilContainer{
