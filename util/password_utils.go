@@ -13,6 +13,12 @@ type PasswordUtilManger struct {
 	LM *LoggerManager
 }
 
+func NewPasswordUtilManager(loggerManager *LoggerManager) *PasswordUtilManger {
+	return &PasswordUtilManger{
+		LM: loggerManager,
+	}
+}
+
 func (PUM *PasswordUtilManger) FngenerateNewPassword(oldPassword string) (string, error) {
 	letters := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	lowerLetters := "abcdefghijklmnopqrstuvwxy"

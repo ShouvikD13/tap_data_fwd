@@ -4,6 +4,7 @@ import (
 	"DATA_FWD_TAP/util"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 )
 
@@ -13,7 +14,7 @@ const (
 
 type SocketManager struct {
 	LM            *util.LoggerManager
-	SocConnection *net.Conn
+	SocConnection net.Conn
 	ServiceName   string
 	mu            sync.Mutex
 }
@@ -102,4 +103,27 @@ func (sm *SocketManager) Close() error {
 		sm.LM.LogInfo(sm.ServiceName, "Close: Socket connection closed successfully.")
 	}
 	return nil
+}
+
+func (sm *SocketManager) AutoReconnection(ip, port string) (net.Conn, error) {
+	var Conn net.Conn
+	var err error
+
+	sm.LM.LogError(sm.ServiceName, "[AutoReconnection] Disconnected... Initiating automatic reconnection.")
+
+	for i := 0; i < 5; i++ {
+		Conn, err = sm.ConnectToTAP(ip, port)
+		if err != nil {
+			sm.LM.LogError(sm.ServiceName, "Reconnection attempt %d failed: %v", i+1, err)
+		} else {
+			sm.LM.LogInfo(sm.ServiceName, "Connection re-established successfully.")
+			return Conn, nil
+		}
+	}
+
+	sm.LM.LogError(sm.ServiceName, "[AutoReconnection] Reconnection attempts exceeded the limit. IP: %s, Port: %s", ip, port)
+	fmt.Println("Program terminated: Unable to establish a connection to the socket. Please try again with a different IP or port.")
+	os.Exit(1)
+
+	return nil, err
 }

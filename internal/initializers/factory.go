@@ -43,11 +43,20 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
+	/*
+	 Step 1: Setting up the Environment Manager, which is responsible for reading the configuration file.
+	 The Environment Manager requires two inputs:
+	 1. Service Name
+	 2. Path to the configuration file.
+	*/
+
 	environmentManager := util.NewEnvironmentManager(serviceName, "/home/devasheesh/Desktop/go-workspace/data_fwd_tap/internal/config/env_config.ini")
 
 	environmentManager.LoadIniFile()
 
-	//Logger file
+	/*
+	 Step 2: Initializing the LoggerManager, which handles logging to both the terminal and log files.
+	*/
 
 	loggerManager := &util.LoggerManager{}
 	loggerManager.InitLogger(environmentManager)
@@ -56,6 +65,10 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 	logger := loggerManager.GetLogger()
 
 	loggerManager.LogInfo(serviceName, "Program %s starts", args[0])
+
+	/*
+		Step 3: Here we are setting up the configmanager Which is used for DataBase operations.
+	*/
 
 	configManager := database.NewConfigManager(serviceName, environmentManager, loggerManager)
 
@@ -74,12 +87,29 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		loggerManager.LogError(serviceName, "Database connection is nil. Failed to get the database instance.")
 		logger.Fatalf("[%s] Database connection is nil.", serviceName)
 	}
+	/*
+	 Step 4: Initializing the TransactionManager, which handles transaction operations for update and insert queries.
+	*/
+	transactionManager := util.NewTransactionManager(serviceName, configManager, loggerManager)
 
-	TCUM := &typeconversionutil.TypeConversionUtilManager{
-		LoggerManager: loggerManager,
-	}
+	/*
+		Step 5: Initializing the TypeConversionUtilManager, which is generic Manager used for various types of `type conversions
+	*/
+	typeConversionManager := typeconversionutil.NewTypeConversionUtilManager(loggerManager, serviceName)
+
+	/*
+		Step 6: Initializing the PasswordUtilManager, which Used in LogOn service to hanhandle the password conversion
+	*/
+	passwordManager := util.NewPasswordUtilManager(loggerManager)
+
+	/*
+	 Step 7: Initializing the MessageQueueManager, which handles system queue operations (create, write, read, flush, destroy).
+	*/
+
+	messageQueueManager := MessageQueue.NewMessageQueueManager(serviceName, loggerManager)
 
 	//this value also we are reding from configuration file "I have set the temp value in the configuration file for now"
+
 	maxPackValStr := environmentManager.GetProcessSpaceValue("PackingLimit", "PACK_VAL")
 	var maxPackVal int
 	if maxPackValStr == "" {
@@ -95,21 +125,30 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 
 	}
 
-	// Now i have to initalize the scket manager . here i am establising the connect with tap ().
-	// so for that i have to read the ip and post from the ini file and after successful connectiom  set  the  connection globally.
-	// for Socket connection
+	/*
+	 Step 8: Initializing the SocketManager, which manages operations on the TAP socket (creation, write, read).
+	*/
+
 	Ip := environmentManager.GetProcessSpaceValue("server", "ip")
 	Port := environmentManager.GetProcessSpaceValue("server", "port")
-	//	AutoReconnect := environmentManager.GetProcessSpaceValue("server", "auto_reconnect")
-	// AutoReconnect Logic is not clear yet.
 
 	socketManager := socket.NewSocketManager(loggerManager, serviceName)
 	Socket, err := socketManager.ConnectToTAP(Ip, Port)
+
 	if err != nil {
-		logger.Fatalf("[%s] [NewUtilContainer] Failed to connect to Socket", serviceName)
+		loggerManager.LogError(serviceName, "[NewUtilContainer] Initial connection to TAP failed: %v", err)
+		Socket, err = socketManager.AutoReconnection(Ip, Port)
+		if err != nil {
+			loggerManager.LogError(serviceName, "[NewUtilContainer] Auto reconnection failed: %v", err)
+			// if there is any error returned than Program will be terminated by itself.
+		} else {
+			socketManager.SocConnection = Socket
+			loggerManager.LogInfo(serviceName, "[NewUtilContainer] Successfully reconnected to TAP.")
+		}
+	} else {
+		socketManager.SocConnection = Socket
+		loggerManager.LogInfo(serviceName, "[NewUtilContainer] Connected to TAP successfully.")
 	}
-	socketManager.SocConnection = &Socket
-	loggerManager.LogInfo(serviceName, "[NewUtilContainer] Connected With Tap...")
 
 	return &UtilContainer{
 		ServiceName:               serviceName,
@@ -118,19 +157,14 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		MaxPackVal:                maxPackVal,
 		ConfigManager:             configManager,
 		LoggerManager:             loggerManager,
-		TypeConversionUtilManager: TCUM,
-		TransactionManager:        util.NewTransactionManager(serviceName, configManager, loggerManager),
-		PasswordUtilManager:       &util.PasswordUtilManger{LM: loggerManager},
-		MessageQueueManager: &MessageQueue.MessageQueueManager{
-			ServiceName:   serviceName,
-			LoggerManager: loggerManager,
-		},
-		SocketManager: socketManager,
-		DB:            DB,
-		MTypeRead:     mTypeRead,
-		MTypeWrite:    mTypeWrite,
-		InitialQId:    InitialQId,
-		GlobalQId:     GlobalQId,
+		TypeConversionUtilManager: typeConversionManager,
+		TransactionManager:        transactionManager,
+		PasswordUtilManager:       passwordManager,
+		MessageQueueManager:       messageQueueManager,
+		SocketManager:             socketManager,
+		DB:                        DB,
+		InitialQId:                InitialQId,
+		GlobalQId:                 GlobalQId,
 	}
 
 }

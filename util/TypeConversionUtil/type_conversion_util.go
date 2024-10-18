@@ -15,6 +15,13 @@ type TypeConversionUtilManager struct {
 	ServiceName   string
 }
 
+func NewTypeConversionUtilManager(loggerManager *util.LoggerManager, serviceName string) *TypeConversionUtilManager {
+	return &TypeConversionUtilManager{
+		LoggerManager: loggerManager,
+		ServiceName:   serviceName,
+	}
+}
+
 func (TCUM *TypeConversionUtilManager) CopyAndFormatSymbol(dest []byte, destLen int, src string) { //'fn_orstonse_char'
 
 	TCUM.ServiceName = "Type_Conversion_Util"

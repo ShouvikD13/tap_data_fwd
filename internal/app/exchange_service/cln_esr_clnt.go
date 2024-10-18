@@ -74,53 +74,53 @@ type ESRManager struct {
 
 func (ESRM *ESRManager) FnSendThread(conn net.Conn) {
 
-	log.Printf("Inside Send Routine STARTS HERE")
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Inside Send Routine STARTS HERE")
 
 	for {
 
-		log.Printf("Attempting to read from queue with Global queue Id: %d", *ESRM.GlobalQId)
+		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("Attempting to read from queue with Global queue Id: %d", *ESRM.GlobalQId))
 
 		R_L_msg_type, receivedexchngMsg, readErr := ESRM.Message_queue_manager.ReadFromQueue(*ESRM.GlobalQId)
 		if readErr != 0 {
-			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[send_thrd] [Error: Failed to read from queue with GlobalQueueId... %d: ", *ESRM.GlobalQId)
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, fmt.Sprintf("[send_thrd] [Error: Failed to read from queue with GlobalQueueId... %d]", *ESRM.GlobalQId))
 			continue
 		}
 
-		log.Printf("[send_thrd] Successfully read from queue eith GlobalQueueId: %d, received data: %v", *ESRM.GlobalQId, receivedexchngMsg)
+		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[send_thrd] Successfully read from queue with GlobalQueueId: %d, received data: %v", *ESRM.GlobalQId, receivedexchngMsg))
 
-		fmt.Println("Message Type:", R_L_msg_type)
+		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("Message Type: %d", R_L_msg_type))
 
 		// Check if R_L_msg_type is "2000"
 		if R_L_msg_type == util.LOGIN_WITHOUT_OPEN_ORDR_DTLS {
-			log.Printf("[send_thrd] Message Type is LOGIN")
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[send_thrd] Message Type is LOGIN")
 
-			if err := ESRM.Do_xchng_logon(msg.St_exch_msg_so, conn); err != nil {
-				log.Printf("[%s] Failed to send exch_msg_data: %v", err)
+			if err := ESRM.Do_xchng_logon(receivedexchngMsg); err != nil {
+				ESRM.LoggerManager.LogError(ESRM.ServiceName, fmt.Sprintf("[%s] Failed to send exch_msg_data: %v", ESRM.ServiceName, err))
 				return
 			}
 
 		} else if R_L_msg_type == util.BOARD_LOT_IN {
-			log.Printf("[send_thrd] Message type is BOARD LOT IN")
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[send_thrd] Message type is BOARD LOT IN")
 
 			li_business_data_size := int64(unsafe.Sizeof(models.St_oe_reqres{}))
 			li_send_tap_msg_size := int64(len(receivedexchngMsg))
-			log.Printf("[send_thrd] Business Data Size: %v", li_business_data_size)
-			log.Printf("[send_thrd] TAP message size: %v", li_send_tap_msg_size)
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[send_thrd] Business Data Size: %v", li_business_data_size))
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[send_thrd] TAP message size: %v", li_send_tap_msg_size))
 
 			// Call fn_writen to write exch_msg_data to TCP connection
 			if err := ESRM.fn_writen(conn, receivedexchngMsg, li_send_tap_msg_size); err != nil {
-				log.Printf("[%s] [send_thrd] Failed to send exch_msg_data: %v", ESRM.ServiceName, err)
+				ESRM.LoggerManager.LogError(ESRM.ServiceName, fmt.Sprintf("[%s] [send_thrd] Failed to send exch_msg_data: %v", ESRM.ServiceName, err))
 				return
 			}
 
 		} else {
-			log.Printf("[%s] [send_thrd] Skipped message with message type: %d", ESRM.ServiceName, R_L_msg_type)
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[%s] [send_thrd] Skipped message with message type: %d", ESRM.ServiceName, R_L_msg_type))
 		}
 
-		log.Printf("Inside SEND Routine ENDS HERE")
+		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Inside SEND Routine ENDS HERE")
 	}
 
-	log.Printf("Message queue closed, send thread exiting")
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Message queue closed, send thread exiting")
 	exitcount += 1
 }
 
@@ -372,18 +372,23 @@ func (ESRM *ESRManager) ClnEsrClnt() int {
 	return 0
 }
 
-func (ESRM *ESRManager) Do_xchng_logon(st_exch_msg models.St_exch_msg_so, Conn net.Conn) error {
-	li_business_data_size = int64(unsafe.Sizeof(models.St_sign_on_req{}))
-	li_send_tap_msg_size = int64(unsafe.Sizeof(models.St_net_hdr{})) + li_business_data_size
+func (ESRM *ESRManager) Do_xchng_logon(Data []byte) error {
 
-	// Send the logon message
-	if err := ESRM.fn_writen(Conn, st_exch_msg, li_send_tap_msg_size); err != nil {
-		log.Printf("[%s] []Failed to send exch_msg_data: %v", err)
+	if len(Data) < 22 {
+		return fmt.Errorf(" [Do_xchng_logon] Message size is less than size of NET_HDR")
+	}
+
+	NET_HDR := Data[:22]
+
+	message := Data[22:]
+
+	if err := ESRM.SCM.WriteOnTapSocket(NET_HDR, message); err != nil {
+		log.Printf("[%s] [Do_xchng_logon] Failed to send exch_msg_data: %v", err)
 		return err
 	}
 
-	// Wait for the logon response from the receive thread
 	log.Printf("Waiting for logon response...")
+
 	logonResponse := <-logonResponseChan // Block until logon response is received
 	log.Printf("Logon response received, processing...")
 

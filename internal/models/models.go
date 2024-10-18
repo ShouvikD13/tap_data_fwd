@@ -431,6 +431,7 @@ Packet Length: 2 bytes
 | Modified    | BIT       | 1           | 1      |
 | Frozen      | BIT       | 1           | 1      |
 | Reserved    | BIT       | 3           | 1      |
+
 */
 
 func (o *St_order_flags) SetFlag(flag uint16) {

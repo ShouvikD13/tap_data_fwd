@@ -24,8 +24,11 @@ type MessageQueueManager struct {
 	LoggerManager      *util.LoggerManager
 }
 
-func NewMessageQueueManager(ServiceName string) {
-
+func NewMessageQueueManager(ServiceName string, LoggerManager *util.LoggerManager) *MessageQueueManager {
+	return &MessageQueueManager{
+		ServiceName:   ServiceName,
+		LoggerManager: LoggerManager,
+	}
 }
 
 type WriteQueueMessage interface {
