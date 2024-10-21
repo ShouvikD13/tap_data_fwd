@@ -1,6 +1,6 @@
 package esr
 
-/* import (
+ import (
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
 	"encoding/binary"
@@ -319,4 +319,4 @@ func (ESRM *ESRManager) Fn_AcallSvc_Sfo_Udp_Msg(mkt_msg *models.Vw_mkt_msg) erro
 
 	return nil
 }
-*/
+	

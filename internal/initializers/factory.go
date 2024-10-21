@@ -132,7 +132,7 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 	Ip := environmentManager.GetProcessSpaceValue("server", "ip")
 	Port := environmentManager.GetProcessSpaceValue("server", "port")
 
-	socketManager := socket.NewSocketManager(loggerManager, serviceName)
+	socketManager := socket.NewSocketManager(loggerManager, serviceName, typeConversionManager)
 	Socket, err := socketManager.ConnectToTAP(Ip, Port)
 
 	if err != nil {
@@ -140,7 +140,7 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		Socket, err = socketManager.AutoReconnection(Ip, Port)
 		if err != nil {
 			loggerManager.LogError(serviceName, "[NewUtilContainer] Auto reconnection failed: %v", err)
-			// if there is any error returned than Program will be terminated by itself.
+			// If reconnection fails, the program will terminate.
 		} else {
 			socketManager.SocConnection = Socket
 			loggerManager.LogInfo(serviceName, "[NewUtilContainer] Successfully reconnected to TAP.")
@@ -149,6 +149,7 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		socketManager.SocConnection = Socket
 		loggerManager.LogInfo(serviceName, "[NewUtilContainer] Connected to TAP successfully.")
 	}
+	//
 
 	return &UtilContainer{
 		ServiceName:               serviceName,

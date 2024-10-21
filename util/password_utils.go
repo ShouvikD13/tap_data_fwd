@@ -143,4 +143,5 @@ func (PUM *PasswordUtilManger) CopyAndFormatPassword(dest []byte, destLen int, s
 	for i := len(src); i < destLen; i++ {
 		dest[i] = ' '
 	}
+
 }

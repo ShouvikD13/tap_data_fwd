@@ -27,8 +27,6 @@ type UtilContainer struct {
 	PasswordUtilManager       *util.PasswordUtilManger
 	SocketManager             *socket.SocketManager
 	DB                        *gorm.DB
-	MTypeRead                 *int
-	MTypeWrite                *int
 	InitialQId                *int
 	GlobalQId                 *int
 }

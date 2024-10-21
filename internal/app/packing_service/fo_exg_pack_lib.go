@@ -45,7 +45,6 @@ type ExchngPackLibMaster struct {
 	cUserTypGlb   byte
 	LoggerManager *util.LoggerManager
 	TCUM          *typeconversionutil.TypeConversionUtilManager
-	Mtype         *int
 	Db            *gorm.DB
 }
 
@@ -66,7 +65,6 @@ func NewExchngPackLibMaster(serviceName string,
 	cPanNo, cLstActRef, cEspID, cAlgoID, cSourceFlg, cPrgmFlg string,
 	Log *util.LoggerManager,
 	TCUM *typeconversionutil.TypeConversionUtilManager,
-	mtype *int,
 	Db *gorm.DB) *ExchngPackLibMaster {
 
 	var (
@@ -105,7 +103,6 @@ func NewExchngPackLibMaster(serviceName string,
 		cPrgmFlg:      bPrgmFlg,
 		LoggerManager: Log,
 		TCUM:          TCUM,
-		Mtype:         mtype,
 		Db:            Db,
 	}
 }

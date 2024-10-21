@@ -40,7 +40,6 @@ type LogOnToTapManager struct {
 	Message_queue_manager      *MessageQueue.MessageQueueManager
 	C_pipe_id                  string
 	UserID                     int64
-	MtypeWrite                 *int
 	Max_Pack_Val               int
 	//----------------------------------
 	Opm_loginStatus    int
@@ -478,6 +477,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap]  Exiting from function")
 	}
 
+	// this
 	for {
 		if LOTTM.Message_queue_manager.FnCanWriteToQueue(*LOTTM.GlobalQId) != 0 {
 			LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[LogOnToTap] [Error: Queue is Full ")

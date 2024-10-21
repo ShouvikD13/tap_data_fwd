@@ -2,6 +2,7 @@ package socket
 
 import (
 	"DATA_FWD_TAP/util"
+	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"fmt"
 	"net"
 	"os"
@@ -17,12 +18,14 @@ type SocketManager struct {
 	SocConnection net.Conn
 	ServiceName   string
 	mu            sync.Mutex
+	TCUM          *typeconversionutil.TypeConversionUtilManager
 }
 
-func NewSocketManager(lm *util.LoggerManager, serviceName string) *SocketManager {
+func NewSocketManager(lm *util.LoggerManager, serviceName string, tcum *typeconversionutil.TypeConversionUtilManager) *SocketManager {
 	return &SocketManager{
 		LM:          lm,
 		ServiceName: serviceName,
+		TCUM:        tcum,
 	}
 }
 
@@ -38,17 +41,23 @@ func (sm *SocketManager) ConnectToTAP(ip, port string) (net.Conn, error) {
 	return connection, nil
 }
 
-func (sm *SocketManager) WriteOnTapSocket(net_header []byte, message []byte) error {
+func (sm *SocketManager) WriteOnTapSocket(buffer []byte) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	net_header, message, err := sm.TCUM.ExtractNetHdrAndMessage(buffer)
+	if err != nil {
+		sm.LM.LogError(sm.ServiceName, "Error extracting net header and message: %v", err)
+		return fmt.Errorf("error extracting net header and message: %w", err)
+	}
 
 	if sm.SocConnection == nil {
 		sm.LM.LogError(sm.ServiceName, "Write: Socket connection is not established.")
 		return fmt.Errorf("socket connection is not established")
 	}
 
-	// Step 1: Send HDR (the 22-byte net_header)
 	if len(net_header) != 22 {
+		sm.LM.LogError(sm.ServiceName, "Invalid net_header size, expected 22 bytes, got %d", len(net_header))
 		return fmt.Errorf("invalid net_header size, expected 22 bytes, got %d", len(net_header))
 	}
 
@@ -59,7 +68,7 @@ func (sm *SocketManager) WriteOnTapSocket(net_header []byte, message []byte) err
 	}
 	sm.LM.LogInfo(sm.ServiceName, "Write: Successfully wrote %d bytes of net_header to socket.", n)
 
-	// Step 2: Send Actual Message (For ordinay order , LogOn , LogOff)
+	// Step 2: Send the actual message
 	n, err = sm.SocConnection.Write(message)
 	if err != nil {
 		sm.LM.LogError(sm.ServiceName, "Write: Error writing message to socket: %v", err)

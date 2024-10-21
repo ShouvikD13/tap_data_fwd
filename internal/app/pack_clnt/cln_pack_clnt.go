@@ -44,7 +44,6 @@ type ClnPackClntManager struct {
 	Config_manager           *database.ConfigManager
 	LoggerManager            *util.LoggerManager
 	TCUM                     *typeconversionutil.TypeConversionUtilManager
-	MtypeWrite               *int
 	Args                     []string
 	Db                       *gorm.DB
 	QueueId                  int
@@ -497,7 +496,6 @@ func (cpcm *ClnPackClntManager) fnGetNxtRec() int {
 			cpcm.CPrgmFlg,
 			cpcm.LoggerManager,
 			cpcm.TCUM,
-			cpcm.MtypeWrite,
 			cpcm.Db,
 		)
 

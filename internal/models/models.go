@@ -769,3 +769,87 @@ type St_oe_reqresp struct {
 	Ll_lastactivityref int64
 	C_reserved         [52]byte
 }
+
+/*
+
+
+	Structure Name: MS_SYSTEM_INFO_REQ
+	Packet Length: 44 bytes
+
+	| Field Name              | Data Type | Size (bytes) | Offset |
+	|-------------------------|-----------|--------------|--------|
+	| MESSAGE_HEADER          | STRUCT    | 40           | 0      |
+	| LastUpdatePortfolioTime  | LONG      | 4            | 40     |
+
+	Structure Name: MS_SYSTEM_INFO_DATA
+	Packet Length: 106 bytes
+
+	| Field Name                   | Data Type | Size (bytes) | Offset |
+	|------------------------------|-----------|--------------|--------|
+	| MESSAGE_HEADER               | STRUCT    | 40           | 0      |
+	| ST_MARKET_STATUS             | STRUCT    | 8            | 40     |
+	| ST_EX_MARKET_STATUS          | STRUCT    | 8            | 48     |
+	| ST_PL_MARKET_STATUS          | STRUCT    | 8            | 56     |
+	| UpdatePortfolio              | CHAR      | 1            | 64     |
+	| MarketIndex                  | LONG      | 4            | 65     |
+	| DefaultSettlementPeriod (Normal)  | SHORT     | 2            | 69     |
+	| DefaultSettlementPeriod (Spot)    | SHORT     | 2            | 71     |
+	| DefaultSettlementPeriod (Auction) | SHORT     | 2            | 73     |
+	| CompetitorPeriod             | SHORT     | 2            | 75     |
+	| SolicitorPeriod              | SHORT     | 2            | 77     |
+	| WarningPercent               | SHORT     | 2            | 79     |
+	| VolumeFreezePercent          | SHORT     | 2            | 81     |
+	| SnapQuoteTime                | SHORT     | 2            | 83     |
+	| Reserved                     | CHAR      | 2            | 85     |
+	| BoardLotQuantity             | LONG      | 4            | 87     |
+	| TickSize                     | LONG      | 4            | 91     |
+	| MaximumGtcDays               | SHORT     | 2            | 95     |
+	| ST_STOCK_ELIGIBLE_INDICATORS | STRUCT    | 2            | 97     |
+	| DisclosedQuantityPercentAllowed | SHORT     | 2            | 99     |
+	| RiskFreeInterestRate         | LONG      | 4            | 101    |
+
+
+	Structure Name: ST_MARKET_STATUS
+	Packet Length: 8 bytes
+
+	| Field Name    | Data Type | Size (bytes) | Offset |
+	|---------------|-----------|--------------|--------|
+	| Normal        | SHORT     | 2            | 0      |
+	| Oddlot        | SHORT     | 2            | 2      |
+	| Spot          | SHORT     | 2            | 4      |
+	| Auction       | SHORT     | 2            | 6      |
+
+
+	Structure Name: ST_EX_MARKET_STATUS
+	Packet Length: 8 bytes
+
+	| Field Name    | Data Type | Size (bytes) | Offset |
+	|---------------|-----------|--------------|--------|
+	| Normal        | SHORT     | 2            | 0      |
+	| Oddlot        | SHORT     | 2            | 2      |
+	| Spot          | SHORT     | 2            | 4      |
+	| Auction       | SHORT     | 2            | 6      |
+
+
+	Structure Name: ST_PL_MARKET_STATUS
+	Packet Length: 8 bytes
+
+	| Field Name    | Data Type | Size (bytes) | Offset |
+	|---------------|-----------|--------------|--------|
+	| Normal        | SHORT     | 2            | 0      |
+	| Oddlot        | SHORT     | 2            | 2      |
+	| Spot          | SHORT     | 2            | 4      |
+	| Auction       | SHORT     | 2            | 6      |
+
+
+	Structure Name: ST_STOCK_ELIGIBLE_INDICATORS
+	Packet Length: 2 bytes
+
+	| Field Name        | Data Type | Size (bytes) | Offset |
+	|-------------------|-----------|--------------|--------|
+	| Reserved          | BIT       | 5            | 0      |
+	| BooksMerged       | BIT       | 1            | 0      |
+	| MinimumFill       | BIT       | 1            | 0      |
+	| AON               | BIT       | 1            | 0      |
+	| Reserved Byte     | CHAR      | 1            | 1      |
+*/

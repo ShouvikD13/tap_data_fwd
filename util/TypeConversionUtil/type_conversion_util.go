@@ -4,6 +4,7 @@ import (
 	"DATA_FWD_TAP/util"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"strings"
 	"time"
 
@@ -130,4 +131,18 @@ func (TCUM *TypeConversionUtilManager) WriteAndCopy(buf *bytes.Buffer, data inte
 	}
 	copy(dest, buf.Bytes())
 	return nil
+}
+
+func (TCUM *TypeConversionUtilManager) ExtractNetHdrAndMessage(input []byte) ([]byte, []byte, error) {
+
+	if len(input) < 22 {
+		err := fmt.Errorf("retrieved data from message queue is less than expected (size: %d bytes)", len(input))
+		TCUM.LoggerManager.LogError(TCUM.ServiceName, err.Error())
+		return input, []byte{}, err
+	}
+
+	NetHdr := input[:22]  // NET_HDR (first 22 bytes)
+	Message := input[22:] // Actual message (remaining bytes)
+
+	return NetHdr, Message, nil
 }

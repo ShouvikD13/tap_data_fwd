@@ -23,7 +23,6 @@ type LogOffFromTapManager struct {
 	DB                    *gorm.DB
 	LoggerManager         *util.LoggerManager
 	ServiceName           string
-	MtypeWrite            *int
 	Int_header            *models.St_int_header
 	St_net_hdr            *models.St_net_hdr
 	Exch_msg_Log_Off      *models.St_exch_msg_Log_Off

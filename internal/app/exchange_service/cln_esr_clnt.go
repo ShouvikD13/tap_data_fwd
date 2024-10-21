@@ -108,7 +108,7 @@ func (ESRM *ESRManager) FnSendThread(conn net.Conn) {
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[send_thrd] TAP message size: %v", li_send_tap_msg_size))
 
 			// Call fn_writen to write exch_msg_data to TCP connection
-			if err := ESRM.fn_writen(conn, receivedexchngMsg, li_send_tap_msg_size); err != nil {
+			if err := ESRM.SCM.WriteOnTapSocket(receivedexchngMsg); err != nil {
 				ESRM.LoggerManager.LogError(ESRM.ServiceName, fmt.Sprintf("[%s] [send_thrd] Failed to send exch_msg_data: %v", ESRM.ServiceName, err))
 				return
 			}
@@ -121,80 +121,7 @@ func (ESRM *ESRManager) FnSendThread(conn net.Conn) {
 	}
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Message queue closed, send thread exiting")
-	exitcount += 1
-}
 
-func (ESRM *ESRManager) fn_writen(conn net.Conn, msg interface{}, msg_size int64) error {
-	var buf bytes.Buffer
-
-	// Get the size of the message
-	msgSize := int(unsafe.Sizeof(msg))
-
-	log.Printf("Mesage Size %d ", msgSize)
-
-	// Use a switch to handle different message sizes
-	switch msgSize {
-	case 24:
-		// Serialize St_exch_msg
-		if err := binary.Write(&buf, binary.BigEndian, msg); err != nil {
-			return err
-		}
-	case 314:
-		// Serialize St_exch_msg_Log_On
-		if err := binary.Write(&buf, binary.BigEndian, msg); err != nil {
-			return err
-		}
-	default:
-		//return errors.New("unsupported message type")
-		if err := binary.Write(&buf, binary.BigEndian, msg); err != nil {
-			return err
-		}
-	}
-	dsize := buf.Len()
-
-	log.Printf("Size of binary data: %v", dsize)
-
-	data := buf.Bytes()
-
-	// Restrict the message size if it exceeds the given msg_size
-	if int64(len(data)) > msg_size {
-		data = data[:msg_size]
-	}
-
-	totalWritten := 0
-
-	for totalWritten < len(data) {
-		log.Printf("[%s] [fn_writen]Attempting to write: totalWritten=%d, data_len=%d", totalWritten, len(data))
-		written, err := conn.Write(data[totalWritten:])
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				log.Printf("Temporary network error, retrying...")
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			log.Printf("[%s] []Write failed: %v\n", err)
-			return err
-		}
-
-		if written == 0 {
-			// If no bytes are written, the connection might be stalled or closed.
-			log.Printf("No bytes written; connection may be stalled or closed.")
-			return net.ErrWriteToConnected
-		}
-
-		totalWritten += written
-
-		log.Printf("[%s] [fn_writen]Written: %d bytes, Total Written: %d bytes", written, totalWritten)
-
-		if totalWritten < len(data) {
-			// Small delay to help with buffer recovery
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-
-	//log.Printf("[%s] []Successfully sent exch_msg: %+v", msg)
-	log.Printf("[%s]Successfully sent exch_msg")
-	return nil
 }
 
 func (ESRM *ESRManager) rcv_thrd(conn net.Conn) {
@@ -378,27 +305,9 @@ func (ESRM *ESRManager) Do_xchng_logon(Data []byte) error {
 		return fmt.Errorf(" [Do_xchng_logon] Message size is less than size of NET_HDR")
 	}
 
-	NET_HDR := Data[:22]
-
-	message := Data[22:]
-
-	if err := ESRM.SCM.WriteOnTapSocket(NET_HDR, message); err != nil {
+	if err := ESRM.SCM.WriteOnTapSocket(Data); err != nil {
 		log.Printf("[%s] [Do_xchng_logon] Failed to send exch_msg_data: %v", err)
 		return err
-	}
-
-	log.Printf("Waiting for logon response...")
-
-	logonResponse := <-logonResponseChan // Block until logon response is received
-	log.Printf("Logon response received, processing...")
-
-	// Process the logon response (example)
-	log.Printf("Transaction Code: %v", logonResponse.St_sign_on_req.StHdr.Si_transaction_code)
-	log.Printf("Error Code: %v", logonResponse.St_sign_on_req.StHdr.Si_error_code)
-
-	// Return if error code in logon response indicates failure
-	if logonResponse.St_sign_on_req.StHdr.Si_error_code != 0 {
-		return fmt.Errorf("logon failed with error code: %v", logonResponse.St_sign_on_req.StHdr.Si_error_code)
 	}
 
 	// Logon success
