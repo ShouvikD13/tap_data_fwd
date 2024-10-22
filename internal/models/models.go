@@ -652,15 +652,15 @@ func (data *St_req_q_data_Log_Off) GetMessageData() (int64, []byte) {
 
 type St_exch_msg_resp struct {
 	St_net_header St_net_hdr
-	St_oe_res     St_oe_reqresp
+	St_oe_res     St_oe_reqres_out
 }
 
-type St_exch_msg_Log_On_use struct {
+type St_exch_msg_LogOn_OUT struct {
 	St_net_header  [22]byte //St_net_hdr
-	St_sign_on_req St_sign_on_req_use
+	St_sign_on_req St_sign_on_out
 }
 
-type St_sign_on_req_use struct {
+type St_sign_on_out struct {
 	St_hdr                       St_int_header
 	Li_user_id                   int64
 	C_reserved_1                 [8]byte
@@ -691,7 +691,7 @@ type St_sign_on_req_use struct {
 	C_reserved_5                 [16]byte
 }
 
-type St_oe_reqresp struct {
+type St_oe_reqres_out struct {
 	St_hdr                        St_int_header
 	C_participant_type            byte // byte
 	C_filler_1                    byte //byte
@@ -853,3 +853,75 @@ type St_oe_reqresp struct {
 	| AON               | BIT       | 1            | 0      |
 	| Reserved Byte     | CHAR      | 1            | 1      |
 */
+
+/**********/
+
+type St_system_info_req struct {
+	St_Hdr                        St_int_header
+	Li_last_update_protfolio_time int64
+}
+
+type St_system_info_data struct {
+	St_hdr                                St_int_header
+	St_mkt_stts                           St_market_status
+	St_ex_mkt_stts                        St_ex_market_status
+	St_pl_mkt_stts                        St_pl_market_status
+	C_update_portfolio                    byte
+	Li_market_index                       int64
+	Si_default_sttlmnt_period_nm          int16
+	Si_default_sttlmnt_period_sp          int16
+	Si_default_sttlmnt_period_au          int16
+	Si_competitor_period                  int16
+	Si_solicitor_period                   int16
+	Si_warning_percent                    int16
+	Si_volume_freeze_percent              int16
+	C_filler_1                            [4]byte
+	Li_board_lot_quantity                 int64
+	Li_tick_size                          int64
+	Si_maximum_gtc_days                   int16
+	St_stk_elg_ind                        St_stock_eligible_indicators
+	Si_disclosed_quantity_percent_allowed int16
+	Li_risk_free_interest_rate            int64
+}
+
+type St_stock_eligible_indicators struct {
+	Flg_aon          uint32 `json:"flg_aon"`
+	Flg_minimum_fill uint32 `json:"flg_minimum_fill"`
+	Flg_books_merged uint32 `json:"flg_books_merged"`
+	Flg_filler1      uint32 `json:"flg_filler1"`
+	Flg_filler2      uint32 `json:"flg_filler2"`
+}
+
+type St_market_status struct {
+	Si_normal  int16
+	Si_oddlot  int16
+	Si_spot    int16
+	Si_auction int16
+}
+
+type St_ex_market_status struct {
+	Si_normal  int16
+	Si_oddlot  int16
+	Si_spot    int16
+	Si_auction int16
+}
+
+type St_pl_market_status struct {
+	Si_normal  int16
+	Si_oddlot  int16
+	Si_spot    int16
+	Si_auction int16
+}
+
+type St_update_local_database struct {
+	St_Hdr                         St_int_header
+	Li_LastUpdate_Security_Time    int32
+	Li_LastUpdate_Participant_Time int32
+	Li_LastUpdate_Instrument_Time  int32
+	Li_Last_Update_Index_Time      int32
+	C_Request_For_Open_Orders      byte // Use byte for char fields in Go
+	C_Filler_1                     byte // Use byte for filler
+	St_Mkt_Stts                    St_market_status
+	St_ExMkt_Stts                  St_ex_market_status
+	St_Pl_Mkt_Stts                 St_pl_market_status
+}

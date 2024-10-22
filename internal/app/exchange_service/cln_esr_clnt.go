@@ -51,27 +51,6 @@ type ESRManager struct {
 	AutoReconnect         *bool
 }
 
-// func (ESRM *ESRManager) Fn_crt_tap_con() (net.Conn, error) {
-
-// 	// address := net.JoinHostPort(config.IP, config.Port)
-// 	// log.Printf("After join host port")
-// 	// conn, err := net.Dial("tcp", address)
-// 	// log.Printf("after dialing to")
-// 	// if err != nil {
-// 	// 	log.Printf("Error connecting:", err)
-// 	// 	if config.AutoReconnect {
-// 	// 		log.Printf("Disconnected. Auto Reconnecting...")
-// 	// 		return nil, nil
-// 	// 	} else {
-// 	// 		log.Printf("Auto Reconnect is disabled.")
-// 	// 		return nil, err
-// 	// 	}
-// 	// }
-
-// 	// log.Printf("Connected to TAP at", address)
-// 	// return conn, nil
-// }
-
 func (ESRM *ESRManager) FnSendThread(conn net.Conn) {
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Inside Send Routine STARTS HERE")
@@ -119,8 +98,6 @@ func (ESRM *ESRManager) FnSendThread(conn net.Conn) {
 
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Inside SEND Routine ENDS HERE")
 	}
-
-	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Message queue closed, send thread exiting")
 
 }
 
@@ -309,6 +286,18 @@ func (ESRM *ESRManager) Do_xchng_logon(Data []byte) error {
 		log.Printf("[%s] [Do_xchng_logon] Failed to send exch_msg_data: %v", err)
 		return err
 	}
+
+	// In the original C function, we perform the following operations in this order:
+	// 1. First, we send the data (SignOn_IN struct) directly to the TAP.
+	// 2. After that, we wait for a response trigger.
+	//    - This trigger will be received in the "receive thread" and can indicate two things:
+	//      1. A successful response received.
+	//      2. An error response received.
+	// 3. Once the trigger is received, we populate the 'System Information struct'.
+	// 4. After populating the 'System Information struct', we send it directly to the TAP.
+	// 5. Then, we wait for another response trigger, and after receiving a successful response:
+	// 6. We populate the 'LocalDB struct' and send it directly to the TAP.
+	// 7. Finally, we wait for the response trigger again.
 
 	// Logon success
 	log.Printf("Logon successful, continuing...")

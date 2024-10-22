@@ -288,8 +288,8 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse() int {
 	}
 
 	eplm.oe_reqres.Li_disclosed_volume = eplm.xchngbook.L_dsclsd_qty                     // 23 BDY
-	eplm.oe_reqres.Li_disclosed_volume_remaining = eplm.oe_reqres.Li_disclosed_volume    //24 BDY
-	eplm.oe_reqres.Li_volume = eplm.xchngbook.L_ord_tot_qty - eplm.orderbook.L_exctd_qty //25 BDY
+	eplm.oe_reqres.Li_disclosed_volume_remaining = eplm.oe_reqres.Li_disclosed_volume    // 24 BDY
+	eplm.oe_reqres.Li_volume = eplm.xchngbook.L_ord_tot_qty - eplm.orderbook.L_exctd_qty // 25 BDY
 
 	if eplm.xchngbook.L_ord_tot_qty > eplm.orderbook.L_ord_tot_qty {
 		eplm.oe_reqres.Li_total_volume_remaining = eplm.orderbook.L_ord_tot_qty - eplm.orderbook.L_exctd_qty //26 BDY
@@ -297,8 +297,8 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse() int {
 		eplm.oe_reqres.Li_total_volume_remaining = eplm.xchngbook.L_ord_tot_qty - eplm.orderbook.L_exctd_qty
 	}
 
-	eplm.oe_reqres.Li_volume_filled_today = eplm.orderbook.L_exctd_qty_day //27 BDY
-	eplm.oe_reqres.Li_trigger_price = eplm.xchngbook.L_stp_lss_tgr         //28 BDY
+	eplm.oe_reqres.Li_volume_filled_today = eplm.orderbook.L_exctd_qty_day // 27 BDY
+	eplm.oe_reqres.Li_trigger_price = eplm.xchngbook.L_stp_lss_tgr         // 28 BDY
 
 	switch eplm.xchngbook.C_ord_typ { // 29 BDY
 	case "T", "I":

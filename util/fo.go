@@ -38,6 +38,7 @@ const (
 
 	//length
 	LEN_PASSWORD        = 8
+	LEN_DATE            = 21
 	LEN_TRADER_NAME     = 26
 	LEN_BROKER_NAME     = 25
 	LEN_COLOUR          = 50
@@ -57,8 +58,9 @@ const (
 	BOARD_LOT_IN                 = 2000
 	LOGIN_WITHOUT_OPEN_ORDR_DTLS = 5105 //LogON
 	SIGN_OFF_REQUEST_IN          = 2320 //LogOff
-
-	LOGIN_WITH_OPEN_ORDR_DTLS = 5104 //For testing only
+	LOGIN_WITH_OPEN_ORDR_DTLS    = 5104
+	SYSTEM_INFORMATION_IN        = 1600
+	UPDATE_LOCALDB_IN            = 7300
 
 	PRICE_CONFIRMATION     = 2012
 	ORDER_CONFIRMATION_OUT = 2073
@@ -131,6 +133,29 @@ const (
 
 	/**** Temporary Message Queue ID's ****/
 	INITIAL_QUEUE_ID = 1
+
+	TRADING_SECTION      = "TS"
+	COMMON               = "0"
+	UPD_PARTICIPANT_STTS = 'P'
+
+	//PLACEHOLDERS
+	ORDER_MKT        = 11
+	ORDER_MARKET     = 'O'
+	EXTND_MKT        = 12
+	EXTENDED_SEGMENT = 'S'
+	EXERCISE_MKT     = 13
+	EXERCISE_MARKET  = 'M'
+	PL_MKT           = 14
+	PL_MARKET        = 'P'
+	EXERCISE_SEGMENT = 'E' //MOST IMPORTED CASE ACTUALLY IMPLEMENTED
+
+	//For SFO_UPD_XSTTS
+	SUSPEND             = 'S'
+	UPD_BRK_LMT_EXCD    = 'B'
+	UPD_EXER_MKT_STTS   = 'E'
+	EXCHANGE_OPEN       = 'O'
+	UPD_NORMAL_MKT_STTS = 'N'
+	UPD_EXTND_MKT_STTS  = 'X'
 )
 
 /*********************************************************************/
