@@ -1,111 +1,63 @@
 package recvhandler
 
 import (
+	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
-	socket "DATA_FWD_TAP/util/TapSocket"
+	"DATA_FWD_TAP/util/OrderConversion"
 	"bytes"
+	"crypto/md5"
 	"encoding/binary"
-	"fmt"
-	"os"
 )
 
-type RecieverManager struct {
-	ServiceName string
-	SM          *socket.SocketManager
+type RecvManager struct {
+	NetHDR      models.St_net_hdr
 	LM          *util.LoggerManager
+	OCM         *OrderConversion.OrderConversionManager
+	ServiceName string
 }
 
-func (RM *RecieverManager) FnDoXchngLogOn(Data []byte) int {
+func (RM *RecvManager) FnValidateTap(exgSeq *int32, wholePtrData []byte) int {
 
-	if err := RM.SM.WriteOnTapSocket(Data); err != nil {
-
-		RM.LM.LogInfo("")
-
+	// Step 1: Validate the received buffer size
+	headerSize := binary.Size(RM.NetHDR)
+	if len(wholePtrData) < headerSize {
+		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error: Packet data is too small to contain header")
+		return -1
 	}
 
-	return 0
-}
-
-// Go equivalent of C function
-func fnDoXchngLogon(ptrStExchMsg *StExchMsg, ptrSndMsgsFile *os.File, cServiceName string, cErrMsg *string) int {
-	var iChVal int
-	var liBusinessDataSize, liSendTapMsgSize int64
-	var liOpmTrdrId int64
-	var cTapHeader byte
-	var stExchMessage StExchMsg
-	var digest [16]byte
-	var stSysInfReq StSystemInfoReq
-
-	// Set initial condition control
-	iCondSndRcvCntrl = LOGON_REQ_SENT
-
-	// Calculate business data size
-	liBusinessDataSize = int64(binary.Size(stSysInfReq))
-	liSendTapMsgSize = int64(binary.Size(ptrStExchMsg.StNetHeader)) + liBusinessDataSize
-
-	// Increment sequence number and log
-	iNtwkHdrSeqNo++
-	ptrStExchMsg.StNetHeader.ISeqNum = iNtwkHdrSeqNo
-	fnUserlog(cServiceName, "st_net_header.i_seq_num :%d:", ptrStExchMsg.StNetHeader.ISeqNum)
-
-	// Send data over socket
-	msgBuffer := new(bytes.Buffer)
-	binary.Write(msgBuffer, binary.LittleEndian, ptrStExchMsg)
-	err := fnWriten(iTapSckId, msgBuffer.Bytes(), cServiceName, cErrMsg)
+	// Step 2: Copy data to the NetHdr structure and Perform Order Conversion
+	reader := bytes.NewReader(wholePtrData[:headerSize])
+	err := binary.Read(reader, binary.BigEndian, &RM.NetHDR)
 	if err != nil {
-		fnErrlog(cServiceName, "L31005", "Error sending message", cErrMsg)
+		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error reading net header: %v", err)
+		return -1
+	}
+	// order conversion
+	RM.NetHDR = RM.OCM.ConvertNetHeaderToHostOrder(RM.NetHDR)
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Sequence number of tap packet: %d", RM.NetHDR.I_seq_num)
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Incoming sequence number: %d", *exgSeq)
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Sequence difference: %d", *exgSeq-RM.NetHDR.I_seq_num)
+
+	*exgSeq++
+
+	// Calculate the expected packet length
+	packetLength := int(RM.NetHDR.S_message_length) - headerSize
+	if packetLength < 0 || len(wholePtrData) < packetLength+headerSize {
+		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error: Invalid packet length")
 		return -1
 	}
 
-	// Log message dump if needed
-	if iMsgDumpFlg == LOG_DUMP {
-		cTapHeader = 'Y'
-		fnFprintLog(ptrSndMsgsFile, cTapHeader, msgBuffer.Bytes(), cServiceName, cErrMsg)
-	}
+	// Step 3: Calculate MD5 digest on packet data
+	dataToDigest := wholePtrData[headerSize : headerSize+packetLength]
+	digest := md5.Sum(dataToDigest)
 
-	// Wait for condition to be met
-	for iCondSndRcvCntrl != LOGON_RESP_RCVD && iCondSndRcvCntrl != RCV_ERR {
-		fnUserlog(cServiceName, "Inside while loop waiting for LOGON_RESP_RCVD or RCV_ERR")
-		err = fnThrdCondWait(condSndRcvCntrl, &mutSndRcvCntrl, cServiceName, cErrMsg)
-		if err != nil {
-			fnErrlog(cServiceName, "L31010", "Error in thread wait", cErrMsg)
-			return -1
-		}
-	}
-
-	// Check if an error occurred
-	if iCondSndRcvCntrl == RCV_ERR {
-		fnErrlog(cServiceName, "L31015", "Error in receive thread", cErrMsg)
+	// Step 4: Compare checksums
+	if !bytes.Equal(RM.NetHDR.C_checksum[:], digest[:]) {
+		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error: Checksum validation failed")
 		return -1
 	}
 
-	// Populate System information request structure
-	liOpmTrdrId, err = fetchTraderID("sqlCPipeID", "sqlCXchngCD")
-	if err != nil {
-		fnErrlog(cServiceName, "L31020", "Error fetching trader ID", cErrMsg)
-		return -1
-	}
-
-	stSysInfReq.StHdr.LiTraderId = liOpmTrdrId
-	stSysInfReq.StHdr.LiLogTime = 0
-	fnOrstonseChar(stSysInfReq.StHdr.CAlphaChar[:], LEN_ALPHA_CHAR, " ", 1)
-	stSysInfReq.StHdr.SiTransactionCode = SYSTEM_INFORMATION_IN
-	stSysInfReq.StHdr.SiErrorCode = 0
-	fnOrstonseChar(stSysInfReq.StHdr.CFiller2[:], 8, " ", 1)
-
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Checksum validation successful")
 	return 0
-}
-
-func main() {
-	// Example usage of fnDoXchngLogon
-	var exchMsg StExchMsg
-	var errMsg string
-	f, _ := os.Create("log.txt")
-	defer f.Close()
-
-	result := fnDoXchngLogon(&exchMsg, f, "ServiceName", &errMsg)
-	fmt.Println("Result:", result)
-	if errMsg != "" {
-		fmt.Println("Error:", errMsg)
-	}
 }

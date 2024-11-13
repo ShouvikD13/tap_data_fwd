@@ -131,6 +131,13 @@ func (OCM *OrderConversionManager) ConvertNetHeaderToNetworkOrder(Net_hdr *model
 	OCM.Net_hdr.S_message_length = OCM.ConvertInt16ToNetworkOrder(OCM.Net_hdr.S_message_length)
 }
 
+func (OCM *OrderConversionManager) ConvertNetHeaderToHostOrder(Net_hdr models.St_net_hdr) models.St_net_hdr {
+	OCM.Net_hdr = &Net_hdr
+	OCM.Net_hdr.I_seq_num = OCM.ConvertInt32ToHostOrder(OCM.Net_hdr.I_seq_num)
+	OCM.Net_hdr.S_message_length = OCM.ConvertInt16ToHostOrder(OCM.Net_hdr.S_message_length)
+	return *OCM.Net_hdr
+}
+
 func (OCM *OrderConversionManager) ConvertSignOnReqToNetworkOrder(St_sign *models.St_sign_on_req, int_header *models.St_int_header) {
 	OCM.St_sign_on_req = St_sign
 	OCM.ConvertIntHeaderToNetworkOrder(int_header)

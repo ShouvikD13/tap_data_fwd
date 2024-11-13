@@ -856,34 +856,6 @@ type St_oe_reqres_out struct {
 
 /**********/
 
-type St_system_info_req struct {
-	St_Hdr                        St_int_header
-	Li_last_update_protfolio_time int64
-}
-
-type St_system_info_data struct {
-	St_hdr                                St_int_header
-	St_mkt_stts                           St_market_status
-	St_ex_mkt_stts                        St_ex_market_status
-	St_pl_mkt_stts                        St_pl_market_status
-	C_update_portfolio                    byte
-	Li_market_index                       int64
-	Si_default_sttlmnt_period_nm          int16
-	Si_default_sttlmnt_period_sp          int16
-	Si_default_sttlmnt_period_au          int16
-	Si_competitor_period                  int16
-	Si_solicitor_period                   int16
-	Si_warning_percent                    int16
-	Si_volume_freeze_percent              int16
-	C_filler_1                            [4]byte
-	Li_board_lot_quantity                 int64
-	Li_tick_size                          int64
-	Si_maximum_gtc_days                   int16
-	St_stk_elg_ind                        St_stock_eligible_indicators
-	Si_disclosed_quantity_percent_allowed int16
-	Li_risk_free_interest_rate            int64
-}
-
 type St_stock_eligible_indicators struct {
 	Flg_aon          uint32 `json:"flg_aon"`
 	Flg_minimum_fill uint32 `json:"flg_minimum_fill"`
@@ -913,6 +885,34 @@ type St_pl_market_status struct {
 	Si_auction int16
 }
 
+type St_system_info_req struct {
+	St_Hdr                        St_int_header
+	Li_last_update_protfolio_time int64
+}
+
+type St_system_info_data struct {
+	St_hdr                                St_int_header
+	St_mkt_stts                           St_market_status
+	St_ex_mkt_stts                        St_ex_market_status
+	St_pl_mkt_stts                        St_pl_market_status
+	C_update_portfolio                    byte
+	Li_market_index                       int64
+	Si_default_sttlmnt_period_nm          int16
+	Si_default_sttlmnt_period_sp          int16
+	Si_default_sttlmnt_period_au          int16
+	Si_competitor_period                  int16
+	Si_solicitor_period                   int16
+	Si_warning_percent                    int16
+	Si_volume_freeze_percent              int16
+	C_filler_1                            [4]byte
+	Li_board_lot_quantity                 int64
+	Li_tick_size                          int64
+	Si_maximum_gtc_days                   int16
+	St_stk_elg_ind                        St_stock_eligible_indicators
+	Si_disclosed_quantity_percent_allowed int16
+	Li_risk_free_interest_rate            int64
+}
+
 type St_update_local_database struct {
 	St_Hdr                         St_int_header
 	Li_LastUpdate_Security_Time    int32
@@ -924,4 +924,9 @@ type St_update_local_database struct {
 	St_Mkt_Stts                    St_market_status
 	St_ExMkt_Stts                  St_ex_market_status
 	St_Pl_Mkt_Stts                 St_pl_market_status
+}
+
+type St_exch_msg_system_info_Req struct {
+	St_net_header      [22]byte
+	St_system_info_req [44]byte
 }

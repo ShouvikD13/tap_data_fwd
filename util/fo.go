@@ -156,6 +156,18 @@ const (
 	EXCHANGE_OPEN       = 'O'
 	UPD_NORMAL_MKT_STTS = 'N'
 	UPD_EXTND_MKT_STTS  = 'X'
+
+	/***********EXG_ESR************/
+	REQ_SENT        = 1
+	LOGON_REQ_SENT  = 2
+	LOGON_RESP_RCVD = 3
+	SID_REQ_SENT    = 4
+	SID_RESP_RCVD   = 5
+	LDB_REQ_SENT    = 6
+	LDB_RESP_RCVD   = 7
+	DWNLD_REQ_SENT  = 8
+	DWNLD_OVER      = 9
+	RCV_ERR         = -1
 )
 
 /*********************************************************************/
