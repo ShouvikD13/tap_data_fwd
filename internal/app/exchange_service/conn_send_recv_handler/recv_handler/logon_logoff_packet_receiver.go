@@ -9,6 +9,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -18,6 +19,7 @@ type RecvManager struct {
 	ServiceName       string
 	Db                *gorm.DB
 	TCM               *util.TransactionManager
+	PUM               *util.PasswordUtilManger
 	NetHDR            models.St_net_hdr
 	St_sign_on_res    models.St_sign_on_res
 	St_Error_Response *models.St_Error_Response
@@ -83,17 +85,13 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 		return -1
 	}
 
-	RM.LM.LogInfo(RM.ServiceName, fmt.Sprintf("The ERROR CODE IS : %d", St_sign_on_res.St_hdr.Si_error_code))
-
 	RM.LM.LogInfo(RM.ServiceName, "Sign On Successful : Checking Other Details")
 	RM.LM.LogInfo(RM.ServiceName, fmt.Sprintf("Broker Status Is : %c", St_sign_on_res.C_broker_status))
 	RM.LM.LogInfo(RM.ServiceName, fmt.Sprintf("Clearing Status Is : %c", St_sign_on_res.C_clearing_status))
 
-	// Initialize message
 	c_message := "Logon Successful"
 
-	TempTimeStamp := fmt.Sprintf("%d", LogTime)
-	TempTimeStamp = time.Unix(int64(LogTime), 0).Format("02-Jan-2006 15:04:05")
+	TempTimeStamp := time.Unix(int64(LogTime), 0).Format("02-Jan-2006 15:04:05")
 
 	if St_sign_on_res.C_broker_status == util.CLOSE_OUT {
 		c_msg := fmt.Sprintf("|%s| - Logon successful, Broker ClosedOut|", TempTimeStamp)
@@ -118,8 +116,6 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 	RM.LM.LogInfo(RM.ServiceName, "Inside Success Condition While Log In")
 	RM.LM.LogInfo(RM.ServiceName, fmt.Sprintf("c_message Is : %s", c_message))
 
-	//Broker ID fetching
-
 	query := `
 	SELECT exg_brkr_id
 	FROM exg_xchng_mstr
@@ -137,17 +133,16 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 	trader_msg := string(util.TRADER_MSG) // converting to string
 	if initResult := RM.FnInsertTradeMessage(C_xchng_cd, brkrID, trader_msg, c_message, TempTimeStamp); initResult != nil {
 		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Error: %v", initResult)
-
 		return -1
 	}
 
-	pwdLastChangeTime, _ := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.Li_last_password_change_date))
+	pwdLastChangeDate, _ := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.Li_last_password_change_date))
 	marketCloseDate, _ := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.St_hdr.Li_log_time))
 	exchangeTime, _ := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.Li_end_time))
 
-	RM.LM.LogInfo(RM.ServiceName, fmt.Sprintf("Password Last Change Date Is : %s", pwdLastChangeTime))
-	RM.LM.LogInfo(RM.ServiceName, fmt.Sprintf("Market Closing Date Is : %s", marketCloseDate))
-	RM.LM.LogInfo(RM.ServiceName, fmt.Sprintf("Exchange Time Is : %s", exchangeTime))
+	RM.LM.LogInfo(RM.ServiceName, "[FnInsertTradeMessage] Password Last Change Date Is : %s", pwdLastChangeDate)
+	RM.LM.LogInfo(RM.ServiceName, "[FnInsertTradeMessage] Market Closing Date Is : %s", marketCloseDate)
+	RM.LM.LogInfo(RM.ServiceName, "[FnInsertTradeMessage] Exchange Time Is : %s", exchangeTime)
 
 	tranStatus := RM.TCM.FnBeginTran()
 	if tranStatus != 0 {
@@ -161,7 +156,7 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
     SET OPM_EXG_PWD = OPM_NEW_EXG_PWD,
         OPM_NEW_EXG_PWD = NULL
     WHERE OPM_PIPE_ID = ? AND OPM_XCHNG_CD = ? AND OPM_NEW_EXG_PWD IS NOT NULL`
-	if result := RM.Db.Exec(updateQuery1, Pipe_Id, C_xchng_cd); result.Error != nil {
+	if result := RM.Db.Exec(updateQuery1, PipeId, C_xchng_cd); result.Error != nil {
 		RM.LM.LogError(RM.ServiceName, "[FnSignOnRequestOut] Error updating OPM_ORD_PIPE_MSTR: %v", result.Error)
 		if abortResult := RM.TCM.FnAbortTran(); abortResult == -1 {
 			RM.LM.LogError(RM.ServiceName, "[FnSignOnRequestOut] Failed to abort transaction")
@@ -176,7 +171,7 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
         SET opm_lst_pswd_chg_dt = TO_DATE(?, 'dd-Mon-yyyy hh24:mi:ss'),
             opm_login_stts = 1
         WHERE opm_pipe_id = ?`
-		if result := RM.Db.Exec(updateQuery2, sql_passwd_lst_updt_dt, sql_c_pipe_id); result.Error != nil {
+		if result := RM.Db.Exec(updateQuery2, pwdLastChangeDate, PipeId); result.Error != nil {
 			RM.LM.LogError(RM.ServiceName, "[FnSignOnRequestOut] Error updating opm_ord_pipe_mstr: %v", result.Error)
 			if abortResult := RM.TCM.FnAbortTran(); abortResult == -1 {
 				RM.LM.LogError(RM.ServiceName, "[FnSignOnRequestOut] Failed to abort transaction")
@@ -212,28 +207,65 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 	return 0
 }
 
-/*
-	RM.St_Error_Response.St_hdr = St_sign_on_res.St_hdr
-		copy(RM.St_Error_Response.CKey[:], St_sign_on_res.St_hdr.C_key[:])
-		copy(RM.St_Error_Response.CErrorMessage[:], St_sign_on_res.St_hdr.C_error_message[:])
+func (RM *RecvManager) FnErrorResponse(St_Error_Response *models.St_Error_Response, C_xchng_cd string, PipeId string) int {
+	RM.LM.LogInfo(RM.ServiceName, "[FnErrorResponse] Inside Log On Error Response Handling Function")
 
-		there is a problem in this code . both these structures we get in a response from the NSE
-		if there errorcode in the header is 0 then we recieve the actual structure otherwise we are getting the error structure .
-		// i wanted here , if we recieve error than St_sign_on_res convert into St_Error_Response
-*/
+	ErrMsg := strings.TrimSpace(string(St_Error_Response.C_ErrorMessage[:]))
 
-func (RM *RecvManager) FnSignOnRequestOutErrorResponse(St_Error_Response *models.St_Error_Response) int {
-
-	RM.LM.LogInfo(RM.ServiceName, "[FnSignOnRequestOutErrorResponse] Inside Log On Error Response Handling Function")
-
-	err, LogTime := RM.TCUM.LongToTimeArr(string(St_Error_Response.St_Hdr.Li_log_time))
-	if err != 0 {
-		RM.LM.LogError(RM.ServiceName, "Error recieved while parsing the time ")
+	timestampQuery := `
+		SELECT to_char(CURRENT_TIMESTAMP, 'DD-Mon-YYYY HH24:MI:SS')
+	`
+	var timestamp string
+	result := RM.Db.Raw(timestampQuery).Scan(&timestamp)
+	if result.Error != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnErrorResponse] Error executing timestamp query: %v", result.Error)
 		return -1
 	}
 
-	RM.LM.LogInfo(RM.ServiceName, "[FnSignOnRequestOutErrorResponse] Exiting Log On Error Response Handling Function")
-	return 0
+	c_msg := fmt.Sprintf("|%s|%d- %s|", timestamp, St_Error_Response.St_Hdr.Si_error_code, ErrMsg)
+
+	brkrIDQuery := `
+		SELECT exg_brkr_id
+		FROM exg_xchng_mstr
+		WHERE exg_xchng_cd = ?
+	`
+	var brkrID string
+	result = RM.Db.Raw(brkrIDQuery, C_xchng_cd).Scan(&brkrID)
+	if result.Error != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnErrorResponse] Error executing broker ID query: %v", result.Error)
+		return -1
+	}
+
+	trader_msg := string(util.TRADER_MSG)
+
+	if initResult := RM.FnInsertTradeMessage(C_xchng_cd, brkrID, trader_msg, c_msg, timestamp); initResult != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Failed to insert trade message : %v", initResult)
+		return -1
+	}
+
+	if St_Error_Response.St_Hdr.Si_error_code == 16053 {
+		RM.LM.LogInfo(RM.ServiceName, "[FnErrorResponse] Expired password detected, initiating password regeneration process")
+
+		cNewGenPasswd, iChVal := RM.FnChngExpPasswdReq(PipeId)
+		if iChVal != nil {
+			RM.LM.LogError(RM.ServiceName, "[FnErrorResponse] Failed to change expired password: %v", iChVal)
+			RM.LM.LogInfo(RM.ServiceName, "Error encountered during password change request")
+			return -1
+		}
+
+		c_msg = fmt.Sprintf("|%s - Password has been regenerated. Please re-login. New password is: %s|", timestamp, cNewGenPasswd)
+
+		if initResult := RM.FnInsertTradeMessage(C_xchng_cd, brkrID, trader_msg, c_msg, timestamp); initResult != nil {
+			RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Failed to insert trade message for password change : %v", initResult)
+			return -1
+		}
+
+		RM.LM.LogInfo(RM.ServiceName, "[FnErrorResponse] Password successfully regenerated and trade message inserted")
+
+	}
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnErrorResponse] Exiting Log On Error Response Handling Function")
+	return -1
 }
 
 func (RM *RecvManager) FnInsertTradeMessage(exchangeCode, brokerID, messageID, message, timestamp string) error {
@@ -246,7 +278,6 @@ func (RM *RecvManager) FnInsertTradeMessage(exchangeCode, brokerID, messageID, m
 	RM.LM.LogInfo(RM.ServiceName, "[FnInsertTradeMessage] Message: %s", cMsg)
 	RM.LM.LogInfo(RM.ServiceName, "[FnInsertTradeMessage] Timestamp: %s", timestamp)
 
-	// Start the transaction using the TransactionManager
 	tranStatus := RM.TCM.FnBeginTran()
 	if tranStatus != 0 {
 		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Failed to begin transaction")
@@ -267,7 +298,6 @@ func (RM *RecvManager) FnInsertTradeMessage(exchangeCode, brokerID, messageID, m
 		return result.Error
 	}
 
-	// Commit the transaction if local, or skip if remote
 	commitStatus := RM.TCM.FnCommitTran()
 	if commitStatus != 0 {
 		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Transaction commit failed")
@@ -278,6 +308,59 @@ func (RM *RecvManager) FnInsertTradeMessage(exchangeCode, brokerID, messageID, m
 	return nil
 }
 
-// func (RM *RecvManager) FnSignOnRequestOut(sql_c_pipe_id, sql_c_xchng_cd, sql_passwd_lst_updt_dt string, St_sign_on_res *LogonResponse) error {
+func (RM *RecvManager) FnChngExpPasswdReq(pipeID string) (string, error) {
+	var currentPassword string
 
-// 	}
+	tranStatus := RM.TCM.FnBeginTran()
+	if tranStatus != 0 {
+		RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Failed to begin transaction")
+		return "", fmt.Errorf("failed to begin transaction")
+	}
+
+	query := `SELECT OPM_EXG_PWD FROM OPM_ORD_PIPE_MSTR WHERE OPM_PIPE_ID = ?`
+	if err := RM.Db.Raw(query, pipeID).Scan(&currentPassword).Error; err != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Error fetching current password: %v", err)
+		if abortResult := RM.TCM.FnAbortTran(); abortResult == -1 {
+			RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Failed to abort transaction")
+		}
+		return "", fmt.Errorf("error fetching current password: %v", err)
+	}
+
+	decryptedCurrentPassword := RM.PUM.Fndecrypt(currentPassword)
+	RM.LM.LogInfo(RM.ServiceName, "[FnChngExpPasswdReq] Decrypted current password: %s", decryptedCurrentPassword)
+
+	newPassword, err := RM.PUM.FngenerateNewPassword(decryptedCurrentPassword)
+	if err != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Error generating new password: %v", err)
+		if abortResult := RM.TCM.FnAbortTran(); abortResult == -1 {
+			RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Failed to abort transaction")
+		}
+		return "", err
+	}
+
+	encryptedNewPassword := RM.PUM.Fnencrypt(newPassword)
+	RM.LM.LogInfo(RM.ServiceName, "[FnChngExpPasswdReq] Generated new password (encrypted): %s", encryptedNewPassword)
+
+	updateQuery := `UPDATE OPM_ORD_PIPE_MSTR SET OPM_NEW_EXG_PWD = ? WHERE OPM_PIPE_ID = ?`
+	if err := RM.Db.Exec(updateQuery, encryptedNewPassword, pipeID).Error; err != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Error updating new password: %v", err)
+		if abortResult := RM.TCM.FnAbortTran(); abortResult == -1 {
+			RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Failed to abort transaction")
+		}
+		return "", fmt.Errorf("error updating new password: %v", err)
+	}
+
+	if commitStatus := RM.TCM.FnCommitTran(); commitStatus != 0 {
+		RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Error committing transaction")
+		return "", fmt.Errorf("error committing transaction")
+	}
+
+	decryptedNewPassword := RM.PUM.Fndecrypt(encryptedNewPassword)
+
+	errForPasswordChange := RM.PUM.FnwritePasswordChangeToFile(pipeID, decryptedNewPassword)
+	if errForPasswordChange != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnChngExpPasswdReq] Failed to log password change: %v", errForPasswordChange)
+	}
+
+	return newPassword, nil
+}

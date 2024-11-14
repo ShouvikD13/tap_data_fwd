@@ -108,11 +108,11 @@ func (PUM *PasswordUtilManger) Fndecrypt(encrypted string) string {
 	}
 	return decrypted.String()
 }
-
 func (PUM *PasswordUtilManger) FnwritePasswordChangeToFile(IpPipeID, newPassword string) error {
-	filePath := "/mnt/c/Users/devdu/go-workspace/data_fwd_tap/logs/password_changes.log"
 
-	// Attempt to open or create the log file
+	fileDate := time.Now().Format("2006_01_02") // YYYY_MM_DD format
+	filePath := fmt.Sprintf("/mnt/c/Users/devdu/go-workspace/data_fwd_tap/logs/password_changes_%s.log", fileDate)
+
 	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
 	if err != nil {
 		PUM.LM.LogError("PasswordChange", "Error opening or creating file: %v", err)
@@ -128,11 +128,16 @@ func (PUM *PasswordUtilManger) FnwritePasswordChangeToFile(IpPipeID, newPassword
 		return fmt.Errorf("error writing to file: %v", err)
 	}
 
-	// Log success
 	PUM.LM.LogInfo("PasswordChange", "Successfully wrote password change to file for IpPipeID: %s", IpPipeID)
 
 	return nil
 }
+
+// Make the following updates to this file:
+//
+// Only one file should be created per day,
+// and the name of the file should include the current date as a timestamp.
+// for example: "password_changes_2024_11_14_15_04_05.log".
 
 func (PUM *PasswordUtilManger) CopyAndFormatPassword(dest []byte, destLen int, src string) {
 
