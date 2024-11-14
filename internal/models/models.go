@@ -655,42 +655,6 @@ type St_exch_msg_resp struct {
 	St_oe_res     St_oe_reqres_out
 }
 
-type St_exch_msg_LogOn_OUT struct {
-	St_net_header  [22]byte //St_net_hdr
-	St_sign_on_req St_sign_on_out
-}
-
-type St_sign_on_out struct {
-	St_hdr                       St_int_header
-	Li_user_id                   int64
-	C_reserved_1                 [8]byte
-	C_password                   [util.LEN_PASSWORD]byte
-	C_reserved_2                 [8]byte
-	C_new_password               [util.LEN_PASSWORD]byte
-	C_trader_name                [util.LEN_TRADER_NAME]byte
-	Li_last_password_change_date int64
-	C_broker_id                  [util.LEN_BROKER_ID]byte
-	C_filler_1                   byte
-	Si_branch_id                 int16
-	Li_version_number            int32
-	Li_batch_2_start_time        int32
-	C_host_switch_context        byte
-	C_colour                     [util.LEN_COLOUR]byte
-	C_filler_2                   byte
-	Si_user_type                 int16
-	D_sequence_number            float64
-	C_ws_class_name              [util.LEN_WS_CLASS_NAME]byte
-	C_broker_status              byte
-	C_show_index                 byte
-	St_mkt_allwd_lst             [2]byte //St_broker_eligibility_per_mkt // 2byte array
-	Si_member_type               int16
-	C_clearing_status            byte
-	C_broker_name                [util.LEN_BROKER_NAME]byte
-	C_reserved_3                 [16]byte
-	C_reserved_4                 [16]byte
-	C_reserved_5                 [16]byte
-}
-
 type St_oe_reqres_out struct {
 	St_hdr                        St_int_header
 	C_participant_type            byte // byte
@@ -929,4 +893,19 @@ type St_update_local_database struct {
 type St_exch_msg_system_info_Req struct {
 	St_net_header      [22]byte
 	St_system_info_req [44]byte
+}
+
+type Vw_mkt_msg struct {
+	C_xchngCd [4]byte
+	C_BrkrId  [6]byte
+	C_MsgId   byte
+	C_Msg     [256]byte
+	C_TmStmp  [23]byte
+	C_RoutCrt [4]byte
+}
+
+type St_Error_Response struct {
+	St_Hdr         St_int_header
+	C_Key          [util.LEN_ERROR_KEY]byte
+	C_ErrorMessage [util.LEN_ERROR_MESSAGE]byte
 }

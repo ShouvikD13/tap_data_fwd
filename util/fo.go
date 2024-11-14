@@ -62,6 +62,14 @@ const (
 	SYSTEM_INFORMATION_IN        = 1600
 	UPDATE_LOCALDB_IN            = 7300
 
+	UPDATE_LOCALDB_DATA        = 7304
+	SIGN_ON_REQUEST_OUT        = 2301
+	SYSTEM_INFORMATION_OUT     = 1601
+	PARTIAL_SYSTEM_INFORMATION = 7321
+	UPDATE_LOCALDB_HEADER      = 7307
+	UPDATE_LOCALDB_TRAILER     = 7308
+	SIGN_OFF_REQUEST_OUT       = 2321
+
 	PRICE_CONFIRMATION     = 2012
 	ORDER_CONFIRMATION_OUT = 2073
 	LEN_PASS_WD            = 8 + 1
@@ -71,7 +79,6 @@ const (
 	ACTIVE                 = 'A'
 	CLOSE_OUT              = 'C'
 	SYSTEM_ERROR           = -100
-	SIGN_ON_REQUEST_OUT    = 2301
 	PRE_OPEN               = 0
 	OPEN                   = 1
 	CLOSED                 = 2

@@ -12,6 +12,7 @@ type OrderConversionManager struct {
 	Int_header     *models.St_int_header
 	Contract_desc  *models.St_contract_desc
 	St_sign_on_req *models.St_sign_on_req
+	St_sign_on_res *models.St_sign_on_res
 }
 
 func (OCM *OrderConversionManager) ConvertInt16ToNetworkOrder(i int16) int16 {
@@ -74,6 +75,7 @@ func (OCM *OrderConversionManager) ConvertFloat64ToHostOrder(f float64) float64 
 	return math.Float64frombits(uint64(hostBits))
 }
 
+// Set the response structure reference in the OrderConversionManager
 func (OCM *OrderConversionManager) ConvertOrderReqResToNetworkOrder(st_oe *models.St_oe_reqres, int_header *models.St_int_header, con_desc *models.St_contract_desc) {
 	OCM.Oe_reqres = st_oe
 	OCM.ConvertIntHeaderToNetworkOrder(int_header) //&OCM.Int_header
@@ -117,6 +119,14 @@ func (OCM *OrderConversionManager) ConvertIntHeaderToNetworkOrder(int_header *mo
 	OCM.Int_header.Si_error_code = OCM.ConvertInt16ToNetworkOrder(OCM.Int_header.Si_error_code)
 	OCM.Int_header.Si_message_length = OCM.ConvertInt16ToNetworkOrder(OCM.Int_header.Si_message_length)
 }
+func (OCM *OrderConversionManager) ConvertIntHeaderToHostOrder(int_header *models.St_int_header) {
+	OCM.Int_header = int_header
+	OCM.Int_header.Si_transaction_code = OCM.ConvertInt16ToHostOrder(OCM.Int_header.Si_transaction_code)
+	OCM.Int_header.Li_log_time = OCM.ConvertInt32ToHostOrder(OCM.Int_header.Li_log_time)
+	OCM.Int_header.Li_trader_id = OCM.ConvertInt32ToHostOrder(OCM.Int_header.Li_trader_id)
+	OCM.Int_header.Si_error_code = OCM.ConvertInt16ToHostOrder(OCM.Int_header.Si_error_code)
+	OCM.Int_header.Si_message_length = OCM.ConvertInt16ToHostOrder(OCM.Int_header.Si_message_length)
+}
 
 func (OCM *OrderConversionManager) ConvertContractDescToNetworkOrder(con_desc *models.St_contract_desc) {
 	OCM.Contract_desc = con_desc
@@ -149,4 +159,16 @@ func (OCM *OrderConversionManager) ConvertSignOnReqToNetworkOrder(St_sign *model
 	OCM.St_sign_on_req.Si_user_type = OCM.ConvertInt16ToNetworkOrder(OCM.St_sign_on_req.Si_user_type)
 	OCM.St_sign_on_req.D_sequence_number = OCM.ConvertFloat64ToNetworkOrder(OCM.St_sign_on_req.D_sequence_number)
 	OCM.St_sign_on_req.Si_member_type = OCM.ConvertInt16ToNetworkOrder(OCM.St_sign_on_req.Si_member_type)
+}
+func (OCM *OrderConversionManager) ConvertSignOnResToHostOrder(St_sign *models.St_sign_on_res, int_header *models.St_int_header) {
+	OCM.St_sign_on_res = St_sign
+	OCM.ConvertIntHeaderToHostOrder(int_header)
+	OCM.St_sign_on_res.Li_user_id = OCM.ConvertInt64ToHostOrder(OCM.St_sign_on_res.Li_user_id)
+	OCM.St_sign_on_res.Li_last_password_change_date = OCM.ConvertInt64ToHostOrder(OCM.St_sign_on_res.Li_last_password_change_date)
+	OCM.St_sign_on_res.Si_branch_id = OCM.ConvertInt16ToHostOrder(OCM.St_sign_on_res.Si_branch_id)
+	OCM.St_sign_on_res.Li_version_number = OCM.ConvertInt64ToHostOrder(OCM.St_sign_on_res.Li_version_number)
+	OCM.St_sign_on_res.Li_end_time = OCM.ConvertInt64ToHostOrder(OCM.St_sign_on_res.Li_end_time)
+	OCM.St_sign_on_res.Si_user_type = OCM.ConvertInt16ToHostOrder(OCM.St_sign_on_res.Si_user_type)
+	OCM.St_sign_on_res.D_sequence_number = OCM.ConvertFloat64ToHostOrder(OCM.St_sign_on_res.D_sequence_number)
+	OCM.St_sign_on_res.Si_member_type = OCM.ConvertInt16ToHostOrder(OCM.St_sign_on_res.Si_member_type)
 }
