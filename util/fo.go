@@ -88,6 +88,7 @@ const (
 	TRADER            = 'T'
 	CORPORATE_MANAGER = 'M'
 	BRANCH_MANAGER    = 'B'
+	TRADER_MSG        = 'T'
 
 	//for Expiry DT
 	TEN_YRS_IN_SEC = 315513000
