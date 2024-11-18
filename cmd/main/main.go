@@ -4,7 +4,6 @@ import (
 	"DATA_FWD_TAP/internal/initializers"
 	"DATA_FWD_TAP/util"
 	"log"
-	"sync"
 )
 
 func main() {
@@ -19,7 +18,6 @@ func main() {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	// Initialization of MainContainer
 	mainContainer := initializers.NewMainContainer(args[0], args[1:], &mtypeRead, &mtypewrite, &InitialQId, &GlobalQId)
 
 	serviceInitManager := &initializers.ServiceInitializationManager{
@@ -28,41 +26,20 @@ func main() {
 
 	logger := mainContainer.UtilContainer.LoggerManager.GetLogger()
 
-	// // ClnPackClnt initialization
-	// if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
-	// 	logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
-	// }
+	// Normal Order Packing
+	if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
+		logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
+	}
 
-	var wg sync.WaitGroup // WaitGroup to wait for the Go routines
+	// LogOn Packing
+	if initResult := serviceInitManager.LogOnToTapInitialization(); initResult != 0 {
+		logger.Fatalf("Fatal: Shutting down due to error in %s: LogOnToTapInitialization failed with result code %d", serviceName, initResult)
+	}
 
-	// ClnPackClnt initialization using a Go routine
-	wg.Add(1) // Increment the WaitGroup counter by 1
-	go func() {
-		defer wg.Done() // Decrement the WaitGroup counter when this goroutine completes
-		if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
-			logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
-		}
-	}()
-
-	// ESR initialization using a Go routine
-	wg.Add(1) // Increment the WaitGroup counter by 1
-	go func() {
-		defer wg.Done() // Decrement the WaitGroup counter when this goroutine completes
-		if initResult := serviceInitManager.ESRInitialization(); initResult != 0 {
-			logger.Fatalf("[Fatal: Shutting down due to error in %s: ESRInitialization failed with result code %d", serviceName, initResult)
-		}
-	}()
-
-	// Wait for both initialization goroutines to complete
-	wg.Wait()
-
-	// if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
-	// 	logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
-	// }
-
-	//  if initResult := serviceInitManager.ESRInitialization(); initResult != 0 {
-	//  	logger.Fatalf("[Fatal: Shutting down due to error in %s: ESRInitialization failed with result code %d", serviceName, initResult)
-	//  }
+	//LOgOff Packing
+	if initResult := serviceInitManager.LogOffFromTapInitialization(); initResult != 0 {
+		logger.Fatalf("Fatal: Shutting down due to error in %s: LogOffFromTapInitialization failed with result code %d", serviceName, initResult)
+	}
 
 	mainContainer.UtilContainer.LoggerManager.LogInfo(serviceName, "Main ended successfully.")
 }

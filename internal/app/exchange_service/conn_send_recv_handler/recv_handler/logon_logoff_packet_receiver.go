@@ -130,7 +130,7 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 
 	RM.LM.LogInfo(RM.ServiceName, " [FnSignOnRequestOut] exg_brkr_id: %s", brkrID)
 
-	trader_msg := string(util.TRADER_MSG) // converting to string
+	trader_msg := string(util.TRADER_MSG)
 	if initResult := RM.FnInsertTradeMessage(C_xchng_cd, brkrID, trader_msg, c_message, TempTimeStamp); initResult != nil {
 		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Error: %v", initResult)
 		return -1
@@ -150,7 +150,6 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 		return -1
 	}
 
-	// Update OPM_ORD_PIPE_MSTR table
 	updateQuery1 := `
     UPDATE OPM_ORD_PIPE_MSTR
     SET OPM_EXG_PWD = OPM_NEW_EXG_PWD,
@@ -164,7 +163,6 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 		return -1
 	}
 
-	// Update if broker status is ACTIVE
 	if St_sign_on_res.C_broker_status == util.ACTIVE {
 		updateQuery2 := `
         UPDATE opm_ord_pipe_mstr
@@ -180,7 +178,6 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 		}
 	}
 
-	// Update Broker Status in exg_xchng_mstr table
 	if St_sign_on_res.C_broker_status == util.ACTIVE || St_sign_on_res.C_broker_status == util.CLOSE_OUT || St_sign_on_res.C_broker_status == util.SUSPEND {
 		updateQuery3 := `
         UPDATE exg_xchng_mstr
@@ -195,7 +192,6 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 		}
 	}
 
-	// Commit transaction
 	commitStatus := RM.TCM.FnCommitTran()
 	if commitStatus != 0 {
 		RM.LM.LogError(RM.ServiceName, "[FnSignOnRequestOut] Transaction commit failed")

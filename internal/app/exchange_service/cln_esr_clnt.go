@@ -54,6 +54,8 @@ type ESRManager struct {
 	IP                    string
 	Port                  string
 	AutoReconnect         *bool
+	Xchng_cd              string
+	Pipe_Id               string
 }
 
 var Sequence_number int32 = 1
@@ -106,7 +108,6 @@ func (ESRM *ESRManager) FnSendThread() {
 
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Inside SEND Routine ENDS HERE")
 	}
-
 }
 
 func (ESRM *ESRManager) FnRecieveThread() {
@@ -171,7 +172,7 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		ESRM.OCM.ConvertIntHeaderToHostOrder(intHdr)
 
 		// Step 5: Extract actual message
-		ActualMessageSize := netHdr.S_message_length - int16(netHdrSize+intHdrSize)
+		ActualMessageSize := netHdr.S_message_length - int16(netHdrSize)
 		actualDataEnd := int16(netHdrSize+intHdrSize) + ActualMessageSize
 		if int(actualDataEnd) > len(receivedResult) {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Actual message size exceeds received data length.")
@@ -186,9 +187,9 @@ func (ESRM *ESRManager) FnRecieveThread() {
 
 			if intHdr.Si_error_code != 0 {
 
-				err = binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_sign_on_res)
+				err = binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_Error_Response)
 				if err != nil {
-					ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing sign_on_res: %v", err)
+					ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing St_Error_Response: %v", err)
 					break
 				}
 
@@ -201,7 +202,7 @@ func (ESRM *ESRManager) FnRecieveThread() {
 
 				ESRM.OCM.ConvertSignOnResToHostOrder(ESRM.St_sign_on_res, intHdr)
 
-				initResult := ESRM.RM.FnSignOnRequestOut(ESRM.St_sign_on_res)
+				initResult := ESRM.RM.FnSignOnRequestOut(ESRM.St_sign_on_res, ESRM.Xchng_cd, ESRM.Pipe_Id)
 				if initResult != 0 {
 					break
 				}
@@ -231,4 +232,8 @@ func (ESRM *ESRManager) FnRecieveThread() {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Unknown transaction code received: %d", intHdr.Si_transaction_code)
 		}
 	}
+}
+
+func (ESRM *ESRManager) FnClnEsrClnt() int {
+	return 0
 }

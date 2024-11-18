@@ -1,7 +1,7 @@
 package initializers
 
 import (
-	"DATA_FWD_TAP/internal/app/exchange_connection"
+	"DATA_FWD_TAP/internal/app/ESR_Packing"
 	esr "DATA_FWD_TAP/internal/app/exchange_service"
 	"DATA_FWD_TAP/internal/app/pack_clnt"
 )
@@ -56,7 +56,7 @@ func (SIM *ServiceInitializationManager) ClnPackClntInitialization() int {
 
 func (SIM *ServiceInitializationManager) LogOnToTapInitialization() int {
 
-	VarLogOn := &exchange_connection.LogOnToTapManager{
+	VarLogOn := &ESR_Packing.LogOnToTapManager{
 		ServiceName:                SIM.MainContainer.UtilContainer.ServiceName,
 		St_sign_on_req:             SIM.MainContainer.LogOnContainer.StSignOnReq,
 		St_req_q_data:              SIM.MainContainer.LogOnContainer.StReqQData,
@@ -103,7 +103,7 @@ func (SIM *ServiceInitializationManager) LogOnToTapInitialization() int {
 
 func (SIM *ServiceInitializationManager) LogOffFromTapInitialization() int {
 
-	VarLogOff := &exchange_connection.LogOffFromTapManager{
+	VarLogOff := &ESR_Packing.LogOffFromTapManager{
 		DB:                    SIM.MainContainer.UtilContainer.DB,
 		LoggerManager:         SIM.MainContainer.UtilContainer.LoggerManager,
 		ServiceName:           SIM.MainContainer.UtilContainer.ServiceName,
@@ -157,7 +157,7 @@ func (SIM *ServiceInitializationManager) ESRInitialization() int {
 		GlobalQId:             SIM.MainContainer.UtilContainer.GlobalQId,
 	}
 
-	initResult := VarEsr.ClnEsrClnt()
+	initResult := VarEsr.FnClnEsrClnt()
 	if initResult != 0 {
 		SIM.MainContainer.UtilContainer.LoggerManager.LogError(SIM.MainContainer.UtilContainer.ServiceName, " Fn_logoff_from_TAP() failed with result code: %d", initResult)
 		return -1

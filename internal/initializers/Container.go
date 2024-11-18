@@ -106,14 +106,13 @@ type LogOffGlobalValueContainer struct {
 }
 
 type ESRContainer struct {
-	Req_q_data            *models.St_req_q_data
-	St_exch_msg           *models.St_exch_msg
-	St_net_hdr            *models.St_net_hdr
-	St_oe_reqres          *models.St_oe_reqres
-	St_sign_on_req        *models.St_sign_on_req
-	St_exch_msg_Log_on    *models.St_exch_msg_Log_On
-	St_exch_msg_LogOn_OUT *models.St_exch_msg_LogOn_OUT
-	St_exch_msg_resp      *models.St_exch_msg_resp
+	Req_q_data         *models.St_req_q_data
+	St_exch_msg        *models.St_exch_msg
+	St_net_hdr         *models.St_net_hdr
+	St_oe_reqres       *models.St_oe_reqres
+	St_sign_on_req     *models.St_sign_on_req
+	St_exch_msg_Log_on *models.St_exch_msg_Log_On
+	St_exch_msg_resp   *models.St_exch_msg_resp
 }
 
 type ESRGlobalValueContainer struct {
