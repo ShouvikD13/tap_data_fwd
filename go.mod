@@ -1,6 +1,6 @@
 module DATA_FWD_TAP
 
-go 1.23.3
+go 1.22.7
 
 require (
 	github.com/Shopify/sysv_mq v0.0.0-20240802160215-0dbf2a356098

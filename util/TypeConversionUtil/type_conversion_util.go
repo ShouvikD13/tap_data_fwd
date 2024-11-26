@@ -44,16 +44,29 @@ func (TCUM *TypeConversionUtilManager) CopyAndFormatSymbol(dest []byte, destLen 
 func (TCUM *TypeConversionUtilManager) LongToTimeArr(C_expry_dt string) (int, int32) {
 	TCUM.ServiceName = "Type_Conversion_Util"
 	var Li_expiry_date int32
-	// Parse the ISO 8601 date-time string to a time.Time object
-	layout := time.RFC3339
-	t, err := time.Parse(layout, C_expry_dt)
+
+	layouts := []string{
+		"02/01/2006",
+		"02/01/2006 15:04:05",
+		time.RFC3339, // Combined with T and Z: YYYY-MM-DDTHH:mm:ssZ
+	}
+
+	var t time.Time
+	var err error
+
+	for _, layout := range layouts {
+		t, err = time.Parse(layout, C_expry_dt)
+		if err == nil {
+			break
+		}
+	}
+
 	if err != nil {
 		TCUM.LoggerManager.LogError(TCUM.ServiceName, "[LongToTimeArr] ERROR: error in parsing expiry date: %v", err)
-		return -1, Li_expiry_date // Return -1 and the unmodified expiry date in case of an error
+		return -1, Li_expiry_date
 	}
 
 	liSrc := t.Unix() + util.TEN_YRS_IN_SEC
-
 	Li_expiry_date = int32(liSrc)
 
 	return 0, Li_expiry_date

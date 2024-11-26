@@ -20,6 +20,7 @@ type RecvManager struct {
 	Db                *gorm.DB
 	TCM               *util.TransactionManager
 	PUM               *util.PasswordUtilManger
+	St_int_header     *models.St_int_header
 	NetHDR            models.St_net_hdr
 	St_sign_on_res    models.St_sign_on_res
 	St_Error_Response *models.St_Error_Response
@@ -136,9 +137,23 @@ func (RM *RecvManager) FnSignOnRequestOut(St_sign_on_res *models.St_sign_on_res,
 		return -1
 	}
 
-	pwdLastChangeDate, _ := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.Li_last_password_change_date))
-	marketCloseDate, _ := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.St_hdr.Li_log_time))
-	exchangeTime, _ := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.Li_end_time))
+	errPwd, pwdLastChangeDate := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.Li_last_password_change_date))
+	if errPwd != 0 {
+		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Error parsing Password Last Change Date")
+		return -1
+	}
+
+	errMarketClose, marketCloseDate := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.St_hdr.Li_log_time))
+	if errMarketClose != 0 {
+		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Error parsing Market Closing Date")
+		return -1
+	}
+
+	errExchangeTime, exchangeTime := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", St_sign_on_res.Li_end_time))
+	if errExchangeTime != 0 {
+		RM.LM.LogError(RM.ServiceName, "[FnInsertTradeMessage] Error parsing Exchange Time")
+		return -1
+	}
 
 	RM.LM.LogInfo(RM.ServiceName, "[FnInsertTradeMessage] Password Last Change Date Is : %s", pwdLastChangeDate)
 	RM.LM.LogInfo(RM.ServiceName, "[FnInsertTradeMessage] Market Closing Date Is : %s", marketCloseDate)
@@ -359,4 +374,175 @@ func (RM *RecvManager) FnChngExpPasswdReq(pipeID string) (string, error) {
 	}
 
 	return newPassword, nil
+}
+
+func (RM *RecvManager) FnSystemInformationOut(stSysInfoDat *models.StSystemInfoData, C_xchng_cd string, PipeId string) int {
+
+	// Step 1: Extract Normal Market Status
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Step 1: Extracting Normal Market Status")
+	siNormalMktStts := stSysInfoDat.StMktStts.SiNormal
+	siOddMktStts := stSysInfoDat.StMktStts.SiOddlot
+	siSpotMktStts := stSysInfoDat.StMktStts.SiSpot
+	siAuctionMktStts := stSysInfoDat.StMktStts.SiAuction
+
+	// Log Market Status for Debugging
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Normal Market Status - Normal: %d", siNormalMktStts)
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Normal Market Status - Oddlot: %d", siOddMktStts)
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Normal Market Status - Spot: %d", siSpotMktStts)
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Normal Market Status - Auction: %d", siAuctionMktStts)
+
+	/*// Exercise Market Status
+	siExrMktStts := stSysInfoDat.StExMktStts.SiNormal
+	siExrOddMktStts := stSysInfoDat.StExMktStts.SiOddlot
+	siExrSpotMktStts := stSysInfoDat.StExMktStts.SiSpot
+	siExrAuctionMktStts := stSysInfoDat.StExMktStts.SiAuction
+
+	if DebugMsgLvl3 {
+		logMessage(RM.ServiceName, "The Exer si_mkt_stts is :%d:", siExrMktStts)
+		logMessage(RM.ServiceName, "The Exer si_mkt_stts is :%d, %d:", stSysInfoDat.StExMktStts.SiOddlot, siExrOddMktStts)
+		logMessage(RM.ServiceName, "The Exer si_mkt_stts is :%d, %d:", stSysInfoDat.StExMktStts.SiSpot, siExrSpotMktStts)
+		logMessage(RM.ServiceName, "The Exer si_mkt_stts is :%d, %d:", stSysInfoDat.StExMktStts.SiAuction, siExrAuctionMktStts)
+	}
+
+	liMktType = ExerciseMkt
+
+	iChVal = FnMrktSttsHndlr(siExrMktStts, liMktType, sqlCXchngCd, RM.ServiceName, errMsg)
+	if iChVal == -1 {
+		logMessage(RM.ServiceName, "Failed While Calling Function FnMrktSttsHndlr")
+		return -1
+	}
+
+	// Portfolio Market Status
+	siPlMktStts := stSysInfoDat.StPlMktStts.SiNormal
+	siPlOddMktStts := stSysInfoDat.StPlMktStts.SiOddlot
+	siPlSpotMktStts := stSysInfoDat.StPlMktStts.SiSpot
+	siPlAuctionMktStts := stSysInfoDat.StPlMktStts.SiAuction
+
+	if DebugMsgLvl3 {
+		logMessage(RM.ServiceName, "The PL si_mkt_stts is :%d:", siPlMktStts)
+		logMessage(RM.ServiceName, "The PL si_mkt_stts is :%d, %d:", stSysInfoDat.StPlMktStts.SiOddlot, siPlOddMktStts)
+		logMessage(RM.ServiceName, "The PL si_mkt_stts is :%d, %d:", stSysInfoDat.StPlMktStts.SiSpot, siPlSpotMktStts)
+		logMessage(RM.ServiceName, "The PL si_mkt_stts is :%d, %d:", stSysInfoDat.StPlMktStts.SiAuction, siPlAuctionMktStts)
+	}
+
+	liMktType = PlMkt
+	*/
+
+	// Step 2: Extract Stream Number
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Step 2: Handling Stream Number")
+	liStreamNo := int64(stSysInfoDat.StHdr.C_alpha_char[0])
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Header Stream Char[0]: %c", stSysInfoDat.StHdr.C_alpha_char[0])
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Converted Stream Number: %d", liStreamNo)
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Header Stream: %s", string(stSysInfoDat.StHdr.C_alpha_char[:]))
+
+	// Step 3: Begin Transaction
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Step 3: Beginning Transaction")
+	iTransaction := RM.TCM.FnBeginTran()
+	if iTransaction == -1 {
+		RM.LM.LogError(RM.ServiceName, "[FnSystemInformationOut] Failed to begin transaction")
+		return -1
+	}
+
+	// Step 4: Update Exchange Master Table
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Step 4: Updating Exchange Master Table")
+	updateExchangeMasterQuery := `
+    UPDATE exg_xchng_mstr 
+    SET exg_def_stlmnt_pd = ?, 
+        exg_wrn_pcnt = ?, 
+        exg_vol_frz_pcnt = ?, 
+        exg_brd_lot_qty = ?, 
+        exg_tck_sz = ?, 
+        exg_gtc_dys = ?, 
+        exg_dsclsd_qty_pcnt = ?
+    WHERE exg_xchng_cd = ?`
+
+	if err := RM.Db.Exec(updateExchangeMasterQuery,
+		stSysInfoDat.SiDefaultSttlmntPeriodNm,
+		stSysInfoDat.SiWarningPercent,
+		stSysInfoDat.SiVolumeFreezePercent,
+		stSysInfoDat.LiBoardLotQuantity,
+		stSysInfoDat.LiTickSize,
+		stSysInfoDat.SiMaximumGtcDays,
+		stSysInfoDat.SiDisclosedQuantityPercentAllowed,
+		C_xchng_cd).Error; err != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnSystemInformationOut] Error updating exchange master: %v", err)
+		RM.TCM.FnAbortTran()
+		return -1
+	}
+
+	// Step 5: Update Order Pipe Master Table
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Step 5: Updating Order Pipe Master Table")
+	updateOrderPipeMasterQuery := `
+    UPDATE OPM_ORD_PIPE_MSTR 
+    SET OPM_STREAM_NO = ? 
+    WHERE OPM_PIPE_ID = ? 
+      AND OPM_XCHNG_CD = ?`
+
+	if err := RM.Db.Exec(updateOrderPipeMasterQuery,
+		liStreamNo,
+		PipeId,
+		C_xchng_cd).Error; err != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnSystemInformationOut] Error updating order pipe master: %v", err)
+		RM.TCM.FnAbortTran()
+		return -1
+	}
+
+	// Step 6: Commit Transaction
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Step 6: Committing Transaction")
+	if RM.TCM.FnCommitTran() == -1 {
+		RM.LM.LogError(RM.ServiceName, "[FnSystemInformationOut] Failed to commit transaction")
+		return -1
+	}
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnSystemInformationOut] Transaction completed successfully")
+	return 0
+}
+
+func (RM *RecvManager) FnPartialLogonRes(stSysInfoDat *models.StSystemInfoData, pipeID string) int {
+	var msg string
+	var tradeMsg string
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnPartialLogonRes] Inside Function FnPartialLogonRes")
+
+	msg = "SID information download failed"
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnPartialLogonRes] MSG Is : %s", msg)
+	RM.OCM.ConvertIntHeaderToHostOrder(&stSysInfoDat.StHdr)
+
+	err, timestampStr := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", stSysInfoDat.StHdr.Li_log_time))
+	if err != 0 {
+		RM.LM.LogError(RM.ServiceName, "[FnPartialLogonRes] Error received while parsing the log time")
+		return -1
+	}
+
+	tradeMsg = fmt.Sprintf("|%d| |%s|", timestampStr, msg)
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnPartialLogonRes] Trade Msg Is : %s", tradeMsg)
+
+	return 0
+}
+
+func (RM *RecvManager) FnLocalDBRes(stLdbData *models.StUpdateLocalDBData, pipeID string) int {
+	var msg string
+	var tradeMsg string
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnLocalDBRes] Inside Function FnLocalDBRes")
+
+	msg = "LDB information downloaded"
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnLocalDBRes] MSG Is: %s", msg)
+
+	RM.OCM.ConvertIntHeaderToHostOrder(&stLdbData.MessageHeader)
+
+	err, timestampStr := RM.TCUM.LongToTimeArr(fmt.Sprintf("%d", stLdbData.MessageHeader.Li_log_time))
+	if err != 0 {
+		RM.LM.LogError(RM.ServiceName, "[FnLocalDBRes] Error received while parsing the log time")
+		return -1
+	}
+
+	tradeMsg = fmt.Sprintf("|%d| %s|", timestampStr, msg)
+
+	RM.LM.LogInfo(RM.ServiceName, "[FnLocalDBRes] Trade Msg Is: %s", tradeMsg)
+
+	return 0
 }

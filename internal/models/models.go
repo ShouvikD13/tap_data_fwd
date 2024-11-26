@@ -909,3 +909,110 @@ type St_Error_Response struct {
 	C_Key          [util.LEN_ERROR_KEY]byte
 	C_ErrorMessage [util.LEN_ERROR_MESSAGE]byte
 }
+
+type StSystemInfoData struct {
+	StHdr                             St_int_header
+	StMktStts                         StMarketStatus
+	StExMktStts                       StExMarketStatus
+	StPlMktStts                       StPlMarketStatus
+	CUpdatePortfolio                  byte
+	LiMarketIndex                     int32
+	SiDefaultSttlmntPeriodNm          int16
+	SiDefaultSttlmntPeriodSp          int16
+	SiDefaultSttlmntPeriodAu          int16
+	SiCompetitorPeriod                int16
+	SiSolicitorPeriod                 int16
+	SiWarningPercent                  int16
+	SiVolumeFreezePercent             int16
+	CFiller1                          [4]byte
+	LiBoardLotQuantity                int32
+	LiTickSize                        int32
+	SiMaximumGtcDays                  int16
+	StStkElgInd                       StStockEligibleIndicators
+	SiDisclosedQuantityPercentAllowed int16
+	LiRiskFreeInterestRate            int32
+}
+
+type StMarketStatus struct {
+	SiNormal  int16
+	SiOddlot  int16
+	SiSpot    int16
+	SiAuction int16
+}
+
+type StExMarketStatus struct {
+	SiNormal  int16
+	SiOddlot  int16
+	SiSpot    int16
+	SiAuction int16
+}
+
+type StPlMarketStatus struct {
+	SiNormal  int16
+	SiOddlot  int16
+	SiSpot    int16
+	SiAuction int16
+}
+
+type StStockEligibleIndicators struct {
+	FlgAon         bool  `bitfield:"1"`
+	FlgMinimumFill bool  `bitfield:"1"`
+	FlgBooksMerged bool  `bitfield:"1"`
+	FlgFiller1     uint8 `bitfield:"5"`
+	FlgFiller2     uint8
+}
+
+//--------------------------------- Update_Local_DB_Structures ------------------------------------------
+
+type StUpdateLDBHeader struct {
+	MessageHeader St_int_header
+	Reserved      [2]byte
+}
+
+type StUpdateLocalDBData struct {
+	MessageHeader      St_int_header
+	InnerMessageHeader StInnerMessageHeader
+	Data               [436]byte
+}
+
+type StInnerMessageHeader struct {
+	TraderId        int32
+	LogTime         int32
+	AlphaChar       [2]byte
+	TransactionCode int16
+	ErrorCode       int16
+	Timestamp       int64
+	TimeStamp1      [8]byte
+	TimeStamp2      [8]byte
+	MessageLength   int16
+}
+
+type StMSDownloadIndex struct {
+	MessageHeader St_int_header      // Refer to MESSAGE_HEADER structure (40 bytes)
+	NoOfRecords   int16              // Number of records (2 bytes)
+	IndexDetails  [17]StIndexDetails // Array of index details (408 bytes)
+}
+
+type StIndexDetails struct {
+	IndexName          [15]byte // Name of the index (15 bytes)
+	Token              int32    // Token number of the index (4 bytes)
+	LastUpdateDateTime int64    // Last update datetime (4 bytes)
+}
+
+type StMSDownloadIndexMap struct {
+	MessageHeader        St_int_header              // Refer to MESSAGE_HEADER structure (40 bytes)
+	NoOfRecords          int16                      // Number of index names (2 bytes)
+	BcastIndexMapDetails [10]StBcastIndexMapDetails // Array of broadcast index details (410 bytes)
+}
+
+type StBcastIndexMapDetails struct {
+	BcastName          [26]byte // Broadcast index name (26 bytes)
+	ChangedName        [10]byte // Actual name of the index (10 bytes)
+	DeleteFlag         byte     // Delete flag (1 byte: 'Y' or 'N')
+	LastUpdateDateTime int64    // Last update datetime (4 bytes)
+}
+
+type StUpdateLocalDBTrailer struct {
+	MessageHeader St_int_header // Refer to MESSAGE_HEADER structure (size 40 bytes)
+	Reserved      [2]byte       // Reserved space (size 2 bytes)
+}
