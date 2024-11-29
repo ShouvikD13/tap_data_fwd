@@ -116,7 +116,12 @@ func (LOFTM *LogOffFromTapManager) Fn_logoff_from_TAP() int {
 	LOFTM.Exg_NxtTrdDate = strings.TrimSpace(LOFTM.Exg_NxtTrdDate)
 
 	LOFTM.St_net_hdr.S_message_length = int16(unsafe.Sizeof(LOFTM.St_net_hdr) + unsafe.Sizeof(LOFTM.Int_header)) // 1 NET_FDR
-	LOFTM.St_net_hdr.I_seq_num = LOFTM.TCUM.GetResetSequence(LOFTM.DB, LOFTM.C_pipe_id, LOFTM.Exg_NxtTrdDate)    // 2 NET_HDR
+	seqNum, err12 := LOFTM.TCUM.GetResetSequence(LOFTM.DB, LOFTM.C_pipe_id, LOFTM.Exg_NxtTrdDate)
+	if err12 != 0 {
+		LOFTM.LoggerManager.LogError(LOFTM.ServiceName, "[Fn_logoff_from_TAP] Error retrieving sequence number: %v", err)
+		return -1 // Wrap the error and return it
+	}
+	LOFTM.St_net_hdr.I_seq_num = seqNum // 2 NET_HDR
 
 	hasher := md5.New()
 	Int_headerString, err := json.Marshal(LOFTM.Int_header) // to convert the structure in string

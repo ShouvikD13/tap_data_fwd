@@ -35,7 +35,7 @@ type ESRManager struct {
 	St_Error_Response  *models.St_Error_Response
 	St_exch_msg_Log_on *models.St_exch_msg_Log_On
 	St_exch_msg_resp   *models.St_exch_msg_resp
-
+	//------------  All the Managers ----------------------
 	ENVM                  *util.EnvironmentManager
 	Req_q_data1           models.St_req_q_data
 	PUM                   *util.PasswordUtilManger
@@ -47,19 +47,142 @@ type ESRManager struct {
 	RM                    *recvhandler.RecvManager
 	OCM                   *OrderConversion.OrderConversionManager
 	Max_Pack_Val          int
-	SHM                   *sendhandler.SendManager
-	Db                    *gorm.DB
-	InitialQId            *int
-	GlobalQId             *int
-	IP                    string
-	Port                  string
-	AutoReconnect         *bool
-	Xchng_cd              string
-	Pipe_Id               string
+	SendManager           *sendhandler.SendManager
+	RecieveManager        *recvhandler.RecvManager
+	//------------- Variables from Factory ------------
+	DB            *gorm.DB
+	InitialQId    *int
+	GlobalQId     *int
+	IP            string
+	Port          string
+	AutoReconnect *bool
+	//--------- Values from OPM table------
+	OPM_ExchangeCode string
+	OPM_PipeID       string
+	//--------- Values from Exg table
+	EXG_NextTradeDate   string
+	EXG_TradeRef        string
+	EXG_SecurityTime    string
+	EXG_ParticipantTime string
+	EXG_InstrumentTime  string
+	EXG_IndexTime       string
 }
 
 var Sequence_number int32 = 1
 var RecieveTrigger = make(chan int)
+
+func (ESRM *ESRManager) FnBatInit() error {
+	// Query to fetch exchange code
+	queryToFetchExchangeCode := `
+        SELECT OPM_XCHNG_CD 
+        FROM OPM_ORD_PIPE_MSTR 
+        WHERE OPM_PIPE_ID = ?`
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Fetching exchange code for pipe ID: %s", ESRM.OPM_PipeID)
+
+	row := ESRM.DB.Raw(queryToFetchExchangeCode, ESRM.OPM_PipeID).Row()
+	if err := row.Scan(&ESRM.OPM_ExchangeCode); err != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error fetching exchange code: %v", err)
+		return err
+	}
+
+	// Query to fetch trade details
+	queryToFetchTradeDetails := `
+        SELECT 
+            TO_CHAR(EXG_NXT_TRD_DT, 'dd-mon-yyyy'), 
+            TO_CHAR(EXG_NXT_TRD_DT, 'yyyymmdd'), 
+            TO_CHAR(EXG_SEC_TM, 'dd-mon-yyyy'), 
+            TO_CHAR(EXG_PART_TM, 'dd-mon-yyyy'), 
+            TO_CHAR(EXG_INST_TM, 'dd-mon-yyyy'), 
+            TO_CHAR(EXG_IDX_TM, 'dd-mon-yyyy')
+        FROM EXG_XCHNG_MSTR 
+        WHERE EXG_XCHNG_CD = ?`
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Fetching trade details for exchange code: %s", ESRM.OPM_ExchangeCode)
+
+	row = ESRM.DB.Raw(queryToFetchTradeDetails, ESRM.OPM_ExchangeCode).Row()
+	if err := row.Scan(&ESRM.EXG_NextTradeDate, &ESRM.EXG_TradeRef, &ESRM.EXG_SecurityTime, &ESRM.EXG_ParticipantTime, &ESRM.EXG_InstrumentTime, &ESRM.EXG_IndexTime); err != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error fetching trade details: %v", err)
+		return err
+	}
+
+	// Begin transaction
+	transactionStatus := ESRM.TM.FnBeginTran()
+	if transactionStatus != 0 {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Failed to begin transaction")
+		return fmt.Errorf("transaction begin failed")
+	}
+
+	// Query to update order pipe master
+	queryToUpdateOrderPipeMaster := `
+        UPDATE OPM_ORD_PIPE_MSTR
+        SET OPM_LOGIN_STTS = 0, OPM_IPO_SSSN_ID = ?
+        WHERE OPM_PIPE_ID = ?`
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Updating login status for pipe ID: %s", ESRM.OPM_PipeID)
+
+	if result := ESRM.DB.Exec(queryToUpdateOrderPipeMaster, ESRM.IP, ESRM.OPM_PipeID); result.Error != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error updating OPM_ORD_PIPE_MSTR: %v", result.Error)
+		if abortResult := ESRM.TM.FnAbortTran(); abortResult == -1 {
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Failed to abort transaction")
+		}
+		return result.Error
+	}
+
+	// Commit transaction
+	commitStatus := ESRM.TM.FnCommitTran()
+	if commitStatus != 0 {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Transaction commit failed")
+		return fmt.Errorf("transaction commit failed")
+	}
+
+	/***********************SEND HANDLER INITIALIZATIO***********************/
+	/*
+		sendManager := NewSendManager(
+			"SendManagerService",
+			models.St_system_info_req{},
+			models.St_net_hdr{},
+			models.St_exch_msg_system_info_Req{},
+			models.St_req_q_data_system_info_Req{},
+			models.StUpdateLocalDatabase{},
+			scm,
+			lm,
+			ocm,
+			tcum,
+			db,
+			SendRecvTrigger,
+			CPipeId,
+			XchngCd,
+			C_mod_trd_dt,
+			C_opm_trdr_id,
+		)
+	*/
+
+	/***********************RECIEVE HANDLER INITIALIZATION***********************/
+	/*
+			recvMgr := NewRecvManager(
+			"RecvService",
+			db,
+			tcm,
+			pum,
+			lm,
+			ocm,
+			tcum,
+			stIntHeader,
+			netHDR,
+			stSignOnRes,
+			stErrorRes,
+			stSysInfoDat,
+			stLdbData,
+			"XCHNG_CD",
+			"PipeID_123",
+		)
+
+	*/
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Initialization successful")
+	return nil
+}
 
 func (ESRM *ESRManager) FnSendThread() {
 
@@ -79,11 +202,11 @@ func (ESRM *ESRManager) FnSendThread() {
 
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("Message Type: %d", R_L_msg_type))
 
-		// Check if R_L_msg_type is "2000"
-		if R_L_msg_type == util.LOGIN_WITHOUT_OPEN_ORDR_DTLS {
+		// Check if R_L_msg_type is "2300"
+		if R_L_msg_type == util.SIGN_ON_REQUEST_IN {
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[send_thrd] Message Type is LOGIN")
 
-			if err := ESRM.SHM.FnDoXchngLogOn(receivedexchngMsg); err != nil {
+			if err := ESRM.SendManager.FnDoXchngLogOn(receivedexchngMsg); err != nil {
 				ESRM.LoggerManager.LogError(ESRM.ServiceName, fmt.Sprintf("[send_thrd] Failed to send exch_msg_data: %v", err))
 				return
 			}
@@ -102,6 +225,8 @@ func (ESRM *ESRManager) FnSendThread() {
 				return
 			}
 
+		} else if R_L_msg_type == util.SIGN_OFF_REQUEST_IN {
+
 		} else {
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[%s] [send_thrd] Skipped message with message type: %d", ESRM.ServiceName, R_L_msg_type))
 		}
@@ -118,7 +243,7 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] ESR TIME_STATS Before Reading From Socket %s", formattedTime)
 
 		// Step 2: Reading from the socket using the updated ReadFromTapSocket function
-		receivedResult, err := ESRM.SCM.ReadFromTapSocket(1024)
+		receivedResult, err := ESRM.SCM.ReadFromTapSocket(1024) // 1024 buffer
 		if err != nil {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error while reading from socket: %v", err)
 			break
@@ -202,7 +327,7 @@ func (ESRM *ESRManager) FnRecieveThread() {
 
 				ESRM.OCM.ConvertSignOnResToHostOrder(ESRM.St_sign_on_res, intHdr)
 
-				initResult := ESRM.RM.FnSignOnRequestOut(ESRM.St_sign_on_res, ESRM.Xchng_cd, ESRM.Pipe_Id)
+				initResult := ESRM.RM.FnSignOnRequestOut()
 				if initResult != 0 {
 					break
 				}

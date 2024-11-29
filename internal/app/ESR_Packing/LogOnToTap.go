@@ -414,7 +414,12 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	LOTTM.OCM.ConvertSignOnReqToNetworkOrder(LOTTM.St_sign_on_req, LOTTM.Int_header) // Here we are converting all the numbers to Network Order
 
 	LOTTM.St_net_hdr.S_message_length = int16(unsafe.Sizeof(LOTTM.St_sign_on_req) + unsafe.Sizeof(LOTTM.St_net_hdr)) // 1 NET_FDR
-	LOTTM.St_net_hdr.I_seq_num = LOTTM.TCUM.GetResetSequence(LOTTM.DB, LOTTM.C_pipe_id, LOTTM.Exg_NxtTrdDate)        // 2 NET_HDR
+	seqNum, err13 := LOTTM.TCUM.GetResetSequence(LOTTM.DB, LOTTM.C_pipe_id, LOTTM.Exg_NxtTrdDate)
+	if err13 != 0 {
+		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[LogOnToTap] Error retrieving sequence number: %v", err)
+		return -1
+	}
+	LOTTM.St_net_hdr.I_seq_num = seqNum // 2 NET_HDR
 
 	hasher := md5.New()
 
@@ -462,7 +467,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	}
 
 	// Set L_msg_type and log success message
-	LOTTM.St_req_q_data.L_msg_type = util.LOGIN_WITHOUT_OPEN_ORDR_DTLS // 1 St_req_q
+	LOTTM.St_req_q_data.L_msg_type = util.SIGN_ON_REQUEST_IN // 1 St_req_q
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "[LogOnToTap] Data copied into Queue Packet")
 
 	/* Create a message queue using the CreateQueue function from MessageQueue.go file ().

@@ -367,7 +367,7 @@ type St_int_header struct { // correct size
 	C_filler_2          [8]byte
 	C_time_stamp_1      [util.LEN_TIME_STAMP]byte // const util.LEN_TIME_STAMP untyped int = 8
 	C_time_stamp_2      [util.LEN_TIME_STAMP]byte // const util.LEN_TIME_STAMP untyped int = 8
-	Si_message_length   int16                     // 316 size
+	Si_message_length   int16
 }
 
 /* Structure Name: MESSAGE_HEADER
@@ -648,7 +648,7 @@ func (data *St_req_q_data_Log_Off) GetMessageData() (int64, []byte) {
 	return data.L_msg_type, data.St_exch_msg_Log_Off[:]
 }
 
-//----------------- ESR
+//----------------- ESR-------------
 
 type St_exch_msg_resp struct {
 	St_net_header St_net_hdr
@@ -849,11 +849,6 @@ type St_pl_market_status struct {
 	Si_auction int16
 }
 
-type St_system_info_req struct {
-	St_Hdr                        St_int_header
-	Li_last_update_protfolio_time int64
-}
-
 type St_system_info_data struct {
 	St_hdr                                St_int_header
 	St_mkt_stts                           St_market_status
@@ -890,11 +885,6 @@ type St_update_local_database struct {
 	St_Pl_Mkt_Stts                 St_pl_market_status
 }
 
-type St_exch_msg_system_info_Req struct {
-	St_net_header      [22]byte
-	St_system_info_req [44]byte
-}
-
 type Vw_mkt_msg struct {
 	C_xchngCd [4]byte
 	C_BrkrId  [6]byte
@@ -908,6 +898,22 @@ type St_Error_Response struct {
 	St_Hdr         St_int_header
 	C_Key          [util.LEN_ERROR_KEY]byte
 	C_ErrorMessage [util.LEN_ERROR_MESSAGE]byte
+}
+
+//---------------------------------- System_Information ----------------------------------
+
+type St_req_q_data_system_info_Req struct {
+	St_exch_msg_system_info_Req [66]byte
+}
+
+type St_exch_msg_system_info_Req struct {
+	St_net_header      [22]byte
+	St_system_info_req [44]byte
+}
+
+type St_system_info_req struct {
+	St_Hdr                        St_int_header
+	Li_last_update_protfolio_time int32
 }
 
 type StSystemInfoData struct {
@@ -963,6 +969,27 @@ type StStockEligibleIndicators struct {
 }
 
 //--------------------------------- Update_Local_DB_Structures ------------------------------------------
+
+type St_req_q_data_StUpdateLocalDatabase struct {
+	St_Exch_Msg_UpdateLocalDatabase [104]byte
+}
+type St_Exch_Msg_UpdateLocalDatabase struct {
+	St_net_header         [22]byte
+	StUpdateLocalDatabase [82]byte
+}
+
+type StUpdateLocalDatabase struct {
+	St_Hdr                       St_int_header //40
+	Li_LastUpdateSecurityTime    int32
+	Li_LastUpdateParticipantTime int32
+	Li_LastUpdateInstrumentTime  int32
+	Li_LastUpdateIndexTime       int32
+	C_RequestForOpenOrders       byte
+	C_Filler1                    byte
+	St_MktStts                   StMarketStatus
+	St_ExMktStts                 StExMarketStatus
+	St_PlMktStts                 StPlMarketStatus
+}
 
 type StUpdateLDBHeader struct {
 	MessageHeader St_int_header

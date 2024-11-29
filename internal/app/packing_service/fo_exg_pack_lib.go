@@ -572,8 +572,8 @@ func (eplm *ExchngPackLibMaster) FnPackOrdnryOrdToNse() int {
 	// eplm.LoggerManager.LogInfo(eplm.serviceName , " [fnPackOrdnryOrdToNse] flg_closed is :	%d ", eplm.order_flag.Flg_closed)
 	// eplm.LoggerManager.LogInfo(eplm.serviceName , " [fnPackOrdnryOrdToNse] flg_fill_and_kill is :	%d ", eplm.order_flag.Flg_fill_and_kill)
 
-	tmpVar := eplm.TCUM.GetResetSequence(eplm.Db, eplm.xchngbook.C_pipe_id, eplm.xchngbook.C_mod_trd_dt)
-	if tmpVar == -1 {
+	tmpVar, errr := eplm.TCUM.GetResetSequence(eplm.Db, eplm.xchngbook.C_pipe_id, eplm.xchngbook.C_mod_trd_dt)
+	if errr == -1 {
 		eplm.LoggerManager.LogError(eplm.serviceName, " [fnPackOrdnryOrdToNse] Error: Failed to retrieve sequence number")
 		return -1
 	}

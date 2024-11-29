@@ -87,7 +87,7 @@ func (TCUM *TypeConversionUtilManager) TimeArrToLong(C_valid_dt string, date *in
 	return 0
 }
 
-func (TCUM *TypeConversionUtilManager) GetResetSequence(db *gorm.DB, C_pipe_id string, C_mod_trd_dt string) int32 {
+func (TCUM *TypeConversionUtilManager) GetResetSequence(db *gorm.DB, C_pipe_id string, C_mod_trd_dt string) (int32, int) {
 	TCUM.ServiceName = "Type_Conversion_Util"
 	var seqNum int32
 	var query string
@@ -104,7 +104,7 @@ func (TCUM *TypeConversionUtilManager) GetResetSequence(db *gorm.DB, C_pipe_id s
 
 	if result1.Error != nil {
 		TCUM.LoggerManager.LogError(TCUM.ServiceName, " [GetResetSequence] [Error: executing increment sequence query: %v]", result1.Error)
-		return -1
+		return 0, -1
 	}
 	TCUM.LoggerManager.LogInfo(TCUM.ServiceName, " [GetResetSequence] [Incremented sequence number: %d]", seqNum)
 
@@ -121,11 +121,11 @@ func (TCUM *TypeConversionUtilManager) GetResetSequence(db *gorm.DB, C_pipe_id s
 
 		if result2.Error != nil {
 			TCUM.LoggerManager.LogError(TCUM.ServiceName, " [GetResetSequence] [Error: executing reset sequence query: %v]", result2.Error)
-			return -1
+			return 0, -1
 		}
 		TCUM.LoggerManager.LogInfo(TCUM.ServiceName, " [GetResetSequence] [Sequence number reset to: %d]", seqNum)
 	}
-	return seqNum
+	return seqNum, 0
 }
 
 func (TCUM *TypeConversionUtilManager) BoolToInt(value bool) int {
@@ -138,7 +138,7 @@ func (TCUM *TypeConversionUtilManager) BoolToInt(value bool) int {
 
 func (TCUM *TypeConversionUtilManager) WriteAndCopy(buf *bytes.Buffer, data interface{}, dest []byte) error {
 	buf.Reset()
-	err := binary.Write(buf, binary.LittleEndian, data)
+	err := binary.Write(buf, binary.BigEndian, data)
 	if err != nil {
 		return err
 	}

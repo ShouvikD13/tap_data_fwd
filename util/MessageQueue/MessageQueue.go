@@ -173,7 +173,7 @@ func (MQM *MessageQueueManager) ReadFromQueue(GlobalQId int) (int64, []byte, int
 		MQM.LoggerManager.LogInfo(MQM.ServiceName, "[ReadFromQueue] board_lot_in message received successfully")
 		return reqData.L_msg_type, reqData.St_exch_msg_data[:], 0
 
-	case util.LOGIN_WITHOUT_OPEN_ORDR_DTLS:
+	case util.SIGN_ON_REQUEST_IN:
 		expectedSize := 8 + 300
 		if len(buffer) < expectedSize {
 			MQM.LoggerManager.LogError(MQM.ServiceName, "[ReadFromQueue] Buffer size is smaller than expected for log_on")
