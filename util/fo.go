@@ -166,7 +166,6 @@ const (
 	UPD_EXTND_MKT_STTS  = 'X'
 
 	/***********EXG_ESR************/
-	REQ_SENT        = 1
 	LOGON_REQ_SENT  = 2
 	LOGON_RESP_RCVD = 3
 	SID_REQ_SENT    = 4

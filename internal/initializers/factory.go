@@ -12,11 +12,11 @@ import (
 	"strconv"
 )
 
-func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int, InitialQId *int, GlobalQId *int) *MainContainer {
+func NewMainContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ResponseTrigger *int) *MainContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	utilContainer := NewUtilContainer(serviceName, args, mTypeRead, mTypeWrite, InitialQId, GlobalQId)
+	utilContainer := NewUtilContainer(serviceName, args, InitialQId, GlobalQId, ResponseTrigger)
 	clientContainer := NewClientContainer()
 	logOnContainer := NewLogOnContainer()
 	logOffContainer := NewLogOffContainer()
@@ -39,7 +39,7 @@ func NewMainContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 	}
 }
 
-func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWrite *int, InitialQId *int, GlobalQId *int) *UtilContainer {
+func NewUtilContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ResponseTrigger *int) *UtilContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
@@ -166,6 +166,7 @@ func NewUtilContainer(serviceName string, args []string, mTypeRead *int, mTypeWr
 		DB:                        DB,
 		InitialQId:                InitialQId,
 		GlobalQId:                 GlobalQId,
+		ResponseTrigger:           ResponseTrigger,
 	}
 
 }

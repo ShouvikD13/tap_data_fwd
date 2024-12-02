@@ -29,6 +29,7 @@ type UtilContainer struct {
 	DB                        *gorm.DB
 	InitialQId                *int
 	GlobalQId                 *int
+	ResponseTrigger           *int
 }
 
 type ClientContainer struct {
@@ -116,11 +117,12 @@ type ESRContainer struct {
 }
 
 type ESRGlobalValueContainer struct {
-	Max_Pack_Val   int
-	InitialQueueId *int
-	GlobalQueueId  *int
-	SocConnection  *net.Conn
-	IP             string
-	Port           string
-	AutoReconnect  *bool
+	Max_Pack_Val    int
+	InitialQueueId  *int
+	GlobalQueueId   *int
+	ResponseTrigger *int
+	SocConnection   *net.Conn
+	IP              string
+	Port            string
+	AutoReconnect   *bool
 }

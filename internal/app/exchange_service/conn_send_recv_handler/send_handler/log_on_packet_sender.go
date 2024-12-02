@@ -10,6 +10,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -17,7 +18,8 @@ import (
 )
 
 type SendManager struct {
-	ServiceName                   string
+	ServiceName string
+	//---------- Required models ---------------------
 	St_system_info_req            models.St_system_info_req
 	St_net_hdr                    models.St_net_hdr
 	St_exch_msg_system_info       models.St_exch_msg_system_info_Req
@@ -46,6 +48,9 @@ type SendManager struct {
 	EXG_ParticipantTime string
 	EXG_InstrumentTime  string
 	EXG_IndexTime       string
+
+	// -------- Trigger to communicate between Send and recieve ----------
+	ResponseTrigger *int
 }
 
 func NewSendManager(
@@ -85,18 +90,26 @@ func NewSendManager(
 }
 
 func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
-	// Send the data packet to the socket
+
+	if err := SM.SCM.WriteOnTapSocket(Data); err != nil {
+		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error writing to socket: %v", err)
+		return fmt.Errorf("error writing to socket: %w", err)
+	}
+
+	*SM.ResponseTrigger = util.LOGON_REQ_SENT
 
 	// Wait until response is received or error is triggered
-	for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
-		// Here, add the logic to wait until a response is received from the socket
+	for {
+		if *SM.ResponseTrigger != util.LOGON_RESP_RCVD && *SM.ResponseTrigger != util.RCV_ERR {
+			break
+		}
 	}
 
 	if SM.SendRecvTrigger == util.RCV_ERR {
 		errMsg := fmt.Sprintf("%s [FnDoXchngLogOn] Received error in receive thread.", SM.ServiceName)
 		SM.LM.LogError(SM.ServiceName, errMsg)
 		SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Value of 'SendRecvTrigger' received from 'fnrecievethread': %d", SM.SendRecvTrigger)
-		return fmt.Errorf(errMsg)
+		return errors.New(errMsg)
 	}
 
 	// Query to fetch trader ID
@@ -115,6 +128,19 @@ func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 		return SysInfoErr
 	}
 
+	for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
+		// Here, add the logic to wait until a response is received from the socket
+	}
+
+	LocalDbErr := SM.FnLocalDBReq()
+	if LocalDbErr != nil {
+		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] FnLocalDBReq encountered an error: %v", LocalDbErr)
+		return LocalDbErr
+	}
+
+	for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
+		// Here, add the logic to wait until a response is received from the socket
+	}
 	return nil
 }
 
@@ -210,7 +236,7 @@ func (SM *SendManager) FnSystemInfoReq() error {
 	}
 
 	if err := SM.SCM.WriteOnTapSocket(SM.St_req_q_data_system_info_Req.St_exch_msg_system_info_Req[:]); err != nil {
-		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error writing to socket: %v", err)
+		SM.LM.LogError(SM.ServiceName, "[FnSystemInfoReq] Error writing to socket: %v", err)
 		return fmt.Errorf("error writing to socket: %w", err)
 	}
 

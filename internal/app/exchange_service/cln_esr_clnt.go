@@ -66,10 +66,12 @@ type ESRManager struct {
 	EXG_ParticipantTime string
 	EXG_InstrumentTime  string
 	EXG_IndexTime       string
+
+	// -------- Trigger to communicate between Send and recieve ----------
+	ResponseTrigger *int
 }
 
 var Sequence_number int32 = 1
-var RecieveTrigger = make(chan int)
 
 func (ESRM *ESRManager) FnBatInit() error {
 	// Query to fetch exchange code

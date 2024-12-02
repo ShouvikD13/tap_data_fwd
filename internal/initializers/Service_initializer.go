@@ -155,6 +155,7 @@ func (SIM *ServiceInitializationManager) ESRInitialization() int {
 		DB:                    SIM.MainContainer.UtilContainer.DB,
 		InitialQId:            SIM.MainContainer.UtilContainer.InitialQId,
 		GlobalQId:             SIM.MainContainer.UtilContainer.GlobalQId,
+		ResponseTrigger:       SIM.MainContainer.UtilContainer.ResponseTrigger,
 	}
 
 	initResult := VarEsr.FnClnEsrClnt()
