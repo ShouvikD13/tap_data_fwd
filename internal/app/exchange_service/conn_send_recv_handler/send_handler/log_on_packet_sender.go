@@ -10,9 +10,9 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -50,7 +50,8 @@ type SendManager struct {
 	EXG_IndexTime       string
 
 	// -------- Trigger to communicate between Send and recieve ----------
-	ResponseTrigger *int
+	ActualResponseTrigger chan int
+	ErrorResponseTrigger  chan int
 }
 
 func NewSendManager(
@@ -96,23 +97,20 @@ func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 		return fmt.Errorf("error writing to socket: %w", err)
 	}
 
-	*SM.ResponseTrigger = util.LOGON_REQ_SENT
+	// *SM.ResponseTrigger = util.LOGON_REQ_SENT
 
-	// Wait until response is received or error is triggered
-	for {
-		if *SM.ResponseTrigger != util.LOGON_RESP_RCVD && *SM.ResponseTrigger != util.RCV_ERR {
-			break
-		}
+	// // Wait until response is received or error is triggered
+	// for {
+	// 	if *SM.ResponseTrigger != util.LOGON_RESP_RCVD && *SM.ResponseTrigger != util.RCV_ERR {
+	// 		break
+	// 	}
+	// }
+
+	if err := SM.waitForResponse("LOGON_REQ", util.LOGON_RESP_RCVD); err != nil {
+		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error waiting for LOGON_REQ response: %v", err)
+		return err
 	}
 
-	if SM.SendRecvTrigger == util.RCV_ERR {
-		errMsg := fmt.Sprintf("%s [FnDoXchngLogOn] Received error in receive thread.", SM.ServiceName)
-		SM.LM.LogError(SM.ServiceName, errMsg)
-		SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Value of 'SendRecvTrigger' received from 'fnrecievethread': %d", SM.SendRecvTrigger)
-		return errors.New(errMsg)
-	}
-
-	// Query to fetch trader ID
 	queryToFetchTraderID := `SELECT OPM_TRDR_ID FROM OPM_ORD_PIPE_MSTR WHERE OPM_PIPE_ID = ? AND OPM_XCHNG_CD = ?`
 	SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Executing query to fetch trader ID with exchange code: %s and pipe ID: %s", SM.XchngCd, SM.CPipeId)
 
@@ -128,8 +126,13 @@ func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 		return SysInfoErr
 	}
 
-	for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
-		// Here, add the logic to wait until a response is received from the socket
+	// for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
+
+	// }
+
+	if err := SM.waitForResponse("SystemInfoReq", util.SID_RESP_RCVD); err != nil {
+		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error waiting for SystemInfoReq response: %v", err)
+		return err
 	}
 
 	LocalDbErr := SM.FnLocalDBReq()
@@ -138,9 +141,15 @@ func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 		return LocalDbErr
 	}
 
-	for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
-		// Here, add the logic to wait until a response is received from the socket
+	// for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
+	// 	// Here, add the logic to wait until a response is received from the socket
+	// }
+
+	if err := SM.waitForResponse("LocalDbUpdateReq", util.LDB_RESP_RCVD); err != nil {
+		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error waiting for LocalDbUpdateReq response: %v", err)
+		return err
 	}
+
 	return nil
 }
 
@@ -406,5 +415,31 @@ func (SM *SendManager) FnLocalDBReq() error {
 	}
 
 	SM.LM.LogInfo(SM.ServiceName, "[FnLocalDBReq] Successfully sent LocalDB Request.")
+	return nil
+}
+
+func (SM *SendManager) waitForResponse(operation string, expectedResponse int) error {
+	select {
+
+	case resp := <-SM.ActualResponseTrigger:
+		if resp == expectedResponse {
+			SM.LM.LogInfo(SM.ServiceName, "[%s] Received expected response: %d", operation, resp)
+			return nil
+		}
+	case err := <-SM.ErrorResponseTrigger:
+		if err == util.RCV_ERR {
+			errMsg := fmt.Sprintf("%s [waitForResponse] Error received %s ", SM.ServiceName, operation)
+			SM.LM.LogError(SM.ServiceName, errMsg)
+			SM.LM.LogInfo(SM.ServiceName, "[waitForResponse] Received 'Error' trigger: %d", err)
+			return fmt.Errorf("%s: error received while waiting for response", operation)
+		}
+
+	case <-time.After(10 * time.Second):
+
+		errMsg := fmt.Sprintf("[%s] Timeout waiting for %s response.", SM.ServiceName, operation)
+		SM.LM.LogError(SM.ServiceName, errMsg)
+		return fmt.Errorf("timeout during %s operation", operation)
+	}
+
 	return nil
 }

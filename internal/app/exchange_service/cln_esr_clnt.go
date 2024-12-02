@@ -18,8 +18,6 @@ import (
 	"fmt"
 	"time"
 
-	"unsafe"
-
 	"gorm.io/gorm"
 )
 
@@ -44,7 +42,6 @@ type ESRManager struct {
 	LoggerManager         *util.LoggerManager
 	TM                    *util.TransactionManager
 	SCM                   *socket.SocketManager
-	RM                    *recvhandler.RecvManager
 	OCM                   *OrderConversion.OrderConversionManager
 	Max_Pack_Val          int
 	SendManager           *sendhandler.SendManager
@@ -68,7 +65,8 @@ type ESRManager struct {
 	EXG_IndexTime       string
 
 	// -------- Trigger to communicate between Send and recieve ----------
-	ResponseTrigger *int
+	ActualResponseTrigger chan *int
+	ErrorResponseTrigger  chan *int
 }
 
 var Sequence_number int32 = 1
@@ -216,9 +214,7 @@ func (ESRM *ESRManager) FnSendThread() {
 		} else if R_L_msg_type == util.BOARD_LOT_IN {
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[send_thrd] Message type is BOARD LOT IN")
 
-			li_business_data_size := int64(unsafe.Sizeof(models.St_oe_reqres{}))
 			li_send_tap_msg_size := int64(len(receivedexchngMsg))
-			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[send_thrd] Business Data Size: %v", li_business_data_size))
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, fmt.Sprintf("[send_thrd] TAP message size: %v", li_send_tap_msg_size))
 
 			// Call fn_writen to write exch_msg_data to TCP connection
@@ -248,7 +244,7 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		receivedResult, err := ESRM.SCM.ReadFromTapSocket(1024) // 1024 buffer
 		if err != nil {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error while reading from socket: %v", err)
-			break
+			continue
 		}
 
 		// Step 3: Log after reading from the socket
@@ -256,9 +252,9 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] ESR TIME_STATS After Reading From Socket %s", formattedTime)
 
 		//Step 4: TAP validation ,  meaning valiating the checksum and sequence number
-		initResult := ESRM.RM.FnValidateTap(&Sequence_number, receivedResult)
+		initResult := ESRM.RecieveManager.FnValidateTap(&Sequence_number, receivedResult)
 		if initResult != 0 {
-			break // from for loop
+			continue // from for loop
 		}
 
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] Validation Successfull")
@@ -320,6 +316,10 @@ func (ESRM *ESRManager) FnRecieveThread() {
 					break
 				}
 
+				if Err := ESRM.RecieveManager.FnSignOnRequestOut(); Err != 0 {
+					// calling a function
+				}
+
 			} else {
 				err = binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_sign_on_res)
 				if err != nil {
@@ -329,19 +329,17 @@ func (ESRM *ESRManager) FnRecieveThread() {
 
 				ESRM.OCM.ConvertSignOnResToHostOrder(ESRM.St_sign_on_res, intHdr)
 
-				initResult := ESRM.RM.FnSignOnRequestOut()
+				initResult := ESRM.RecieveManager.FnSignOnRequestOut()
 				if initResult != 0 {
-					break
+					// calling a function
 				}
 			}
 
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] SIGN_ON_REQUEST_OUT ENDED")
 
 		case util.SIGN_OFF_REQUEST_OUT:
-			// Handle SIGN_OFF_REQUEST_OUT case
 
 		case util.SYSTEM_INFORMATION_OUT:
-			// Handle SYSTEM_INFORMATION_OUT case
 
 		case util.PARTIAL_SYSTEM_INFORMATION:
 			// Handle PARTIAL_SYSTEM_INFORMATION case
@@ -362,5 +360,34 @@ func (ESRM *ESRManager) FnRecieveThread() {
 }
 
 func (ESRM *ESRManager) FnClnEsrClnt() int {
+	return 0
+}
+
+func (ESRM *ESRManager) functionThatWillBeCalledAfterRecievingErrorfromSignOnoutfunctionAndErrorFUnction() int {
+	newExgPwdQuery := `
+	SELECT COALESCE(OPM_NEW_EXG_PWD, 'NA') AS new_exg_pwd
+	FROM OPM_ORD_PIPE_MSTR
+	WHERE OPM_XCHNG_CD = ? AND OPM_PIPE_ID = ?
+`
+
+	var cNewExgPwd string
+	result := ESRM.DB.Raw(newExgPwdQuery, sqlCXchngCd, sqlCPipeId).Scan(&cNewExgPwd)
+	if result.Error != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnGetNewExgPwd] Error executing query: %v", result.Error)
+		return "", result.Error
+	}
+
+	updateNewExgPwdQuery := `
+	UPDATE OPM_ORD_PIPE_MSTR
+	SET OPM_NEW_EXG_PWD = NULL
+	WHERE OPM_XCHNG_CD = ? AND OPM_PIPE_ID = ?
+`
+
+	result = RM.Db.Exec(updateNewExgPwdQuery, sqlCXchngCd, sqlCPipeId)
+	if result.Error != nil {
+		RM.LM.LogError(RM.ServiceName, "[FnUpdateNewExgPwd] Error executing update query: %v", result.Error)
+		return result.Error
+	}
+	// This function will be called when we are going to return -1 from FnSignInOut and FnErrorResponse. here i have to implement all the logic used in the if condion in recieve thread in C code .
 	return 0
 }

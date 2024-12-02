@@ -10,14 +10,16 @@ func main() {
 	// These are Example arguments . Actual ARguments will be provided from Command line.
 	args := []string{"main", "arg1", "arg2", "arg3", "P1", "arg5", "arg6", "arg7"}
 	serviceName := args[0]
-	var InitialQId, GlobalQId, ResponseTrigger int
+	var InitialQId, GlobalQId int
 
-	ResponseTrigger = 0
+	ActualResponseTrigger := make(chan *int)
+	ErrorResponseTrigger := make(chan *int)
+
 	InitialQId = util.INITIAL_QUEUE_ID
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	mainContainer := initializers.NewMainContainer(args[0], args[1:], &InitialQId, &GlobalQId, &ResponseTrigger)
+	mainContainer := initializers.NewMainContainer(args[0], args[1:], &InitialQId, &GlobalQId, ActualResponseTrigger, ErrorResponseTrigger)
 
 	serviceInitManager := &initializers.ServiceInitializationManager{
 		MainContainer: mainContainer,

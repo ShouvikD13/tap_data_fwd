@@ -12,11 +12,11 @@ import (
 	"strconv"
 )
 
-func NewMainContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ResponseTrigger *int) *MainContainer {
+func NewMainContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ActualResponseTrigger chan *int, ErrorResponseTrigger chan *int) *MainContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	utilContainer := NewUtilContainer(serviceName, args, InitialQId, GlobalQId, ResponseTrigger)
+	utilContainer := NewUtilContainer(serviceName, args, InitialQId, GlobalQId, ActualResponseTrigger, ErrorResponseTrigger)
 	clientContainer := NewClientContainer()
 	logOnContainer := NewLogOnContainer()
 	logOffContainer := NewLogOffContainer()
@@ -39,7 +39,7 @@ func NewMainContainer(serviceName string, args []string, InitialQId *int, Global
 	}
 }
 
-func NewUtilContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ResponseTrigger *int) *UtilContainer {
+func NewUtilContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ActualResponseTrigger chan *int, ErrorResponseTrigger chan *int) *UtilContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
@@ -166,7 +166,8 @@ func NewUtilContainer(serviceName string, args []string, InitialQId *int, Global
 		DB:                        DB,
 		InitialQId:                InitialQId,
 		GlobalQId:                 GlobalQId,
-		ResponseTrigger:           ResponseTrigger,
+		ActualResponseTrigger:     ActualResponseTrigger,
+		ErrorResponseTrigger:      ErrorResponseTrigger,
 	}
 
 }

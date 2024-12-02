@@ -29,7 +29,8 @@ type UtilContainer struct {
 	DB                        *gorm.DB
 	InitialQId                *int
 	GlobalQId                 *int
-	ResponseTrigger           *int
+	ActualResponseTrigger     chan *int
+	ErrorResponseTrigger      chan *int
 }
 
 type ClientContainer struct {
