@@ -22,37 +22,42 @@ import (
 )
 
 type ESRManager struct {
-	Req_q_data         *models.St_req_q_data
-	ServiceName        string
-	St_exch_msg        *models.St_exch_msg
-	St_int_header      *models.St_int_header
-	St_net_hdr         *models.St_net_hdr
-	St_oe_reqres       *models.St_oe_reqres
-	St_sign_on_req     *models.St_sign_on_req
-	St_sign_on_res     *models.St_sign_on_res
-	St_Error_Response  *models.St_Error_Response
-	St_exch_msg_Log_on *models.St_exch_msg_Log_On
-	St_exch_msg_resp   *models.St_exch_msg_resp
+	Req_q_data                          *models.St_req_q_data
+	ServiceName                         string
+	St_exch_msg                         *models.St_exch_msg
+	St_int_header                       *models.St_int_header
+	St_net_hdr                          *models.St_net_hdr
+	St_oe_reqres                        *models.St_oe_reqres
+	St_sign_on_req                      *models.St_sign_on_req
+	St_sign_on_res                      *models.St_sign_on_res
+	St_Error_Response                   *models.St_Error_Response
+	StSystemInfoData                    *models.StSystemInfoData
+	StUpdateLocalDBData                 *models.StUpdateLocalDBData
+	St_exch_msg_Log_on                  *models.St_exch_msg_Log_On
+	St_exch_msg_resp                    *models.St_exch_msg_resp
+	St_exch_msg_system_info_Req         *models.St_exch_msg_system_info_Req
+	St_req_q_data_system_info_Req       *models.St_req_q_data_system_info_Req
+	StUpdateLocalDatabase               *models.StUpdateLocalDatabase
+	St_Exch_Msg_UpdateLocalDatabase     *models.St_Exch_Msg_UpdateLocalDatabase
+	St_req_q_data_StUpdateLocalDatabase *models.St_req_q_data_StUpdateLocalDatabase
 	//------------  All the Managers ----------------------
 	ENVM                  *util.EnvironmentManager
-	Req_q_data1           models.St_req_q_data
 	PUM                   *util.PasswordUtilManger
 	Message_queue_manager *MessageQueue.MessageQueueManager
 	TCUM                  *typeconversionutil.TypeConversionUtilManager
 	LoggerManager         *util.LoggerManager
-	TM                    *util.TransactionManager
+	TransactionManager    *util.TransactionManager
 	SCM                   *socket.SocketManager
 	OCM                   *OrderConversion.OrderConversionManager
 	Max_Pack_Val          int
 	SendManager           *sendhandler.SendManager
 	RecieveManager        *recvhandler.RecvManager
 	//------------- Variables from Factory ------------
-	DB            *gorm.DB
-	InitialQId    *int
-	GlobalQId     *int
-	IP            string
-	Port          string
-	AutoReconnect *bool
+	DB         *gorm.DB
+	InitialQId *int
+	GlobalQId  *int
+	IP         string
+	Port       string
 	//--------- Values from OPM table------
 	OPM_ExchangeCode string
 	OPM_PipeID       string
@@ -65,8 +70,12 @@ type ESRManager struct {
 	EXG_IndexTime       string
 
 	// -------- Trigger to communicate between Send and recieve ----------
-	ActualResponseTrigger chan *int
-	ErrorResponseTrigger  chan *int
+	ActualResponseTrigger *chan int
+	ErrorResponseTrigger  *chan int
+
+	ChanValue        int
+	ThreadExitStatus int
+	RecievedStatus   string
 }
 
 var Sequence_number int32 = 1
@@ -107,7 +116,7 @@ func (ESRM *ESRManager) FnBatInit() error {
 	}
 
 	// Begin transaction
-	transactionStatus := ESRM.TM.FnBeginTran()
+	transactionStatus := ESRM.TransactionManager.FnBeginTran()
 	if transactionStatus != 0 {
 		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Failed to begin transaction")
 		return fmt.Errorf("transaction begin failed")
@@ -123,64 +132,120 @@ func (ESRM *ESRManager) FnBatInit() error {
 
 	if result := ESRM.DB.Exec(queryToUpdateOrderPipeMaster, ESRM.IP, ESRM.OPM_PipeID); result.Error != nil {
 		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error updating OPM_ORD_PIPE_MSTR: %v", result.Error)
-		if abortResult := ESRM.TM.FnAbortTran(); abortResult == -1 {
+		if abortResult := ESRM.TransactionManager.FnAbortTran(); abortResult == -1 {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Failed to abort transaction")
 		}
 		return result.Error
 	}
 
 	// Commit transaction
-	commitStatus := ESRM.TM.FnCommitTran()
+	commitStatus := ESRM.TransactionManager.FnCommitTran()
 	if commitStatus != 0 {
 		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Transaction commit failed")
 		return fmt.Errorf("transaction commit failed")
 	}
 
 	/***********************SEND HANDLER INITIALIZATIO***********************/
+
+	ESRM.SendManager = sendhandler.NewSendManager(
+		ESRM.ServiceName,
+		ESRM.SendManager.St_system_info_req,
+		ESRM.St_net_hdr,
+		ESRM.St_exch_msg_system_info_Req,
+		ESRM.St_req_q_data_system_info_Req,
+		ESRM.StUpdateLocalDatabase,
+		ESRM.St_Exch_Msg_UpdateLocalDatabase,
+		ESRM.St_req_q_data_StUpdateLocalDatabase,
+		ESRM.SCM,
+		ESRM.LoggerManager,
+		ESRM.OCM,
+		ESRM.TCUM,
+		ESRM.DB,
+		ESRM.OPM_PipeID,
+		ESRM.OPM_ExchangeCode,
+		ESRM.EXG_NextTradeDate,
+		ESRM.EXG_TradeRef,
+		ESRM.EXG_SecurityTime,
+		ESRM.EXG_ParticipantTime,
+		ESRM.EXG_InstrumentTime,
+		ESRM.EXG_IndexTime,
+		ESRM.ActualResponseTrigger,
+		ESRM.ErrorResponseTrigger,
+	)
+
 	/*
-		sendManager := NewSendManager(
-			"SendManagerService",
-			models.St_system_info_req{},
-			models.St_net_hdr{},
-			models.St_exch_msg_system_info_Req{},
-			models.St_req_q_data_system_info_Req{},
-			models.StUpdateLocalDatabase{},
-			scm,
-			lm,
-			ocm,
-			tcum,
-			db,
-			SendRecvTrigger,
-			CPipeId,
-			XchngCd,
-			C_mod_trd_dt,
-			C_opm_trdr_id,
-		)
+			return &SendManager{
+			ServiceName:                         serviceName,
+			St_system_info_req:                  stSystemInfoReq,
+			St_net_hdr:                          stNetHdr,
+			St_exch_msg_system_info:             stExchMsgSystemInfoReq,
+			St_req_q_data_system_info_Req:       stReqQDataSystemInfoReq,
+			St_upd_local_db:                     stUpdLocalDb,
+			St_Exch_Msg_UpdateLocalDatabase:     stExchMsgUpdLocalDb,
+			St_req_q_data_StUpdateLocalDatabase: stReqQDataUpdLocalDb,
+			SCM:                                 scm,
+			LM:                                  lm,
+			OCM:                                 ocm,
+			TCUM:                                tcum,
+			Db:                                  db,
+			CPipeId:                             cPipeId,
+			XchngCd:                             xchngCd,
+			EXG_NextTradeDate:                   exgNextTradeDate,
+			EXG_TradeRef:                        exgTradeRef,
+			EXG_SecurityTime:                    exgSecurityTime,
+			EXG_ParticipantTime:                 exgParticipantTime,
+			EXG_InstrumentTime:                  exgInstrumentTime,
+			EXG_IndexTime:                       exgIndexTime,
+			ActualResponseTrigger:               actualResponseTrigger,
+			ErrorResponseTrigger:                errorResponseTrigger,
+		}
+
 	*/
 
 	/***********************RECIEVE HANDLER INITIALIZATION***********************/
+
+	ESRM.RecieveManager = recvhandler.NewRecvManager(
+		ESRM.ServiceName,
+		ESRM.DB,
+		ESRM.TransactionManager,
+		ESRM.PUM,
+		ESRM.LoggerManager,
+		ESRM.OCM,
+		ESRM.TCUM,
+		ESRM.St_int_header,
+		ESRM.St_net_hdr,
+		ESRM.St_sign_on_res,
+		ESRM.St_Error_Response,
+		ESRM.StSystemInfoData,
+		ESRM.StUpdateLocalDBData,
+		ESRM.OPM_ExchangeCode,
+		ESRM.OPM_PipeID,
+	)
+
 	/*
-			recvMgr := NewRecvManager(
-			"RecvService",
-			db,
-			tcm,
-			pum,
-			lm,
-			ocm,
-			tcum,
-			stIntHeader,
-			netHDR,
-			stSignOnRes,
-			stErrorRes,
-			stSysInfoDat,
-			stLdbData,
-			"XCHNG_CD",
-			"PipeID_123",
+			recvManager := recvhandler.NewRecvManager(
+			"ServiceName",                  // Replace with your service name
+			dbInstance,                     // Instance of *gorm.DB
+			transactionManagerInstance,     // Instance of *util.TransactionManager
+			passwordUtilManagerInstance,    // Instance of *util.PasswordUtilManger
+			loggerManagerInstance,          // Instance of *util.LoggerManager
+			orderConversionManagerInstance, // Instance of *OrderConversion.OrderConversionManager
+			typeConversionManagerInstance,  // Instance of *typeconversionutil.TypeConversionUtilManager
+			intHeaderInstance,              // Instance of *models.St_int_header
+			netHeaderInstance,              // Instance of *models.St_net_hdr
+			signOnResponseInstance,         // Instance of *models.St_sign_on_res
+			errorResponseInstance,          // Instance of *models.St_Error_Response
+			sysInfoDataInstance,            // Instance of *models.StSystemInfoData
+			ldbDataInstance,                // Instance of *models.StUpdateLocalDBData
+			"ExchangeCode",                 // Replace with your exchange code (string)
+			"PipeId",                       // Replace with your pipe ID (string)
 		)
+
 
 	*/
 
-	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Initialization successful")
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Initialization successful Now we are going to call the go routines ")
+
 	return nil
 }
 
@@ -234,7 +299,9 @@ func (ESRM *ESRManager) FnSendThread() {
 }
 
 func (ESRM *ESRManager) FnRecieveThread() {
-	for {
+	ESRM.ThreadExitStatus = util.NOT_EXIT
+
+	for ESRM.ThreadExitStatus != util.EXIT {
 
 		// Step 1: Fetching the current time before reading from the socket
 		formattedTime := time.Now().Format("2006-01-02 15:04:05")
@@ -291,7 +358,6 @@ func (ESRM *ESRManager) FnRecieveThread() {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing int_hdr: %v", err)
 			break
 		}
-
 		ESRM.OCM.ConvertIntHeaderToHostOrder(intHdr)
 
 		// Step 5: Extract actual message
@@ -307,51 +373,73 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		switch intHdr.Si_transaction_code {
 		case util.SIGN_ON_REQUEST_OUT:
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] SIGN_ON_REQUEST_OUT STARTED")
-
 			if intHdr.Si_error_code != 0 {
-
 				err = binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_Error_Response)
 				if err != nil {
 					ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing St_Error_Response: %v", err)
 					break
 				}
+				if Err := ESRM.RecieveManager.FnErrorResponse(); Err != 0 {
+					initResult := ESRM.HandleErrorFromSignInOutAndErrorResponse()
+					if initResult != nil {
+						ESRM.LoggerManager.LogError(ESRM.ServiceName, "[initResult] Failed to handle error response: %v Exiting from 'FnRecieveThread' Loop", initResult)
+						ESRM.ThreadExitStatus = util.EXIT
+						*ESRM.ErrorResponseTrigger <- util.RCV_ERR
+					}
+				} else {
 
-				if Err := ESRM.RecieveManager.FnSignOnRequestOut(); Err != 0 {
-					// calling a function
+					*ESRM.ActualResponseTrigger <- util.LOGON_RESP_RCVD
 				}
-
 			} else {
 				err = binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_sign_on_res)
 				if err != nil {
 					ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing sign_on_res: %v", err)
 					break
 				}
-
 				ESRM.OCM.ConvertSignOnResToHostOrder(ESRM.St_sign_on_res, intHdr)
 
-				initResult := ESRM.RecieveManager.FnSignOnRequestOut()
-				if initResult != 0 {
-					// calling a function
+				if initResult := ESRM.RecieveManager.FnSignOnRequestOut(); initResult != 0 {
+					initResult := ESRM.HandleErrorFromSignInOutAndErrorResponse()
+					if initResult != nil {
+						ESRM.LoggerManager.LogError(ESRM.ServiceName, "[initResult] Failed to handle error response: %v Exiting from 'FnRecieveThread' Loop", initResult)
+						ESRM.ThreadExitStatus = util.EXIT
+						*ESRM.ErrorResponseTrigger <- util.RCV_ERR
+					}
+				} else {
+					*ESRM.ActualResponseTrigger <- util.LOGON_RESP_RCVD
 				}
 			}
-
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] SIGN_ON_REQUEST_OUT ENDED")
 
 		case util.SIGN_OFF_REQUEST_OUT:
 
 		case util.SYSTEM_INFORMATION_OUT:
 
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] SYSTEM_INFORMATION_OUT STARTED")
+			err := ESRM.RecieveManager.FnSystemInformationOut()
+			if err != 0 {
+				ESRM.ThreadExitStatus = util.EXIT
+				*ESRM.ErrorResponseTrigger <- util.RCV_ERR
+			} else {
+				*ESRM.ActualResponseTrigger <- util.LOGON_RESP_RCVD
+			}
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] SYSTEM_INFORMATION_OUT ENDED")
+
 		case util.PARTIAL_SYSTEM_INFORMATION:
-			// Handle PARTIAL_SYSTEM_INFORMATION case
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] PARTIAL_SYSTEM_INFORMATION STARTED ")
+			err := ESRM.RecieveManager.FnPartialLogonRes()
+			if err != 0 {
+				ESRM.LoggerManager.LogError(ESRM.ServiceName, "Failed In Function 'FnPartialLogonRes' ")
+			}
+			ESRM.ThreadExitStatus = util.EXIT
+			*ESRM.ErrorResponseTrigger <- util.RCV_ERR
+			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] PARTIAL_SYSTEM_INFORMATION ENDED ")
 
 		case util.UPDATE_LOCALDB_HEADER:
-			// Handle UPDATE_LOCALDB_HEADER case
-
+			ESRM.RecievedStatus = "NO"
 		case util.UPDATE_LOCALDB_TRAILER:
-			// Handle UPDATE_LOCALDB_TRAILER case
-
+			*ESRM.ActualResponseTrigger <- util.LDB_RESP_RCVD
 		case util.UPDATE_LOCALDB_DATA:
-			// Handle UPDATE_LOCALDB_DATA case
 
 		default:
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Unknown transaction code received: %d", intHdr.Si_transaction_code)
@@ -359,35 +447,76 @@ func (ESRM *ESRManager) FnRecieveThread() {
 	}
 }
 
-func (ESRM *ESRManager) FnClnEsrClnt() int {
-	return 0
-}
+func (ESRM *ESRManager) HandleErrorFromSignInOutAndErrorResponse() error {
 
-func (ESRM *ESRManager) functionThatWillBeCalledAfterRecievingErrorfromSignOnoutfunctionAndErrorFUnction() int {
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "Recived error from 'fnSignOnIN' or 'FnErrorResponse' ")
+
 	newExgPwdQuery := `
-	SELECT COALESCE(OPM_NEW_EXG_PWD, 'NA') AS new_exg_pwd
-	FROM OPM_ORD_PIPE_MSTR
-	WHERE OPM_XCHNG_CD = ? AND OPM_PIPE_ID = ?
+    SELECT 
+        COALESCE(OPM_NEW_EXG_PWD, 'NA') AS new_exg_pwd
+    FROM OPM_ORD_PIPE_MSTR
+    WHERE OPM_XCHNG_CD = ? 
+      AND OPM_PIPE_ID = ?
 `
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[HandleError] Starting error handling logic for exchange code: %s and pipe ID: %s", ESRM.OPM_ExchangeCode, ESRM.OPM_PipeID)
 
 	var cNewExgPwd string
-	result := ESRM.DB.Raw(newExgPwdQuery, sqlCXchngCd, sqlCPipeId).Scan(&cNewExgPwd)
-	if result.Error != nil {
-		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnGetNewExgPwd] Error executing query: %v", result.Error)
-		return "", result.Error
+	row := ESRM.DB.Raw(newExgPwdQuery, ESRM.OPM_ExchangeCode, ESRM.OPM_PipeID).Row()
+	if err := row.Scan(&cNewExgPwd); err != nil {
+		ESRM.ChanValue = util.RCV_ERR
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[HandleError] Error fetching new exchange password: %v", err)
+		return fmt.Errorf("failed to fetch new exchange password: %w", err)
+	}
+	if cNewExgPwd == "NA" {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[HandleError] No new exchange password available for exchange code: %s and pipe ID: %s", ESRM.OPM_ExchangeCode, ESRM.OPM_PipeID)
+
+		beginTranResult := ESRM.TransactionManager.FnBeginTran()
+
+		if beginTranResult != 0 {
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[HandleError] Failed to begin transaction. FnBeginTran returned: %d", beginTranResult)
+			ESRM.ChanValue = util.RCV_ERR
+			return fmt.Errorf("failed to begin transaction: FnBeginTran returned %d", beginTranResult)
+		}
+		updateNewExgPwdQuery := `
+		UPDATE OPM_ORD_PIPE_MSTR
+		SET OPM_NEW_EXG_PWD = NULL
+		WHERE OPM_XCHNG_CD = ? 
+		AND OPM_PIPE_ID = ?
+		`
+		result := ESRM.DB.Exec(updateNewExgPwdQuery, ESRM.OPM_ExchangeCode, ESRM.OPM_PipeID)
+		if result.Error != nil {
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[HandleError] Error resetting exchange password: %v", result.Error)
+			abortTranResult := ESRM.TransactionManager.FnAbortTran()
+			if abortTranResult != 0 {
+				ESRM.LoggerManager.LogError(ESRM.ServiceName, "[HandleError] Failed to abort transaction : %v", result.Error)
+				ESRM.ChanValue = util.RCV_ERR
+				return fmt.Errorf("[HandleError] Error: Unable to abort transaction , FnAbortTran returned: %d", abortTranResult)
+			}
+			ESRM.ChanValue = util.RCV_ERR
+			return fmt.Errorf("failed to reset exchange password: %w", result.Error)
+		}
+
+		commitTranResult := ESRM.TransactionManager.FnCommitTran()
+		if commitTranResult != 0 {
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[HandleError] Failed to commit transaction. FnCommitTran returned: %d", commitTranResult)
+			abortTranResult := ESRM.TransactionManager.FnAbortTran()
+			if abortTranResult != 0 {
+				ESRM.LoggerManager.LogError(ESRM.ServiceName, "[HandleError] Failed to abort transaction after commit failure. FnAbortTran returned: %d", abortTranResult)
+				ESRM.ChanValue = util.RCV_ERR
+				return fmt.Errorf("[HandleError] Error: Unable to abort transaction after commit failure, FnAbortTran returned: %d", abortTranResult)
+
+			}
+			ESRM.ChanValue = util.RCV_ERR
+			return fmt.Errorf("[HandleError] Failed to commit transaction , Transaction RollBack ")
+		}
+		ESRM.ChanValue = util.RCV_ERR
+		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[HandleError] Transaction committed successfully")
+
+	} else {
+		ESRM.ChanValue = util.RCV_ERR
+		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[HandleError] Fetched new exchange password successfully: %s", cNewExgPwd)
 	}
 
-	updateNewExgPwdQuery := `
-	UPDATE OPM_ORD_PIPE_MSTR
-	SET OPM_NEW_EXG_PWD = NULL
-	WHERE OPM_XCHNG_CD = ? AND OPM_PIPE_ID = ?
-`
-
-	result = RM.Db.Exec(updateNewExgPwdQuery, sqlCXchngCd, sqlCPipeId)
-	if result.Error != nil {
-		RM.LM.LogError(RM.ServiceName, "[FnUpdateNewExgPwd] Error executing update query: %v", result.Error)
-		return result.Error
-	}
-	// This function will be called when we are going to return -1 from FnSignInOut and FnErrorResponse. here i have to implement all the logic used in the if condion in recieve thread in C code .
-	return 0
+	return nil
 }

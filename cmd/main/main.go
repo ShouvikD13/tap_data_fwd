@@ -12,14 +12,14 @@ func main() {
 	serviceName := args[0]
 	var InitialQId, GlobalQId int
 
-	ActualResponseTrigger := make(chan *int)
-	ErrorResponseTrigger := make(chan *int)
+	ActualResponseTrigger := make(chan int)
+	ErrorResponseTrigger := make(chan int)
 
 	InitialQId = util.INITIAL_QUEUE_ID
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
-	mainContainer := initializers.NewMainContainer(args[0], args[1:], &InitialQId, &GlobalQId, ActualResponseTrigger, ErrorResponseTrigger)
+	mainContainer := initializers.NewMainContainer(args[0], args[1:], &InitialQId, &GlobalQId, &ActualResponseTrigger, &ErrorResponseTrigger)
 
 	serviceInitManager := &initializers.ServiceInitializationManager{
 		MainContainer: mainContainer,

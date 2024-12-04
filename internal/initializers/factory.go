@@ -12,7 +12,7 @@ import (
 	"strconv"
 )
 
-func NewMainContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ActualResponseTrigger chan *int, ErrorResponseTrigger chan *int) *MainContainer {
+func NewMainContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ActualResponseTrigger *chan int, ErrorResponseTrigger *chan int) *MainContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
@@ -39,7 +39,7 @@ func NewMainContainer(serviceName string, args []string, InitialQId *int, Global
 	}
 }
 
-func NewUtilContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ActualResponseTrigger chan *int, ErrorResponseTrigger chan *int) *UtilContainer {
+func NewUtilContainer(serviceName string, args []string, InitialQId *int, GlobalQId *int, ActualResponseTrigger *chan int, ErrorResponseTrigger *chan int) *UtilContainer {
 
 	log.Printf("[%s] Program %s starts", serviceName, args[0])
 
@@ -230,13 +230,23 @@ func NewLogOffGlobalValueContainer(args []string) *LogOffGlobalValueContainer {
 
 func NewESRContainer() *ESRContainer {
 	return &ESRContainer{
-		Req_q_data:         &models.St_req_q_data{},
-		St_exch_msg:        &models.St_exch_msg{},
-		St_net_hdr:         &models.St_net_hdr{},
-		St_oe_reqres:       &models.St_oe_reqres{},
-		St_sign_on_req:     &models.St_sign_on_req{},
-		St_exch_msg_Log_on: &models.St_exch_msg_Log_On{},
-		St_exch_msg_resp:   &models.St_exch_msg_resp{},
+		Req_q_data:                          &models.St_req_q_data{},
+		St_exch_msg:                         &models.St_exch_msg{},
+		St_int_header:                       &models.St_int_header{}, // Added
+		St_net_hdr:                          &models.St_net_hdr{},
+		St_oe_reqres:                        &models.St_oe_reqres{},
+		St_sign_on_req:                      &models.St_sign_on_req{},
+		St_sign_on_res:                      &models.St_sign_on_res{},      // Added
+		St_Error_Response:                   &models.St_Error_Response{},   // Added
+		StSystemInfoData:                    &models.StSystemInfoData{},    // Added
+		StUpdateLocalDBData:                 &models.StUpdateLocalDBData{}, // Added
+		St_exch_msg_Log_on:                  &models.St_exch_msg_Log_On{},
+		St_exch_msg_resp:                    &models.St_exch_msg_resp{},
+		St_exch_msg_system_info_Req:         &models.St_exch_msg_system_info_Req{},         // Added
+		St_req_q_data_system_info_Req:       &models.St_req_q_data_system_info_Req{},       // Added
+		StUpdateLocalDatabase:               &models.StUpdateLocalDatabase{},               // Added
+		St_Exch_Msg_UpdateLocalDatabase:     &models.St_Exch_Msg_UpdateLocalDatabase{},     // Added
+		St_req_q_data_StUpdateLocalDatabase: &models.St_req_q_data_StUpdateLocalDatabase{}, // Added
 	}
 }
 

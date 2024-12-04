@@ -136,32 +136,66 @@ func (SIM *ServiceInitializationManager) LogOffFromTapInitialization() int {
 
 func (SIM *ServiceInitializationManager) ESRInitialization() int {
 
+	// VarEsr := &esr.ESRManager{
+	// 	Req_q_data:            SIM.MainContainer.ESRContainer.Req_q_data,
+	// 	St_exch_msg:           SIM.MainContainer.ESRContainer.St_exch_msg,
+	// 	St_net_hdr:            SIM.MainContainer.ESRContainer.St_net_hdr,
+	// 	St_oe_reqres:          SIM.MainContainer.ESRContainer.St_oe_reqres,
+	// 	St_sign_on_req:        SIM.MainContainer.ESRContainer.St_sign_on_req,
+	// 	St_exch_msg_Log_on:    SIM.MainContainer.ESRContainer.St_exch_msg_Log_on,
+	// 	St_exch_msg_resp:      SIM.MainContainer.ESRContainer.St_exch_msg_resp,
+	// 	ENVM:                  SIM.MainContainer.UtilContainer.EnvironmentManager,
+	// 	Req_q_data1:           *SIM.MainContainer.ESRContainer.Req_q_data,
+	// 	PUM:                   SIM.MainContainer.UtilContainer.PasswordUtilManager,
+	// 	Message_queue_manager: SIM.MainContainer.UtilContainer.MessageQueueManager,
+	// 	TCUM:                  SIM.MainContainer.UtilContainer.TypeConversionUtilManager,
+	// 	LoggerManager:         SIM.MainContainer.UtilContainer.TransactionManager.LoggerManager,
+	// 	TransactionManager:    SIM.MainContainer.UtilContainer.TransactionManager,
+	// 	Max_Pack_Val:          SIM.MainContainer.ESRGlobalValueContainer.Max_Pack_Val,
+	// 	DB:                    SIM.MainContainer.UtilContainer.DB,
+	// 	InitialQId:            SIM.MainContainer.UtilContainer.InitialQId,
+	// 	GlobalQId:             SIM.MainContainer.UtilContainer.GlobalQId,
+	// 	ActualResponseTrigger: SIM.MainContainer.UtilContainer.ActualResponseTrigger,
+	// 	ErrorResponseTrigger:  SIM.MainContainer.UtilContainer.ErrorResponseTrigger,
+	// }
+
 	VarEsr := &esr.ESRManager{
-		Req_q_data:            SIM.MainContainer.ESRContainer.Req_q_data,
-		St_exch_msg:           SIM.MainContainer.ESRContainer.St_exch_msg,
-		St_net_hdr:            SIM.MainContainer.ESRContainer.St_net_hdr,
-		St_oe_reqres:          SIM.MainContainer.ESRContainer.St_oe_reqres,
-		St_sign_on_req:        SIM.MainContainer.ESRContainer.St_sign_on_req,
-		St_exch_msg_Log_on:    SIM.MainContainer.ESRContainer.St_exch_msg_Log_on,
-		St_exch_msg_resp:      SIM.MainContainer.ESRContainer.St_exch_msg_resp,
-		ENVM:                  SIM.MainContainer.UtilContainer.EnvironmentManager,
-		Req_q_data1:           *SIM.MainContainer.ESRContainer.Req_q_data,
-		PUM:                   SIM.MainContainer.UtilContainer.PasswordUtilManager,
-		Message_queue_manager: SIM.MainContainer.UtilContainer.MessageQueueManager,
-		TCUM:                  SIM.MainContainer.UtilContainer.TypeConversionUtilManager,
-		LoggerManager:         SIM.MainContainer.UtilContainer.TransactionManager.LoggerManager,
-		TM:                    SIM.MainContainer.UtilContainer.TransactionManager,
-		Max_Pack_Val:          SIM.MainContainer.ESRGlobalValueContainer.Max_Pack_Val,
-		DB:                    SIM.MainContainer.UtilContainer.DB,
-		InitialQId:            SIM.MainContainer.UtilContainer.InitialQId,
-		GlobalQId:             SIM.MainContainer.UtilContainer.GlobalQId,
-		ActualResponseTrigger: SIM.MainContainer.UtilContainer.ActualResponseTrigger,
-		ErrorResponseTrigger:  SIM.MainContainer.UtilContainer.ErrorResponseTrigger,
+		Req_q_data:                          SIM.MainContainer.ESRContainer.Req_q_data,
+		St_exch_msg:                         SIM.MainContainer.ESRContainer.St_exch_msg,
+		St_int_header:                       SIM.MainContainer.ESRContainer.St_int_header, // Added
+		St_net_hdr:                          SIM.MainContainer.ESRContainer.St_net_hdr,
+		St_oe_reqres:                        SIM.MainContainer.ESRContainer.St_oe_reqres,
+		St_sign_on_req:                      SIM.MainContainer.ESRContainer.St_sign_on_req,
+		St_sign_on_res:                      SIM.MainContainer.ESRContainer.St_sign_on_res,      // Added
+		St_Error_Response:                   SIM.MainContainer.ESRContainer.St_Error_Response,   // Added
+		StSystemInfoData:                    SIM.MainContainer.ESRContainer.StSystemInfoData,    // Added
+		StUpdateLocalDBData:                 SIM.MainContainer.ESRContainer.StUpdateLocalDBData, // Added
+		St_exch_msg_Log_on:                  SIM.MainContainer.ESRContainer.St_exch_msg_Log_on,
+		St_exch_msg_resp:                    SIM.MainContainer.ESRContainer.St_exch_msg_resp,
+		St_exch_msg_system_info_Req:         SIM.MainContainer.ESRContainer.St_exch_msg_system_info_Req,         // Added
+		St_req_q_data_system_info_Req:       SIM.MainContainer.ESRContainer.St_req_q_data_system_info_Req,       // Added
+		StUpdateLocalDatabase:               SIM.MainContainer.ESRContainer.StUpdateLocalDatabase,               // Added
+		St_Exch_Msg_UpdateLocalDatabase:     SIM.MainContainer.ESRContainer.St_Exch_Msg_UpdateLocalDatabase,     // Added
+		St_req_q_data_StUpdateLocalDatabase: SIM.MainContainer.ESRContainer.St_req_q_data_StUpdateLocalDatabase, // Added
+		ENVM:                                SIM.MainContainer.UtilContainer.EnvironmentManager,
+		PUM:                                 SIM.MainContainer.UtilContainer.PasswordUtilManager,
+		Message_queue_manager:               SIM.MainContainer.UtilContainer.MessageQueueManager,
+		TCUM:                                SIM.MainContainer.UtilContainer.TypeConversionUtilManager,
+		LoggerManager:                       SIM.MainContainer.UtilContainer.TransactionManager.LoggerManager,
+		TransactionManager:                  SIM.MainContainer.UtilContainer.TransactionManager,
+		SCM:                                 SIM.MainContainer.UtilContainer.SocketManager,          // Added
+		OCM:                                 SIM.MainContainer.UtilContainer.OrderConversionManager, // Added
+		Max_Pack_Val:                        SIM.MainContainer.ESRGlobalValueContainer.Max_Pack_Val,
+		DB:                                  SIM.MainContainer.UtilContainer.DB,
+		InitialQId:                          SIM.MainContainer.UtilContainer.InitialQId,
+		GlobalQId:                           SIM.MainContainer.UtilContainer.GlobalQId,
+		ActualResponseTrigger:               SIM.MainContainer.UtilContainer.ActualResponseTrigger,
+		ErrorResponseTrigger:                SIM.MainContainer.UtilContainer.ErrorResponseTrigger,
 	}
 
-	initResult := VarEsr.FnClnEsrClnt()
-	if initResult != 0 {
-		SIM.MainContainer.UtilContainer.LoggerManager.LogError(SIM.MainContainer.UtilContainer.ServiceName, " Fn_logoff_from_TAP() failed with result code: %d", initResult)
+	initResult := VarEsr.FnBatInit()
+	if initResult != nil {
+		SIM.MainContainer.UtilContainer.LoggerManager.LogError(SIM.MainContainer.UtilContainer.ServiceName, "[ESRInitialization()] Recieved Error from FnBatInit() : %W", initResult)
 		return -1
 	}
 
