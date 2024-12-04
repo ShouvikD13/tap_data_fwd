@@ -14,6 +14,7 @@ import (
 	typeconversionutil "DATA_FWD_TAP/util/TypeConversionUtil"
 	"bytes"
 	"encoding/binary"
+	"sync"
 
 	"fmt"
 	"time"
@@ -245,6 +246,23 @@ func (ESRM *ESRManager) FnBatInit() error {
 	*/
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Initialization successful Now we are going to call the go routines ")
+
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		ESRM.FnSendThread()
+	}()
+	go func() {
+		defer wg.Done()
+
+		ESRM.FnRecieveThread()
+	}()
+
+	wg.Wait()
 
 	return nil
 }
