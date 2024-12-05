@@ -160,6 +160,7 @@ func (SIM *ServiceInitializationManager) ESRInitialization() int {
 	// }
 
 	VarEsr := &esr.ESRManager{
+		ServiceName:                         SIM.MainContainer.ClientGlobalValueContainer.CLastActRef,
 		Req_q_data:                          SIM.MainContainer.ESRContainer.Req_q_data,
 		St_exch_msg:                         SIM.MainContainer.ESRContainer.St_exch_msg,
 		St_int_header:                       SIM.MainContainer.ESRContainer.St_int_header, // Added
@@ -172,6 +173,7 @@ func (SIM *ServiceInitializationManager) ESRInitialization() int {
 		StUpdateLocalDBData:                 SIM.MainContainer.ESRContainer.StUpdateLocalDBData, // Added
 		St_exch_msg_Log_on:                  SIM.MainContainer.ESRContainer.St_exch_msg_Log_on,
 		St_exch_msg_resp:                    SIM.MainContainer.ESRContainer.St_exch_msg_resp,
+		St_system_info_req:                  SIM.MainContainer.ESRContainer.St_system_info_req,
 		St_exch_msg_system_info_Req:         SIM.MainContainer.ESRContainer.St_exch_msg_system_info_Req,         // Added
 		St_req_q_data_system_info_Req:       SIM.MainContainer.ESRContainer.St_req_q_data_system_info_Req,       // Added
 		StUpdateLocalDatabase:               SIM.MainContainer.ESRContainer.StUpdateLocalDatabase,               // Added
@@ -187,8 +189,11 @@ func (SIM *ServiceInitializationManager) ESRInitialization() int {
 		OCM:                                 SIM.MainContainer.UtilContainer.OrderConversionManager, // Added
 		Max_Pack_Val:                        SIM.MainContainer.ESRGlobalValueContainer.Max_Pack_Val,
 		DB:                                  SIM.MainContainer.UtilContainer.DB,
+		Args:                                SIM.MainContainer.ClientGlobalValueContainer.Args,
 		InitialQId:                          SIM.MainContainer.UtilContainer.InitialQId,
 		GlobalQId:                           SIM.MainContainer.UtilContainer.GlobalQId,
+		IP:                                  SIM.MainContainer.UtilContainer.IP,
+		Port:                                SIM.MainContainer.UtilContainer.PORT,
 		ActualResponseTrigger:               SIM.MainContainer.UtilContainer.ActualResponseTrigger,
 		ErrorResponseTrigger:                SIM.MainContainer.UtilContainer.ErrorResponseTrigger,
 	}

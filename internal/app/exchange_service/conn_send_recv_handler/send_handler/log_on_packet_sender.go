@@ -100,6 +100,9 @@ func NewSendManager(
 }
 func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 
+	SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Entering function with Data: %s", string(Data))
+
+	SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Writing data to TAP socket.")
 	if err := SM.SCM.WriteOnTapSocket(Data); err != nil {
 		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error writing to socket: %v", err)
 		return fmt.Errorf("error writing to socket: %w", err)
@@ -114,6 +117,7 @@ func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 	// 	}
 	// }
 
+	SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Waiting for LOGON_REQ response.")
 	if err := SM.waitForResponse("LOGON_REQ", util.LOGON_RESP_RCVD); err != nil {
 		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error waiting for LOGON_REQ response: %v", err)
 		return err
@@ -128,6 +132,7 @@ func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 		return err
 	}
 
+	SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Sending SystemInfoReq.")
 	SysInfoErr := SM.FnSystemInfoReq()
 	if SysInfoErr != nil {
 		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] FnSystemInfoReq encountered an error: %v", SysInfoErr)
@@ -137,7 +142,7 @@ func (SM *SendManager) FnDoXchngLogOn(Data []byte) error {
 	// for SM.SendRecvTrigger != util.LOGON_RESP_RCVD && SM.SendRecvTrigger != util.RCV_ERR {
 
 	// }
-
+	SM.LM.LogInfo(SM.ServiceName, "[FnDoXchngLogOn] Waiting for SystemInfoReq response.")
 	if err := SM.waitForResponse("SystemInfoReq", util.SID_RESP_RCVD); err != nil {
 		SM.LM.LogError(SM.ServiceName, "[FnDoXchngLogOn] Error waiting for SystemInfoReq response: %v", err)
 		return err

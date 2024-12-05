@@ -4,6 +4,7 @@ import (
 	"DATA_FWD_TAP/internal/initializers"
 	"DATA_FWD_TAP/util"
 	"log"
+	"sync"
 )
 
 func main() {
@@ -28,19 +29,40 @@ func main() {
 	logger := mainContainer.UtilContainer.LoggerManager.GetLogger()
 
 	// Normal Order Packing
-	if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
-		logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
-	}
+	// if initResult := serviceInitManager.ClnPackClntInitialization(); initResult != 0 {
+	// 	logger.Fatalf("[Fatal: Shutting down due to error in %s: ClnPackClntInitialization failed with result code %d", serviceName, initResult)
+	// }
 
 	// LogOn Packing
-	if initResult := serviceInitManager.LogOnToTapInitialization(); initResult != 0 {
-		logger.Fatalf("Fatal: Shutting down due to error in %s: LogOnToTapInitialization failed with result code %d", serviceName, initResult)
-	}
+	// if initResult := serviceInitManager.LogOnToTapInitialization(); initResult != 0 {
+	// 	logger.Fatalf("Fatal: Shutting down due to error in %s: LogOnToTapInitialization failed with result code %d", serviceName, initResult)
+	// }
+
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		val := serviceInitManager.ESRInitialization()
+		if val != 0 {
+			logger.Fatalf("[Fatal] Shutting down due to error in ESRInitialization. Error code: %d", val)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if initResult := serviceInitManager.LogOnToTapInitialization(); initResult != 0 {
+			logger.Fatalf("[Fatal] Shutting down due to error in LogOnToTapInitialization. Error code: %d, Service Name: %s", initResult, serviceName)
+		}
+	}()
+
+	wg.Wait()
 
 	//LOgOff Packing
-	if initResult := serviceInitManager.LogOffFromTapInitialization(); initResult != 0 {
-		logger.Fatalf("Fatal: Shutting down due to error in %s: LogOffFromTapInitialization failed with result code %d", serviceName, initResult)
-	}
+	// if initResult := serviceInitManager.LogOffFromTapInitialization(); initResult != 0 {
+	// 	logger.Fatalf("Fatal: Shutting down due to error in %s: LogOffFromTapInitialization failed with result code %d", serviceName, initResult)
+	// }
 
 	mainContainer.UtilContainer.LoggerManager.LogInfo(serviceName, "Main ended successfully.")
 }

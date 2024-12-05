@@ -502,14 +502,14 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 
 	/********************* Below Code is only for Testing remove that after Testing*************/
 
-	R_L_msg_type, receivedType, readErr := LOTTM.Message_queue_manager.ReadFromQueue(*LOTTM.GlobalQId)
-	if readErr != 0 {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId %d", *LOTTM.GlobalQId)
-		return -1
-	}
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId %d: received type: %v", *LOTTM.GlobalQId, receivedType)
+	// R_L_msg_type, receivedType, readErr := LOTTM.Message_queue_manager.ReadFromQueue(*LOTTM.GlobalQId)
+	// if readErr != 0 {
+	// 	LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [CLN_PACK_CLNT] [Error:  Failed to read from queue with GlobalQueueId %d", *LOTTM.GlobalQId)
+	// 	return -1
+	// }
+	// LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [CLN_PACK_CLNT] Successfully read from queue with GlobalQueueId %d: received type: %v", *LOTTM.GlobalQId, receivedType)
 
-	fmt.Println("Li Message Type:", R_L_msg_type)
+	// fmt.Println("Li Message Type:", R_L_msg_type)
 
 	return 0
 }

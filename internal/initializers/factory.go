@@ -23,7 +23,7 @@ func NewMainContainer(serviceName string, args []string, InitialQId *int, Global
 	clientGlobalValueContainer := NewClientGlobalValueContainer(args)
 	logOnGlobalValueContainer := NewLogOnGlobalValueContainer(args)
 	logOffGlobalValueContainer := NewLogOffGlobalValueContainer(args)
-	ESRGlobalValueContainer := NewESRGlobalValueContainer()
+	ESRGlobalValueContainer := NewESRGlobalValueContainer(args)
 	ESRContainer := NewESRContainer()
 
 	return &MainContainer{
@@ -166,6 +166,8 @@ func NewUtilContainer(serviceName string, args []string, InitialQId *int, Global
 		DB:                        DB,
 		InitialQId:                InitialQId,
 		GlobalQId:                 GlobalQId,
+		IP:                        Ip,
+		PORT:                      Port,
 		ActualResponseTrigger:     ActualResponseTrigger,
 		ErrorResponseTrigger:      ErrorResponseTrigger,
 	}
@@ -242,6 +244,7 @@ func NewESRContainer() *ESRContainer {
 		StUpdateLocalDBData:                 &models.StUpdateLocalDBData{}, // Added
 		St_exch_msg_Log_on:                  &models.St_exch_msg_Log_On{},
 		St_exch_msg_resp:                    &models.St_exch_msg_resp{},
+		St_system_info_req:                  &models.St_system_info_req{},
 		St_exch_msg_system_info_Req:         &models.St_exch_msg_system_info_Req{},         // Added
 		St_req_q_data_system_info_Req:       &models.St_req_q_data_system_info_Req{},       // Added
 		StUpdateLocalDatabase:               &models.StUpdateLocalDatabase{},               // Added
@@ -250,7 +253,9 @@ func NewESRContainer() *ESRContainer {
 	}
 }
 
-func NewESRGlobalValueContainer() *ESRGlobalValueContainer {
+func NewESRGlobalValueContainer(args []string) *ESRGlobalValueContainer {
 
-	return &ESRGlobalValueContainer{}
+	return &ESRGlobalValueContainer{
+		Args: args,
+	}
 }

@@ -36,6 +36,7 @@ type ESRManager struct {
 	StUpdateLocalDBData                 *models.StUpdateLocalDBData
 	St_exch_msg_Log_on                  *models.St_exch_msg_Log_On
 	St_exch_msg_resp                    *models.St_exch_msg_resp
+	St_system_info_req                  *models.St_system_info_req
 	St_exch_msg_system_info_Req         *models.St_exch_msg_system_info_Req
 	St_req_q_data_system_info_Req       *models.St_req_q_data_system_info_Req
 	StUpdateLocalDatabase               *models.StUpdateLocalDatabase
@@ -55,6 +56,7 @@ type ESRManager struct {
 	RecieveManager        *recvhandler.RecvManager
 	//------------- Variables from Factory ------------
 	DB         *gorm.DB
+	Args       []string
 	InitialQId *int
 	GlobalQId  *int
 	IP         string
@@ -82,6 +84,14 @@ type ESRManager struct {
 var Sequence_number int32 = 1
 
 func (ESRM *ESRManager) FnBatInit() error {
+
+	if len(ESRM.Args) < 7 {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] [Error] Insufficient arguments provided. Expected at least 7, but got %d", len(ESRM.Args))
+		return fmt.Errorf("[FnBatInit] Insufficient arguments provided. Expected at least 7, but got %d", len(ESRM.Args))
+	}
+
+	ESRM.OPM_PipeID = ESRM.Args[3]
+
 	// Query to fetch exchange code
 	queryToFetchExchangeCode := `
         SELECT OPM_XCHNG_CD 
@@ -98,19 +108,20 @@ func (ESRM *ESRManager) FnBatInit() error {
 
 	// Query to fetch trade details
 	queryToFetchTradeDetails := `
-        SELECT 
-            TO_CHAR(EXG_NXT_TRD_DT, 'dd-mon-yyyy'), 
-            TO_CHAR(EXG_NXT_TRD_DT, 'yyyymmdd'), 
-            TO_CHAR(EXG_SEC_TM, 'dd-mon-yyyy'), 
-            TO_CHAR(EXG_PART_TM, 'dd-mon-yyyy'), 
-            TO_CHAR(EXG_INST_TM, 'dd-mon-yyyy'), 
-            TO_CHAR(EXG_IDX_TM, 'dd-mon-yyyy')
-        FROM EXG_XCHNG_MSTR 
-        WHERE EXG_XCHNG_CD = ?`
+       SELECT 
+		TO_CHAR(EXG_NXT_TRD_DT::DATE, 'dd-mon-yyyy') AS nxt_trd_dt_fmt,
+		TO_CHAR(EXG_NXT_TRD_DT::DATE, 'yyyymmdd') AS nxt_trd_dt_yyyymmdd,
+		TO_CHAR(EXG_SEC_TM::DATE, 'dd-mon-yyyy') AS sec_tm_fmt,
+		TO_CHAR(EXG_PART_TM::DATE, 'dd-mon-yyyy') AS part_tm_fmt,
+		TO_CHAR(EXG_INST_TM::DATE, 'dd-mon-yyyy') AS inst_tm_fmt,
+		TO_CHAR(EXG_IDX_TM::DATE, 'dd-mon-yyyy') AS idx_tm_fmt
+		FROM EXG_XCHNG_MSTR 
+		WHERE EXG_XCHNG_CD = ?;
+	`
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Fetching trade details for exchange code: %s", ESRM.OPM_ExchangeCode)
 
-	row = ESRM.DB.Raw(queryToFetchTradeDetails, ESRM.OPM_ExchangeCode).Row()
+	row = ESRM.DB.Debug().Raw(queryToFetchTradeDetails, ESRM.OPM_ExchangeCode).Row()
 	if err := row.Scan(&ESRM.EXG_NextTradeDate, &ESRM.EXG_TradeRef, &ESRM.EXG_SecurityTime, &ESRM.EXG_ParticipantTime, &ESRM.EXG_InstrumentTime, &ESRM.EXG_IndexTime); err != nil {
 		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error fetching trade details: %v", err)
 		return err
@@ -131,7 +142,7 @@ func (ESRM *ESRManager) FnBatInit() error {
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Updating login status for pipe ID: %s", ESRM.OPM_PipeID)
 
-	if result := ESRM.DB.Exec(queryToUpdateOrderPipeMaster, ESRM.IP, ESRM.OPM_PipeID); result.Error != nil {
+	if result := ESRM.DB.Debug().Exec(queryToUpdateOrderPipeMaster, ESRM.IP, ESRM.OPM_PipeID); result.Error != nil {
 		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error updating OPM_ORD_PIPE_MSTR: %v", result.Error)
 		if abortResult := ESRM.TransactionManager.FnAbortTran(); abortResult == -1 {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Failed to abort transaction")
@@ -150,7 +161,7 @@ func (ESRM *ESRManager) FnBatInit() error {
 
 	ESRM.SendManager = sendhandler.NewSendManager(
 		ESRM.ServiceName,
-		ESRM.SendManager.St_system_info_req,
+		ESRM.St_system_info_req,
 		ESRM.St_net_hdr,
 		ESRM.St_exch_msg_system_info_Req,
 		ESRM.St_req_q_data_system_info_Req,

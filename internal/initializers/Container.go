@@ -29,6 +29,8 @@ type UtilContainer struct {
 	DB                        *gorm.DB
 	InitialQId                *int
 	GlobalQId                 *int
+	IP                        string
+	PORT                      string
 	ActualResponseTrigger     *chan int
 	ErrorResponseTrigger      *chan int
 }
@@ -120,6 +122,7 @@ type ESRContainer struct {
 	StUpdateLocalDBData                 *models.StUpdateLocalDBData // Added
 	St_exch_msg_Log_on                  *models.St_exch_msg_Log_On
 	St_exch_msg_resp                    *models.St_exch_msg_resp
+	St_system_info_req                  *models.St_system_info_req
 	St_exch_msg_system_info_Req         *models.St_exch_msg_system_info_Req         // Added
 	St_req_q_data_system_info_Req       *models.St_req_q_data_system_info_Req       // Added
 	StUpdateLocalDatabase               *models.StUpdateLocalDatabase               // Added
@@ -136,4 +139,5 @@ type ESRGlobalValueContainer struct {
 	IP              string
 	Port            string
 	AutoReconnect   *bool
+	Args            []string
 }
