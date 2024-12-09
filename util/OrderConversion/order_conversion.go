@@ -151,8 +151,8 @@ func (OCM *OrderConversionManager) ConvertNetHeaderToHostOrder(Net_hdr models.St
 func (OCM *OrderConversionManager) ConvertSignOnReqToNetworkOrder(St_sign *models.St_sign_on_req, int_header *models.St_int_header) {
 	OCM.St_sign_on_req = St_sign
 	OCM.ConvertIntHeaderToNetworkOrder(int_header)
-	OCM.St_sign_on_req.Li_user_id = OCM.ConvertInt64ToNetworkOrder(OCM.St_sign_on_req.Li_user_id)
-	OCM.St_sign_on_req.Li_last_password_change_date = OCM.ConvertInt64ToNetworkOrder(OCM.St_sign_on_req.Li_last_password_change_date)
+	OCM.St_sign_on_req.Li_user_id = OCM.ConvertInt32ToNetworkOrder(OCM.St_sign_on_req.Li_user_id)
+	OCM.St_sign_on_req.Li_last_password_change_date = OCM.ConvertInt32ToNetworkOrder(OCM.St_sign_on_req.Li_last_password_change_date)
 	OCM.St_sign_on_req.Si_branch_id = OCM.ConvertInt16ToNetworkOrder(OCM.St_sign_on_req.Si_branch_id)
 	OCM.St_sign_on_req.Li_version_number = OCM.ConvertInt32ToNetworkOrder(OCM.St_sign_on_req.Li_version_number)
 	OCM.St_sign_on_req.Li_batch_2_start_time = OCM.ConvertInt32ToNetworkOrder(OCM.St_sign_on_req.Li_batch_2_start_time)

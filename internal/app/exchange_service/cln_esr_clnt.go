@@ -90,6 +90,8 @@ func (ESRM *ESRManager) FnBatInit() error {
 		return fmt.Errorf("[FnBatInit] Insufficient arguments provided. Expected at least 7, but got %d", len(ESRM.Args))
 	}
 
+	ESRM.ServiceName = "CLN_ESR_CLNT"
+
 	ESRM.OPM_PipeID = ESRM.Args[3]
 
 	// Query to fetch exchange code
@@ -121,7 +123,7 @@ func (ESRM *ESRManager) FnBatInit() error {
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Fetching trade details for exchange code: %s", ESRM.OPM_ExchangeCode)
 
-	row = ESRM.DB.Debug().Raw(queryToFetchTradeDetails, ESRM.OPM_ExchangeCode).Row()
+	row = ESRM.DB.Raw(queryToFetchTradeDetails, ESRM.OPM_ExchangeCode).Row()
 	if err := row.Scan(&ESRM.EXG_NextTradeDate, &ESRM.EXG_TradeRef, &ESRM.EXG_SecurityTime, &ESRM.EXG_ParticipantTime, &ESRM.EXG_InstrumentTime, &ESRM.EXG_IndexTime); err != nil {
 		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error fetching trade details: %v", err)
 		return err
@@ -142,7 +144,7 @@ func (ESRM *ESRManager) FnBatInit() error {
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnBatInit] Updating login status for pipe ID: %s", ESRM.OPM_PipeID)
 
-	if result := ESRM.DB.Debug().Exec(queryToUpdateOrderPipeMaster, ESRM.IP, ESRM.OPM_PipeID); result.Error != nil {
+	if result := ESRM.DB.Exec(queryToUpdateOrderPipeMaster, ESRM.IP, ESRM.OPM_PipeID); result.Error != nil {
 		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Error updating OPM_ORD_PIPE_MSTR: %v", result.Error)
 		if abortResult := ESRM.TransactionManager.FnAbortTran(); abortResult == -1 {
 			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnBatInit] Failed to abort transaction")
@@ -337,10 +339,10 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] ESR TIME_STATS Before Reading From Socket %s", formattedTime)
 
 		// Step 2: Reading from the socket using the updated ReadFromTapSocket function
-		receivedResult, err := ESRM.SCM.ReadFromTapSocket(1024) // 1024 buffer
-		if err != nil {
-			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error while reading from socket: %v", err)
-			continue
+
+		netHdr, intHdr, ActualData, ErrManageRFT := ESRM.FnManageReadingFromTAP()
+		if ErrManageRFT != nil {
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[Main] Error in ManageReadingFromTAP: %v", ErrManageRFT)
 		}
 
 		// Step 3: Log after reading from the socket
@@ -348,9 +350,10 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] ESR TIME_STATS After Reading From Socket %s", formattedTime)
 
 		//Step 4: TAP validation ,  meaning valiating the checksum and sequence number
-		initResult := ESRM.RecieveManager.FnValidateTap(&Sequence_number, receivedResult)
-		if initResult != 0 {
-			continue // from for loop
+		err := ESRM.RecieveManager.FnValidateTap(&Sequence_number, &netHdr, ActualData)
+		if err != nil {
+			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[Main] Validation failed: %v", err)
+			break
 		}
 
 		ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] Validation Successfull")
@@ -360,50 +363,12 @@ func (ESRM *ESRManager) FnRecieveThread() {
 		// step 1: First i have to extract the net_hdr than after extract Int_hdr_then after actual message
 		// step 2: we will extract the int header and based on the tranactionCode we are going to extract actual message.
 
-		netHdrSize := binary.Size(ESRM.St_net_hdr)
-		intHdrSize := binary.Size(ESRM.St_int_header)
-
-		if len(receivedResult) < netHdrSize+intHdrSize {
-			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Received data is too small to contain headers.")
-			break
-		}
-
-		netHdrData := receivedResult[:netHdrSize]
-		netHdr := ESRM.St_net_hdr
-
-		err = binary.Read(bytes.NewReader(netHdrData), binary.BigEndian, netHdr)
-		if err != nil {
-			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing net_hdr: %v", err)
-			break
-		}
-
-		*netHdr = ESRM.OCM.ConvertNetHeaderToHostOrder(*netHdr)
-
-		intHdrData := receivedResult[netHdrSize : netHdrSize+intHdrSize]
-		intHdr := ESRM.St_int_header
-
-		err = binary.Read(bytes.NewReader(intHdrData), binary.BigEndian, intHdr)
-		if err != nil {
-			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing int_hdr: %v", err)
-			break
-		}
-		ESRM.OCM.ConvertIntHeaderToHostOrder(intHdr)
-
-		// Step 5: Extract actual message
-		ActualMessageSize := netHdr.S_message_length - int16(netHdrSize)
-		actualDataEnd := int16(netHdrSize+intHdrSize) + ActualMessageSize
-		if int(actualDataEnd) > len(receivedResult) {
-			ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Actual message size exceeds received data length.")
-			break
-		}
-		ActualData := receivedResult[netHdrSize+intHdrSize : actualDataEnd]
-
 		// Step 6: Process based on transaction code
 		switch intHdr.Si_transaction_code {
 		case util.SIGN_ON_REQUEST_OUT:
 			ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnRecieveThread] SIGN_ON_REQUEST_OUT STARTED")
 			if intHdr.Si_error_code != 0 {
-				err = binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_Error_Response)
+				err := binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_Error_Response)
 				if err != nil {
 					ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing St_Error_Response: %v", err)
 					break
@@ -420,12 +385,13 @@ func (ESRM *ESRManager) FnRecieveThread() {
 					*ESRM.ActualResponseTrigger <- util.LOGON_RESP_RCVD
 				}
 			} else {
-				err = binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_sign_on_res)
+				err := binary.Read(bytes.NewReader(ActualData), binary.BigEndian, ESRM.St_sign_on_res)
 				if err != nil {
 					ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing sign_on_res: %v", err)
 					break
 				}
-				ESRM.OCM.ConvertSignOnResToHostOrder(ESRM.St_sign_on_res, intHdr)
+				ESRM.OCM.ConvertSignOnResToHostOrder(ESRM.St_sign_on_res, &models.St_int_header{})
+				ESRM.St_sign_on_res.St_hdr = intHdr // I am assigning the int_hdr beacause the byte conversion of Header is already done
 
 				if initResult := ESRM.RecieveManager.FnSignOnRequestOut(); initResult != 0 {
 					initResult := ESRM.HandleErrorFromSignInOutAndErrorResponse()
@@ -486,7 +452,7 @@ func (ESRM *ESRManager) HandleErrorFromSignInOutAndErrorResponse() error {
     FROM OPM_ORD_PIPE_MSTR
     WHERE OPM_XCHNG_CD = ? 
       AND OPM_PIPE_ID = ?
-`
+	`
 
 	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[HandleError] Starting error handling logic for exchange code: %s and pipe ID: %s", ESRM.OPM_ExchangeCode, ESRM.OPM_PipeID)
 
@@ -548,4 +514,60 @@ func (ESRM *ESRManager) HandleErrorFromSignInOutAndErrorResponse() error {
 	}
 
 	return nil
+}
+
+func (ESRM *ESRManager) FnManageReadingFromTAP() (models.St_net_hdr, models.St_int_header, []byte, error) {
+
+	receivedHeader, err := ESRM.SCM.ReadFromTapSocket(22) // NET_HDR size is fixed at 22 bytes
+	if err != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error while reading from socket: %v", err)
+		return models.St_net_hdr{}, models.St_int_header{}, nil, err
+	}
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnManageReadingFromTAP] Recived the size of header from TAP %d", len(receivedHeader))
+
+	netHdr := ESRM.St_net_hdr
+	IntHDR := ESRM.St_int_header
+	intHdrSize := binary.Size(ESRM.St_int_header)
+
+	err = binary.Read(bytes.NewReader(receivedHeader), binary.BigEndian, netHdr)
+	if err != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnRecieveThread] Error parsing net_hdr: %v", err)
+		return models.St_net_hdr{}, models.St_int_header{}, nil, err
+	}
+
+	*netHdr = ESRM.OCM.ConvertNetHeaderToHostOrder(*netHdr)
+
+	// now i am assuming that i have saved the va;ues in the NET_HDR structure . And i am able to access  these values .
+	// Brfore usig those values i am going to TakeLg of all the values prsent inthe NET HDR.
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnManageReadingFromTAP] Checksum received: %x", netHdr.C_checksum)
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnManageReadingFromTAP] Sequence Number: %d", netHdr.I_seq_num)
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnManageReadingFromTAP] Message Length: %d", netHdr.S_message_length)
+
+	PacketSize := netHdr.S_message_length - 22
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnManageReadingFromTAP] Calculated Packet Size: %d", PacketSize)
+
+	receivedPacket, err1 := ESRM.SCM.ReadFromTapSocket(PacketSize) // reading Actual Packet
+	if err1 != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnManageReadingFromTAP] Error reading packet from TAP-socket: %v", err1)
+		return models.St_net_hdr{}, models.St_int_header{}, nil, err
+	}
+
+	ESRM.LoggerManager.LogInfo(ESRM.ServiceName, "[FnManageReadingFromTAP] Recived the size of Packet from TAP %d", len(receivedPacket))
+
+	intHdrData := receivedPacket[:intHdrSize]
+
+	err = binary.Read(bytes.NewReader(intHdrData), binary.BigEndian, IntHDR)
+	if err != nil {
+		ESRM.LoggerManager.LogError(ESRM.ServiceName, "[FnManageReadingFromTAP] Error parsing int_hdr: %v", err)
+		return models.St_net_hdr{}, models.St_int_header{}, nil, err
+	}
+	ESRM.OCM.ConvertIntHeaderToHostOrder(IntHDR)
+
+	// fmt.Println("Printing the hecksum in [FnManageReadingFromTAP] ", netHdr.C_checksum)
+	// time.Sleep(time.Second * 5)
+
+	return *netHdr, *IntHDR, receivedPacket, err
 }

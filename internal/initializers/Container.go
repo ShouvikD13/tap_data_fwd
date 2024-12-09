@@ -73,10 +73,10 @@ type LogOnContainer struct {
 
 type LogOnGlobalValueContainer struct {
 	CPipeID           string
-	UserID            int64
+	UserID            int32
 	MaxPackVal        int
 	OpmLoginStatus    int
-	OpmUserID         int64
+	OpmUserID         int32
 	OpmExistingPasswd string
 	OpmNewPasswd      sql.NullString
 	OpmLstPswdChgDt   string

@@ -93,50 +93,45 @@ func NewRecvManager(
 
 */
 
-func (RM *RecvManager) FnValidateTap(exgSeq *int32, wholePtrData []byte) int {
+func (RM *RecvManager) FnValidateTap(exgSeq *int32, NetHDR *models.St_net_hdr, DataRecievedFromTap []byte) error {
 
-	// Step 1: Validate the received buffer size
-	headerSize := binary.Size(RM.NetHDR)
-	if len(wholePtrData) < headerSize {
+	headerSize := binary.Size(NetHDR)
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] calculated size for Net_HDR: %d", headerSize)
+	if len(DataRecievedFromTap) < headerSize {
 		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error: Packet data is too small to contain header")
-		return -1
+		return fmt.Errorf("packet data too small; expected at least %d bytes, got %d bytes", headerSize, len(DataRecievedFromTap))
 	}
 
-	// Step 2: Copy data to the NetHdr structure and Perform Order Conversion
-	reader := bytes.NewReader(wholePtrData[:headerSize])
-	err := binary.Read(reader, binary.BigEndian, &RM.NetHDR)
-	if err != nil {
-		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error reading net header: %v", err)
-		return -1
-	}
-	// order conversion
-	RM.OCM.ConvertNetHeaderToHostOrder(*RM.NetHDR)
-
-	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Sequence number of tap packet: %d", RM.NetHDR.I_seq_num)
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Sequence number of tap packet: %d", NetHDR.I_seq_num)
 	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Incoming sequence number: %d", *exgSeq)
-	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Sequence difference: %d", *exgSeq-RM.NetHDR.I_seq_num)
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Sequence difference: %d", *exgSeq-NetHDR.I_seq_num)
 
 	*exgSeq++
 
-	// Calculate the expected packet length
-	packetLength := int(RM.NetHDR.S_message_length) - headerSize
-	if packetLength < 0 || len(wholePtrData) < packetLength+headerSize {
-		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error: Invalid packet length")
-		return -1
+	packetLength := int(NetHDR.S_message_length) - headerSize
+	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] calculated size for 'NetHDR.S_message_length' message Length : %d", NetHDR.S_message_length)
+
+	if packetLength < 0 {
+		RM.LM.LogError(RM.ServiceName, "[ValidateTap] Error: Packet length is negative (invalid header length: %d)", packetLength)
+		return fmt.Errorf("invalid packet length: %d", packetLength)
 	}
 
-	// Step 3: Calculate MD5 digest on packet data
-	dataToDigest := wholePtrData[headerSize : headerSize+packetLength]
+	if len(DataRecievedFromTap) < packetLength {
+		RM.LM.LogError(RM.ServiceName, "[ValidateTap] Error: Packet data is smaller than expected size (expected: %d, got: %d)", headerSize+packetLength, len(DataRecievedFromTap))
+		return fmt.Errorf("packet data too small; expected %d bytes, got %d bytes", headerSize+packetLength, len(DataRecievedFromTap))
+	}
+
+	// dataToDigest := DataRecievedFromTap[headerSize : headerSize+packetLength]
+	dataToDigest := DataRecievedFromTap
 	digest := md5.Sum(dataToDigest)
 
-	// Step 4: Compare checksums
-	if !bytes.Equal(RM.NetHDR.C_checksum[:], digest[:]) {
-		RM.LM.LogError(RM.ServiceName, "[FnValidateTap] Error: Checksum validation failed")
-		return -1
+	if !bytes.Equal(NetHDR.C_checksum[:], digest[:]) {
+		RM.LM.LogError(RM.ServiceName, "[ValidateTap] Error: Checksum validation failed. Expected: %x, Received: %x", NetHDR.C_checksum, digest)
+		return fmt.Errorf("checksum validation failed; expected %x, got %x", NetHDR.C_checksum, digest)
 	}
 
 	RM.LM.LogInfo(RM.ServiceName, "[FnValidateTap] Checksum validation successful")
-	return 0
+	return nil
 }
 
 func (RM *RecvManager) FnSignOnRequestOut() int {

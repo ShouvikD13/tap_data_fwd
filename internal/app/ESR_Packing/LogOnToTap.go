@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"crypto/md5"
 	"database/sql"
-	"encoding/json"
+	"encoding/binary"
 	"fmt"
-	"io"
 	"reflect"
 	"strconv"
 	"strings"
-	"unsafe"
 
 	"DATA_FWD_TAP/internal/models"
 	"DATA_FWD_TAP/util"
@@ -39,11 +37,11 @@ type LogOnToTapManager struct {
 	TCUM                       *typeconversionutil.TypeConversionUtilManager
 	Message_queue_manager      *MessageQueue.MessageQueueManager
 	C_pipe_id                  string
-	UserID                     int64
+	UserID                     int32
 	Max_Pack_Val               int
 	//----------------------------------
 	Opm_loginStatus    int
-	Opm_userID         int64
+	Opm_userID         int32
 	Opm_existingPasswd string
 	Opm_newPasswd      sql.NullString
 	Opm_LstPswdChgDt   string
@@ -411,9 +409,12 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	/********************** Body Done ********************/
 
 	/********************** Net_Hdr Starts ********************/
+
 	LOTTM.OCM.ConvertSignOnReqToNetworkOrder(LOTTM.St_sign_on_req, LOTTM.Int_header) // Here we are converting all the numbers to Network Order
 
-	LOTTM.St_net_hdr.S_message_length = int16(unsafe.Sizeof(LOTTM.St_sign_on_req) + unsafe.Sizeof(LOTTM.St_net_hdr)) // 1 NET_FDR
+	// LOTTM.St_sign_on_req
+	// binary.Size(LOTTM.St_net_hdr)
+	LOTTM.St_net_hdr.S_message_length = int16(binary.Size(LOTTM.St_sign_on_req) + binary.Size(LOTTM.St_net_hdr)) // 1 NET_FDR
 	seqNum, err13 := LOTTM.TCUM.GetResetSequence(LOTTM.DB, LOTTM.C_pipe_id, LOTTM.Exg_NxtTrdDate)
 	if err13 != 0 {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, "[LogOnToTap] Error retrieving sequence number: %v", err)
@@ -421,20 +422,26 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	}
 	LOTTM.St_net_hdr.I_seq_num = seqNum // 2 NET_HDR
 
-	hasher := md5.New()
+	// hasher := md5.New()
 
-	oeReqResString, err := json.Marshal(LOTTM.St_sign_on_req) // to convert the structure in string
-	if err != nil {
-		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: failed to convert St_sign_on_req to string: %v", err)
-	}
-	io.WriteString(hasher, string(oeReqResString))
+	// oeReqResByte, err := json.Marshal(LOTTM.St_sign_on_req) // to convert the structure in string
+	// if err != nil {
+	// 	LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: failed to convert St_sign_on_req to string: %v", err)
+	// }
 
-	checksum := hasher.Sum(nil)
-	copy(LOTTM.St_net_hdr.C_checksum[:], fmt.Sprintf("%x", checksum)) // 3 NET_FDR
+	// testBuffer := new(bytes.Buffer)
+	// var testBufferByte [278]byte
 
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_net_hdr` S_message_length: %d", LOTTM.St_net_hdr.S_message_length)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_net_hdr` I_seq_num: %d", LOTTM.St_net_hdr.I_seq_num)
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_net_hdr` C_checksum: %s", string(LOTTM.St_net_hdr.C_checksum[:]))
+	// // _ = LOTTM.TCUM.WriteAndCopy(testBuffer, LOTTM.St_sign_on_req, testBufferByte[:])
+
+	// // testing := models.St_sign_on_req{}
+	// fmt.Println("**************", (testBufferByte))
+
+	// hasher.Write(oeReqResByte)
+
+	// time.Sleep(time.Second * 10)
+
+	// checksum := hasher.Sum(nil)
 
 	/********************** Net_Hdr Done ********************/
 
@@ -455,6 +462,14 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_sign_on_req, LOTTM.St_exch_msg_Log_On.St_sign_on_req[:]); err != nil {
 		LOTTM.LoggerManager.LogError(LOTTM.ServiceName, " [LogOnToTap] [Error: Failed to write St_sign_on_req: %v", err)
 	}
+
+	digest := md5.Sum(LOTTM.St_exch_msg_Log_On.St_sign_on_req[:])
+
+	copy(LOTTM.St_net_hdr.C_checksum[:], digest[:]) // 3 NET_FDR
+
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_net_hdr` S_message_length: %d", LOTTM.St_net_hdr.S_message_length)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_net_hdr` I_seq_num: %d", LOTTM.St_net_hdr.I_seq_num)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, " [LogOnToTap] `St_net_hdr` C_checksum: %s", LOTTM.St_net_hdr.C_checksum[:])
 
 	// Write net_hdr and handle error
 	if err := LOTTM.TCUM.WriteAndCopy(buf, *LOTTM.St_net_hdr, LOTTM.St_exch_msg_Log_On.St_net_header[:]); err != nil {

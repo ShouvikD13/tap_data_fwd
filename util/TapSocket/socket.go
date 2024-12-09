@@ -42,8 +42,11 @@ func (sm *SocketManager) ConnectToTAP(ip, port string) (net.Conn, error) {
 }
 
 func (sm *SocketManager) WriteOnTapSocket(buffer []byte) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	sm.LM.LogInfo(sm.ServiceName, "Eneterd in 'WriteOnTapSocket' ")
+	// sm.mu.Lock()
+	// sm.LM.LogInfo(sm.ServiceName, "Eneterd in 'WriteOnTapSocket' ")
+	// defer sm.mu.Unlock()
+	sm.LM.LogInfo(sm.ServiceName, "Eneterd in 'WriteOnTapSocket' ")
 
 	net_header, message, err := sm.TCUM.ExtractNetHdrAndMessage(buffer)
 	if err != nil {
@@ -79,23 +82,21 @@ func (sm *SocketManager) WriteOnTapSocket(buffer []byte) error {
 	return nil
 }
 
-func (sm *SocketManager) ReadFromTapSocket(bufferSize int) ([]byte, error) {
+func (sm *SocketManager) ReadFromTapSocket(bufferSize int16) ([]byte, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	if sm.SocConnection == nil {
-		sm.LM.LogError(sm.ServiceName, "Read: Socket connection is not established.")
+		sm.LM.LogError(sm.ServiceName, "[ReadFromTapSocket] Socket connection is not established.")
 		return nil, fmt.Errorf("socket connection is not established")
 	}
 
-	buffer := make([]byte, bufferSize)
+	buffer := make([]byte, bufferSize) // on this line the error is occuring 'panic: runtime error: makeslice: len out of range'
 	n, err := sm.SocConnection.Read(buffer)
 	if err != nil {
-		sm.LM.LogError(sm.ServiceName, "Read: Error reading from socket: %v", err)
+		sm.LM.LogError(sm.ServiceName, "[ReadFromTapSocket] Error reading from socket: %v", err)
 		return nil, fmt.Errorf("error reading from socket: %w", err)
 	}
-
-	sm.LM.LogInfo(sm.ServiceName, "Read: Successfully read %d bytes from socket.", n)
 	return buffer[:n], nil
 }
 

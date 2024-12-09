@@ -464,13 +464,13 @@ func (o *St_order_flags) GetFlagValue(flag uint16) bool {
 
 type St_sign_on_req struct {
 	St_hdr                       [40]byte //St_int_header
-	Li_user_id                   int64
+	Li_user_id                   int32
 	C_reserved_1                 [8]byte
 	C_password                   [util.LEN_PASSWORD]byte
 	C_reserved_2                 [8]byte
 	C_new_password               [util.LEN_PASSWORD]byte
 	C_trader_name                [util.LEN_TRADER_NAME]byte
-	Li_last_password_change_date int64
+	Li_last_password_change_date int32
 	C_broker_id                  [util.LEN_BROKER_ID]byte
 	C_filler_1                   byte
 	Si_branch_id                 int16

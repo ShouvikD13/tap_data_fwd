@@ -449,6 +449,7 @@ func (SM *SendManager) waitForResponse(operation string, expectedResponse int) e
 
 		errMsg := fmt.Sprintf("[%s] Timeout waiting for %s response.", SM.ServiceName, operation)
 		SM.LM.LogError(SM.ServiceName, errMsg)
+		SM.LM.LogError(SM.ServiceName, "HERE")
 		return fmt.Errorf("timeout during %s operation", operation)
 	}
 
