@@ -46,7 +46,6 @@ type ClnPackClntManager struct {
 	TCUM                     *typeconversionutil.TypeConversionUtilManager
 	Args                     []string
 	Db                       *gorm.DB
-	QueueId                  int
 	InitialQId               *int
 	GlobalQId                *int
 }
