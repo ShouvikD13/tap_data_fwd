@@ -1,0 +1,690 @@
+/**********************************************************************************************
+* Program     : cln_fo_trl_rcvclnt                                                            *
+*                                                                                             *
+* Description : This program will perform the followings :                                    *
+*               1. Connects to CEP system through socket.                                     *
+*               2. Accept records from CEP system through socket for trail SLTP order.        *
+*               2. Call service SFO_SLTRL_ORD.                                                *
+*                                                                                             *
+* Input Para. : 1. Program Name                                                               *
+*               2. Exchange Code                                                              *
+*                                                                                             *
+* Log : 09-Sept-2016 - Initial Release.(Kishor)                                               *
+**********************************************************************************************/
+/**** C header ****/
+#include <stdio.h>
+#include <sys/socket.h>
+
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <unistd.h>
+
+#include<errno.h>
+#include <fo_view_def.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_scklib_tap.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_signal.h>
+
+/* Process specific header  */
+#include <fn_env.h>
+#include <fn_log.h>
+#include <fn_ddr.h>
+#include <signal.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+
+#define DELIMITER '~'
+#define MAX_SCK_MSG   1024
+#define SCK_MSG_LENGTH   5
+
+/*Protoype of local functions*/
+int   fn_read_inifile(void);
+int   fn_send ( int  i_fd, char *ptr_c_stm, int  *ptr_i_sz);
+void  fn_sigusr2_hnd(int);
+int   fn_rcv_sck_msg(int, char*);
+void  fn_snd_stp_mail(char *, char*);
+
+char  c_ServiceName[33] = {'\0'} ;
+char  c_errmsg[256]     = {'\0'} ;
+char  c_xchng_cd[4]			= {'\0'} ;
+char  c_inpt_xchng_cd[4]= {'\0'} ;
+char  c_cep_ip[20]			= {'\0'} ;
+char  c_trg_name[30]		= {'\0'} ;
+char  c_trg_message[30]	= {'\0'} ;
+char  c_filter[20]			= {'\0'} ;
+char  c_trail_sck_msg[1024]= {'\0'};
+char  c_trg_got ='N';
+char* strptr;
+
+int 	i	= 0;
+int   i_cep_port  = 0;
+int   i_sleep_time= 0;
+int   i_exit_stts = 0;
+int   i_exp_cnt= 0;
+
+char c_filter2[32] = {'\0'} ;
+long  li_trail_trg_hnd=0;
+
+void CLN_FO_TRL_RCVCLNT(int argc, char *argv[] )
+{
+  FBFR32 *ptr_fml_Ibuf;
+
+  int   i_trail_sck_id = 0;
+  int   i_returncode = 0;
+  int   i_err[25]; 
+  int   i_ferr[25];
+  int   i_ch_val = 0;
+
+  char c_ordr_ref[19] 	= "\0";
+  char c_pipe_id[3]     = "\0";
+  char c_undrlyng[7]    = "\0";
+  char c_sem_map_vl[20] = "\0";
+  char c_srvc_nm[33]        = "\0";
+  char c_cln_mtch_accnt[11] = "\0";
+  char c_contract_desc[50]  = "\0";
+  char c_prdct_typ      = '\0';
+  char c_ordr_flw       = '\0';
+  char c_cep_flg        = '\0';
+
+  int  i_ordr_qty = 0;
+  int  i_cncl_qty = 0;
+  int  i_exec_qty = 0;
+
+  long l_sequence_no= 0;
+  long l_mdfctn_cntr= 0;
+	long l_cep_ltp_rt=0;
+	long l_inc_prc=0;
+
+  double  d_ltp_rt  = 0.0;
+  double  d_inc_prc = 0.0;
+
+  FBFR32    *ptr_fml_Sbuf;
+
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar v_rowid[26];
+    varchar v_trigger_time[23];
+  EXEC SQL END DECLARE SECTION;
+
+	TPINIT    *ptr_st_tpinfo;
+  INITBATDBGLVL("cln_fo_trl_rcvclnt");
+  strcpy(c_ServiceName,"cln_fo_trl_rcvclnt");
+
+  /*** Set the signal handler for signal SIGUSR2 ***/
+  ptr_fml_Ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+  if ( ptr_fml_Ibuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31005", TPMSG, c_errmsg  );
+    return;
+  }
+
+  if(fn_set_sgn_hnd(SIGUSR2, fn_sigusr2_hnd, c_ServiceName, c_errmsg) == -1)
+  {
+    fn_errlog(c_ServiceName, "S31010", LIBMSG, c_errmsg);
+    fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+    tpfree((char*)ptr_fml_Ibuf);
+    return;
+  }
+
+  if( fn_read_inifile() == -1)
+  {
+    fn_userlog(c_ServiceName,"Pipe Id :%s: - Error while reading ini file.",c_pipe_id);
+    fn_errlog(c_ServiceName, "S31015", LIBMSG, c_errmsg);
+    fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+    tpfree((char*)ptr_fml_Ibuf);
+    return;
+  }
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,":%s: Starts successfully.",c_ServiceName);
+    fn_userlog(c_ServiceName,"Input parametrs:");
+    fn_userlog(c_ServiceName,"Parameters from ini file:");
+    fn_userlog(c_ServiceName,"CEP IP address :%s:",c_cep_ip);
+    fn_userlog(c_ServiceName,"CEP Port :%d:",i_cep_port);
+    fn_userlog(c_ServiceName,"Sleep time :%d",i_sleep_time);
+  }
+
+  i_returncode = fn_crt_clnt_sck ( c_cep_ip,
+                               i_cep_port,
+                               &i_trail_sck_id,
+                               c_ServiceName ,
+                               c_errmsg );
+  if ( i_returncode == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31020", LIBMSG, c_errmsg);
+    fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+    tpfree((char*)ptr_fml_Ibuf);
+    return  ;
+  }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+  		fn_userlog(c_ServiceName,"Socket creation sucess ");
+		}
+
+  ptr_fml_Sbuf = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  if(ptr_fml_Sbuf == NULL)
+  {
+    fn_userlog(c_ServiceName,"Error while allocating ptr_fml_Sbuf");
+    fn_errlog(c_ServiceName,"S31025", DEFMSG, c_errmsg);
+    exit(-1);
+  }
+
+  i_exit_stts = DONT_EXIT;
+  c_trg_got = 'N';
+
+  while(i_exit_stts == DONT_EXIT)
+  {
+    MEMSET(c_ordr_ref);
+    MEMSET(c_undrlyng);
+    MEMSET(c_xchng_cd);
+    MEMSET(v_rowid);
+    MEMSET(c_pipe_id);
+    MEMSET(c_cln_mtch_accnt);
+    MEMSET(c_sem_map_vl);
+    MEMSET(v_trigger_time);
+    c_ordr_flw = ' ';
+    d_inc_prc = 0.0;
+    c_prdct_typ = ' ';
+    c_cep_flg = ' ';
+    d_ltp_rt = 0.0;
+    i_ordr_qty = 0;
+    i_exec_qty = 0;
+    i_cncl_qty = 0;
+    l_sequence_no = 0.0;
+		l_mdfctn_cntr	= 0.0;
+
+    /** receiving record from CEP server via socket **/
+    i_returncode = fn_rcv_sck_msg (i_trail_sck_id, c_trail_sck_msg);
+    if ( i_returncode == -1 )
+    {
+      fn_userlog(c_ServiceName,"TRAIL RCVCLT : msg received from socket is not proper.");
+      fn_userlog(c_ServiceName,"Wrong str:%s:", c_trail_sck_msg);
+      fn_errlog(c_ServiceName, "S31030", DEFMSG, c_errmsg);
+      fn_close_sck(i_trail_sck_id,c_ServiceName,c_errmsg);
+      fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+      tpfree((char*)ptr_fml_Ibuf);
+      tpfree((char*)ptr_fml_Sbuf);
+      return;
+    }
+
+    /** record coming from CEP contain "$" as a end character.
+        replacing "$" with '\0' **/
+    strptr = strchr(c_trail_sck_msg, '$');
+    if(strptr != NULL)
+    {
+      *strptr = '\0';
+    }
+    else
+    {
+      fn_userlog(c_ServiceName,"TRAIL RCVCLT : msg received from socket is not proper.");
+      fn_userlog(c_ServiceName,"Wrong str:%s:", c_trail_sck_msg);
+      fn_errlog(c_ServiceName, "S31035", DEFMSG, c_errmsg);
+      fn_close_sck(i_trail_sck_id,c_ServiceName,c_errmsg);
+      fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+      tpfree((char*)ptr_fml_Ibuf);
+      tpfree((char*)ptr_fml_Sbuf); 
+      return;
+    }
+    
+		/** record coming from CEP contain "~" as a delimiter. **/
+    /** CEP this record with strtok to get order refrence,stock code,order flow,mod counter,incremental price
+        exchange,product type,CEP flag, rowid,LTP **/
+    strptr = strtok(c_trail_sck_msg, "~");
+    i = 0;
+
+    if(strptr != NULL)
+    {
+      strcpy(c_ordr_ref, strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(c_sem_map_vl, strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(c_contract_desc, strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      c_ordr_flw = strptr[0];
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      sscanf(strptr, "%d", &l_mdfctn_cntr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      sscanf(strptr,"%lf",&d_inc_prc);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(c_xchng_cd,strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      c_prdct_typ = strptr[0];
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      c_cep_flg = strptr[0];
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(v_rowid.arr, strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(c_pipe_id,strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      sscanf(strptr,"%d",&i_ordr_qty);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      sscanf(strptr,"%d",&i_exec_qty);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      sscanf(strptr,"%d",&i_cncl_qty);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      sscanf(strptr,"%lf",&d_ltp_rt);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      sscanf(strptr,"%ld",&l_sequence_no);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(c_cln_mtch_accnt,strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(c_undrlyng, strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(strptr != NULL)
+    {
+      strcpy(v_trigger_time.arr, strptr);
+      strptr = strtok(NULL, "~");
+      i++;
+    }
+    if(i < 18)
+    {
+      fn_userlog(c_ServiceName,"TRAIL RCVCLT : msg received from socket is not proper.");
+      fn_userlog(c_ServiceName,"Wrong str:%s:", c_trail_sck_msg);
+      fn_errlog(c_ServiceName, "S31040", DEFMSG, c_errmsg);
+      fn_close_sck(i_trail_sck_id,c_ServiceName,c_errmsg);
+      fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+      tpfree((char*)ptr_fml_Ibuf);
+      tpfree((char*)ptr_fml_Sbuf);
+      return;
+    }
+
+    rtrim(v_rowid.arr);
+    rtrim(v_trigger_time.arr);
+
+    SETLEN(v_rowid);
+    SETLEN(v_trigger_time);
+
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"d_ltp_rt   :%lf:",d_ltp_rt);
+			fn_userlog(c_ServiceName,"d_inc_prc  :%lf:",d_inc_prc);
+		}
+
+		l_cep_ltp_rt= ((long)(d_ltp_rt*10000))/100;
+		l_inc_prc=((long)(d_inc_prc*10000))/100;
+		strcpy(c_srvc_nm,"SFO_SLTRL_ORD");
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"From CEP...");
+      fn_userlog(c_ServiceName,"Ord ref        :%s:",c_ordr_ref);
+      fn_userlog(c_ServiceName,"Sem Map        :%s:",c_sem_map_vl);
+      fn_userlog(c_ServiceName,"Contract Desc  :%s:",c_contract_desc);
+      fn_userlog(c_ServiceName,"Order flow     :%c:",c_ordr_flw);
+      fn_userlog(c_ServiceName,"Mod cnt        :%ld:",l_mdfctn_cntr);
+      fn_userlog(c_ServiceName,"Inc price      :%lf:",d_inc_prc);
+      fn_userlog(c_ServiceName,"Xchng          :%s:",c_xchng_cd);
+      fn_userlog(c_ServiceName,"Product type   :%c:",c_prdct_typ);
+      fn_userlog(c_ServiceName,"CEP flg        :%c:",c_cep_flg);
+      fn_userlog(c_ServiceName,"Rowid          :%s:",v_rowid.arr);
+      fn_userlog(c_ServiceName,"Pipe ID        :%s:",c_pipe_id);
+      fn_userlog(c_ServiceName,"Ordered qty    :%d:",i_ordr_qty);
+      fn_userlog(c_ServiceName,"Executed qty   :%d:",i_exec_qty);
+      fn_userlog(c_ServiceName,"Cancel qty     :%d:",i_cncl_qty);
+      fn_userlog(c_ServiceName,"LTQ            :%ld:",l_cep_ltp_rt);
+      fn_userlog(c_ServiceName,"Sequence no    :%ld:",l_sequence_no);
+      fn_userlog(c_ServiceName,"Match account  :%s:",c_cln_mtch_accnt);
+      fn_userlog(c_ServiceName,"Stock          :%s:",c_undrlyng);
+      fn_userlog(c_ServiceName,"Trigger time   :%s:",v_trigger_time.arr);
+    }
+
+    i_err[0]= Fchg32(ptr_fml_Sbuf, FFO_ORDR_RFRNC, 0,(char *)c_ordr_ref, 0);
+    i_ferr[0] = Ferror32;
+    i_err[1]= Fchg32(ptr_fml_Sbuf, FFO_MDFCTN_CNTR, 0,(char *)&l_mdfctn_cntr, 0);
+    i_ferr[1] = Ferror32;
+    i_err[2]= Fchg32(ptr_fml_Sbuf, FFO_PRDCT_TYP, 0,(char *)&c_prdct_typ, 0);
+    i_ferr[2] = Ferror32;
+    i_err[3]= Fchg32(ptr_fml_Sbuf, FFO_SERIES, 0,(char *)v_rowid.arr, 0);
+    i_ferr[3]= Ferror32;
+    i_err[4]= Fchg32(ptr_fml_Sbuf, FFO_ORDR_FLW, 0,(char *)&c_ordr_flw, 0);
+    i_ferr[4]= Ferror32;
+    i_err[5]= Fchg32(ptr_fml_Sbuf, FFO_PIPE_ID, 0,(char *)c_pipe_id, 0);
+    i_ferr[5]= Ferror32;
+    i_err[6]= Fchg32(ptr_fml_Sbuf, FFO_ORD_TOT_QTY, 0, (char *)&i_ordr_qty, 0);
+    i_ferr[6]= Ferror32;
+    i_err[7]= Fchg32(ptr_fml_Sbuf, FFO_EXEC_QTY, 0, (char *)&i_exec_qty, 0);
+    i_ferr[7]= Ferror32;
+    i_err[8]= Fchg32(ptr_fml_Sbuf, FFO_CANCL_QTY, 0, (char *)&i_cncl_qty, 0);
+    i_ferr[8]= Ferror32;
+    i_err[9]= Fchg32(ptr_fml_Sbuf, FFO_LST_TRD_PRC, 0, (char *)&l_cep_ltp_rt, 0);
+    i_ferr[9]= Ferror32;
+    i_err[10]= Fchg32(ptr_fml_Sbuf,FFO_UNDRLYNG, 0, (char *)c_undrlyng, 0);
+    i_ferr[10]= Ferror32;
+    i_err[11]= Fchg32(ptr_fml_Sbuf, FFO_XCHNG_CD, 0, (char *)c_xchng_cd, 0);
+    i_ferr[11]= Ferror32;
+    i_err[12]= Fchg32(ptr_fml_Sbuf, FFO_EBA_MTCH_ACT_NO, 0, (char *)c_cln_mtch_accnt, 0);
+    i_ferr[12]= Ferror32;
+    i_err[13]= Fchg32(ptr_fml_Sbuf, FFO_ORD_SEQ, 0, (char *)&l_sequence_no, 0);
+    i_ferr[13]= Ferror32;
+    i_err[14]= Fchg32(ptr_fml_Sbuf, FFO_OPN_PRC, 0, (char *)&l_inc_prc, 0);
+    i_ferr[14]= Ferror32;
+    i_err[15]= Fchg32(ptr_fml_Sbuf, FFO_STATUS_FLG, 0, (char *)&c_cep_flg, 0);
+    i_ferr[15]= Ferror32;
+    i_err[16]= Fchg32(ptr_fml_Sbuf, FFO_QT_TM, 0, (char *)v_trigger_time.arr, 0);
+    i_ferr[16]= Ferror32;
+    i_err[17]= Fchg32(ptr_fml_Sbuf, FFO_PRDCT_DESC, 0, (char *)c_contract_desc, 0);
+    i_ferr[17]= Ferror32;
+    i_err[18]= Fchg32(ptr_fml_Sbuf, FFO_STCK_CD, 0, (char *)c_sem_map_vl, 0);
+    i_ferr[18]= Ferror32;
+    i_err[19]= Fchg32(ptr_fml_Sbuf, FFO_SVC_NAME, 0, (char *)c_srvc_nm, 0);
+    i_ferr[19]= Ferror32;
+
+    for(i = 0; i < 20; i++)
+    {
+      if(i_err[i] == -1)
+      {
+        fn_userlog(c_ServiceName,"Fchg32 failed at i_cntr :%d:",i);
+        fn_errlog(c_ServiceName, "S31045", FMLMSG, c_errmsg);
+        fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+        continue;
+      }
+
+    }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Calling SFO_ORD_ROUT...."); 
+    }
+
+    i_ch_val = tpacall("SFO_ORD_ROUT", (char *)ptr_fml_Sbuf, 0, TPNOTRAN | TPNOREPLY);
+    if ( i_ch_val == -1 )
+    {
+      fn_userlog(c_ServiceName,"tpacall failed for SFO_ORD_ROUT....");
+      fn_errlog(c_ServiceName, "S31050", TPMSG, c_errmsg);
+      fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+      fn_close_sck(i_trail_sck_id,c_ServiceName,c_errmsg);
+      exit(1);
+    }
+
+    i_ch_val = fn_chk_stts ( c_ServiceName ) ;
+
+    if ( i_ch_val == -1 )
+    {
+      fn_userlog(c_ServiceName,"tpacall failed for SFO_SLTRL_ORD....");
+      fn_errlog(c_ServiceName, "S31055", TPMSG, c_errmsg);
+      fn_snd_stp_mail(c_ServiceName, c_xchng_cd);
+      tpfree((char*)ptr_fml_Ibuf);
+      tpfree((char*)ptr_fml_Sbuf);
+      return ;
+    }
+	}
+  tpfree((char*)ptr_fml_Ibuf);
+  tpfree((char*)ptr_fml_Sbuf);
+  return;
+}
+int fn_read_inifile()
+{
+  int i_ch_val;
+  char c_FileName[256];
+  char c_sleep_time[4];
+  char *ptr_c_tmp;
+
+  MEMSET(c_FileName);
+  MEMSET(c_errmsg);
+
+  /** Get CEP IP Address. **/
+
+  ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName, "FOTRL_IP" );
+
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31060", LIBMSG, c_errmsg);
+    return -1;
+  }
+  else
+  {
+    strcpy(c_cep_ip, ptr_c_tmp );
+  }
+
+  /** Get CEP Port Number. **/
+  if( strcmp(c_xchng_cd,"NFO") == 0 )
+  {
+    ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName, "FOTRL_RCV_PRT" );
+  }
+  else if( strcmp(c_xchng_cd,"BFO") == 0 )
+  {
+    ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName, "FOTRL_RCV_PRT_BFO" );
+  }
+  else
+  {
+    fn_userlog(c_ServiceName,"Wrong Exchange code Passed");
+    return -1;
+  }
+
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31065", LIBMSG, c_errmsg);
+    return -1;
+  }
+  i_cep_port  = atoi(ptr_c_tmp);
+
+
+  return 0;
+}
+
+int fn_bat_init(int argc, char *argv[])
+{
+  char c_ServiceName [ 33 ];
+  char c_errmsg[256];
+  char *ptr_c_tmp;
+
+  strcpy( c_ServiceName, "cln_fo_trl_rcvclnt" );
+
+  MEMSET(c_xchng_cd);
+  strcpy(c_xchng_cd,argv[2]);
+
+  if( argc != 4)
+  {
+    fn_userlog(c_ServiceName,
+    "Usage - cln_fo_trl_rcvclnt <ini FILE><Exchange code><Pipe ID>");
+    fn_snd_stp_mail(c_ServiceName,argv[2]);
+    return ( -1 );
+  }
+
+  MEMSET(c_filter2);
+  strcpy( c_filter2, "FFO_FILTER=='NA'");
+
+  fn_userlog(c_ServiceName," c_filter2 :%s:, c_xchng_cd :%s:",c_filter2,c_xchng_cd);
+
+  li_trail_trg_hnd =  tpsubscribe ( "TRG_STOP_FOTRAIL_RCVCLNT",
+                                       (char *)c_filter2,
+                                       (TPEVCTL *)NULL,
+                                       0);
+  if ( li_trail_trg_hnd == -1 )
+  {
+     fn_errlog( c_ServiceName, "S31070",LIBMSG,c_errmsg);
+     fn_snd_stp_mail(c_ServiceName,c_xchng_cd);
+     return -1;
+  }
+
+  fn_var = CLN_FO_TRL_RCVCLNT;
+  return ( 0 );
+}
+
+int fn_send ( int  i_fd,
+              char *ptr_c_stm,
+              int  *ptr_i_sz)
+{
+  int  i_res;
+  char *ptr_c_temp_stm;
+  int  i_written;
+  int  i_left;
+
+  i_res = 100;
+
+  ptr_c_temp_stm = ptr_c_stm;
+  i_written = 0;
+  i_left = *ptr_i_sz;
+
+  while (i_left > 0)
+  {
+    if ((i_written = write(i_fd, ptr_c_temp_stm, i_left)) <= 0)
+    {
+      if (errno == EINTR)
+      {
+        i_written = 0;
+      }
+      else
+      {
+        i_res = -1;
+        *ptr_i_sz = *ptr_i_sz - i_left;
+        return(i_res);
+      }
+    }
+    i_left = i_left - i_written;
+    ptr_c_temp_stm = ptr_c_temp_stm + i_written;
+  }
+
+  *ptr_i_sz = *ptr_i_sz - i_left;
+  return (i_res);
+}
+
+void fn_sigusr2_hnd(int i_signal_no)
+{
+
+  fn_userlog(c_ServiceName,"TRAIL RCV CLNT process stopped:Caught signal |%d|", i_signal_no);
+  i_exit_stts = EXIT;
+  fn_set_break_sck();
+}
+
+int fn_rcv_sck_msg(int i_sck_id, char* c_msg)
+{
+  char  c_sck_msg[MAX_SCK_MSG];
+  int   i_msg_size;
+  char  c_msg_length[SCK_MSG_LENGTH];
+    char  c_errmsg[256];
+
+  MEMSET(c_sck_msg);
+
+  i_msg_size = SCK_MSG_LENGTH;      /** Length will be present in this 4 byte **/
+
+  if(  fn_readn (i_sck_id,c_msg_length,i_msg_size,0,c_ServiceName,c_errmsg) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31075", UNXMSG, c_errmsg);
+    return -1;
+  }
+
+  c_msg_length[SCK_MSG_LENGTH - 1] = '\0';
+  sscanf(c_msg_length, "%d", &i_msg_size);
+
+  i_msg_size = i_msg_size+1;
+
+  if(  fn_readn (i_sck_id,c_sck_msg,i_msg_size,0,c_ServiceName,c_errmsg) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31080", UNXMSG, c_errmsg);
+    return -1;
+  }
+
+  c_sck_msg[i_msg_size] = '\0';
+  memcpy(c_msg, c_sck_msg, i_msg_size);
+
+  return 0;
+}
+
+void fn_bat_term(int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg(char *c_ServiceName, int i_trg_typ)
+{
+  if ( strcmp ( c_trg_msg, "TRG_STOP_FOTRAIL_RCVCLNT" ) == 0 )
+  {
+    fn_userlog(c_ServiceName,"inside fn_prcs_trg TRG_STOP_FOTRAIL_RCVCLNT");
+
+    i_exit_stts=EXIT;
+  	fn_set_break_sck();
+  }
+  return ( 0 );
+
+}
+
+void fn_snd_stp_mail(char* c_ServiceName, char* c_xchng_cd)
+{
+  char c_command[256];
+  sprintf(c_command, "%s/sh_scripts/auto_fo_trail_mail.sh %s %s", tuxgetenv("HOME"), c_ServiceName, c_xchng_cd);
+  system(c_command);
+}

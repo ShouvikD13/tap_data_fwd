@@ -1,0 +1,957 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_CALC_RSK 	                                        */
+/*                                                                            */
+/*  Input             : Time for expiration				FFO_DAY_TO_EXP							*/
+/*                      Product type							FFO_PRDCT_TYP								*/
+/*                      option type								FFO_OPT_TYP									*/
+/*                      Stock category						FFO_CTGRY_INDSTK						*/
+/*                      Strike price							FFO_STRIKE_PRC							*/
+/*                      Index Spot Price					FFO_INDEX										*/
+/*                      [Nifty current Level ]                                */
+/*                     	User Index spot level			FFO_USER_INDEX							*/
+/*                     	Stock Spot Price					FFO_STCK_PRICE							*/
+/*                      [Spot price of stock at                               */
+/*                       Nifty current Level ]                                */
+/*                      Base Price								FFO_BASE_ORD_VAL						*/
+/*                      [Price of underlying                                  */
+/*                      at which user executed      							  				  */
+/*                      the trade.             ]     							  				  */
+/*                      Risk Free Interest				FFO_INTRST_RT								*/
+/*                      Dividend									FFO_PLG_RT									*/
+/*                      Beta											FFO_AVM_PRCNT								*/
+/*                      Quantity									FFO_OPNPSTN_QTY							*/
+/*                      Order Flow Flag						FFO_OPNPSTN_FLW							*/
+/*                      Implied volatility Flag		FFO_RQST_TYP	       				*/
+/*                      												  [ R - Real time IV ]				*/
+/*                      												  [ U - User defined IV ]			*/
+/*                      Implied volatility				FFO_EFF_LMT_RT							*/
+/*                      												  [This FML will be 					*/
+/*                      													considered only when 				*/
+/*                      													FFO_RQST_TYP is 'U' ]				*/
+/*                      Target           					FFO_EFF_LTP									*/
+/*                      												  [This FML will be 					*/
+/*                      													considered only when 				*/
+/*                      													FFO_RQST_TYP is 'R' ]				*/
+/*                     	Interval between spot  		FFO_INTERVAL 								*/
+/*                      levels																								*/
+/*                     	No of spot levels 				FFO_COUNT		 								*/
+/*                      																											*/
+/*                                                                            */
+/*  Output            : Spot levels												FFO_INDEX						*/
+/*                      Call/Put rate											FFO_RATE						*/
+/*                      Delta															FFO_SOMC_PRCNT			*/
+/*                      D1																FFO_U_MM_EX_MRGN		*/
+/*                      D2  															FFO_U_MM_SP_MRGN		*/
+/*                      P&L at  spot levels								FFO_RLZD_PL					*/
+/*                      Calculated implied volatility			FFO_FUT_PRC					*/
+/*                      Basket1 exposure at spot levels,	FFO_BO_AMT_BLKD			*/
+/*                      Basket1 exposure at  spot levels	FFO_SO_AMT_BLKD			*/
+/*                      																											*/
+/*  Description       : Service to calculate the net Profit and Loss and net  */
+/*                      exposure of given portfolio using Black & Scholes  		*/
+/*                      formula.																							*/
+/*                      																											*/
+/*  Log               :                                                     	*/ 
+/*                      																											*/
+/******************************************************************************/
+/* 01-Dec-2009 		Ver 1.0  					Indrajit Bhadange													*/
+/* 29-May-2012 		Ver 1.1  					Swati Bharankar                           */
+/* 01-Oct-2018 		Ver VQC  					Parag Kanojia		| VERSION QUALITY CONTROL	*/
+/******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include<math.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+
+/*Add header files here */
+#include <fo.h>
+#include <fo_fml_def.h>
+/*#include <fml_def.h>				*** Commented in VQC ***/
+/***	#include <fn_battmpt.h>			*** Commented in VQC ***/
+/*#include <fn_tuxlib.h>			*** Commented in VQC ***/
+#include <fn_log.h>			 
+#include <fn_read_debug_lvl.h>			
+
+#ifndef Pi
+#define Pi 3.141592653589793238462643
+#endif
+
+double BlackScholes(char CallPutFlag, 
+										char Calculation_flg, 
+										char Ctgry_flg, 
+										double IDX_SPT, 
+										double UNDRLYNG_SPT, 
+										double SPT_LEV, 
+										double STRIKE, 
+										double T, 
+										double r, 
+										double v, 
+										double d_betaval,
+                    char *c_ServiceName);
+
+double CND( double X );
+double ND( double X);
+double impliedvol(double target,
+                  double idx_spot,
+                  double undrlyng_spot,
+                  double strike_prc,
+                  double rsk_free_int,
+                  double dividend,
+                  double time_for_exp,
+                  char option_type,
+                  char c_ctgry_flg,
+									double beta,
+									char *c_ServiceName);
+double delta( char option, double divdnd, double time_expr, double d );
+int fn_calc_exp(double d_quantity,
+                double d_price,
+                double d_delta,
+                char c_prdtp,
+                char c_buysellflg,
+                char c_opttp,
+                double *d_b1exp,
+                double *d_b2exp);
+
+
+double d1 = 0.0, d2 = 0.0;			/*** variable initialized in VQC ***/
+
+
+void SFO_CALC_RSK( TPSVCINFO *rqst )
+{
+
+  FBFR32 *ptr_fml_Ibuf;
+  FBFR32 *ptr_fml_Obuf;
+
+  char c_ServiceName [ 33 ];
+  varchar c_err_msg [ 256 ];					/*** Data type changed from char to varchar in VQC ***/
+/*  char c_new_cntrct_tag ;	*** Commented in VQC ***/
+	char c_trd_flg = '\0';							/*** variable initialized in VQC ***/
+
+  /***	int i_returncode;							*** Commented in VQC ***/	
+
+	double d_time_exp = 0.0;						/*** variable initialized in VQC ***/
+	char c_prdct_typ = '\0';						/*** variable initialized in VQC ***/
+	char c_opt_typ = '\0';							/*** variable initialized in VQC ***/
+	double	d_strk_price = 0.0;					/*** variable initialized in VQC ***/
+	double	d_idx_spot_price = 0.0; /* Current Spot level of NIFTY  *** variable initialized in VQC ***/
+	double	d_new_idx_spot_price = 0.0; /* Ver 1.1 -- for Index stock other than NIFTY *** variable initialized in VQC ***/
+	double	d_usr_idx_spot_price = 0.0; /* User Input Index Level *** variable initialized in VQC ***/ 
+	double	d_stock_spot = 0.0;			/* Spot price of stock at current NIFTY *** variable initialized in VQC ***/ 
+	double	d_base_price = 0.0;     /* Price at which trader bought/sold the underlying *** variable initialized in VQC ***/
+	double	d_ltp_prc = 0.0;     /* The second component of P&L formula, P&L=Theoritical Price - LTP(d_ltp_prc)*** variable initialized in VQC ***/
+	double	d_fut_cls_prc = 0.0; 			/*** variable initialized in VQC ***/
+	double	d_intrst_rt	= 0.0;   			/*** variable initialized in VQC ***/
+	double	d_dvdnd	= 0.0;						/*** variable initialized in VQC ***/
+	double	d_beta = 0.0;							/*** variable initialized in VQC ***/
+	char c_pstn_flg = '\0';						/*** variable initialized in VQC ***/
+	char c_iv_rqst = '\0';						/*** variable initialized in VQC ***/
+	char c_ctgry = '\0';							/*** variable initialized in VQC ***/
+	
+	/*** Ver 1.1 Starts ***/
+
+	char c_ltq_underlying[7];
+	char c_xchng_cd[4];
+	char c_ltq_xchng_cd[4];
+
+	/*** Ver 1.1 Ends   ***/
+
+	/*** MEMSET done in VQC Starts ***/
+	MEMSET(c_ltq_underlying);
+	MEMSET(c_xchng_cd);
+	MEMSET(c_ltq_xchng_cd);
+	MEMSET(c_err_msg);
+	/*** MEMSET done in VQC Ends ***/
+	
+	double	d_iv_user = 0.0;
+	double	d_target = 0.0;
+	double	d_impl_vol = 0.0;
+
+	double	d_curr_spot = 0.0;
+	double	d_spot = 0.0;
+	double	d_curr_rate = 0.0;
+	double	d_curr_delta = 0.0;
+	double	d_curr_pnl = 0.0;
+	double	d_b1exp = 0.0;
+	double	d_b2exp = 0.0;
+	long	l_num_of_levels = 0;
+	long	l_qty = 0;									/*** variable initialized in VQC ***/							
+	long	l_interval = 0;
+	int	i_ret_val = 0, i = 0, j = 0, i_err[22], i_ferr[22];			/*** Ver 1.1 -- subscript changed from 20 to 21 ***/	/*** variable initialized in VQC ***/
+
+  ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+
+/***	Finit32(ptr_fml_Obuf, Fsizeof32(ptr_fml_Obuf)); *** Commented in VQC ***/
+
+	ptr_fml_Obuf = 	(FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN*2 );
+  if( ptr_fml_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31005", TPMSG , c_err_msg.arr );	/*** .arr Added in VQC ***/
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );				/*** .arr Added in VQC ***/
+    tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  }
+
+	Finit32(ptr_fml_Obuf, (FLDLEN32) Fsizeof32(ptr_fml_Obuf));	/*** Added in VQC ***/
+
+	INITDBGLVL(c_ServiceName);			
+	
+	i_err[0]= Fget32(ptr_fml_Ibuf, FFO_DAY_TO_EXP ,0,(char *)&d_time_exp, 0);
+  i_ferr [ 0 ] = Ferror32;
+	i_err[1]= Fget32(ptr_fml_Ibuf, FFO_PRDCT_TYP ,0,(char *)&c_prdct_typ, 0);
+  i_ferr [ 1 ] = Ferror32;
+	i_err[2]= Fget32(ptr_fml_Ibuf, FFO_BASE_ORD_VAL ,0,(char *)&d_base_price, 0);
+  i_ferr [ 2 ] = Ferror32;
+	i_err[3]= Fget32(ptr_fml_Ibuf, FFO_INTRST_RT ,0,(char *)&d_intrst_rt, 0);
+  i_ferr [ 3 ] = Ferror32;
+	i_err[4]= Fget32(ptr_fml_Ibuf, FFO_PLG_RT ,0,(char *)&d_dvdnd, 0);
+  i_ferr [ 4 ] = Ferror32;
+	i_err[5]= Fget32(ptr_fml_Ibuf, FFO_AVM_PRCNT ,0,(char *)&d_beta, 0);
+  i_ferr [ 5 ] = Ferror32;
+	i_err[6]= Fget32(ptr_fml_Ibuf, FFO_OPNPSTN_QTY ,0,(char *)&l_qty, 0);
+  i_ferr [ 6 ] = Ferror32;
+	i_err[7]= Fget32(ptr_fml_Ibuf, FFO_OPNPSTN_FLW ,0,(char *)&c_pstn_flg, 0);
+  i_ferr [ 7 ] = Ferror32;
+	i_err[8]= Fget32(ptr_fml_Ibuf, FFO_RQST_TYP ,0,(char *)&c_iv_rqst, 0);
+  i_ferr [ 8 ] = Ferror32;
+	i_err[9]= Fget32(ptr_fml_Ibuf, FFO_EFF_LTP ,0,(char *)&d_target, 0);
+  i_ferr [ 9 ] = Ferror32;
+	i_err[10]= Fget32(ptr_fml_Ibuf, FFO_INTERVAL ,0,(char *)&l_interval, 0);
+  i_ferr [ 10 ] = Ferror32;
+	i_err[11]= Fget32(ptr_fml_Ibuf,  FFO_COUNT,0,(char *)&l_num_of_levels, 0);
+  i_ferr [ 11 ] = Ferror32;
+	i_err[12]= Fget32(ptr_fml_Ibuf,  FFO_INDEX,0,(char *)&d_idx_spot_price, 0);
+  i_ferr [ 12 ] = Ferror32;
+	i_err[13]= Fget32(ptr_fml_Ibuf,  FFO_USER_INDEX,0,(char *)&d_usr_idx_spot_price, 0);
+  i_ferr [ 13 ] = Ferror32;
+	i_err[14]= Fget32(ptr_fml_Ibuf,  FFO_CTGRY_INDSTK,0,(char *)&c_ctgry, 0);
+  i_ferr [ 14 ] = Ferror32;
+	i_err[15]= Fget32(ptr_fml_Ibuf,  FFO_STCK_PRICE,0,(char *)&d_stock_spot, 0);
+  i_ferr [ 15 ] = Ferror32;
+	i_err[16]= Fget32(ptr_fml_Ibuf,  FFO_OPT_PREMIUM,0,(char *)&d_ltp_prc, 0);
+  i_ferr [ 16 ] = Ferror32;
+
+
+	for(j=0;j<17;j++)	
+	{
+		if(i_err[j] == -1)
+  	{
+			fn_errlog( c_ServiceName, "S31010",Fstrerror32(i_ferr[j]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+      fn_userlog(c_ServiceName,"Error in retrieving Input FML:%d:",j );
+			tpfree((char *)ptr_fml_Obuf);
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+    	tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+		}
+	}
+
+	d_ltp_prc = d_ltp_prc / 100;
+
+	if (c_prdct_typ == 'O')
+	{
+		i_err[0]= Fget32(ptr_fml_Ibuf,  FFO_OPT_TYP,0,(char *)&c_opt_typ, 0);
+  	i_ferr [ 0 ] = Ferror32;
+	  if( i_err[0] == -1 )
+  	{
+			fn_errlog( c_ServiceName, "S31015",Fstrerror32(i_ferr[0]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+			fn_userlog(c_ServiceName,"Error in retrieving OPTION TYPE FML" );
+			tpfree((char *)ptr_fml_Obuf);
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+    	tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  	}
+
+		i_err[0]= Fget32(ptr_fml_Ibuf,  FFO_STRIKE_PRC,0,(char *)&d_strk_price, 0);
+  	i_ferr [ 0 ] = Ferror32;
+	  if( i_err[0] == -1 )
+  	{
+			fn_errlog( c_ServiceName, "S31020",Fstrerror32(i_ferr[0]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+			fn_userlog(c_ServiceName,"Error in retrieving STRIKE PRICE FML" );
+			tpfree((char *)ptr_fml_Obuf);
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+    	tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  	}
+	}
+	else if ( c_prdct_typ == 'F' )
+	{
+		i_err[17]= Fget32(ptr_fml_Ibuf,  FFO_EFF_CLS_PRC,0,(char *)&d_fut_cls_prc, 0);
+  	i_ferr [ 17 ] = Ferror32;
+
+		if( i_err[17] == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31025",Fstrerror32(i_ferr[17]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+      fn_userlog(c_ServiceName,"Error in retrieving OPTION TYPE FML" );
+      tpfree((char *)ptr_fml_Obuf);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+      tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+
+		i_err[18]= Fget32(ptr_fml_Ibuf, FFO_QT_TRDNG_FLG,0,(char *)&c_trd_flg, 0);
+    i_ferr [ 18 ] = Ferror32;
+
+    if( i_err[18] == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31030",Fstrerror32(i_ferr[18]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+      fn_userlog(c_ServiceName,"Error in retrieving OPTION TYPE FML" );
+      tpfree((char *)ptr_fml_Obuf);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+      tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+
+	}
+
+	/*** Ver 1.1 Starts ***/
+
+	i_err[19]= Fget32(ptr_fml_Ibuf,  FFO_SYMBOL,0,(char *)c_ltq_underlying, 0);
+  i_ferr [ 19 ] = Ferror32;
+
+  if( i_err[19] == -1 )
+  {
+
+		 	if(i_ferr [ 19 ] == FNOTPRES)
+   	 	{
+      	fn_userlog(c_ServiceName," Underlying not Passesd in case called from FNO-Fingrtips ");
+				strcpy(c_ltq_underlying,"NIFTY");
+    	}
+    	else
+    	{
+     		fn_errlog( c_ServiceName, "S31035",Fstrerror32(i_ferr[19]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+     		fn_userlog(c_ServiceName,"Error in retrieving OPTION TYPE FML" );
+     		tpfree((char *)ptr_fml_Obuf);
+     		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+     		tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+  }
+
+  i_err[20]= Fget32(ptr_fml_Ibuf, FFO_XCHNG_CD,0,(char *)c_xchng_cd, 0);
+  i_ferr [ 20 ] = Ferror32;
+
+  if( i_err[20] == -1 )
+  {
+			if(i_ferr [ 20 ] == FNOTPRES)
+      {
+        fn_userlog(c_ServiceName," Exchange Code not Passesd in case called from FNO-Fingrtips ");
+        strcpy(c_xchng_cd,"NFO");
+      }
+      else
+      {
+     		fn_errlog( c_ServiceName, "S31040",Fstrerror32(i_ferr[20]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+     		fn_userlog(c_ServiceName,"Error in retrieving OPTION TYPE FML" );
+     		tpfree((char *)ptr_fml_Obuf);
+     		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+     		tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+  }
+
+	/*** Ver 1.1 Ends   ***/
+	
+	/*** if(c_iv_rqst == 'U')   commented In Ver  1.1 
+	{ ***/
+		i_err[0]= Fget32(ptr_fml_Ibuf,  FFO_EFF_LMT_RT,0,(char *)&d_iv_user, 0);
+  	i_ferr [ 0 ] = Ferror32;
+	  if( i_err[0] == -1 )
+  	{
+			fn_errlog( c_ServiceName, "S31045",Fstrerror32(i_ferr[0]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+			fn_userlog(c_ServiceName,"Error in retrieving LTP OF OPTION FML" );
+			tpfree((char *)ptr_fml_Obuf);
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+    	tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  	}
+
+	/*** commented In Ver  1.1		
+	} ***/
+
+  if (DEBUG_MSG_LVL_3)			
+	{
+    fn_userlog( c_ServiceName, "d_time_exp :%lf:", d_time_exp );
+    fn_userlog( c_ServiceName, "c_prdct_typ :%c:", c_prdct_typ );
+    fn_userlog( c_ServiceName, "c_ctgry :%c:", c_ctgry );
+		if(c_prdct_typ == 'O')
+		{
+    	fn_userlog( c_ServiceName, "c_opt_typ :%c:", c_opt_typ );
+    	fn_userlog( c_ServiceName, "d_strk_price :%lf:", d_strk_price );
+		}
+    fn_userlog( c_ServiceName, "d_stock_spot :%lf:", d_stock_spot );
+    fn_userlog( c_ServiceName, "d_idx_spot_price :%lf:", d_idx_spot_price );
+    fn_userlog( c_ServiceName, "d_usr_idx_spot_price :%lf:", d_usr_idx_spot_price );
+    fn_userlog( c_ServiceName, "d_base_price :%lf:", d_base_price );
+    fn_userlog( c_ServiceName, "d_intrst_rt :%lf:", d_intrst_rt );
+    fn_userlog( c_ServiceName, "d_dvdnd :%lf:", d_dvdnd );
+    fn_userlog( c_ServiceName, "d_beta :%lf:", d_beta );
+    fn_userlog( c_ServiceName, "l_qty :%ld:", l_qty );
+    fn_userlog( c_ServiceName, "c_pstn_flg :%c:",c_pstn_flg  );
+    fn_userlog( c_ServiceName, "c_iv_rqst :%c:", c_iv_rqst );
+    fn_userlog( c_ServiceName, "d_iv_user :%lf:", d_iv_user );
+    fn_userlog( c_ServiceName, "d_target :%lf:", d_target );
+    fn_userlog( c_ServiceName, "l_interval :%ld:", l_interval );
+    fn_userlog( c_ServiceName, "l_num_of_levels :%ld:", l_num_of_levels );
+    fn_userlog( c_ServiceName, "c_ltq_underlying  :%s:",c_ltq_underlying );    /*** Ver 1.1 ***/
+    fn_userlog( c_ServiceName, " c_xchng_cd :%s:",c_xchng_cd);				 /*** Ver 1.1 ***/
+  }
+
+	if( c_prdct_typ == 'O' )
+	{
+		if(c_iv_rqst == 'U' )
+		{
+			d_impl_vol = d_iv_user;
+
+			if (DEBUG_MSG_LVL_0)
+  		{
+    		fn_userlog( c_ServiceName, "User Defined Implied volatility is :%lf:", d_impl_vol );
+			}
+		}
+		else if ( c_iv_rqst == 'R' && d_iv_user != 0.0 )  /*** Ver 1.1 ***/
+		{
+			d_impl_vol = d_iv_user;
+
+      if (DEBUG_MSG_LVL_0)
+      {
+        fn_userlog( c_ServiceName, " Inside Run Time Mode and Volatility Passed As Input " );
+        fn_userlog( c_ServiceName, "User Defined Implied volatility is :%lf:", d_impl_vol );
+      }
+		}	
+		else
+		{
+
+			/*** Ver 1.1 Starts ***/
+			
+			rtrim (c_ltq_underlying);
+			rtrim (c_xchng_cd);
+			
+			if (DEBUG_MSG_LVL_0)
+      {
+        fn_userlog( c_ServiceName, " c_ltq_underlying  :%s:",c_ltq_underlying );
+        fn_userlog( c_ServiceName, " c_ltq_xchng_cd :%s:", c_ltq_xchng_cd);
+      }
+
+			/*** Ver 1.1 Ends ***/
+			
+			if((strcmp(c_ltq_underlying,"NIFTY") != 0) &&  c_ctgry == 'I' )  /*** Ver 1.1 ***/
+			{
+				
+				if( strcmp (c_xchng_cd,"NFO") == 0)
+  			{
+    			strcpy(c_ltq_xchng_cd ,"NSE");
+ 				}
+  			else if (strcmp (c_xchng_cd,"BFO") == 0)
+ 			  {
+    			strcpy(c_ltq_xchng_cd ,"BSE");
+ 				}		
+		
+				EXEC SQL
+    			SELECT  LTQ_RT
+    			INTO    :d_new_idx_spot_price
+    			FROM    LTQ_TRD_QT
+    			WHERE   LTQ_STCK_CD   = :c_ltq_underlying       
+    			AND     LTQ_XCHNG_CD  = :c_ltq_xchng_cd ;     
+
+
+  			if ( SQLCODE != 0 )
+  			{
+					fn_errlog( c_ServiceName, "S31050",SQLMSG,c_err_msg.arr);		/*** .arr Added in VQC ***/
+					fn_userlog(c_ServiceName,"Error in retrieving Spot Price for Index other than NIFTY" );
+					tpfree((char *)ptr_fml_Obuf);
+					Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+					tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  			}
+				
+				d_impl_vol = impliedvol(d_target,
+                              d_new_idx_spot_price,
+                              d_stock_spot,
+                              d_strk_price,
+                              d_intrst_rt,
+                              d_dvdnd,
+                              d_time_exp,
+                              c_opt_typ,
+                              c_ctgry,
+                              d_beta,
+                              c_ServiceName);				
+						
+				
+				if (DEBUG_MSG_LVL_0)
+      	{
+        	fn_userlog( c_ServiceName, " d_new_idx_spot_price :%lf:", d_new_idx_spot_price);
+      	}	
+	
+			}
+			else 
+			{	
+				d_impl_vol = impliedvol(d_target,
+																d_idx_spot_price,
+																d_stock_spot,
+																d_strk_price,
+																d_intrst_rt,
+																d_dvdnd,
+																d_time_exp,
+																c_opt_typ,
+																c_ctgry,
+																d_beta,
+																c_ServiceName);
+			}	
+
+	  	if (DEBUG_MSG_LVL_0)
+    	{
+    		fn_userlog( c_ServiceName, "System calculated Implied volatility is :%lf:", d_impl_vol );
+			}
+		}
+	}
+	
+	
+	/**************** Calculate exposure for current Nifty level ************/
+	if(c_prdct_typ == 'F')
+	{
+		i_ret_val = fn_calc_exp(l_qty,
+														d_base_price,
+														d_curr_delta,
+														c_prdct_typ,
+														c_pstn_flg,
+														c_opt_typ,
+														&d_b1exp,
+														&d_b2exp);
+	}
+	else
+	{
+		d_spot = d_idx_spot_price;
+		d_curr_rate = BlackScholes (c_opt_typ,
+																'R',
+																c_ctgry,
+																d_spot,
+																d_stock_spot,
+																d_spot,
+																d_strk_price,
+																d_time_exp,
+																d_intrst_rt,
+																d_impl_vol,
+																d_beta,
+																c_ServiceName);
+		d_curr_delta = delta(c_opt_typ,d_dvdnd,d_time_exp,d1);  
+		i_ret_val = fn_calc_exp(l_qty,
+														d_curr_rate,
+														d_curr_delta,
+														c_prdct_typ,
+														c_pstn_flg,
+														c_opt_typ,
+														&d_b1exp,
+														&d_b2exp);
+	}	
+	if (DEBUG_MSG_LVL_3)
+  {
+  	fn_userlog( c_ServiceName, "Basket1 exposure at spot level :%lf: is :%lf:", d_curr_spot, d_b1exp );
+  	fn_userlog( c_ServiceName, "Basket2 exposure at spot level :%lf: is :%lf:", d_curr_spot, d_b2exp );
+	}
+	i_err[0] = Fadd32(ptr_fml_Obuf,FFO_FUT_PRC, (char *)&d_impl_vol , 0);
+ 	i_ferr [ 0 ] = Ferror32;
+	i_err[1] = Fadd32(ptr_fml_Obuf,FFO_BO_AMT_BLKD, (char *)&d_b1exp , 0);
+ 	i_ferr [ 1 ] = Ferror32;
+	i_err[2] = Fadd32(ptr_fml_Obuf,FFO_SO_AMT_BLKD, (char *)&d_b2exp , 0);
+ 	i_ferr [ 2 ] = Ferror32;
+
+	for(j=0;j<3;j++)	
+	{
+		if(i_err[j] == -1)
+ 		{
+			fn_errlog( c_ServiceName, "S31055",Fstrerror32(i_ferr[j]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+			fn_userlog(c_ServiceName,"Error in adding output FML" );
+			tpfree((char *)ptr_fml_Obuf);
+   		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+   		tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+		}
+	}
+
+	/************************************************************************/
+	d_curr_spot	= d_usr_idx_spot_price;
+	for(i = 0;i<l_num_of_levels;i++)
+	{
+  	if (DEBUG_MSG_LVL_3)			
+		{
+   		fn_userlog( c_ServiceName, "CURRENT SPOT LEVEL IS :%lf:", d_curr_spot);
+   		fn_userlog( c_ServiceName, "i IS :%d:", i);
+		}
+		
+		d1 = 0.0;
+		d2 = 0.0;
+
+		
+		if(c_prdct_typ == 'F')
+		{
+			if ( c_trd_flg == 'T' )
+			{
+				if (DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Security Traded On Day");
+					fn_userlog(c_ServiceName,"d_curr_spot Is :%lf:, d_idx_spot_price Is :%lf:,d_beta Is :%lf:,",d_curr_spot,d_idx_spot_price,d_beta);
+					fn_userlog(c_ServiceName,"l_qty Is :%ld:,d_ltp_prc Is :%lf:",l_qty,d_ltp_prc);
+				}
+
+				d_curr_rate = (d_curr_spot - d_idx_spot_price)*d_beta/d_idx_spot_price*l_qty*d_ltp_prc; 
+
+				if (DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"d_curr_rate Is :%lf:",d_curr_rate);
+				}
+			}
+			else
+			{
+				if (DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Security Not Traded On Day");
+					fn_userlog(c_ServiceName,"d_curr_spot Is :%lf:,d_idx_spot_price Is :%lf:,d_beta Is :%lf:",d_curr_spot,d_idx_spot_price,d_beta);
+					fn_userlog(c_ServiceName,"l_qty Is :%ld:,d_ltp_prc Is :%lf:,d_fut_cls_prc Is :%lf:",l_qty,d_ltp_prc,d_fut_cls_prc);
+				}
+
+				d_curr_rate	=	(((d_curr_spot -	d_idx_spot_price)*d_beta/d_idx_spot_price * d_ltp_prc) + (d_ltp_prc	-	d_fut_cls_prc)) *	l_qty;
+
+				if (DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"d_curr_rate Is :%lf:",d_curr_rate);
+				}
+			}
+			d_curr_pnl = d_curr_rate; 
+		}
+		else
+		{
+			d_curr_rate = BlackScholes (c_opt_typ,
+																	'F',
+																	c_ctgry,
+																	d_idx_spot_price,
+																	d_stock_spot,
+																	d_curr_spot,
+																	d_strk_price,
+																	d_time_exp,
+																	d_intrst_rt,
+																	d_impl_vol,
+																	d_beta,
+																	c_ServiceName);
+			d_curr_delta = delta(c_opt_typ,d_dvdnd,d_time_exp,d1);  
+			d_curr_pnl = (d_curr_rate*l_qty) - (d_ltp_prc*l_qty);
+		}	
+
+
+  	if (DEBUG_MSG_LVL_3)			
+		{
+    	fn_userlog( c_ServiceName, "calculated rate at spot level :%lf: is :%lf:", d_curr_spot,d_curr_rate );
+    	fn_userlog( c_ServiceName, "d_ltp_prcis :%lf:", d_ltp_prc );
+    	fn_userlog( c_ServiceName, "Delta at spot level :%lf: is :%lf:", d_curr_spot,d_curr_delta );
+    	fn_userlog( c_ServiceName, "Profit/Loss at spot level :%lf: is :%lf:", d_curr_spot,d_curr_pnl );
+    	fn_userlog( c_ServiceName, "Base price at spot level :%lf: is :%lf:", d_curr_spot,d_base_price );
+		}
+		
+
+		i_err[0] = Fadd32(ptr_fml_Obuf,FFO_INDEX, (char *)&d_curr_spot , 0);
+  	i_ferr [ 0 ] = Ferror32;
+		i_err[1] = Fadd32(ptr_fml_Obuf,FFO_RLZD_PL, (char *)&d_curr_pnl , 0);
+  	i_ferr [ 1 ] = Ferror32;
+		i_err[2] = Fadd32(ptr_fml_Obuf,FFO_RATE, (char *)&d_curr_rate , 0);
+  	i_ferr [ 2 ] = Ferror32;
+		i_err[3] = Fadd32(ptr_fml_Obuf,FFO_SOMC_PRCNT, (char *)&d_curr_delta , 0);
+  	i_ferr [ 3 ] = Ferror32;
+		i_err[4] = Fadd32(ptr_fml_Obuf,FFO_U_MM_EX_MRGN, (char *)&d1 , 0);
+  	i_ferr [ 4 ] = Ferror32;
+		i_err[5] = Fadd32(ptr_fml_Obuf,FFO_U_MM_SP_MRGN, (char *)&d2 , 0);
+  	i_ferr [ 5 ] = Ferror32;
+
+		for(j=0;j<6;j++)	
+		{
+			if(i_err[j] == -1)
+  		{
+				fn_errlog( c_ServiceName, "S31060",Fstrerror32(i_ferr[j]),c_err_msg.arr);	/*** .arr Added in VQC ***/
+				fn_userlog(c_ServiceName,"Error in adding iterative output FML" );
+				tpfree((char *)ptr_fml_Obuf);
+    		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg.arr, 0 );		/*** .arr Added in VQC ***/
+    		tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+		}
+		d_curr_spot = d_curr_spot + l_interval;
+		if (DEBUG_MSG_LVL_3)
+		{
+   		fn_userlog( c_ServiceName, "i IS :%d:", i);
+		}
+	}
+  tpreturn(TPSUCCESS, SUCC_BFR, ( char * )ptr_fml_Obuf, 0, 0 );
+}
+
+/* The Black and Scholes formula*/
+double BlackScholes(char CallPutFlag, 
+										char Calculation_flg, 
+										char Ctgry_flg, 
+										double IDX_SPT, 
+										double UNDRLYNG_SPT, 
+										double SPT_LEV, 
+										double STRIKE, 
+										double T, 
+										double r, 
+										double v, 
+										double d_betaval,
+										char *c_ServiceName)
+{
+
+	double d_modified_spot = 0.0;
+	double d_rt = 0.0;
+	d_modified_spot	 = (((SPT_LEV-IDX_SPT)/IDX_SPT)*d_betaval*UNDRLYNG_SPT)+ UNDRLYNG_SPT;
+
+  if (DEBUG_MSG_LVL_3)			
+	{
+  	fn_userlog( c_ServiceName, "Black Scholes :CallPutFlag is :%c:", CallPutFlag );
+  	fn_userlog( c_ServiceName, "Black Scholes :Calculation_flg is :%c:", Calculation_flg );
+  	fn_userlog( c_ServiceName, "Black Scholes :Ctgry_flg is :%c:", Ctgry_flg );
+  	fn_userlog( c_ServiceName, "Black Scholes :IDX_SPT is :%lf:", IDX_SPT );
+  	fn_userlog( c_ServiceName, "Black Scholes :UNDRLYNG_SPT is :%lf:", UNDRLYNG_SPT );
+  	fn_userlog( c_ServiceName, "Black Scholes :SPT_LEV is :%lf:", SPT_LEV );
+  	fn_userlog( c_ServiceName, "Black Scholes :STRIKE is :%lf:", STRIKE );
+  	fn_userlog( c_ServiceName, "Black Scholes :T is :%lf:", T );
+  	fn_userlog( c_ServiceName, "Black Scholes :r is :%lf:", r );
+  	fn_userlog( c_ServiceName, "Black Scholes :v is :%lf:", v );
+  	fn_userlog( c_ServiceName, "Black Scholes :d_betaval is :%lf:", d_betaval );
+		if(Calculation_flg != 'R')
+		{
+  		fn_userlog( c_ServiceName, "Black Scholes :d_modified_spot is :%lf:", d_modified_spot );
+		}
+	}
+	
+
+	if(Calculation_flg != 'R')
+	{
+		d1=(log((d_modified_spot)/STRIKE)+(r+v*v/2)*T)/(v*sqrt(T));
+  	if (DEBUG_MSG_LVL_3)			
+		{
+  		fn_userlog( c_ServiceName, "Black Scholes :d1 with modified spot is :%lf:", d1 );
+		}
+	}
+	else 
+	{
+		if (Ctgry_flg == 'I')
+		{
+			d1=(log(IDX_SPT/STRIKE)+(r+v*v/2)*T)/(v*sqrt(T));	
+  		if (DEBUG_MSG_LVL_3)			
+			{
+  			fn_userlog( c_ServiceName, "Black Scholes :d1 with IDX_SPT is :%lf:", d1 );
+			}
+		}
+		else
+		{
+			d1=(log(UNDRLYNG_SPT/STRIKE)+(r+v*v/2)*T)/(v*sqrt(T));	
+  		if (DEBUG_MSG_LVL_3)			
+			{
+  			fn_userlog( c_ServiceName, "Black Scholes :d1 with UNDRLYNG_SPT is :%lf:", d1 );
+			}
+		}
+	}
+
+	d2=d1-v*sqrt(T);
+  if (DEBUG_MSG_LVL_3)			
+	{
+  	fn_userlog( c_ServiceName, "Black Scholes :d2 is :%lf:", d2 );
+	}
+
+	if(CallPutFlag == 'C')
+	{
+		if(Calculation_flg != 'R')
+		{
+			d_rt = d_modified_spot *CND(d1)-STRIKE * exp(-r*T)*CND(d2);
+  		if (DEBUG_MSG_LVL_3)			
+			{
+  			fn_userlog( c_ServiceName, "Black Scholes :Call rate with modified spot  is :%lf:", d_rt );
+			}
+			return d_rt; 
+		}
+		else
+		{
+			if( Ctgry_flg == 'I')
+			{
+				d_rt = IDX_SPT *CND(d1)-STRIKE * exp(-r*T)*CND(d2);
+  			if (DEBUG_MSG_LVL_3)			
+				{
+  				fn_userlog( c_ServiceName, "Black Scholes :Call rate with IDX_SPT is :%lf:", d_rt );
+				}
+				return d_rt; 
+			}
+			else
+			{
+				d_rt = UNDRLYNG_SPT *CND(d1)-STRIKE * exp(-r*T)*CND(d2);
+  			if (DEBUG_MSG_LVL_3)			
+				{
+  				fn_userlog( c_ServiceName, "Black Scholes :Call rate with UNDRLYNG_SPT is :%lf:", d_rt );
+				}
+				return d_rt;
+			}
+		}
+	}
+	else if(CallPutFlag == 'P')
+	{
+		if(Calculation_flg != 'R')
+		{
+			d_rt = STRIKE * exp(-r * T) * CND(-d2) - d_modified_spot * CND(-d1);
+  		if (DEBUG_MSG_LVL_3)			
+			{
+  			fn_userlog( c_ServiceName, "Black Scholes :Put rate with modified spot  is :%lf:", d_rt );
+			}
+			return d_rt;
+		}
+		else
+		{
+			if( Ctgry_flg == 'I')
+			{
+				d_rt = STRIKE * exp(-r * T) * CND(-d2) - IDX_SPT * CND(-d1);
+  			if (DEBUG_MSG_LVL_3)			
+				{
+  				fn_userlog( c_ServiceName, "Black Scholes :Put rate with IDX_SPT is :%lf:", d_rt );
+				}
+				return d_rt;
+			}
+			else
+			{
+				d_rt = STRIKE * exp(-r * T) * CND(-d2) - UNDRLYNG_SPT * CND(-d1);
+  			if (DEBUG_MSG_LVL_3)			
+				{
+  				fn_userlog( c_ServiceName, "Black Scholes :Put rate with UNDRLYNG_SPT is :%lf:", d_rt );
+				}
+				return d_rt;
+			}
+		}
+	}
+}
+
+/* The cumulative normal distribution function */
+double CND( double X )
+{
+
+	double L = 0.0, K = 0.0, w = 0.0;		/*** variables initialized in VQC ***/
+
+	double const a1 = 0.31938153, a2 = -0.356563782, a3 = 1.781477937;
+	double const a4 = -1.821255978, a5 = 1.330274429;
+
+	if (X < -7)
+	{
+		w = ND(X)/(1+(2*X*X)+pow(X,4));	
+	}
+	else if ( X > 7)
+	{
+		w = 1 - CND(-1*X);
+	}	
+	else
+	{
+		L = fabs(X);
+		K = 1.0 / (1.0 + 0.2316419 * L);
+		w = 1.0 - ND(L) * (a1 * K + a2 * K *K + a3 * pow(K,3) + a4 * pow(K,4) + a5 * pow(K,5));
+
+		if (X <= 0 )
+		{
+			w = 1.0 - w;
+		}
+	}
+	return w;
+}
+
+double ND( double X)
+{
+	return (1.0 / sqrt(2 * Pi))*(exp(-X *X * 0.5));
+}
+
+/* The Implied volatility calculation function */
+double impliedvol( double target,
+                   double idx_spot,
+                   double undrlyng_spot,
+                   double strike_prc,
+                   double rsk_free_int,
+                   double dividend,
+                   double time_for_exp,
+                   char option_type,
+                   char c_ctgry_flg,
+									 double beta,
+									 char *c_ServiceName	
+                  )
+{
+  double high = 5;
+  double low = 0;
+  double calc_prc = 0.0;	/*** variable initialized in VQC ***/
+  double implied_volatility = 0.0;	/*** variable initialized in VQC ***/
+
+  while((high-low)>0.00001)
+  {
+    calc_prc = BlackScholes (	option_type,
+															'R',
+															c_ctgry_flg,
+															idx_spot,
+															undrlyng_spot,
+															idx_spot,
+															strike_prc,
+															time_for_exp,
+															rsk_free_int,
+															((high+low)/2),
+															beta,
+															c_ServiceName);
+
+		if (DEBUG_MSG_LVL_0)
+		{
+			fn_userlog("implied_vol","Calc prc :%lf:, Trgt :%lf: ,hi :%lf:, lo :%lf:, (hi+lo)/2 :%lf:",calc_prc,target,high,low,((high+low)/2) );		/*** Format Specifier %lf added after (hi+lo)/2 in VQC ***/ 
+		}
+
+    if (calc_prc > target)
+    {
+      high = (high+low)/2;
+    }
+    else
+    {
+      low = (high+low)/2;
+    }
+  }
+	implied_volatility = (high+low)/2;
+  return implied_volatility;
+}
+
+/* The Delta calculation function */
+double delta( char option, double divdnd, double time_expr, double d )
+{
+  double del = 0.0;		/*** variable initialized in VQC ***/
+  if (option == 'C')
+  {
+    del = exp(-1*divdnd*time_expr)*CND(d);
+  }
+  else
+  {
+    del = exp(-1*divdnd*time_expr)*(CND(d)-1);
+  }
+  return del;
+}
+
+
+/* The  Basket1 and baket2 exposure calculation function */
+int fn_calc_exp(double d_quantity, 
+								double d_price, 
+								double d_delta, 
+								char c_prdtp, 
+								char c_buysellflg,
+								char c_opttp,
+								double *d_b1exp, 
+								double *d_b2exp)
+	
+{
+	if (c_prdtp == 'F')
+	{
+			d_delta = 1;
+	} 	
+
+	if(c_prdtp == 'O' && c_buysellflg == 'B')		
+	{
+		if(c_opttp == 'P')
+		{
+			d_delta = -1*d_delta;	
+		}	
+		*d_b2exp = d_quantity*d_price*d_delta;
+	}
+	else if ( c_prdtp == 'O' && c_buysellflg == 'S' )
+	{
+		d_quantity = -1*d_quantity;
+		if(c_opttp == 'P')
+		{
+			d_delta = -1*d_delta;	
+		}	
+		*d_b1exp = d_quantity*d_price*d_delta;
+	}
+	else
+	{	
+		*d_b1exp = d_quantity*d_price*d_delta;	
+	}
+	return 0;	
+}

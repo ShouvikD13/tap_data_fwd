@@ -1,0 +1,433 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_SEQ_TO_OMD                                        */
+/*                                                                            */
+/*  Input             : vw_xchngbook                                          */
+/*                                                                            */
+/*  Output            : vw_xchngbook                                          */
+/*                      vw_err_msg                                            */
+/*                                                                            */
+/*  Description       : To get the details from the Exchange Book for the     */
+/*                      given input Exchange Code, Pipe ID Sequence Number    */
+/*                      and the Order Placed Time                             */
+/*                                                                            */
+/*  Log               : 1.0   04-Oct-2001   S. Swaminathan                    */
+/*  Log               : 1.1   																								*/
+/*  Log               : 1.2   24-Jan-2008   Shailesh                          */
+/*  Log               : 1.3   07-Mar-2008   SKS                          			*/
+/*  Log               : 1.4   02-Jan-2009   Shailesh                          */
+/*	Log								: 1.5   24-Jun-2009   Sandeep														*/
+/*	Log								: 1.6   12-Aug-2009   Indrajit													*/
+/*	Log								: 1.7   12-Aug-2020   Suchita 													*/
+/*                                                                            */
+/******************************************************************************/
+/*  1.0  -  New release                                                       */
+/*  1.1  -  MG - to implement min logic & return the sequence									*/
+/*  1.2  -  To handle the 2L/3L/SPRD order sequence			     									*/
+/*  1.3  -  SKS- AIX Migration [ 07-Mar-2008 ]                                */
+/*  1.4  -  NNF Changes For Extended Market Hours															*/
+/*	1.5  -  ORS2 Changes																											*/
+/*	1.6  -  Modified the query for optimization																*/
+/*	1.7  -  IOC CANCELLATION WITH 0 ERROR CODE 																*/
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>             /*  Ver 1.3 : Added   */
+#include <fn_read_debug_lvl.h>  /*  Ver 1.3 : Added   */
+
+void SFO_SEQ_TO_OMD( TPSVCINFO *rqst )
+{
+	char c_ServiceName[ 33];
+	char c_errmsg[256];
+	char c_msg[256];
+  char c_ord_ack_nse[20]="\0"; /** ver 1.7 **/
+  char c_fod_spec_flg='\0';/** ver 1.7 **/
+  int i_ndf_flag = 1; /*** ver 1.7 **/
+  double d_xchng_rmrks_temp = 0; /*** ver 1.7 **/
+  char c_xchng_rmrks_temp[257]="\0";  /*** ver 1.7 **/
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		struct vw_xchngbook *ptr_st_xchngbook;
+		short	i_qt_tm;
+		short	i_frwrd_tm;
+		short	i_rms_prcs_flg;
+		short	i_ors_msg_typ;
+		short	i_ack_tm;
+		short	i_xchng_rmrks;
+		short	i_xchng_can_qty;
+		varchar c_rmrks [ 256 ];
+	EXEC SQL END DECLARE SECTION;
+
+	struct vw_err_msg *ptr_st_err_msg;
+
+	ptr_st_xchngbook = ( struct vw_xchngbook *)rqst->data;
+	strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);            /*  Ver 1.3 : Added   */
+
+	ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32",
+                                                     "vw_err_msg",
+                                                sizeof ( struct vw_err_msg ) );
+	if ( ptr_st_err_msg ==  NULL )
+	{
+		fn_errlog ( c_ServiceName, "S31005", TPMSG, c_errmsg );
+		tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+	}
+
+	memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) );
+
+	if( DEBUG_MSG_LVL_3 ) 
+  {   
+  	fn_userlog( c_ServiceName,"c_xchng_cd:%s:",ptr_st_xchngbook->c_xchng_cd );
+  	fn_userlog( c_ServiceName,"c_pipe_id:%s:",ptr_st_xchngbook->c_pipe_id );
+  	fn_userlog( c_ServiceName,"l_ord_seq:%ld:",ptr_st_xchngbook->l_ord_seq );
+  	fn_userlog( c_ServiceName,"mod_trd_dt:%s:",ptr_st_xchngbook->c_mod_trd_dt);
+	}
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( ptr_st_xchngbook->c_rout_crt );
+
+				/** Ver 1.2 for separating normal and sprd sequence call **/
+
+	switch ( ptr_st_xchngbook->c_oprn_typ )
+	{
+ /******* ver 1.7 starts ***************/
+  case FOR_ERR_Q:
+
+    fn_userlog( c_ServiceName,"For FOR_ERR_Q selection, Pipe id:%s:",ptr_st_xchngbook->c_pipe_id);
+    fn_userlog( c_ServiceName,"for FOR_ERR_Q selection, l_ord_seq:%ld:",ptr_st_xchngbook->l_ord_seq);
+    fn_userlog( c_ServiceName,"For FOR_ERR_Q selection, c_xchng_rmrks :%s:",ptr_st_xchngbook->c_xchng_rmrks);
+    rtrim ( ptr_st_xchngbook->c_xchng_rmrks );
+    strcpy( c_xchng_rmrks_temp , ptr_st_xchngbook->c_xchng_rmrks );
+    rtrim ( c_xchng_rmrks_temp );
+     
+    d_xchng_rmrks_temp = atof ( c_xchng_rmrks_temp );
+    fn_userlog(c_ServiceName,"CR_139156 d_xchng_rmrks_temp :%lf: :%s:",d_xchng_rmrks_temp,c_xchng_rmrks_temp);
+
+    memset(c_ord_ack_nse,'\0',sizeof(c_ord_ack_nse));
+    sprintf(c_ord_ack_nse,"%16.0lf",d_xchng_rmrks_temp);
+    fn_userlog(c_ServiceName,"CR_139156 FOR_ERR_Q c_ord_ack_nse:%s:",c_ord_ack_nse);
+
+
+     EXEC SQL
+          SELECT FOD_SPL_FLAG
+            INTO :c_fod_spec_flg
+            FROM FOD_FO_ORDR_DTLS
+           WHERE FOD_ACK_NMBR  = :c_ord_ack_nse
+             AND ROWNUM < 2;
+
+           if ( SQLCODE != 0 )
+           {
+                fn_errlog(c_ServiceName,"S91910", SQLMSG, ptr_st_err_msg->c_err_msg);
+                fn_userlog(c_ServiceName,"CR_139156 FOR_ERR_Q ERROR IN FOD FETCH");
+                tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 ); 
+           }
+
+           fn_userlog(c_ServiceName,"CR_139156 c_fod_spec_flg :%c:",c_fod_spec_flg);
+
+           if( c_fod_spec_flg == 'R' || c_fod_spec_flg == 'O' || c_fod_spec_flg == '2' || c_fod_spec_flg == '3' || c_fod_spec_flg == 'J' )
+           {
+
+            ptr_st_xchngbook->c_req_typ = '\0';
+
+            EXEC SQL
+                 SELECT  Fxb_rqst_typ
+                   INTO  :ptr_st_xchngbook->c_req_typ
+                   FROM  FXB_FO_XCHNG_BOOK
+                  WHERE  FXB_XCHNG_CD  = :ptr_st_xchngbook->c_xchng_cd
+                    AND  FXB_PIPE_ID   = :ptr_st_xchngbook->c_pipe_id
+                    AND  FXB_ORDR_RFRNC IN ( SELECT FOD_ORDR_RFRNC FROM FOD_FO_ORDR_DTLS WHERE FOD_ACK_NMBR  =:c_ord_ack_nse )
+                    AND  FXB_MOD_TRD_DT = to_date(:ptr_st_xchngbook->c_mod_trd_dt,'dd-Mon-yyyy')
+                    AND  FXB_RMS_PRCSD_FLG = 'N'
+                    AND  ROWNUM < 2;
+
+             if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+             {
+                  fn_errlog(c_ServiceName,"S91910", SQLMSG, ptr_st_err_msg->c_err_msg);
+                  fn_userlog(c_ServiceName,"CR_139156 FOR_ERR_Q ERROR IN FXB FETCH");
+                  tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 ); 
+             }
+             else if ( SQLCODE == NO_DATA_FOUND )
+             {
+                 fn_userlog(c_ServiceName,"NO UNPROCESSED RECORD");
+                 i_ndf_flag = 2;
+             }
+           }
+           else
+           {
+  					 EXEC SQL
+     				 SELECT 
+             FXB_ORDR_RFRNC,
+             FXB_ORDR_TYPE,
+             FXB_SPRD_ORD_IND,
+             FXB_RQST_TYP,
+             FXB_PLCD_STTS,
+             FXB_RMS_PRCSD_FLG,
+             FXB_ORS_MSG_TYP,
+             FXB_XCHNG_RMRKS,
+             FXB_SPL_FLAG,
+             FXB_ORDR_SQNC
+             INTO 
+             :ptr_st_xchngbook->c_ordr_rfrnc,
+             :ptr_st_xchngbook->c_ord_typ,
+             :ptr_st_xchngbook->c_sprd_ord_ind,
+             :ptr_st_xchngbook->c_req_typ,
+             :ptr_st_xchngbook->c_plcd_stts,
+             :ptr_st_xchngbook->c_rms_prcsd_flg:i_rms_prcs_flg,
+             :ptr_st_xchngbook->l_ors_msg_typ:i_ors_msg_typ,
+             :c_rmrks:i_xchng_rmrks,
+             :ptr_st_xchngbook->c_spl_flg,
+             :ptr_st_xchngbook->l_ord_seq
+     FROM    FXB_FO_XCHNG_BOOK
+     WHERE   FXB_XCHNG_CD  = :ptr_st_xchngbook->c_xchng_cd
+     AND     FXB_PIPE_ID   = :ptr_st_xchngbook->c_pipe_id
+     AND     FXB_ORDR_SQNC = :ptr_st_xchngbook->l_ord_seq
+     AND     FXB_MOD_TRD_DT =  to_date(:ptr_st_xchngbook->c_mod_trd_dt,'dd-Mon-yyyy');
+      }
+
+      /******* ver 1.7 ends **********/
+    break;
+
+		case FOR_SPRD:
+		case FOR_RCV:	/* Ver 1.5 */
+		
+  	fn_userlog( c_ServiceName,"for Spread selection, l_ord_seq:%ld:",ptr_st_xchngbook->l_ord_seq);
+	  EXEC SQL
+      SELECT  fxb_ordr_rfrnc,
+              fxb_lmt_mrkt_sl_flg,
+              fxb_dsclsd_qty,
+              fxb_ordr_tot_qty,
+              fxb_lmt_rt,
+              fxb_stp_lss_tgr,
+              fxb_mdfctn_cntr,
+              to_char( fxb_ordr_valid_dt, 'dd-mon-yyyy' ),
+              fxb_ordr_type,
+              fxb_sprd_ord_ind,
+              fxb_rqst_typ,
+              fxb_quote,
+              to_char( fxb_qt_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+              to_char( fxb_rqst_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+              to_char( fxb_frwd_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+              fxb_plcd_stts,
+              fxb_rms_prcsd_flg,
+              fxb_ors_msg_typ,
+              to_char ( fxb_ack_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+              fxb_xchng_rmrks,
+              fxb_ex_ordr_typ,
+              fxb_xchng_cncld_qty,
+              fxb_spl_flag,
+							fxb_ordr_sqnc														/* 1.1 */
+      INTO    :ptr_st_xchngbook->c_ordr_rfrnc,
+              :ptr_st_xchngbook->c_slm_flg,
+              :ptr_st_xchngbook->l_dsclsd_qty,
+              :ptr_st_xchngbook->l_ord_tot_qty,
+              :ptr_st_xchngbook->l_ord_lmt_rt,
+              :ptr_st_xchngbook->l_stp_lss_tgr,
+              :ptr_st_xchngbook->l_mdfctn_cntr,
+              :ptr_st_xchngbook->c_valid_dt,
+              :ptr_st_xchngbook->c_ord_typ,
+              :ptr_st_xchngbook->c_sprd_ord_ind,
+              :ptr_st_xchngbook->c_req_typ,
+              :ptr_st_xchngbook->l_quote,
+              :ptr_st_xchngbook->c_qt_tm:i_qt_tm,
+              :ptr_st_xchngbook->c_rqst_tm,
+              :ptr_st_xchngbook->c_frwrd_tm:i_frwrd_tm,
+              :ptr_st_xchngbook->c_plcd_stts,
+              :ptr_st_xchngbook->c_rms_prcsd_flg:i_rms_prcs_flg,
+              :ptr_st_xchngbook->l_ors_msg_typ:i_ors_msg_typ,
+              :ptr_st_xchngbook->c_ack_tm:i_ack_tm,
+              :c_rmrks:i_xchng_rmrks,
+              :ptr_st_xchngbook->c_ex_ordr_typ,
+              :ptr_st_xchngbook->l_xchng_can_qty:i_xchng_can_qty,
+              :ptr_st_xchngbook->c_spl_flg,
+              :ptr_st_xchngbook->l_ord_seq              /* 1.1 */ 
+      FROM    fxb_fo_xchng_book
+      WHERE   fxb_xchng_cd  = :ptr_st_xchngbook->c_xchng_cd
+      AND     fxb_pipe_id   = :ptr_st_xchngbook->c_pipe_id
+      AND     fxb_ordr_sqnc = :ptr_st_xchngbook->l_ord_seq
+      AND     fxb_mod_trd_dt =  to_date(:ptr_st_xchngbook->c_mod_trd_dt,
+                                      'dd-Mon-yyyy');
+			break;
+
+	case FOR_NORM:
+
+  	fn_userlog( c_ServiceName,"for Normal selection, Pipe id:%s:",ptr_st_xchngbook->c_pipe_id);
+  	EXEC SQL
+			SELECT 	fxb_ordr_rfrnc,
+							fxb_lmt_mrkt_sl_flg,
+							fxb_dsclsd_qty,
+							fxb_ordr_tot_qty,
+							fxb_lmt_rt,
+							fxb_stp_lss_tgr,
+              fxb_mdfctn_cntr,
+							to_char( fxb_ordr_valid_dt, 'dd-mon-yyyy' ),
+							fxb_ordr_type,
+							fxb_sprd_ord_ind,
+							fxb_rqst_typ,
+							fxb_quote,
+							to_char( fxb_qt_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							to_char ( fxb_rqst_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							to_char ( fxb_frwd_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							fxb_plcd_stts,
+							fxb_rms_prcsd_flg,
+							fxb_ors_msg_typ,
+							to_char ( fxb_ack_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							fxb_xchng_rmrks,
+							fxb_ex_ordr_typ,
+							fxb_xchng_cncld_qty,
+							fxb_spl_flag,
+							fxb_ordr_sqnc														/* 1.1 */
+			INTO 		:ptr_st_xchngbook->c_ordr_rfrnc,
+							:ptr_st_xchngbook->c_slm_flg,
+							:ptr_st_xchngbook->l_dsclsd_qty,
+							:ptr_st_xchngbook->l_ord_tot_qty,
+							:ptr_st_xchngbook->l_ord_lmt_rt,
+							:ptr_st_xchngbook->l_stp_lss_tgr,
+							:ptr_st_xchngbook->l_mdfctn_cntr,
+							:ptr_st_xchngbook->c_valid_dt,
+							:ptr_st_xchngbook->c_ord_typ,
+							:ptr_st_xchngbook->c_sprd_ord_ind,
+							:ptr_st_xchngbook->c_req_typ,
+							:ptr_st_xchngbook->l_quote,
+							:ptr_st_xchngbook->c_qt_tm:i_qt_tm,
+							:ptr_st_xchngbook->c_rqst_tm,
+							:ptr_st_xchngbook->c_frwrd_tm:i_frwrd_tm,
+							:ptr_st_xchngbook->c_plcd_stts,
+							:ptr_st_xchngbook->c_rms_prcsd_flg:i_rms_prcs_flg,
+							:ptr_st_xchngbook->l_ors_msg_typ:i_ors_msg_typ,
+							:ptr_st_xchngbook->c_ack_tm:i_ack_tm,
+							:c_rmrks:i_xchng_rmrks,
+							:ptr_st_xchngbook->c_ex_ordr_typ,
+							:ptr_st_xchngbook->l_xchng_can_qty:i_xchng_can_qty,
+							:ptr_st_xchngbook->c_spl_flg,
+							:ptr_st_xchngbook->l_ord_seq							/* 1.1 */
+			FROM	 	fxb_fo_xchng_book	 /* fxb_a */										/* 1.1 alias added */ /* 1.6 commented alias */ 
+			WHERE		fxb_xchng_cd	= :ptr_st_xchngbook->c_xchng_cd
+			AND			fxb_pipe_id		=	:ptr_st_xchngbook->c_pipe_id
+/*		AND			fxb_ordr_sqnc	=	:ptr_st_xchngbook->l_ord_seq	/*	1.1 */
+			AND			fxb_mod_trd_dt =	to_date(:ptr_st_xchngbook->c_mod_trd_dt, 'dd-Mon-yyyy')
+/* 1.1 start */
+			AND			fxb_ordr_sqnc = (SELECT  min(fxb_b.fxb_ordr_sqnc)
+                                FROM  fxb_fo_xchng_book fxb_b  
+                                WHERE fxb_b.fxb_xchng_cd    = :ptr_st_xchngbook->c_xchng_cd /* 1.6 */
+                                AND   fxb_b.fxb_mod_trd_dt  = to_date(:ptr_st_xchngbook->c_mod_trd_dt,'dd-Mon-yyyy') /* 1.6 */
+                                AND    fxb_b.fxb_pipe_id     = :ptr_st_xchngbook->c_pipe_id /* 1.6 */ 
+                                AND    fxb_b.fxb_plcd_stts   = 'R'
+																AND		 nvl(fxb_b.fxb_rms_prcsd_flg, '*') != 'P');
+/* 1.1 end */
+
+		  break;
+/*Ver 1.4 starts */
+	case FOR_EXTEND :
+
+  	fn_userlog( c_ServiceName,"for Extended selection, Pipe id:%s:",ptr_st_xchngbook->c_pipe_id);
+  	EXEC SQL
+			SELECT 	fxb_ordr_rfrnc,
+							fxb_lmt_mrkt_sl_flg,
+							fxb_dsclsd_qty,
+							fxb_ordr_tot_qty,
+							fxb_lmt_rt,
+							fxb_stp_lss_tgr,
+              fxb_mdfctn_cntr,
+							to_char( fxb_ordr_valid_dt, 'dd-mon-yyyy' ),
+							fxb_ordr_type,
+							fxb_sprd_ord_ind,
+							fxb_rqst_typ,
+							fxb_quote,
+							to_char( fxb_qt_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							to_char ( fxb_rqst_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							to_char ( fxb_frwd_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							fxb_plcd_stts,
+							fxb_rms_prcsd_flg,
+							fxb_ors_msg_typ,
+							to_char ( fxb_ack_tm, 'dd-mon-yyyy hh24:mi:ss' ),
+							fxb_xchng_rmrks,
+							fxb_ex_ordr_typ,
+							fxb_xchng_cncld_qty,
+							fxb_spl_flag,
+							fxb_ordr_sqnc														/* 1.1 */
+			INTO 		:ptr_st_xchngbook->c_ordr_rfrnc,
+							:ptr_st_xchngbook->c_slm_flg,
+							:ptr_st_xchngbook->l_dsclsd_qty,
+							:ptr_st_xchngbook->l_ord_tot_qty,
+							:ptr_st_xchngbook->l_ord_lmt_rt,
+							:ptr_st_xchngbook->l_stp_lss_tgr,
+							:ptr_st_xchngbook->l_mdfctn_cntr,
+							:ptr_st_xchngbook->c_valid_dt,
+							:ptr_st_xchngbook->c_ord_typ,
+							:ptr_st_xchngbook->c_sprd_ord_ind,
+							:ptr_st_xchngbook->c_req_typ,
+							:ptr_st_xchngbook->l_quote,
+							:ptr_st_xchngbook->c_qt_tm:i_qt_tm,
+							:ptr_st_xchngbook->c_rqst_tm,
+							:ptr_st_xchngbook->c_frwrd_tm:i_frwrd_tm,
+							:ptr_st_xchngbook->c_plcd_stts,
+							:ptr_st_xchngbook->c_rms_prcsd_flg:i_rms_prcs_flg,
+							:ptr_st_xchngbook->l_ors_msg_typ:i_ors_msg_typ,
+							:ptr_st_xchngbook->c_ack_tm:i_ack_tm,
+							:c_rmrks:i_xchng_rmrks,
+							:ptr_st_xchngbook->c_ex_ordr_typ,
+							:ptr_st_xchngbook->l_xchng_can_qty:i_xchng_can_qty,
+							:ptr_st_xchngbook->c_spl_flg,
+							:ptr_st_xchngbook->l_ord_seq							/* 1.1 */
+			FROM	 	fxb_fo_xchng_book	 /* fxb_a	*/									/* 1.1 alias added */ /* 1.6 commented alias */ 
+			WHERE		fxb_xchng_cd	= :ptr_st_xchngbook->c_xchng_cd
+			AND			fxb_pipe_id		=	:ptr_st_xchngbook->c_pipe_id
+/*		AND			fxb_ordr_sqnc	=	:ptr_st_xchngbook->l_ord_seq		/ * 1.1 */
+			AND			fxb_mod_trd_dt =	to_date(:ptr_st_xchngbook->c_mod_trd_dt, 'dd-Mon-yyyy')
+/* 1.1 start */
+			AND			fxb_ordr_sqnc = (SELECT  min(fxb_b.fxb_ordr_sqnc)
+                                FROM  fxb_fo_xchng_book fxb_b 
+                                WHERE fxb_b.fxb_xchng_cd    = :ptr_st_xchngbook->c_xchng_cd /* 1.6 */
+                                AND   fxb_b.fxb_mod_trd_dt  = to_date(:ptr_st_xchngbook->c_mod_trd_dt, 'dd-Mon-yyyy') /* 1.6 */
+                                AND   fxb_b.fxb_pipe_id     = :ptr_st_xchngbook->c_pipe_id /* 1.6 */
+                                AND   fxb_b.fxb_plcd_stts   = 'R'
+															  AND		fxb_b.fxb_mrkt_typ    = 'X'	
+															  AND		nvl(fxb_b.fxb_rms_prcsd_flg, '*') != 'P');
+/* 1.1 end */
+
+		  break;
+/*Ver 1.4 ends*/
+
+      default:
+              sprintf( ptr_st_err_msg->c_err_msg, "Invalid Operation Type:%c:",ptr_st_xchngbook->c_oprn_typ );
+              tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+              break;
+  }
+
+  if ( SQLCODE != 0 && i_ndf_flag == 1) /*** ver 1.7 i_ndf_flag added ***/
+  {
+		if ( SQLCODE == NO_DATA_FOUND )
+		{ 
+      fn_userlog(c_ServiceName,"NDF for seq [%ld]",ptr_st_xchngbook->l_ord_seq);
+    	tpreturn ( TPSUCCESS, NO_DATA_FOUND, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+		else
+		{
+      fn_errlog ( c_ServiceName, "S31010", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+  }
+
+	if ( i_xchng_rmrks == -1 )
+	{
+		memset ( ptr_st_xchngbook->c_xchng_rmrks, 0, 
+             sizeof ( ptr_st_xchngbook->c_xchng_rmrks ) );
+	}
+	else
+	{
+		SETNULL ( c_rmrks );
+		strcpy ( ptr_st_xchngbook->c_xchng_rmrks, (char *)c_rmrks.arr );
+	}
+
+	tpfree ( ( char * ) ptr_st_err_msg );
+  tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_st_xchngbook, 
+                                  sizeof( struct vw_xchngbook ), 0 );
+}

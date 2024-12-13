@@ -1,0 +1,1110 @@
+/*******************************************************************************
+*  Program           : bat_fno_disbl_cmpl.pc                                   *
+*                                                                              *
+*  Description       : One time run for FNO disablement  < 10000 Rs            *  
+*                                                                              *
+*  Input Parameters  :      1. R/S       Mode  - Real or Simulation            *
+*                                                                              *
+*  Change Log        : 1.0   22-Mar-2010  Venture M|Infotech                   *
+*                    : 1.1   16-Apr-2010  Venture M|Infotech                   *  
+*                    : 1.2   09-Sep-2014  Sachin  B|Infotech                   *  
+*                    : 1.3   03-Nov-2014  Samip   M|Infotech                   *  
+*                    : 1.4	 04-Feb-2016  Bhupendra Malik                      *
+*                    : 1.5	 27-Jul-2020  Samip M															 *
+********************************************************************************
+*  1.0    -  New Release																											 *                   
+*  1.1    - Adding the extra handling for NRI customers                        *
+*  1.2    - View to FML CHanges                                                *
+*  1.3    - SAM Block Unblock model																						 *
+*  1.4    - Migration of RI to NRI                                             *
+*  1.5    - CR-ISEC14-138293 Changes for Margin Pledge						  					 *
+*******************************************************************************/
+
+/* Header Files */
+
+#include<sqlca.h>
+#include<atmi.h>
+#include <string.h>
+#include <stdlib.h>
+#include<fo.h>
+#include<fml32.h>
+#include<fn_log.h>
+#include<fn_tuxlib.h>
+#include<fn_battmpt.h>
+#include<fml_def.h>
+#include<fo_fml_def.h>
+#include<fn_ddr.h>
+/*** #include<fo_view_def.h> ** Ver 1.2 **/
+#include <fn_read_debug_lvl.h>
+
+#define DEFLOG3 if (DEBUG_MSG_LVL_3)
+#define DEFLOG5 if (DEBUG_MSG_LVL_5)
+#define SQL_ROW_COUNT sqlca.sqlerrd[2]
+#define STR_TRIM(x) x[strlen(x)]='\0' 
+#define MASTER_COMMIT_INTERVAL 200
+
+/*----------------------------------------------------------------------------*/
+EXEC SQL INCLUDE "table/iai_info_account_info.h"; /*** Ver 1.4 ***/
+EXEC SQL BEGIN DECLARE SECTION;
+
+
+char c_ServiceName[256]={0};
+char c_msg[256]={0};
+char c_err_msg[256]={0};
+
+char c_g_master_mode;
+char c_g_error_code;
+int  i_g_trnsctn=0;
+long l_g_master_counter=0;
+long l_g_master_loop_counter=0;
+char c_g_trim_of_mtch_acnt_id[4]={0};
+
+long l_g_start_seq_nbr=0;
+long l_g_end_seq_nbr=0;
+ 
+typedef struct __cstm_list
+{
+  char mtch_id[11];
+  char usr_name[9];
+} st_cstm_list;
+
+st_cstm_list * ptr_cstm_list = NULL;
+
+EXEC SQL  END  DECLARE SECTION;
+
+int fn_load_cstms(void);
+
+double fn_get_total_allocation(char * i_match_acnt_id,char * i_usr_id , char i_type);
+
+double fn_get_NRI_total_allocation(char * i_match_acnt_id);
+
+double fn_get_shares_amount(char *i_mtch_acnt_id );
+
+int fn_process_client(char * i_mtch_acnt_id ,double i_amount,char * i_usr_id);
+
+int fn_check_open_position(char * i_mtch_acnt_id );
+
+int fn_document_check(char * i_mtch_acnt_id);
+
+int fn_disable_fno(char * i_mtch_acnt_id ,char * i_usr_id);
+
+void fn_print_date_time(void);
+
+char *trim(char *str);
+
+/*----------------------------------------------------------------------------*/
+
+/******************************************************************************/
+
+void BAT_FNO_DISBL_CMPL ( int argc, char *argv[])
+{
+  EXEC SQL BEGIN DECLARE SECTION;
+
+  char c_svc_name[18]={0};
+  char c_trd_date[21]={0};
+
+  char c_xchng_cd[4]={0};
+
+	long l_l_seq_nbr=0;
+	char c_l_usr_id[9]={0};
+	char c_l_mtch_acnt_id[11]={0};
+
+	char c_l_fno_to_be_allwd;
+	
+	double d_amount=0.00;
+
+  EXEC SQL  END  DECLARE SECTION;
+	
+
+  strcpy(c_ServiceName,argv[0]);
+  sprintf(c_tag,"%s_na",argv[0]);
+  c_g_error_code='N';
+
+  INITBATDBGLVL(argv[0]);
+
+  fn_userlog (c_ServiceName,"====================================================");
+  sprintf(c_msg,"Batch process %s is started",argv[0]);
+  fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+  fn_userlog (c_ServiceName,"Batch process %s is started",argv[0]);
+	fn_print_date_time();
+	
+  /*need to validate the params passed*/
+  if ( argc != 7 )
+  {
+    fn_userlog (c_ServiceName,"Invalid Arguments passed %d",argc);
+    fn_userlog (c_ServiceName,"Usage:%s NFO NFO NA <Mode>  ",argv[0]);
+		fn_userlog (c_ServiceName,"==================End of %s =================",argv[0]);    
+    return;
+  }
+  else
+  {
+    c_g_master_mode=argv[4][0];    
+    
+    if  ( (c_g_master_mode != 'R') && (c_g_master_mode != 'S' ) )
+    {
+    	fn_userlog (c_ServiceName,"Invalid Arguments passed %d",argc);
+    	fn_userlog (c_ServiceName,"Mode must be R or S ");
+    	return;
+		}
+		
+		l_g_start_seq_nbr=atol(argv[5]);   
+		l_g_end_seq_nbr=atol(argv[6]);
+		
+    fn_userlog (c_ServiceName,"Arguments passed %c ",c_g_master_mode);
+    fn_userlog (c_ServiceName,"SEQ START |%ld| END |%ld| ",l_g_start_seq_nbr,l_g_end_seq_nbr );
+  }
+
+/*-------------------------
+	if ( fn_load_cstms() != 0 )
+	{
+		fn_errlog ( c_ServiceName, "S31005", SQLMSG, c_err_msg  );
+		return ;
+	}
+-------------------------*/
+
+/*--------------------------------------------------------------------------------*/
+
+/*
+	EXEC SQL
+	  DECLARE MTCH_LIST CURSOR FOR
+		SELECT FDT_USR_ID, FDT_MATCH_ACNT, FDT_FNO_ALLWD
+		FROM 
+		FDT_FNO_DISABLE_TRACK;
+
+	EXEC SQL
+		OPEN MTCH_LIST;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31010", SQLMSG, c_err_msg  );
+    sprintf(c_err_msg,"Cursor creation failed with  :%s  ",sqlca.sqlerrm.sqlerrmc);
+    fn_userlog(c_ServiceName,c_err_msg);
+    return ;
+  }
+*/
+
+	while (1)  /* Outer while loop */
+	{
+		l_g_master_loop_counter++;
+		
+	  i_g_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+	  if ( i_g_trnsctn == -1 )
+	  {
+	      fn_userlog (c_ServiceName,"Failed in initial begin transaction ");
+	    	fn_errlog ( c_ServiceName, "S31015", SQLMSG, c_err_msg  );
+	    	return ;
+	  }
+	
+			/*--------------------------------------------------------------------------------*/
+	  	while (1) /* Start of MAIN while */
+			{
+				l_g_master_counter ++ ;
+				c_g_error_code='N';
+				
+			  EXEC SQL
+			  	SELECT 		FDT_SEQ_ID, FDT_USR_ID, FDT_MATCH_ACNT, FDT_FNO_ALLWD,
+										substr(FDT_MATCH_ACNT,1,3) 
+			  	INTO 			:l_l_seq_nbr, :c_l_usr_id,:c_l_mtch_acnt_id,:c_l_fno_to_be_allwd,
+			  						:c_g_trim_of_mtch_acnt_id
+			  	FROM 			FDT_FNO_DISABLE_TRACK
+					WHERE 		FDT_PRCS_FLG ='N'
+					AND 			ROWNUM = 1
+					AND 			FDT_SEQ_ID between :l_g_start_seq_nbr and :l_g_end_seq_nbr
+					ORDER BY  FDT_SEQ_ID;
+		
+			  if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+			  {
+			    fn_errlog ( c_ServiceName, "S31020", SQLMSG, c_err_msg  );
+			    fn_aborttran( c_ServiceName, i_g_trnsctn, c_err_msg );
+			    return ;
+			  }
+		
+			  if (SQLCODE == NO_DATA_FOUND) 
+				{
+		      fn_userlog (c_ServiceName," End of data in FDT");
+					break;
+				}
+		
+		 		fn_userlog(c_ServiceName,"==== Selected  %ld-%s:%s   FNO-%c =========", 
+										l_l_seq_nbr,c_l_usr_id ,c_l_mtch_acnt_id,c_l_fno_to_be_allwd);
+		
+				EXEC SQL
+					UPDATE 		FDT_FNO_DISABLE_TRACK
+					SET 			FDT_PRCS_FLG='P'
+					WHERE			FDT_MATCH_ACNT = :c_l_mtch_acnt_id
+					AND 		  FDT_SEQ_ID = :l_l_seq_nbr;
+		
+			  if ( SQLCODE != 0 )
+			  {
+			    fn_errlog ( c_ServiceName, "S31025", SQLMSG, c_err_msg  );
+			    fn_aborttran( c_ServiceName, i_g_trnsctn, c_err_msg );
+			    return ;
+			  }
+			  
+				DEFLOG5 fn_print_date_time(); 
+		 		/*** Commented in Ver 1.4 ***
+		 		if (strcmp(c_g_trim_of_mtch_acnt_id,"751") != 0 ) ****/
+			/*** Added in Ver 1.4 **/
+				MEMSET(sql_iai_type);
+				EXEC SQL
+          SELECT  IAI_TYPE
+          INTO    :sql_iai_type
+          FROM    IAI_INFO_ACCOUNT_INFO
+          WHERE   IAI_MATCH_ACCOUNT_NO  = :c_l_mtch_acnt_id;
+				if( SQLCODE != 0 )
+				{
+					 fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg );
+					 return ;
+				}
+				SETNULL(sql_iai_type);
+				/*** Ver 1.4 Ends ***/
+				if(strcmp(sql_iai_type.arr,"NRO_NON_PINS") != 0) /*** If Condition added in Ver 1.4 ***/
+					d_amount=fn_get_total_allocation(c_l_mtch_acnt_id,c_l_usr_id,'N');
+				else
+					d_amount=fn_get_NRI_total_allocation(c_l_mtch_acnt_id);
+		 		
+		 		if (c_g_error_code  == 'N' )
+		 		{
+					fn_process_client(c_l_mtch_acnt_id,d_amount, c_l_usr_id);
+				}
+				else
+				{
+					fn_userlog(c_ServiceName,"Error in  %s:%s:%c ", c_l_usr_id ,c_l_mtch_acnt_id,c_g_error_code);
+					
+					EXEC SQL
+						UPDATE 		FDT_FNO_DISABLE_TRACK
+						SET 			FDT_PRCS_FLG='E'
+						WHERE			FDT_MATCH_ACNT = :c_l_mtch_acnt_id
+						AND 		  FDT_SEQ_ID = :l_l_seq_nbr
+						AND 			FDT_PRCS_FLG='P';
+				  
+					if ( SQLCODE != 0 )
+				  {
+				    fn_errlog ( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+				    fn_aborttran( c_ServiceName, i_g_trnsctn, c_err_msg );
+				    return;
+				  }
+					continue;
+
+				}
+		
+				EXEC SQL
+					UPDATE 		FDT_FNO_DISABLE_TRACK
+					SET 			FDT_PRCS_FLG='Y'
+					WHERE			FDT_MATCH_ACNT = :c_l_mtch_acnt_id
+					AND 		  FDT_SEQ_ID = :l_l_seq_nbr
+					AND 			FDT_PRCS_FLG='P';
+		
+			  if ( SQLCODE != 0 )
+			  {
+			    fn_errlog ( c_ServiceName, "S31040", SQLMSG, c_err_msg  );
+				  fn_aborttran( c_ServiceName, i_g_trnsctn, c_err_msg );
+					return;
+			  }
+			  
+				if ( (l_g_master_counter % MASTER_COMMIT_INTERVAL) == 0 )	break;
+					  
+			} /* End of inner MAIN while */ 
+	
+		/*-------------------------------------------------------------------------------*/
+	
+		if ( fn_committran( c_ServiceName, i_g_trnsctn, c_err_msg ) == -1 )
+		{
+	    fn_userlog (c_ServiceName,"Failed in loop commit transaction |LOOP|-|%ld| ", l_g_master_loop_counter);
+	  	fn_errlog ( c_ServiceName, "S31045", SQLMSG, c_err_msg);
+	  	return ;
+		}
+	
+	  if (SQLCODE == NO_DATA_FOUND) 
+		{
+	    fn_userlog (c_ServiceName," Breaking out of final loop");
+			break;
+		}
+				
+	}	/* End of the outer while */
+	/*--------------------------------------------------------------------------------*/
+		
+  sprintf(c_msg,"Batch process %s completed",argv[0]);
+  fn_userlog (c_ServiceName,"Batch process %s completed",argv[0]);
+  fn_print_date_time();
+  fn_userlog (c_ServiceName,"==================End of %s =================",argv[0]);
+  fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+  
+  return ;
+}
+
+/******************************************************************************/
+ 
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_FNO_DISBL_CMPL;
+  return 0;
+}
+ 
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+} 
+ 
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}
+
+/******************************************************************************/
+
+int fn_load_cstms()
+{
+  fn_userlog (c_ServiceName,"-------------------Loading CSTM List---------------------------");
+  
+  EXEC SQL BEGIN DECLARE SECTION;  
+  char c_t_mtch_id[11]={0};  
+  long l_rowcount=0;
+  EXEC SQL  END  DECLARE SECTION;
+
+  fn_userlog (c_ServiceName," NEED TO REMOVE THIS DELETE -- REMOVED ");
+		  
+/*
+  EXEC SQL
+		DELETE FROM FDT_FNO_DISABLE_TRACK;
+		
+  if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND) )
+  {
+    fn_userlog (c_ServiceName," Truncate of FDT failed ");
+    fn_errlog ( c_ServiceName, "S31050", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+
+*/
+
+  i_g_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_g_trnsctn == -1 )
+  {
+      fn_userlog (c_ServiceName,"Failed in FDT create begin transaction ");
+    	fn_errlog ( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+      return (-1);
+  }
+
+	EXEC SQL
+		UPDATE FDT_FNO_DISABLE_TRACK
+		SET FDT_PRCS_FLG='Z'
+		WHERE FDT_PRCS_FLG = 'N';
+    
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+    fn_userlog (c_ServiceName," Failed in updating past records ");
+    fn_errlog ( c_ServiceName, "S31060", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+
+  EXEC SQL
+		INSERT INTO FDT_FNO_DISABLE_TRACK
+				SELECT SEQ_DISBL_FNO_NMBR.NEXTVAL, UAC_USR_ID , UAC_CLM_MTCH_ACCNT ,CLB_BNK_ACCT_NMBR ,
+						UAC_FNO_ALLWD, 'U',0.00,0.00,0.00,0.00,0.00, 
+						'FNO - Existing Customer initiated Fund & Share allocation more than Rs 10000', SYSDATE,
+						'DPID','DPCLNTID','N'
+				FROM
+				(
+					(
+						 SELECT  UAC_USR_ID , UAC_CLM_MTCH_ACCNT ,CLB_BNK_ACCT_NMBR,UAC_FNO_ALLWD
+						 FROM UAC_USR_ACCNTS, CLB_BNK_ACCTS
+						 WHERE UAC_CLM_MTCH_ACCNT = CLB_CLM_MTCH_ACCNT
+						 AND UAC_FNO_ALLWD = 'Y'
+						 AND UAC_ACT_DEACT_FLG = 'A' 
+					)
+					minus
+					(
+						 SELECT  UAC_USR_ID , UAC_CLM_MTCH_ACCNT ,CLB_BNK_ACCT_NMBR,UAC_FNO_ALLWD
+						 FROM UAC_USR_ACCNTS, CLB_BNK_ACCTS,IAI_INFO_ACCOUNT_INFO
+						 WHERE UAC_CLM_MTCH_ACCNT = CLB_CLM_MTCH_ACCNT
+						 AND UAC_FNO_ALLWD = 'Y'
+						 AND UAC_ACT_DEACT_FLG = 'A'
+						 /*** Ver 1.4 Starts **/
+						 AND IAI_MATCH_ACCOUNT_NO=UAC_CLM_MTCH_ACCNT
+						 AND IAI_TYPE  in ('NRE_NON_PINS','NRE_PINS','NRO_PINS')
+						 /** Ver 1.4 Ends **/
+						 /*** Commmented in Ver 1.4 ***
+						 AND ( UAC_CLM_MTCH_ACCNT LIKE '65%'
+						 OR  UAC_CLM_MTCH_ACCNT LIKE '750%' ) ***/
+					) 
+				)
+				temp;
+
+		 
+    if ( SQLCODE != 0 )
+    {
+      fn_userlog (c_ServiceName," Failed in fetching the client match acnt ids ");
+      fn_errlog ( c_ServiceName, "S31065", SQLMSG, c_err_msg  );
+      return (-1);
+    }
+
+  	if ( fn_committran( c_ServiceName, i_g_trnsctn, c_err_msg ) == -1 )
+		{
+      fn_userlog (c_ServiceName,"Failed in  FDT create commit transaction ");
+    	fn_errlog ( c_ServiceName, "S31070", SQLMSG, c_err_msg  );
+      return (-1);
+		}		
+
+    return (0);
+}
+
+/******************************************************************************/
+
+double fn_get_total_allocation(i_mtch_acnt_id,i_usr_id , i_type)
+EXEC SQL BEGIN DECLARE SECTION;
+char   * i_mtch_acnt_id;
+char * i_usr_id;
+char i_type;
+EXEC SQL END   DECLARE SECTION;
+{
+
+	EXEC SQL BEGIN DECLARE SECTION;
+	
+	double    d_l_plg_amount   = 0.00;
+	double    d_l_eq_amount    = 0.00;
+	double    d_l_fo_amount    = 0.00;
+	double    d_l_cd_amount    = 0.00;
+	double    d_l_mio_amount   = 0.00;
+	double    d_l_total_amount = 0.00;
+	char 			c_l_fno_chg_flag;
+	
+	char 			c_l_dp_id[9]={0};
+	char 			c_l_dp_clnt_id[9]={0};
+	
+	EXEC SQL END   DECLARE SECTION;
+
+	DEFLOG5
+	fn_userlog(c_ServiceName, "Allocation for |%s|",i_mtch_acnt_id );
+	
+	EXEC SQL
+		SELECT
+/**		NVL ( SUM (  (NVL(DBD_TOT_QTY,0) + NVL(DBD_PLG_REQ_QTY,0) + NVL(DBD_TIFP_QTY,0) ) * NVL( LTQ_CLS_PRC, 0) ) , 0)  ** Commented for 1.3 ***/
+		NVL ( SUM ((NVL(DBD_TOT_QTY,0) + NVL(DBD_SAM_BLCKD_QTY,0) + NVL(DBD_PLG_REQ_QTY,0)) * NVL( LTQ_CLS_PRC, 0) ) , 0) /*** Changed for Ver 1.3 ***/ /*** DBD_PLG_REQ_QTY Added for Ver 1.5  ***/
+		INTO :d_l_plg_amount
+		FROM DBD_DP_BLCK_DTLS, LTQ_TRD_QT
+		WHERE
+		DBD_CLM_MTCH_ACCNT   = :i_mtch_acnt_id
+		AND DBD_STCK_CD      = ltq_stck_cd 
+		AND LTQ_XCHNG_CD     = 'BSE';
+
+	if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching  ");
+    fn_errlog ( c_ServiceName, "S31075", SQLMSG, c_err_msg  );
+    c_g_error_code='P';
+    return (-1);
+  }
+  
+  DEFLOG5
+  fn_userlog (c_ServiceName," PLG %lf ",d_l_plg_amount  );
+			
+	EXEC SQL
+		SELECT NVL(CLM_ALLCTD_AMT,0) +  NVL(CLM_BLK_TRD_AMT,0) 
+		INTO  :d_l_eq_amount
+		FROM CLM_CLNT_MSTR
+		WHERE CLM_MTCH_ACCNT = :i_mtch_acnt_id;
+
+  if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching  ");
+    fn_errlog ( c_ServiceName, "S31080", SQLMSG, c_err_msg  );
+    c_g_error_code='E';
+    return (-1);
+  }
+  
+  DEFLOG5
+  fn_userlog (c_ServiceName," EQ  %lf ",d_l_eq_amount   );
+	  
+	EXEC SQL
+		SELECT ( NVL(FAB_ALCTD_AMT,0) + NVL(FAB_BFT_AMT,0) ) / 100 
+		INTO  :d_l_fo_amount
+		FROM FAB_FO_ALC_BFT_SMRY
+		WHERE FAB_CLM_MTCH_ACCNT = :i_mtch_acnt_id ;
+
+  if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching  FAB ");
+    fn_errlog ( c_ServiceName, "S31085", SQLMSG, c_err_msg  );
+    c_g_error_code='F';
+    return (-1);
+  }
+  
+  DEFLOG5
+  fn_userlog (c_ServiceName," FNO %lf ",d_l_fo_amount   );
+	
+	EXEC SQL
+	SELECT NVL(CAB_ALCTD_AMT,0) + NVL( CAB_BFT_AMT, 0) 
+	INTO  :d_l_cd_amount
+	FROM   CAB_CDX_ALC_BFT_SMRY
+	WHERE  CAB_CLM_MTCH_ACCNT =  :i_mtch_acnt_id ;
+
+  if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching  ");
+    fn_errlog ( c_ServiceName, "S31090", SQLMSG, c_err_msg  );
+    c_g_error_code='C';
+    return (-1);
+  }
+  
+  DEFLOG5
+	fn_userlog (c_ServiceName," CDX %lf ",d_l_cd_amount   );
+	 	  
+	EXEC SQL
+		SELECT NVL(CLM_MF_ALLCTD_AMT,0)
+		INTO  :d_l_mio_amount
+		FROM CLM_CLNT_MSTR
+		WHERE CLM_MTCH_ACCNT = :i_mtch_acnt_id;
+
+  if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching ");
+    fn_errlog ( c_ServiceName, "S31095", SQLMSG, c_err_msg  );
+    c_g_error_code='M';
+    return (-1);
+  }
+  
+  DEFLOG5
+  fn_userlog (c_ServiceName," MIO %lf ",d_l_mio_amount  ); 
+
+	d_l_total_amount=d_l_plg_amount + d_l_eq_amount + d_l_fo_amount + d_l_cd_amount + d_l_mio_amount;
+	c_l_fno_chg_flag=(d_l_total_amount < 10000 ) ? 'X' : '*'; 
+
+	DEFLOG5
+  fn_userlog (c_ServiceName," TOTAL %lf ",d_l_total_amount  );
+
+  
+  EXEC SQL
+		SELECT NVL(DBD_DP_ID,'NA') , NVL(DBD_DP_CLNT_ID,'NA')
+		INTO   :c_l_dp_id, :c_l_dp_clnt_id
+		FROM   DBD_DP_BLCK_DTLS
+		WHERE  DBD_CLM_MTCH_ACCNT = :i_mtch_acnt_id
+		AND 	 ROWNUM < 2;
+
+  if ( ( SQLCODE != 0 ) &&  ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching ");
+    fn_errlog ( c_ServiceName, "S31100", SQLMSG, c_err_msg  );
+    c_g_error_code='T';
+    return (-1);
+  }
+  
+  if (SQLCODE == NO_DATA_FOUND)
+  {
+  	strcpy(c_l_dp_id,"NA");
+  	strcpy(c_l_dp_clnt_id,"NA");
+	}
+
+	DEFLOG5
+  fn_userlog (c_ServiceName," DP %s  DP CLNT %s ",c_l_dp_id,  c_l_dp_clnt_id );
+	
+	DEFLOG3  
+  fn_userlog (c_ServiceName,"||%s||   SHR:%lf|EQ:%lf|FO:%lf|CR:%lf|MF:%lf| = |TOTAL:%lf| |DP-%s| |DP_CLNT-%s|",
+  						i_mtch_acnt_id,
+							d_l_plg_amount , d_l_eq_amount , 
+							d_l_fo_amount , d_l_cd_amount , 
+							d_l_mio_amount	,d_l_total_amount ,
+							c_l_dp_id,  c_l_dp_clnt_id );
+
+	if (i_type == 'N')
+	{  
+	  EXEC SQL
+	  UPDATE FDT_FNO_DISABLE_TRACK
+	  SET
+		  FDT_PLG_AMT           = :d_l_plg_amount,
+		  FDT_EQ_AMT            = :d_l_eq_amount , 
+		  FDT_FO_AMT            = :d_l_fo_amount ,
+		  FDT_CR_AMT            = :d_l_cd_amount ,
+		  FDT_MF_AMT            = :d_l_mio_amount,
+		  FDT_FNO_ALLWD         = :c_l_fno_chg_flag,
+		  FDT_DBD_DP_ID					= :c_l_dp_id, 
+		  FDT_DBD_DP_CLNT_ID		= :c_l_dp_clnt_id
+		WHERE 
+		FDT_MATCH_ACNT = :i_mtch_acnt_id
+		/*AND trunc(FDT_PRCS_DATE) = trunc(SYSDATE)*/
+		AND FDT_PRCS_FLG='P';
+	
+	  if ( SQLCODE != 0 )
+	  {
+	    fn_userlog (c_ServiceName," Main update not possible on |%s| ",i_mtch_acnt_id );
+	    /*fn_errlog ( c_ServiceName, "S31105", SQLMSG, c_err_msg  );*/
+	  	c_g_error_code='G';
+	  	return (-1);
+	  }
+  }
+ 
+	if (i_type == 'R')   /* Passed only for NRI */
+	{   
+		DEFLOG3
+			fn_userlog (c_ServiceName," NRI |%s| |%s| ",i_mtch_acnt_id,i_usr_id);
+			
+    EXEC SQL
+		  UPDATE FDT_FNO_DISABLE_TRACK
+		  SET
+			  FDT_PLG_AMT   = 	FDT_PLG_AMT   +			:d_l_plg_amount,
+			  FDT_EQ_AMT    = 	FDT_EQ_AMT    +			:d_l_eq_amount , 
+			  FDT_FO_AMT    = 	FDT_FO_AMT    +			:d_l_fo_amount ,
+			  FDT_CR_AMT    = 	FDT_CR_AMT    +			:d_l_cd_amount ,
+			  FDT_MF_AMT    = 	FDT_MF_AMT    +			:d_l_mio_amount
+			WHERE 
+			FDT_USR_ID = :i_usr_id
+			/*AND TRUNC(FDT_PRCS_DATE) = TRUNC(SYSDATE)*/
+			AND FDT_PRCS_FLG='P';
+
+			if ( SQLCODE != 0 )
+			{
+			  fn_userlog (c_ServiceName," Failed in updating NRI");
+			  fn_errlog ( c_ServiceName, "S31110", SQLMSG, c_err_msg  );
+	    	c_g_error_code='H';
+	    	return (-1);
+	    }
+  }
+	  
+	return (d_l_total_amount);
+
+}
+/******************************************************************************/
+double fn_get_NRI_total_allocation(i_mtch_acnt_id)
+EXEC SQL BEGIN DECLARE SECTION;
+char   * i_mtch_acnt_id;
+EXEC SQL END   DECLARE SECTION;
+{
+
+	EXEC SQL BEGIN DECLARE SECTION;
+	
+	char   c_l_l_mtch_acnt_id[4][11]={0};
+	double d_alloc1=0.00F;
+	double d_alloc2=0.00F;
+	double d_alloc3=0.00F;
+	double d_alloc4=0.00F;
+	char   c_l_l_user_id[14]={0};
+	
+	EXEC SQL END   DECLARE SECTION;
+
+	EXEC SQL
+		SELECT 	UAC_USR_ID
+		INTO   	:c_l_l_user_id
+		FROM 		UAC_USR_ACCNTS
+		WHERE 	UAC_CLM_MTCH_ACCNT = :i_mtch_acnt_id;
+  
+	if ( SQLCODE != 0 )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching User Id ");
+    fn_errlog ( c_ServiceName, "S31115", SQLMSG, c_err_msg  );
+    c_g_error_code='U';
+    return (-1);
+  }
+  
+  trim(c_l_l_user_id);
+	
+	EXEC SQL
+		SELECT 		UAC_CLM_MTCH_ACCNT 
+		INTO   		:c_l_l_mtch_acnt_id
+		FROM   		UAC_USR_ACCNTS
+		WHERE 		UAC_USR_ID = TRIM(:c_l_l_user_id);
+	
+  if ( ( SQLCODE != 0 ) &&   ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog (c_ServiceName," Failed in fetching NRI Matches for |%s|",c_l_l_user_id);
+    fn_errlog ( c_ServiceName, "S31120", SQLMSG, c_err_msg  );
+    c_g_error_code='R';
+    return (-1);
+  }
+  
+  DEFLOG5     
+	fn_userlog (c_ServiceName,"NRI MATCH |%s|%s|%s|%s|",
+						c_l_l_mtch_acnt_id[0],c_l_l_mtch_acnt_id[1],
+						c_l_l_mtch_acnt_id[2],c_l_l_mtch_acnt_id[3]);
+  
+  if ( strcmp(c_l_l_mtch_acnt_id[0],"") != 0 )
+			d_alloc1=fn_get_total_allocation(c_l_l_mtch_acnt_id[0],c_l_l_user_id,'R');
+	
+	if ( strcmp(c_l_l_mtch_acnt_id[1],"") != 0 )
+  		d_alloc2=fn_get_total_allocation(c_l_l_mtch_acnt_id[1],c_l_l_user_id,'R');
+  
+	if ( strcmp(c_l_l_mtch_acnt_id[2],"") != 0 )
+			d_alloc3=fn_get_total_allocation(c_l_l_mtch_acnt_id[2],c_l_l_user_id,'R');
+			
+	if ( strcmp(c_l_l_mtch_acnt_id[3],"") != 0 )
+			d_alloc4=fn_get_total_allocation(c_l_l_mtch_acnt_id[3],c_l_l_user_id,'R');
+
+	return (d_alloc1+d_alloc2+d_alloc3+d_alloc4);
+
+}
+
+/******************************************************************************/
+
+
+/******************************************************************************/
+
+int fn_process_client(i_mtch_acnt_id , i_amount, i_usr_id)
+EXEC SQL BEGIN DECLARE SECTION;
+char  *  i_mtch_acnt_id;
+double  i_amount ;
+char *  i_usr_id;
+EXEC SQL END   DECLARE SECTION;
+{
+	long val=0;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+	char    c_l_flag='U';
+	char		c_l_comment[500]={'\0'};
+	EXEC SQL END   DECLARE SECTION;
+
+	DEFLOG5
+  fn_userlog (c_ServiceName,"Check n update *|%s|* *|%s|* ", i_usr_id, i_mtch_acnt_id);
+  
+  if (fn_document_check(i_mtch_acnt_id) != 0 )
+  {
+  	DEFLOG3
+		fn_userlog (c_ServiceName,"Document exists... no action  !!!");
+		strcpy(c_l_comment,"Document exists... no action  !!!");
+		DEFLOG5 
+		fn_userlog (c_ServiceName,"||%s||", c_l_comment);
+		
+		
+		
+		EXEC SQL
+			UPDATE FDT_FNO_DISABLE_TRACK
+			SET FDT_FNO_ALLWD = 'D'    , 
+					FDT_COMMENT   = :c_l_comment ,				
+					FDT_PRCS_DATE = SYSDATE
+			WHERE FDT_MATCH_ACNT = :i_mtch_acnt_id
+				/*AND TRUNC(FDT_PRCS_DATE) = TRUNC(SYSDATE)*/
+				AND FDT_PRCS_FLG='P';
+
+	  if ( SQLCODE != 0 )
+	  {
+	    fn_userlog (c_ServiceName," Failed in updating FDT to O");
+	    fn_errlog  (c_ServiceName, "S31125", SQLMSG, c_err_msg  );
+	    return (-1);
+	  }
+	  /** We're going back as document check has failed **/
+	  return (0);
+	}
+  
+  strcpy(c_l_comment, "Allocation > 10000 . FNO status unchanged");
+  
+	if (i_amount < 10000)
+	{
+		/*		Need to check for open positions*/
+		if ( fn_check_open_position(i_mtch_acnt_id)> 0 )
+		{
+			/* We have a open position hence need to update accordingly */
+			c_l_flag='O';
+			strcpy(c_l_comment, "Open position present & Total Allocation < 10000.");	
+
+			EXEC SQL			
+				UPDATE FDT_FNO_DISABLE_TRACK
+				SET FDT_FNO_ALLWD = :c_l_flag    , 
+						FDT_COMMENT   = :c_l_comment ,				
+						FDT_PRCS_DATE = SYSDATE
+				WHERE FDT_MATCH_ACNT = :i_mtch_acnt_id
+					/*AND TRUNC(FDT_PRCS_DATE) = TRUNC(SYSDATE)*/
+					AND FDT_PRCS_FLG='P';			
+			
+		  if ( SQLCODE != 0 )
+		  {
+		    fn_userlog (c_ServiceName," Failed in updating FDT to O");
+		    fn_errlog ( c_ServiceName, "S31130", SQLMSG, c_err_msg  );
+		    return (-1);
+		  }
+		}
+		else
+		{
+			/*Less than 10000 & no open position hence need to mark as X*/
+			c_l_flag='X';
+			strcpy(c_l_comment, "Total Allocation < 10000. Compliance Failed");
+
+			EXEC SQL			
+				UPDATE FDT_FNO_DISABLE_TRACK
+				SET FDT_FNO_ALLWD = :c_l_flag    , 
+						FDT_COMMENT   = :c_l_comment ,				
+						FDT_PRCS_DATE = SYSDATE
+				WHERE FDT_MATCH_ACNT = :i_mtch_acnt_id
+					/*AND TRUNC(FDT_PRCS_DATE) = TRUNC(SYSDATE)*/
+					AND FDT_PRCS_FLG='P';			
+			
+		  if ( SQLCODE != 0 )
+		  {
+		    fn_userlog (c_ServiceName," Failed in updating FDT to X");
+		    fn_errlog ( c_ServiceName, "S31135", SQLMSG, c_err_msg  );
+		    return (-1);
+		  }
+			
+			/*Need to update UAC and put log in ADH*/
+			if ( c_g_master_mode == 'R' )
+			{
+				if (fn_disable_fno(i_mtch_acnt_id, i_usr_id) != 0)
+				{
+	  			fn_userlog (c_ServiceName,"Failed in updating UAC |%s| ", i_mtch_acnt_id);				
+				}
+			}
+			else
+			{
+				fn_userlog (c_ServiceName,"****Simulation mode - |%s| not disabled for FNO in UAC", i_mtch_acnt_id);
+			}
+		}
+	} /** >= 10000 , hence we are not updating the record, remains U **/
+	else
+	{
+		/* ----------------------------20100624-------------------------------- */	
+		/*** Commented in Ver 1.4**
+		if (strcmp(c_g_trim_of_mtch_acnt_id,"751") == 0 ) ****/
+		/*** Added in Ver 1.4 **/
+				MEMSET(sql_iai_type);
+				EXEC SQL
+          SELECT  IAI_TYPE
+          INTO    :sql_iai_type
+          FROM    IAI_INFO_ACCOUNT_INFO
+          WHERE   IAI_MATCH_ACCOUNT_NO  = :i_mtch_acnt_id;
+				if( SQLCODE != 0 )
+				{
+					 fn_errlog( c_ServiceName, "S31140", SQLMSG, c_err_msg );
+					 return (-1);
+				}
+				SETNULL(sql_iai_type);
+		/*** Ver 1.4 Ends ***/
+		if(strcmp(sql_iai_type.arr,"NRO_NON_PINS") == 0) /*** If Condition added in Ver 1.4 ***/
+		{
+			EXEC SQL
+				UPDATE FDT_FNO_DISABLE_TRACK
+				SET FDT_FNO_ALLWD = '*'    , 
+						FDT_PRCS_DATE = SYSDATE
+				WHERE FDT_MATCH_ACNT = :i_mtch_acnt_id
+					/*AND TRUNC(FDT_PRCS_DATE) = TRUNC(SYSDATE)*/
+					AND FDT_PRCS_FLG='P';
+					
+			if ( SQLCODE != 0 )
+		  {
+		    fn_userlog (c_ServiceName," Failed in updating FDT to * for NRI ");
+		    fn_errlog ( c_ServiceName, "S31145", SQLMSG, c_err_msg  );
+		    return (-1);
+		  }
+		}		
+		/* ----------------------------------------------------------------------- */
+	}	
+	 
+	return (0);
+}
+
+/******************************************************************************/
+
+int fn_check_open_position(i_mtch_acnt_id )
+EXEC SQL BEGIN DECLARE SECTION;
+char  *  i_mtch_acnt_id;
+EXEC SQL END   DECLARE SECTION;
+{
+
+  DEFLOG5 fn_userlog (c_ServiceName,"Checking Open positions *|%s|* ", i_mtch_acnt_id);
+
+  EXEC SQL BEGIN DECLARE SECTION;
+	long l_ffp_opnpstn_qty=0;
+	long l_fop_opnpstn_qty=0;
+  EXEC SQL END   DECLARE SECTION;
+
+  EXEC SQL
+  SELECT
+		NVL(SUM(ABS(FFP_OPNPSTN_QTY)),0)
+	INTO
+		:l_ffp_opnpstn_qty
+	FROM
+		FFP_FO_FUTURES_PSTN
+	WHERE
+			FFP_CLM_MTCH_ACCNT=:i_mtch_acnt_id
+	AND FFP_XCHNG_CD='NFO'
+	AND FFP_PRDCT_TYP	in ( 'F' , 'P' )
+	AND
+		(     FFP_OPNPSTN_QTY != 0
+		OR    FFP_IBUY_QTY    != 0
+		OR    FFP_ISELL_QTY   != 0
+		);
+		
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog ( c_ServiceName, "S31150", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+
+/* 	fn_userlog (c_ServiceName,"Open position- Futures %ld ", l_ffp_opnpstn_qty);*/
+
+	EXEC SQL
+  SELECT 
+		NVL(SUM(ABS(FOP_OPNPSTN_QTY)),0)
+	INTO
+		:l_fop_opnpstn_qty		
+	FROM
+		FOP_FO_OPTIONS_PSTN
+	WHERE
+			FOP_CLM_MTCH_ACCNT=:i_mtch_acnt_id
+	AND FOP_XCHNG_CD        = 'NFO'
+	AND FOP_PRDCT_TYP				= 'O'
+	AND  
+		(     FOP_OPNPSTN_QTY != 0
+		OR    FOP_IBUY_QTY    != 0
+		OR    FOP_ISELL_QTY   != 0
+		);
+
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog ( c_ServiceName, "S31155", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+
+	DEFLOG5 fn_userlog (c_ServiceName,"Open position |%s| - |Futures %ld|   |Options %ld| ",
+							i_mtch_acnt_id,l_ffp_opnpstn_qty, l_fop_opnpstn_qty);
+
+	if ( (l_fop_opnpstn_qty + l_ffp_opnpstn_qty ) > 0 ) return (1);
+
+	return (0);
+}
+
+/******************************************************************************/
+
+int fn_document_check(i_mtch_acnt_id)
+EXEC SQL BEGIN DECLARE SECTION;
+char  *  i_mtch_acnt_id;
+EXEC SQL END   DECLARE SECTION;
+{
+	DEFLOG5
+  fn_userlog (c_ServiceName,"Checking Documents *|%s|* ", i_mtch_acnt_id);
+
+  EXEC SQL BEGIN DECLARE SECTION;
+	int  i_docs_prsnt=0;
+  EXEC SQL END   DECLARE SECTION;
+
+	EXEC SQL
+		SELECT COUNT(1) INTO :i_docs_prsnt
+		FROM IID_INFO_IDENTIFICATION_DTLS,IAI_INFO_ACCOUNT_INFO
+		WHERE IID_SERIAL_NO = IAI_SERIAL_NO
+		AND IAI_MATCH_ACCOUNT_NO =  :i_mtch_acnt_id
+		AND IID_VERIFY_FLG='Y'
+		AND IID_TYPE IN ('DERIVATIVE_FINANCIAL_DOC_1',
+		'DERIVATIVE_FINANCIAL_DOC_2',
+		'DERIVATIVE_FINANCIAL_DOC_3',
+		'DERIVATIVE_FINANCIAL_DOC_4',
+		'DERIVATIVE_FINANCIAL_DOC_5',
+		'DERIVATIVE_FINANCIAL_DOC_6',
+		'DERIVATIVE_FINANCIAL_DOC_7');
+		
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31160", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+
+	DEFLOG5
+  fn_userlog (c_ServiceName,"Documents Check Value *|%d|* ", i_docs_prsnt);
+
+	return (i_docs_prsnt);
+}
+
+/******************************************************************************/
+
+int fn_disable_fno(i_mtch_acnt_id , i_usr_id)
+EXEC SQL BEGIN DECLARE SECTION;
+char  *  i_mtch_acnt_id;
+char  *  i_usr_id;
+EXEC SQL END   DECLARE SECTION;
+{
+	fn_userlog (c_ServiceName,"**** DISABLE %s ", i_mtch_acnt_id);
+	trim(i_usr_id);
+	
+	EXEC SQL
+		UPDATE UAC_USR_ACCNTS
+		SET UAC_FNO_ALLWD = 'X',UAC_LST_UPDT_DATE = SYSDATE
+		WHERE  UAC_CLM_MTCH_ACCNT = :i_mtch_acnt_id;
+		
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31165", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+
+  EXEC SQL
+		UPDATE USR_USER_MASTER
+		SET USR_FNO_ACCPT_FLG ='N', USR_ACCPT_DT =SYSDATE
+		WHERE USR_USR_ID = :i_usr_id;
+		
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31170", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+	  
+  EXEC SQL
+  	INSERT INTO ADH_ACT_DEACT_HSTRY   /** Ver 1.1 , Insert column specific ***/
+                           (ADH_USR_ID,
+                            ADH_CLM_MTCH_ACCNT,
+                            ADH_ACT_DEACT_FLG,
+                            ADH_ACT_DEACT_DT,
+                            ADH_ACT_DEACT_SRC,
+                            ADH_RMRKS,
+                            ADH_UPGRD_FLG
+                            )
+  	VALUES
+  	(:i_usr_id ,:i_mtch_acnt_id , 'D', SYSDATE, 'FNO_COMPLIANCE' 
+			, 'FNO disabled  - SEBI Circular Number MIRSD/SE/CIR19/2009 Fund & Share allocation less than Rs 10000.' , 'N' );
+			
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31175", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+  
+  EXEC SQL
+	  UPDATE CLM_CLNT_MSTR
+		SET CLM_CLNT_LVL = NULL ,
+		CLM_LST_UPD_DT = SYSDATE
+		WHERE
+		CLM_MTCH_ACCNT = :i_mtch_acnt_id;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31180", SQLMSG, c_err_msg  );
+    return (-1);
+  }
+	
+	return (0);
+}
+
+char *trim(char *str)
+{
+  
+  int i;
+  for (i=0;i<strlen(str);i++)
+    if (str[i]==' ') str[i]='\0';
+
+  return(str);
+}
+
+void fn_print_date_time()
+{
+  EXEC SQL BEGIN DECLARE SECTION;
+  char c_date_time[30];
+  EXEC SQL END   DECLARE SECTION;
+  
+  EXEC SQL
+  SELECT
+  to_char(SYSDATE , 'dd-Mon-yyyy--hh24:mi:ss')
+  INTO :c_date_time
+  from dual;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31185", SQLMSG, c_err_msg  );
+    return ;
+  }
+  
+  trim(c_date_time);
+  fn_userlog (c_ServiceName," ----  Time : %s  ---- ",c_date_time);  
+}
+
+/*******************************************************************************
+														END OF CODE
+*******************************************************************************/
+
+
+
+
+
+

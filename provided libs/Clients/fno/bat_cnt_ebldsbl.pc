@@ -1,0 +1,743 @@
+/************************************************************************************************
+* Service name :  BAT_CNT_EBLDSBL																																*
+*																																																*
+* Description  :  This Batch Program will auto enable or disable optionPLUS contracts depending *
+*								  upon the range defined in the range table                                     *
+*																																																*
+*																																																*
+* Log          :   24-Sep-2013 Initial Release  - Swati A.B        															*
+*      Ver 1.1 :   21-Jan-2014 Spot price logging - Navina D.                                   *
+*  	   Ver 1.2 :   19-Jun-2015 Contract Master and Trade Quote Merger  - Ritesh Deolekar        *
+*      Ver 1.3 :   12-Aug-2016 Reverted Ver 1.1 for CR-ISEC14-83636                             *
+*      VER 1.4 :   25-OCT-2016 New Range based logic for OptionPlus Contracts Enable-Disable    *
+*                  BY MRINAL KISHORE                                                            *	
+*      Ver 1.5 :   21-Mar-2023 Changes for row level commit to avoid FTQ contention Mahesh Shinde *
+************************************************************************************************/
+
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_session.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>
+
+void BAT_CNT_EBLDSBL( int argc, char *argv[] )
+{
+  char 		 c_ServiceName [ 33 ];
+  char 		 c_err_msg [ 256 ];
+	char 		 c_msg[256];
+	/*** varchar  v_near_expry_dt [21]  ;	 *** Commented in Ver 1.3 ***/
+	
+	int i_trnsctn = 0;
+	int	i_ret_va = 0;
+
+	/*** Commented in Ver 1.3 ***
+	double d_spot_prc = 0.0;  *** Ver 1.1 ***
+	double d_open_prc = 0.0;  *** Ver 1.1 ***
+	double d_high_prc = 0.0;  *** Ver 1.1 ***
+	double d_low_prc  = 0.0;  *** Ver 1.1 ***
+  ***/
+
+	/*** MEMSET(v_near_expry_dt );  *** Commented in Ver 1.3 ***/
+
+
+	FBFR32		*ptr_fml_Sbuffer;
+
+  EXEC SQL BEGIN DECLARE SECTION;
+   char     c_exg_stts ;
+	 char c_xchng_cd[3+1];  /*** Ver 1.5 ***/
+   char c_undrlyng[20+1]; /*** Ver 1.5 ***/
+   char c_expry_dt[11+1]; /*** Ver 1.5 ***/
+   long l_strike_prc;			/*** Ver 1.5 ***/
+   char c_prdct_typ;			/*** Ver 1.5 ***/
+   char c_indstk_typ;     /*** Ver 1.5 ***/
+   char c_exer_typ;       /*** Ver 1.5 ***/
+   char c_opt_typ;        /*** Ver 1.5 ***/
+  EXEC SQL END DECLARE SECTION;
+
+	int i_fail_flg = 0;    /*** Ver 1.5 ***/
+  strcpy ( c_ServiceName, argv[0] );
+	INITBATDBGLVL(c_ServiceName);
+
+  sprintf ( c_msg, "Batch process %s started", argv[0] );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Batch process for enabling-disabling optionPLUS started ");
+	}
+  
+	/*** Commented in Ver 1.3 ***
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Selecting near month and mid-month expiry dates");
+	}
+
+	EXEC SQL
+		SELECT  TO_CHAR ( MIN (FCM_EXPRY_DT),'dd-Mon-yyyy')
+    INTO    :v_near_expry_dt 
+    FROM    FCM_FO_CNTRCT_MSTR
+    WHERE   FCM_XCHNG_CD     = 'NFO'
+    AND     FCM_PRDCT_TYP    = 'F'
+    AND     FCM_UNDRLYNG     = 'NIFTY'
+		AND     FCM_QT_TRDNG_FLG = 'T';
+				
+	if ( SQLCODE != 0 )
+  {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog(c_ServiceName,"S31005",SQLMSG,c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, "Error while selecting near month expiry date",c_tag);
+      return;
+  }
+
+	SETNULL(v_near_expry_dt );
+  SETLEN(v_near_expry_dt );
+
+	if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"Near month expiry date is :%s:",v_near_expry_dt .arr);
+	}
+	***/
+
+	/****************************** Logic***********************************/
+	/*** Following query disables the OptionPLUS contracts if the strike ***/
+	/*** strike price falls outside the range derived from the spot of   ***/
+	/*** the underlying and the range defined in the range master  .     ***/
+	/*** Similarly , for enabling contracts the strke price falling      ***/
+	/*** inside enablment range  derived from the spot of the underlying ***/
+	/*** and the range defined in the range master  .	In both cases      ***/
+	/*** In both cases , the contracts present in the Exception Master   ***/
+	/*** marked as 'A' (i.e) for enablment-disablment are excluded.      ***/
+	/*** While disabling border strike price values will be considered   ***/
+	/*** but while enabling border strike price values will not be       ***/
+	/*** considered.																										 ***/
+	/*** Exception master strike price eneterd in Rs by user and         ***/
+	/*** in Paise in the batch process																	 ***/
+	/***********************************************************************/
+
+	/**** Added Ver 1.5 ****/
+	EXEC SQL TRUNCATE TABLE FED_FO_ENB_DSB_TEMP;
+
+  if ( SQLCODE != 0 )
+  {
+      fn_errlog(c_ServiceName,"S31010",SQLMSG,c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, "Error in itruncate FED_FO_ENB_DSB_TEMP Table....",c_tag);
+      return;
+  }
+	/**** Ver 1.5 ****/
+
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+     	strcpy ( c_msg, "System error. Contact system support" );
+     	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+     	fn_errlog(c_ServiceName, "S31015", LIBMSG, c_err_msg );
+     	return ;
+  }
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName," Disabling/Enableing optionPLUS contracts started ");
+	}
+
+	/*** Ver 1.1 starts Commented in Ver 1.3  ***
+	EXEC SQL
+			 SELECT NVL(LTQ_RT,0),
+							NVL(LTQ_OPN_PRC,0),
+						  NVL(LTQ_HGH_PRC,0),
+							NVL(LTQ_LOW_PRC,0)
+			 INTO   :d_spot_prc,
+						  :d_open_prc,
+							:d_high_prc,
+							:d_low_prc
+			 FROM   LTQ_TRD_QT
+			 WHERE  LTQ_XCHNG_CD = 'NSE'
+			 AND    LTQ_STCK_CD  = 'NIFTY';
+
+	if(SQLCODE != 0)
+	{
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		fn_errlog(c_ServiceName,"S31020",SQLMSG,c_err_msg);
+		fn_bat_pst_msg ( c_ServiceName, "Error in selecting Nifty spot ",c_tag);
+		return;
+	}
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog( c_ServiceName,"Nifty Spot Rate in Rs:%lf:",d_spot_prc);
+		fn_userlog( c_ServiceName,"Nifty Open price in Rs:%lf:",d_open_prc);
+		fn_userlog( c_ServiceName,"Nifty high price in Rs:%lf:",d_high_prc);
+		fn_userlog( c_ServiceName,"Nifty low price in Rs:%lf:",d_low_prc);
+	}
+
+	*** Ver 1.1 Ends Commented in Ver 1.3 ends ***/
+
+	/*** Commented in Ver 1.2 ***
+
+	EXEC SQL
+		UPDATE FCM_FO_CNTRCT_MSTR A 
+		SET    A.FCM_SLTP_FP_QT_TRDNG_FLG = 'Q'
+		WHERE  ( A.FCM_XCHNG_CD,A.FCM_PRDCT_TYP , A.FCM_UNDRLYNG,A.FCM_INDSTK,A.FCM_EXPRY_DT,
+					   A.FCM_OPT_TYP,A.FCM_STRK_PRC,A.FCM_EXER_TYP
+					 )
+		IN     ( SELECT	 FCM_XCHNG_CD,FCM_PRDCT_TYP , FCM_UNDRLYNG,FCM_INDSTK,FCM_EXPRY_DT,
+										 FCM_OPT_TYP,FCM_STRK_PRC,FCM_EXER_TYP
+         		 FROM		 FCM_FO_CNTRCT_MSTR  , LTQ_TRD_QT, FED_FO_ENBL_DISBL_MSTR 
+         		 WHERE	 FCM_UNDRLYNG =   LTQ_STCK_CD
+         		 AND		 LTQ_XCHNG_CD   =   DECODE(FCM_XCHNG_CD,'NFO','NSE','BSE')
+         		 AND     (   FCM_STRK_PRC  <=   ((LTQ_RT - NVL(FED_FROM_DISABLMNT,0)) * 100)
+											OR FCM_STRK_PRC  >=   ((LTQ_RT + NVL(FED_TO_DISABLMNT,0)) * 100)
+										 )																																								*** Commented in Ver 1.1 Uncommented in Ver 1.3 ***	
+						 *** AND     (   FCM_STRK_PRC  <=   ((:d_spot_prc - NVL(FED_FROM_DISABLMNT,0)) * 100)
+											OR FCM_STRK_PRC  >=   ((:d_spot_prc + NVL(FED_TO_DISABLMNT,0)) * 100)	
+										 )																																							  *** Ver 1.1  Commented in Ver 1.3 ***
+             AND     FCM_UNDRLYNG   =   FED_UNDRLYNG
+             AND     FCM_XCHNG_CD   =   FED_XCHNG_CD
+             AND     FCM_OPT_TYP    =   FED_OPT_TYP
+						 *** AND     FCM_EXPRY_DT   >=  :v_near_expry_dt  *** commented in Ver 1.3 ***
+						 AND     FCM_EXPRY_DT   >=  trunc(sysdate)				  *** Ver 1.3 ***
+						 AND     FCM_EXPRY_DT   =   FED_EXPRY_DT
+             AND     FCM_PRDCT_TYP  =   'O'
+						 *** AND     ( FED_FROM_DISABLMNT != 0 OR FED_TO_DISABLMNT != 0 ) *** Commented on 27Dec2013 ***
+             AND     ( FED_FROM_DISABLMNT IS NOT NULL OR FED_TO_DISABLMNT IS NOT NULL )
+             MINUS
+             SELECT  FOE_XCHNG_CD,FOE_PRDCT_TYP , FOE_UNDRLYNG,FOE_INDSTK,FOE_EXPRY_DT,FOE_OPT_TYP,(FOE_STRK_PRC*100),FOE_EXER_TYP
+             FROM		 FOE_FO_OPLUS_EXCPMSTR WHERE FOE_FLAG = 'Y'
+           );
+
+	if ( SQLCODE != 0 )
+	{
+			if ( SQLCODE == NO_DATA_FOUND)
+			{
+    		fn_userlog(c_ServiceName," No records found for disablment ...");
+			}
+			else
+			{
+  	 		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   			fn_errlog(c_ServiceName,"S31025",SQLMSG,c_err_msg);
+   			fn_bat_pst_msg ( c_ServiceName, "Error in updating optionPLUS contracts for disablment ",c_tag);
+   			return;
+			}
+	}
+
+	*** Ver 1.2 Comment Ends ***/
+
+ /******  Ver 1.2 Started ****** Commented in Ver 1.5 ***
+
+  EXEC SQL
+    UPDATE FTQ_FO_TRD_QT A
+    SET    A.FTQ_SLTP_FP_QT_TRDNG_FLG = 'Q'
+    WHERE  ( A.FTQ_XCHNG_CD,A.FTQ_PRDCT_TYP , A.FTQ_UNDRLYNG,A.FTQ_INDSTK,A.FTQ_EXPRY_DT,
+             A.FTQ_OPT_TYP,A.FTQ_STRK_PRC,A.FTQ_EXER_TYP
+           )
+    IN     ( SELECT  FTQ_XCHNG_CD,FTQ_PRDCT_TYP , FTQ_UNDRLYNG,FTQ_INDSTK,FTQ_EXPRY_DT,
+                     FTQ_OPT_TYP,FTQ_STRK_PRC,FTQ_EXER_TYP
+             FROM    FTQ_FO_TRD_QT , LTQ_TRD_QT, FED_FO_ENBL_DISBL_MSTR
+             WHERE   FTQ_UNDRLYNG =   LTQ_STCK_CD
+             AND     LTQ_XCHNG_CD   =   DECODE(FTQ_XCHNG_CD,'NFO','NSE','BSE')
+***************************************
+			       AND     (   FTQ_STRK_PRC  <=   ((LTQ_RT - NVL(FED_FROM_DISABLMNT,0)) * 100)
+											OR FTQ_STRK_PRC  >=   ((LTQ_RT + NVL(FED_TO_DISABLMNT,0)) * 100)
+										 )										
+***condition added in Ver 1.3 *******commented in ver 1.4********		
+             *** AND     (   FTQ_STRK_PRC  <=   ((:d_spot_prc - NVL(FED_FROM_DISABLMNT,0)) * 100)
+                      OR FTQ_STRK_PRC  >=   ((:d_spot_prc + NVL(FED_TO_DISABLMNT,0)) * 100)
+                     )     *** Commented in Ver 1.3 ***
+             AND     ((FTQ_STRK_PRC >= ((LTQ_RT + NVL(FED_TO_DISABLMNT, 0))*100))     **** VER 1.4 ****
+                        OR (FTQ_STRK_PRC <= ((LTQ_RT + NVL(FED_FROM_DISABLMNT, 0))*100)) *** VER 1.4 ****
+                        OR (FTQ_TOT_BID_QTY < FED_DSBL_TOT_BID_QTY)                       **** VER 1.4 ****
+                        OR (FTQ_TOT_OFFR_QTY < FED_DSBL_TOT_OFFR_QTY))                    **** VER 1.4 ****
+             AND     FTQ_UNDRLYNG   =   FED_UNDRLYNG
+             AND     FTQ_XCHNG_CD   =   FED_XCHNG_CD
+             AND     FTQ_OPT_TYP    =   FED_OPT_TYP
+             *** AND     FTQ_EXPRY_DT   >=  :v_near_expry_dt   *** commented in Ver 1.3 ***
+						 AND     FTQ_EXPRY_DT   >=  trunc(sysdate)				  *** Ver 1.3 ***
+             AND     FTQ_EXPRY_DT   =   FED_EXPRY_DT
+             AND     FTQ_PRDCT_TYP  =   'O'
+             AND     ( FED_FROM_DISABLMNT IS NOT NULL OR FED_TO_DISABLMNT IS NOT NULL )
+             MINUS
+             SELECT  FOE_XCHNG_CD,FOE_PRDCT_TYP , FOE_UNDRLYNG,FOE_INDSTK,FOE_EXPRY_DT,FOE_OPT_TYP,(FOE_STRK_PRC*100),FOE_EXER_TYP
+             FROM    FOE_FO_OPLUS_EXCPMSTR WHERE FOE_FLAG = 'Y'
+           );
+
+	if ( SQLCODE != 0 )
+  {
+      if ( SQLCODE == NO_DATA_FOUND)
+      {
+        fn_userlog(c_ServiceName," No records found for disablment in Trade Quote Table...");
+      }
+      else
+      {
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog(c_ServiceName,"S31030",SQLMSG,c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "Error in updating optionPLUS contracts for disablment ",c_tag);
+        return;
+      }
+  }
+
+ ********* Ver 1.2 Ends ************
+	
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog( c_ServiceName,":%d: records Disabled", sqlca.sqlerrd[2]);
+    fn_userlog(c_ServiceName," Disabling optionPLUS contracts Ended ");
+    fn_userlog(c_ServiceName," Enabling  optionPLUS contracts started ");
+	}
+	Ver 1.5 Comment end*********/
+
+	/*** Commented in Ver 1.2 ***
+
+	EXEC SQL
+		UPDATE FCM_FO_CNTRCT_MSTR A 
+		SET    A.FCM_SLTP_FP_QT_TRDNG_FLG = 'T'
+		WHERE  ( A.FCM_XCHNG_CD,A.FCM_PRDCT_TYP , A.FCM_UNDRLYNG,A.FCM_INDSTK,A.FCM_EXPRY_DT,
+					   A.FCM_OPT_TYP,A.FCM_STRK_PRC,A.FCM_EXER_TYP
+					 )
+		IN     ( SELECT	 FCM_XCHNG_CD,B.FCM_PRDCT_TYP , B.FCM_UNDRLYNG, B.FCM_INDSTK,B.FCM_EXPRY_DT,
+										 FCM_OPT_TYP,B.FCM_STRK_PRC,B.FCM_EXER_TYP
+         		 FROM		 FCM_FO_CNTRCT_MSTR B , LTQ_TRD_QT, FED_FO_ENBL_DISBL_MSTR 
+         		 WHERE	 FCM_UNDRLYNG   =   LTQ_STCK_CD
+         		 AND		 LTQ_XCHNG_CD   =   DECODE(FCM_XCHNG_CD,'NFO','NSE','BSE')
+         		 AND     (		FCM_STRK_PRC   >   ((LTQ_RT - NVL(FED_FROM_ENABLMNT,0) ) * 100)
+											AND FCM_STRK_PRC   <   ((LTQ_RT + NVL(FED_TO_ENABLMNT,0)   ) * 100)
+										 )																																			*** Commented in Ver 1.1  Uncommented in Ver 1.3 ***
+						*** AND     (				FCM_STRK_PRC   >   ((:d_spot_prc - NVL(FED_FROM_ENABLMNT,0) ) * 100)
+										   AND  FCM_STRK_PRC   <   ((:d_spot_prc + NVL(FED_TO_ENABLMNT,0)   ) * 100)
+										)																																				*** Ver 1.1  Commented in Ver 1.3 ***	
+             AND     FCM_UNDRLYNG   =   FED_UNDRLYNG
+             AND     FCM_XCHNG_CD   =   FED_XCHNG_CD
+             AND     FCM_OPT_TYP    =   FED_OPT_TYP
+             AND     FCM_PRDCT_TYP  =   'O'
+						 *** AND     ( FED_FROM_ENABLMNT != 0 OR FED_TO_ENABLMNT != 0 ) *** Commented on 27Dec2013 ***
+             AND     ( FED_FROM_ENABLMNT IS NOT NULL OR FED_TO_ENABLMNT IS NOT NULL )
+						 *** AND     FCM_EXPRY_DT    >=  :v_near_expry_dt	*** commented in Ver 1.3 ***
+						 AND     FCM_EXPRY_DT   >=  trunc(sysdate)				  *** Ver 1.3 ***
+						 AND     FCM_EXPRY_DT    =   FED_EXPRY_DT
+						 MINUS
+             SELECT  FOE_XCHNG_CD,FOE_PRDCT_TYP , FOE_UNDRLYNG,FOE_INDSTK,FOE_EXPRY_DT,FOE_OPT_TYP,(FOE_STRK_PRC*100),FOE_EXER_TYP
+             FROM		 FOE_FO_OPLUS_EXCPMSTR WHERE FOE_FLAG = 'Y'
+           );
+
+	if ( SQLCODE != 0 )
+	{
+			
+      if ( SQLCODE == NO_DATA_FOUND)
+      {
+        fn_userlog(c_ServiceName," No records found for Enablement ...");
+      }
+			else
+			{
+  	 		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   			fn_errlog(c_ServiceName,"S31035",SQLMSG,c_err_msg);
+   			fn_bat_pst_msg ( c_ServiceName, "Error in updating optionPLUS contracts for enablemnt....",c_tag);
+   			return;
+			}
+	}
+
+	*** Ver 1.2 comment Ends ***/
+
+	/********* Ver 1.2 Started ************ Commented in Ver 1.5
+
+  EXEC SQL
+    UPDATE FTQ_FO_TRD_QT A
+    SET    A.FTQ_SLTP_FP_QT_TRDNG_FLG = 'T'
+    WHERE  ( A.FTQ_XCHNG_CD,A.FTQ_PRDCT_TYP , A.FTQ_UNDRLYNG,A.FTQ_INDSTK,A.FTQ_EXPRY_DT,
+             A.FTQ_OPT_TYP,A.FTQ_STRK_PRC,A.FTQ_EXER_TYP
+           )
+    IN     ( SELECT  FTQ_XCHNG_CD,B.FTQ_PRDCT_TYP , B.FTQ_UNDRLYNG, B.FTQ_INDSTK,B.FTQ_EXPRY_DT,
+                     FTQ_OPT_TYP,B.FTQ_STRK_PRC,B.FTQ_EXER_TYP
+             FROM    FTQ_FO_TRD_QT B , LTQ_TRD_QT, FED_FO_ENBL_DISBL_MSTR
+             WHERE   FTQ_UNDRLYNG   =   LTQ_STCK_CD
+             AND     LTQ_XCHNG_CD   =   DECODE(FTQ_XCHNG_CD,'NFO','NSE','BSE')
+ ********************************
+						 AND     (		FTQ_STRK_PRC   >   ((LTQ_RT - NVL(FED_FROM_ENABLMNT,0) ) * 100)
+											AND FTQ_STRK_PRC   <   ((LTQ_RT + NVL(FED_TO_ENABLMNT,0)   ) * 100)
+										 )																																			*** AND condition added in Ver 1.3 ********commented in ver 1.4*****
+            *** AND     (       FTQ_STRK_PRC   >   ((:d_spot_prc - NVL(FED_FROM_ENABLMNT,0) ) * 100)
+                       AND  FTQ_STRK_PRC   <   ((:d_spot_prc + NVL(FED_TO_ENABLMNT,0)   ) * 100)
+                    )                                                            *** Commented in Ver 1.3 *** 
+             AND     FTQ_STRK_PRC < ((LTQ_RT + NVL(FED_TO_ENABLMNT,0))*100)   **** VER 1.4****
+             AND     FTQ_STRK_PRC > ((LTQ_RT + NVL(FED_FROM_ENABLMNT,0))*100)   **** VER 1.4****
+             AND     FTQ_TOT_BID_QTY > FED_ENBL_TOT_BID_QTY                           **** VER 1.4****
+             AND     FTQ_TOT_OFFR_QTY > FED_ENBL_TOT_OFFR_QTY                            **** VER 1.4****
+             AND     FTQ_UNDRLYNG   =   FED_UNDRLYNG
+             AND     FTQ_XCHNG_CD   =   FED_XCHNG_CD
+             AND     FTQ_OPT_TYP    =   FED_OPT_TYP
+             AND     FTQ_PRDCT_TYP  =   'O'
+             AND     ( FED_FROM_ENABLMNT IS NOT NULL OR FED_TO_ENABLMNT IS NOT NULL )
+             *** AND     FTQ_EXPRY_DT    >=  :v_near_expry_dt  *** commented in Ver 1.3 ***
+						 AND     FTQ_EXPRY_DT   >=  trunc(sysdate)				  *** Ver 1.3 ***
+             AND     FTQ_EXPRY_DT    =   FED_EXPRY_DT
+             MINUS
+             SELECT  FOE_XCHNG_CD,FOE_PRDCT_TYP , FOE_UNDRLYNG,FOE_INDSTK,FOE_EXPRY_DT,FOE_OPT_TYP,(FOE_STRK_PRC
+*100),FOE_EXER_TYP
+             FROM    FOE_FO_OPLUS_EXCPMSTR WHERE FOE_FLAG = 'Y'
+           );
+
+  if ( SQLCODE != 0 )
+  {
+
+      if ( SQLCODE == NO_DATA_FOUND)
+      {
+        fn_userlog(c_ServiceName," No records found for Enablement in Trade Quote table...");
+      }
+      else
+      {
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog(c_ServiceName,"S31040",SQLMSG,c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "Error in updating optionPLUS contracts for enablemnt in Trade Quote Table....",c_tag);
+        return;
+      }
+  }
+
+	********* Ver 1.2 Ends **********
+
+	if(DEBUG_MSG_LVL_3)
+  {
+		fn_userlog( c_ServiceName,":%d: records Enabled", sqlca.sqlerrd[2]);
+    fn_userlog(c_ServiceName," Enabling  optionPLUS contracts Ended ");
+	}
+
+	Ver 1.5 Comment ends *********/
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName," Insert records in temp table");
+  }
+
+	EXEC SQL INSERT INTO FED_FO_ENB_DSB_TEMP(FED_XCHNG_CD,FED_PRDCT_TYP,FED_UNDRLYNG,FED_INDSTK,FED_EXPRY_DT,FED_OPT_TYP,
+																					FED_STRK_PRC,FED_EXER_TYP,FED_QT_TRDNG_FLG,FED_PRCS_FLG) 
+							(	SELECT  FTQ_XCHNG_CD,FTQ_PRDCT_TYP , FTQ_UNDRLYNG,FTQ_INDSTK,FTQ_EXPRY_DT, FTQ_OPT_TYP,
+																				FTQ_STRK_PRC,FTQ_EXER_TYP,'Q','N'
+             FROM    FTQ_FO_TRD_QT , LTQ_TRD_QT, FED_FO_ENBL_DISBL_MSTR
+             WHERE   FTQ_UNDRLYNG =   LTQ_STCK_CD
+             AND     LTQ_XCHNG_CD   =   DECODE(FTQ_XCHNG_CD,'NFO','NSE','BSE')
+             AND     ((FTQ_STRK_PRC >= ((LTQ_RT + NVL(FED_TO_DISABLMNT, 0))*100))   
+                        OR (FTQ_STRK_PRC <= ((LTQ_RT + NVL(FED_FROM_DISABLMNT, 0))*100)) 
+                        OR (FTQ_TOT_BID_QTY < FED_DSBL_TOT_BID_QTY)                      
+                        OR (FTQ_TOT_OFFR_QTY < FED_DSBL_TOT_OFFR_QTY))                    
+             AND     FTQ_UNDRLYNG   =   FED_UNDRLYNG
+             AND     FTQ_XCHNG_CD   =   FED_XCHNG_CD
+             AND     FTQ_OPT_TYP    =   FED_OPT_TYP
+		     		 AND     FTQ_EXPRY_DT   >=  trunc(sysdate)         
+             AND     FTQ_EXPRY_DT   =   FED_EXPRY_DT
+             AND     FTQ_PRDCT_TYP  =   'O'
+			 			 AND	 	 FTQ_SLTP_FP_QT_TRDNG_FLG != 'Q'
+             AND     ( FED_FROM_DISABLMNT IS NOT NULL OR FED_TO_DISABLMNT IS NOT NULL )
+             MINUS
+             SELECT  FOE_XCHNG_CD,FOE_PRDCT_TYP , FOE_UNDRLYNG,FOE_INDSTK,FOE_EXPRY_DT,FOE_OPT_TYP,
+										(FOE_STRK_PRC*100),FOE_EXER_TYP,'Q','N'
+             FROM    FOE_FO_OPLUS_EXCPMSTR WHERE FOE_FLAG = 'Y'
+						
+					UNION	 
+						 SELECT  FTQ_XCHNG_CD,FTQ_PRDCT_TYP , FTQ_UNDRLYNG, FTQ_INDSTK,FTQ_EXPRY_DT, FTQ_OPT_TYP,
+											FTQ_STRK_PRC,FTQ_EXER_TYP,'T','N'
+             FROM    FTQ_FO_TRD_QT , LTQ_TRD_QT, FED_FO_ENBL_DISBL_MSTR
+             WHERE   FTQ_UNDRLYNG   =   LTQ_STCK_CD
+             AND     LTQ_XCHNG_CD   =   DECODE(FTQ_XCHNG_CD,'NFO','NSE','BSE')
+             AND     FTQ_STRK_PRC < ((LTQ_RT + NVL(FED_TO_ENABLMNT,0))*100)   
+             AND     FTQ_STRK_PRC > ((LTQ_RT + NVL(FED_FROM_ENABLMNT,0))*100)  
+             AND     FTQ_TOT_BID_QTY > FED_ENBL_TOT_BID_QTY                      
+             AND     FTQ_TOT_OFFR_QTY > FED_ENBL_TOT_OFFR_QTY                          
+             AND     FTQ_UNDRLYNG   =   FED_UNDRLYNG
+             AND     FTQ_XCHNG_CD   =   FED_XCHNG_CD
+             AND     FTQ_OPT_TYP    =   FED_OPT_TYP
+             AND     FTQ_EXPRY_DT   >=  trunc(sysdate)         
+             AND     FTQ_EXPRY_DT    =   FED_EXPRY_DT
+			 			 AND     FTQ_PRDCT_TYP  =   'O'
+			 			 AND	   FTQ_SLTP_FP_QT_TRDNG_FLG != 'T'
+             AND     ( FED_FROM_ENABLMNT IS NOT NULL OR FED_TO_ENABLMNT IS NOT NULL )
+			 				MINUS
+             SELECT  FOE_XCHNG_CD,FOE_PRDCT_TYP , FOE_UNDRLYNG,FOE_INDSTK,FOE_EXPRY_DT,FOE_OPT_TYP,
+										(FOE_STRK_PRC*100),FOE_EXER_TYP,'T','N'
+             FROM    FOE_FO_OPLUS_EXCPMSTR WHERE FOE_FLAG = 'Y'	
+						);
+			
+	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+ 	{
+     	strcpy ( c_msg, "System error. Contact system support" );
+     	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     	fn_errlog( c_ServiceName, "S31045",LIBMSG,c_err_msg);
+     	return;
+ 	}
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName," Insert records in temp table done");
+	}
+
+	while(1)
+	{
+
+		i_fail_flg = 0;
+
+		EXEC SQL
+				SELECT FED_XCHNG_CD,FED_PRDCT_TYP,FED_UNDRLYNG,FED_INDSTK,FED_EXPRY_DT,FED_OPT_TYP,FED_STRK_PRC,FED_EXER_TYP
+				INTO   :c_xchng_cd,:c_prdct_typ,:c_undrlyng,:c_indstk_typ,:c_expry_dt,:c_opt_typ,:l_strike_prc,:c_exer_typ
+				FROM FED_FO_ENB_DSB_TEMP
+				WHERE FED_QT_TRDNG_FLG = 'Q'
+				AND FED_PRCS_FLG ='N'
+				AND ROWNUM < 2;
+
+		if ( SQLCODE != 0 )
+  	{
+
+      if ( SQLCODE == NO_DATA_FOUND)
+      {
+        fn_userlog(c_ServiceName," No records found for Q...");
+				break;
+      }
+      else
+      {
+        fn_errlog(c_ServiceName,"S31050",SQLMSG,c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "Error in selecting contracts for FED_FO_ENB_DSB_TEMP Table....",c_tag);
+        return;
+      }
+  	}
+
+		if(DEBUG_MSG_LVL_3)
+  	{
+    	fn_userlog(c_ServiceName," c_expry_dt |%s|",c_expry_dt);
+    	fn_userlog(c_ServiceName," c_undrlyng |%s|",c_undrlyng);
+    	fn_userlog(c_ServiceName," l_strike_prc |%ld|",l_strike_prc);
+    	fn_userlog(c_ServiceName," c_opt_typ |%c|",c_opt_typ);
+		}
+
+  	if ( fn_begintran( c_ServiceName, c_err_msg ) == -1 )
+  	{
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_errlog(c_ServiceName, "S31055", LIBMSG, c_err_msg );
+      return ;
+  	}
+
+		EXEC SQL
+					UPDATE FTQ_FO_TRD_QT
+						SET FTQ_SLTP_FP_QT_TRDNG_FLG = 'Q'
+					WHERE FTQ_XCHNG_CD = :c_xchng_cd
+						AND FTQ_PRDCT_TYP = :c_prdct_typ
+						AND FTQ_UNDRLYNG = :c_undrlyng
+						AND FTQ_EXPRY_DT = :c_expry_dt
+						AND FTQ_INDSTK = :c_indstk_typ
+						AND FTQ_OPT_TYP = :c_opt_typ
+						AND FTQ_STRK_PRC = :l_strike_prc
+						AND FTQ_EXER_TYP = :c_exer_typ;
+
+		if ( SQLCODE != 0 )
+    {
+			strcpy ( c_msg, "Issue updating FTQ_FO_TRD_QT" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_errlog( c_ServiceName, "S31060",LIBMSG,c_err_msg);
+
+			EXEC SQL
+          UPDATE FED_FO_ENB_DSB_TEMP
+            SET FED_PRCS_FLG = 'I'
+        	WHERE FED_XCHNG_CD = :c_xchng_cd
+            AND FED_PRDCT_TYP = :c_prdct_typ
+            AND FED_UNDRLYNG = :c_undrlyng
+            AND FED_EXPRY_DT = :c_expry_dt
+            AND FED_INDSTK = :c_indstk_typ
+            AND FED_OPT_TYP = :c_opt_typ
+            AND FED_STRK_PRC = :l_strike_prc
+            AND FED_EXER_TYP = :c_exer_typ;		
+
+			if ( SQLCODE != 0 )
+    	{
+      	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      	strcpy ( c_msg, "Issue updating FED_FO_ENB_DSB_TEMP" );
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_errlog( c_ServiceName, "S31065",LIBMSG,c_err_msg);
+      	break;
+    	}
+			i_fail_flg = 1;
+    }
+
+		if (i_fail_flg == 0)					
+		{
+			EXEC SQL
+          UPDATE FED_FO_ENB_DSB_TEMP
+            SET FED_PRCS_FLG = 'P'
+          WHERE FED_XCHNG_CD = :c_xchng_cd
+            AND FED_PRDCT_TYP = :c_prdct_typ
+            AND FED_UNDRLYNG = :c_undrlyng
+            AND FED_EXPRY_DT = :c_expry_dt
+            AND FED_INDSTK = :c_indstk_typ
+            AND FED_OPT_TYP = :c_opt_typ
+            AND FED_STRK_PRC = :l_strike_prc
+            AND FED_EXER_TYP = :c_exer_typ;
+
+			if ( SQLCODE != 0 )
+    	{
+      	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      	strcpy ( c_msg, "Issue updating FED_FO_ENB_DSB_TEMP" );
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_errlog( c_ServiceName, "S31070",LIBMSG,c_err_msg);
+				break;	
+			}
+		}	
+		if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  	{
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31075",LIBMSG,c_err_msg);
+      return;
+  	}	
+
+		if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName," Record processed");
+		}
+	}
+
+	while(1)
+  {
+
+		i_fail_flg = 0;
+
+    EXEC SQL
+        SELECT FED_XCHNG_CD,FED_PRDCT_TYP,FED_UNDRLYNG,FED_INDSTK,FED_EXPRY_DT,FED_OPT_TYP,FED_STRK_PRC,FED_EXER_TYP
+        INTO   :c_xchng_cd,:c_prdct_typ,:c_undrlyng,:c_indstk_typ,:c_expry_dt,:c_opt_typ,:l_strike_prc,:c_exer_typ
+        FROM FED_FO_ENB_DSB_TEMP
+        WHERE FED_QT_TRDNG_FLG = 'T'
+        AND FED_PRCS_FLG ='N'
+        AND ROWNUM < 2;
+
+    if ( SQLCODE != 0 )
+    {
+
+      if ( SQLCODE == NO_DATA_FOUND)
+      {
+        fn_userlog(c_ServiceName," No records found for table with T...");
+        break;
+      }
+      else
+      {
+        fn_errlog(c_ServiceName,"S31080",SQLMSG,c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "Error in selecting contracts for FED_FO_ENB_DSB_TEMP Table....",c_tag);
+        return;
+      }
+    }
+
+		if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName," c_expry_dt |%s|",c_expry_dt);
+      fn_userlog(c_ServiceName," c_undrlyng |%s|",c_undrlyng);
+      fn_userlog(c_ServiceName," l_strike_prc |%ld|",l_strike_prc);
+      fn_userlog(c_ServiceName," c_opt_typ |%c|",c_opt_typ);
+    }
+
+ 		if ( fn_begintran( c_ServiceName, c_err_msg ) == -1 )
+    {
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_errlog(c_ServiceName, "S31085", LIBMSG, c_err_msg );
+      return ;
+    }
+
+    EXEC SQL
+          UPDATE FTQ_FO_TRD_QT
+            SET FTQ_SLTP_FP_QT_TRDNG_FLG = 'T'
+          WHERE FTQ_XCHNG_CD = :c_xchng_cd
+            AND FTQ_PRDCT_TYP = :c_prdct_typ
+            AND FTQ_UNDRLYNG = :c_undrlyng
+            AND FTQ_EXPRY_DT = :c_expry_dt
+            AND FTQ_INDSTK = :c_indstk_typ
+            AND FTQ_OPT_TYP = :c_opt_typ
+            AND FTQ_STRK_PRC = :l_strike_prc
+            AND FTQ_EXER_TYP = :c_exer_typ;
+
+    if ( SQLCODE != 0 )
+    {
+      strcpy ( c_msg, "Issue updating FTQ_FO_TRD_QT" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_errlog( c_ServiceName, "S31090",LIBMSG,c_err_msg);
+      EXEC SQL
+          UPDATE FED_FO_ENB_DSB_TEMP
+            SET FED_PRCS_FLG = 'I'
+          WHERE FED_XCHNG_CD = :c_xchng_cd
+            AND FED_PRDCT_TYP = :c_prdct_typ
+            AND FED_UNDRLYNG = :c_undrlyng
+            AND FED_EXPRY_DT = :c_expry_dt
+            AND FED_INDSTK = :c_indstk_typ
+            AND FED_OPT_TYP = :c_opt_typ
+            AND FED_STRK_PRC = :l_strike_prc
+            AND FED_EXER_TYP = :c_exer_typ;
+
+      if ( SQLCODE != 0 )
+      {
+        strcpy ( c_msg, "Issue updating FED_FO_ENB_DSB_TEMP" );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_errlog( c_ServiceName, "S31095",LIBMSG,c_err_msg);
+        break;
+      }
+			i_fail_flg = 1;
+    }
+
+		if (i_fail_flg == 0)
+		{
+    	EXEC SQL
+          UPDATE FED_FO_ENB_DSB_TEMP
+            SET FED_PRCS_FLG = 'P'
+          WHERE FED_XCHNG_CD = :c_xchng_cd
+            AND FED_PRDCT_TYP = :c_prdct_typ
+            AND FED_UNDRLYNG = :c_undrlyng
+            AND FED_EXPRY_DT = :c_expry_dt
+            AND FED_INDSTK = :c_indstk_typ
+            AND FED_OPT_TYP = :c_opt_typ
+            AND FED_STRK_PRC = :l_strike_prc
+            AND FED_EXER_TYP = :c_exer_typ;
+
+    	if ( SQLCODE != 0 )
+    	{
+      	strcpy ( c_msg, "Issue updating FED_FO_ENB_DSB_TEMP" );
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_errlog( c_ServiceName, "S31100",LIBMSG,c_err_msg);
+      	break;
+    	}
+		}
+
+    if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    {
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31105",LIBMSG,c_err_msg);
+      return;
+    }
+
+		if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName," Record processed");
+    }
+  }
+  sprintf ( c_msg, "Batch process %s ended", argv[0] );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  return;
+}
+
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_CNT_EBLDSBL;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}

@@ -1,0 +1,788 @@
+/******************************************************************************/
+/*	Program	    			:	sfo_opm_map.pc                                        */
+/*                                                                            */
+/*  Input             :              																	  			*/
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       :                                                       */
+/*											                                                      */
+/*											                                                      */
+/*                                                                            */
+/*  Log               :                                                       */  
+/*	1.0								:Initial Release                                        */
+/*	1.1								:Ver 1.0 Bug fix                                        */
+/*                                                                            */
+/******************************************************************************/
+/*    Version  1.0      22-Feb-2013      Sandip Tambe        Release 1.0      */
+/*    Version  1.1      03-May-2013      Sandip Tambe        									*/
+/*    Version  1.2      22-Sep-2014      Sandip Tambe  I-Gain Pricing CR			*/
+/*    Version  1.3      01-Jan-2015      Sandip Tambe  I-Gain cut off introduced*/
+/*    Version  1.4      06-Jan-2015      Sandip Tambe  FNO Allowed check added  */
+/*    Version  1.5      12-Sep-2017      Tanmay Patel  Bullet Pricing CR II     */
+/*		Version  1.6      17-Sep-2019      Anuj Pancholi Removal of Igain Scheme  */
+/*		Version  1.7      20-Dec-2019      Sandip T OPTION_20_BRK_CR_ISEC14_131137*/
+/*    Version  1.8      24-Feb-2020      Anand Dhopte  CR-ISEC14-133991 My Message for Mapping Only */
+/*    Version  1.9      16-Sep-2020      Akash B      Full & Lite Model Changes */
+/*    Version  2.0      04-Jan-2021      Tanmay Patel  Minor chnages            */
+/********************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+/*Add header files here */
+
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fn_log.h>
+#include <fn_read_debug_lvl.h> 
+#define LOCAL_TRAN_TIMEOUT 3600 /** Ver 2.0 **/
+
+int fn_bullet_status_chng ( char *c_ServiceName, char  *c_mtch_accnt, char c_source_flg,char c_map_dmap, char *c_from_dt,
+                            char *c_to_dt, char *c_err_msg );    /***    Ver 1.5    ***/
+
+
+void SFO_OPM_MAP( TPSVCINFO *rqst )
+{
+	FBFR32 *ptr_fml_Ibuf;
+	
+  char c_msg[256];
+	char c_err_msg [ 256 ];
+  char c_tag [ 256 ];
+	char c_ServiceName [ 33 ];
+  char c_mtch_accnt[10]= {'\0'};
+  char c_mtch_acc[11]; /** Ver 1.9 **/
+  char c_mode='\0';   /*** Ver 1.9 ****/
+  char c_op20_flg='\0'; /*** Ver 1.9 ****/
+  char c_rmk[101];      /*** Ver 1.9 ****/
+
+  int  i_trnsctn=0;
+  int  i_returncode = 0;
+  int  i_process_cnt=0;
+  int  i_dmap_cnt=0;  /** Ver 1.5 **/
+  int  i_ch_val;
+  int  i_clm_upd_success=0;
+  int  i_bkg_cnt=0;  /** Ver 1.9 **/
+
+	EXEC SQL INCLUDE "table/osr_opm_subs_rqst.h";
+	EXEC SQL INCLUDE "table/uac_usr_accnts.h";    
+
+	ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+	strcpy( c_ServiceName, "SFO_OPM_MAP" );
+
+	INITDBGLVL(c_ServiceName);            
+
+  /*** Ver 1.7 Starts ***/
+  char    c_date[12];        
+  char    c_my_msg[200];
+  /*** Ver 1.7 Ends ***/
+ 
+ /*********** Ver 1.9  Starts ************/
+
+ if( Fget32(ptr_fml_Ibuf,FFO_CTGRY_INDSTK,0,(char *)&c_mode,0)== -1)
+ {
+   if( Ferror32 == FNOTPRES )
+   {
+    c_mode='N';
+   }
+   else
+   {
+    fn_errlog ( c_ServiceName, "S31005", FMLMSG, c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+  }
+ 
+ if(c_mode == 'L')
+ {
+  MEMSET(c_mtch_acc);
+ 
+  if( Fget32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO,0,(char *)c_mtch_acc,0)== -1)
+  {
+   fn_errlog ( c_ServiceName, "S31010", FMLMSG, c_err_msg );
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  fn_userlog(c_ServiceName,"Processing for match account :%s:",c_mtch_acc);
+  fn_userlog(c_ServiceName,"Inside demapping process for migration to Lite Model");
+
+  /****** Reject all the  pending brokerage request placed ******/
+
+  rtrim(c_mtch_acc);
+  MEMSET(c_rmk);
+  strcpy(c_rmk,"Request cancelled for migration to Lite Model");
+  rtrim(c_rmk);
+
+
+  EXEC SQL
+  UPDATE OSR_OPM_SUBS_RQST
+  SET    OSR_PRCS_FLG='J',
+         OSR_RQST_PRCS_DT= sysdate,
+         OSR_SCHEME_REMARK =:c_rmk
+  WHERE  OSR_CLM_MTCH_ACCNT=:c_mtch_acc
+  AND    OSR_PRCS_FLG = 'N'
+  AND    OSR_PRDCT_FLG in ('X','O'); 
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+   fn_errlog(c_ServiceName,"S31015",SQLMSG,c_err_msg);
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+
+  EXEC SQL
+  SELECT NVL(CLM_OP20_FLG,'N') 
+  INTO  :c_op20_flg
+  FROM CLM_CLNT_MSTR
+  where CLM_MTCH_ACCNT=:c_mtch_acc;
+
+  if(SQLCODE != 0)
+  {
+   fn_errlog(c_ServiceName,"S31020",SQLMSG,c_err_msg);
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+
+  
+  EXEC SQL
+  INSERT INTO OSR_OPM_SUBS_RQST
+  (
+   OSR_CLM_MTCH_ACCNT,
+   OSR_CURRENT_SCHEME,
+   OSR_TO_SCHEME,
+   OSR_MAP_UNMAP_FLG,
+   OSR_SUBSC_DT,
+   OSR_RQST_PRCS_DT,
+   OSR_CHANNEL,
+   OSR_PRCS_FLG,
+   OSR_RM_CD,
+   OSR_PRDCT_FLG,
+   OSR_SCHEME_REMARK
+  )
+  select
+  :c_mtch_acc,
+    CASE WHEN CLM_BRKR_CMPT_FLG = 'N' THEN CLM_OPT_SCHM_CD
+          WHEN  CLM_OP20_FLG='Y' THEN CLM_OP20_SCHM_CD
+    END,
+   'NA',
+   'U',
+   sysdate,
+   sysdate,
+   'SYS',
+   'Y',
+   null,
+  CASE WHEN CLM_BRKR_CMPT_FLG = 'N' THEN 'O'
+          WHEN  CLM_OP20_FLG='Y' THEN 'X'
+       END,
+  'Migration to Lite Model'
+  FROM CLM_CLNT_MSTR
+  WHERE CLM_MTCH_ACCNT=:c_mtch_acc;
+
+  if(SQLCODE != 0)
+  {
+   fn_errlog(c_ServiceName,"S31025",SQLMSG,c_err_msg);
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+
+  if ( c_op20_flg == 'Y')
+  {
+   EXEC SQL
+   UPDATE clm_clnt_mstr
+   SET CLM_OP20_FLG='E',
+       CLM_OP20_SCHM_CD =null
+   WHERE CLM_MTCH_ACCNT=:c_mtch_acc;
+  }
+  else
+  {
+   EXEC SQL
+   UPDATE clm_clnt_mstr
+   SET  CLM_OPT_SCHM_CD= null,
+        CLM_BRKR_CMPT_FLG='Y'
+   WHERE CLM_MTCH_ACCNT=:c_mtch_acc;
+  }
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+   fn_errlog(c_ServiceName,"S31030",SQLMSG,c_err_msg);
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+   tpreturn( TPSUCCESS, SUCC_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+ }
+  
+
+ /************* Ver 1.9 Ends ***********/
+
+
+  fn_userlog(c_ServiceName,"Inside Normal Mapping and Demapping");
+
+  /** Commented in Ver 2.0 ***
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+	if(i_trnsctn == -1 )  **/
+
+  if (tpbegin(LOCAL_TRAN_TIMEOUT,0)== -1)  /** Ver 2.0 **/
+	{
+		fn_errlog ( c_ServiceName, "S31035", TPMSG, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+  EXEC SQL
+    Declare opm_schm_rqst CURSOR FOR
+    SELECT OSR_CLM_MTCH_ACCNT,
+           NVL(OSR_CURRENT_SCHEME,'NA'),
+           NVL(OSR_TO_SCHEME,'NA'),
+           OSR_MAP_UNMAP_FLG,
+           to_char(OSR_SUBSC_DT,'dd-Mon-yyyy hh24:mi:ss'),
+					 nvl(OSR_PRDCT_FLG,'O')																	/** Ver 1.2 **/
+    FROM   OSR_OPM_SUBS_RQST,UAC_USR_ACCNTS							/** Ver 1.4 added UAC **/
+    /**WHERE  trunc(OSR_SUBSC_DT) < trunc(sysdate)					*** Ver 1.3 ***/ /** ver 1.7 comment**/
+    WHERE  OSR_PRCS_FLG='N'
+		AND    OSR_CLM_MTCH_ACCNT= UAC_CLM_MTCH_ACCNT				/** Ver 1.4 **/
+		AND    UAC_FNO_ALLWD='Y'													  /** Ver 1.4 **/
+    AND    nvl(OSR_PRDCT_FLG,'O') in ('O','X')          /** Ver 1.7 **/ 
+    AND    OSR_SUBSC_DT <= to_date(to_char(trunc(sysdate)|| ' 15:30:00'),'dd-Mon-yyyy hh24:mi:ss') /*ver 1.7*/
+
+    /*AND    nvl(OSR_PRDCT_FLG,'O')='O'               ** To exclude pending Igain Mapping Request Ver 1.6 ** 
+   * WHERE  to_char(OSR_SUBSC_DT,'dd-Mon-yyyy hh24:mi:ss') <= to_char(trunc(sysdate)|| ' 15:30:00') *** Ver 1.1 comment ***
+  * WHERE  OSR_SUBSC_DT <= to_date(to_char(trunc(sysdate)|| ' 15:30:00'),'dd-Mon-yyyy hh24:mi:ss')* ver 1.1 *										/*** Ver 1.2 comment ***/  /** Ver 1.7 comment **/
+		ORDER By OSR_MAP_UNMAP_FLG desc;/*to_char(OSR_SUBSC_DT,'dd-Mon-yyyy hh24:mi:ss');*/			/** Ver 1.2 **/
+
+  if(SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31040",SQLMSG,c_err_msg);
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+    tpabort( 0 );  /** Ver 2.0 **/
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  EXEC SQL
+    Open opm_schm_rqst;
+
+
+	while(1)
+  {
+		fn_userlog(c_ServiceName,"Inside while check");
+    MEMSET(sql_osr_clm_mtch_accnt);
+    MEMSET(sql_osr_current_scheme);
+    MEMSET(sql_osr_to_scheme);
+    MEMSET(sql_osr_subsc_dt);
+    sql_osr_prdct_flg=' ';									 /** Ver 1.2 **/
+    i_clm_upd_success=0;
+    sql_osr_map_unmap_flg = ' ';             /** Ver 1.8 **/     
+
+    EXEC SQL
+      FETCH opm_schm_rqst
+      INTO  :sql_osr_clm_mtch_accnt,
+            :sql_osr_current_scheme,
+            :sql_osr_to_scheme,
+            :sql_osr_map_unmap_flg,
+            :sql_osr_subsc_dt,
+						:sql_osr_prdct_flg;										/** Ver 1.2 **/
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog(c_ServiceName,"S31045",SQLMSG,c_err_msg);
+      EXEC SQL close opm_schm_rqst;
+      /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+      tpabort( 0 );  /** Ver 2.0 **/
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      if(i_process_cnt > 0)
+      {
+        fn_userlog(c_ServiceName,"All records Processed / No more record to be processed");
+        break;
+      }
+      fn_userlog(c_ServiceName,"No Request to be processed today");
+      break;
+    }
+		fn_userlog(c_ServiceName,"Inside while post fetch check");
+    SETNULL(sql_osr_clm_mtch_accnt);
+    SETNULL(sql_osr_current_scheme);
+    SETNULL(sql_osr_to_scheme);
+    SETNULL(sql_osr_subsc_dt);
+
+		if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"sql_osr_clm_mtch_accnt =:%s:",sql_osr_clm_mtch_accnt.arr);
+      fn_userlog(c_ServiceName,"sql_osr_current_scheme =:%s:",sql_osr_current_scheme.arr);
+      fn_userlog(c_ServiceName,"sql_osr_to_scheme      =:%s:",sql_osr_to_scheme.arr);
+      fn_userlog(c_ServiceName,"sql_osr_subsc_dt       =:%s:",sql_osr_subsc_dt.arr);
+      fn_userlog(c_ServiceName,"sql_osr_prdct_flg       =:%c:",sql_osr_prdct_flg);
+    }
+    if(strcmp(sql_osr_current_scheme.arr,sql_osr_to_scheme.arr) == 0 )
+    {
+      fn_userlog(c_ServiceName,"Already in scheme :%s:, Can not map to same chame",sql_osr_to_scheme.arr);
+     	continue;
+    }
+    if(strcmp(sql_osr_current_scheme.arr,"NA") == 0 )
+    {
+      fn_userlog(c_ServiceName,"Processing Mapping request of :%s: to scheme :%s:",
+                               sql_osr_clm_mtch_accnt.arr,sql_osr_to_scheme.arr);
+			if( sql_osr_prdct_flg == 'O' )			/** Ver 1.2 **/
+			{
+      	EXEC SQL
+        	UPDATE clm_clnt_mstr
+        	SET    CLM_BRKR_CMPT_FLG='N',
+             		 CLM_OPT_SCHM_CD=:sql_osr_to_scheme
+        	WHERE  CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+        	/*AND    CLM_BRKR_CMPT_FLG = 'Z'			*** Ver 1.4 comment **/
+        	AND    CLM_BRKR_CMPT_FLG <> 'N'				/*** Ver 1.4 ***/
+					AND		 nvl(CLM_IGAIN_OP_FLG,'N')='N';
+			}																					/*** Ver 1.2 starts ***/
+			else if(sql_osr_prdct_flg == 'X')					/** Ver 1.7 **/
+			{
+				EXEC SQL
+					UPDATE clm_clnt_mstr
+					SET    CLM_OP20_FLG='Y',
+								 CLM_OP20_SCHM_cd=:sql_osr_to_scheme
+					WHERE	 CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+					AND		 nvl(CLM_OP20_FLG,'N') ='E'	
+					AND    nvl(CLM_BRKR_CMPT_FLG,'Y') <> 'N'
+					AND  not exists ( select 	1
+														from 		OSR_OPM_SUBS_RQST
+														where   OSR_CLM_MTCH_ACCNT=:sql_osr_clm_mtch_accnt
+														and 		OSR_PRCS_FLG='N'
+														and     OSR_MAP_UNMAP_FLG='U'
+														and			nvl(OSR_PRDCT_FLG,'O') = 'O'
+													);
+			}
+			else if(sql_osr_prdct_flg == 'I')
+			{
+				EXEC SQL
+					UPDATE clm_clnt_mstr
+					SET    CLM_IGAIN_OP_FLG='Y',
+								 CLM_IGAIN_OP_SCHM_CD=:sql_osr_to_scheme
+					WHERE	 CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+					AND		 nvl(CLM_IGAIN_OP_FLG,'N') ='N'	
+					AND    nvl(CLM_BRKR_CMPT_FLG,'Y') <> 'N'
+					AND  not exists ( select 	1
+														from 		OSR_OPM_SUBS_RQST
+														where   OSR_CLM_MTCH_ACCNT=:sql_osr_clm_mtch_accnt
+														and 		OSR_PRCS_FLG='N'
+														and     OSR_MAP_UNMAP_FLG='U'
+														and			nvl(OSR_PRDCT_FLG,'O') = 'O'
+													);
+			}
+			else if(sql_osr_prdct_flg == 'U')
+			{
+				EXEC SQL
+					UPDATE clm_clnt_mstr
+					SET    CLM_IGAIN_FP_FLG='Y',
+								 CLM_IGAIN_FP_SCHM_CD=:sql_osr_to_scheme
+					WHERE	 CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+					AND		 nvl(CLM_IGAIN_FP_FLG,'N') ='N';	
+			}  																	/** Ver 1.2 Ends **/
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_errlog(c_ServiceName,"S31050",SQLMSG,c_err_msg);
+        /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+        tpabort( 0 );  /** Ver 2.0 **/
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+			if(SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog(c_ServiceName,"No record found for %s: with CLM_BRKR_CMPT_FLG as 'Y'",sql_osr_clm_mtch_accnt.arr);
+        fn_userlog(c_ServiceName,"No record found for %s: with CLM FLG as :%c:",sql_osr_clm_mtch_accnt.arr,(sql_osr_prdct_flg=='O'?'Y':'N'));   /** Ver 1.2 **/
+        i_clm_upd_success= 1;
+      }
+
+    }
+    else if(strcmp(sql_osr_to_scheme.arr,"NA") == 0)
+    {
+      fn_userlog(c_ServiceName,"Processing Un-Mapping request of :%s: from scheme :%s: to normal", sql_osr_clm_mtch_accnt.arr,sql_osr_current_scheme.arr);
+			if( sql_osr_prdct_flg == 'O' )			/** Ver 1.2 **/
+			{
+				fn_userlog(c_ServiceName,"Inside OPM 195 De Map ");
+      	EXEC SQL
+        	UPDATE clm_clnt_mstr
+        	SET    CLM_BRKR_CMPT_FLG='Y',   /** demap but still in Eligible case **//* Ver 1.4 z changd to Y*/
+          	     CLM_OPT_SCHM_CD= null
+       	  WHERE  CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+        	AND    CLM_BRKR_CMPT_FLG = 'N';
+			 }
+			 else if ( sql_osr_prdct_flg == 'X' )			/** Ver 1.7 Starts**/
+			 {
+				fn_userlog(c_ServiceName,"Inside OP-20  De Map ");
+      	EXEC SQL
+        	UPDATE clm_clnt_mstr
+        	SET    CLM_OP20_FLG ='E',   
+          	     CLM_OP20_SCHM_CD = null
+       	  WHERE  CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+        	AND    nvl(CLM_OP20_FLG,'N') = 'Y';
+			 }
+			 else if ( sql_osr_prdct_flg == 'I' )			/** Ver 1.2 Starts**/
+			 {
+				fn_userlog(c_ServiceName,"Inside Igain OP  De Map ");
+      	EXEC SQL
+        	UPDATE clm_clnt_mstr
+        	SET    CLM_IGAIN_OP_FLG ='N',   
+          	     CLM_IGAIN_OP_SCHM_CD = null
+       	  WHERE  CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+        	AND    nvl(CLM_IGAIN_OP_FLG,'N') = 'Y';
+			 }
+			 else if ( sql_osr_prdct_flg == 'U' )
+			 {
+				fn_userlog(c_ServiceName,"Inside Igain FP  De Map ");
+      	EXEC SQL
+        	UPDATE clm_clnt_mstr
+        	SET    CLM_IGAIN_FP_FLG ='N',  
+          	     CLM_IGAIN_FP_SCHM_CD = null
+       	  WHERE  CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+        	AND    nvl(CLM_IGAIN_FP_FLG,'N') = 'Y';
+			 }																				/** Ver 1.2 Ends **/
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_errlog(c_ServiceName,"S31055",SQLMSG,c_err_msg);
+        /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+        tpabort( 0 );  /** Ver 2.0 **/
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+      if(SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog(c_ServiceName,"No record found for %s: with CLM_BRKR_CMPT_FLG as 'N'",sql_osr_clm_mtch_accnt.arr);
+        i_clm_upd_success= 1;
+      }
+    }
+    else if(  strcmp( sql_osr_to_scheme.arr,"NA") != 0  &&
+              strcmp(sql_osr_current_scheme.arr,"NA") != 0
+           )
+    {
+			if ( sql_osr_prdct_flg == 'X' )			/** Ver 1.7  Starts **/
+			{
+      	fn_userlog(c_ServiceName,"Processing OP20 Scheme Change Reqst of :%s: from :%s: to :%s:",
+                               sql_osr_clm_mtch_accnt.arr,
+                               sql_osr_current_scheme.arr,
+                               sql_osr_to_scheme.arr);
+				EXEC SQL
+					UPDATE CLM_CLNT_MSTR
+					SET 	 CLM_OP20_SCHM_CD			= :sql_osr_to_scheme
+        	WHERE  CLM_MTCH_ACCNT 					= :sql_osr_clm_mtch_accnt
+					AND    CLM_OP20_SCHM_CD			= :sql_osr_current_scheme
+        	AND    nvl(CLM_OP20_FLG,'N')= 'Y'
+					AND    CLM_BRKR_CMPT_FLG <>'N';
+			}
+			if ( sql_osr_prdct_flg == 'I' )			/** Ver 1.2  Starts to confirm**/
+			{
+      	fn_userlog(c_ServiceName,"Processing IGainOP Scheme Change Reqst of :%s: from :%s: to :%s:",
+                               sql_osr_clm_mtch_accnt.arr,
+                               sql_osr_current_scheme.arr,
+                               sql_osr_to_scheme.arr);
+				EXEC SQL
+					UPDATE CLM_CLNT_MSTR
+					SET 	 CLM_IGAIN_OP_SCHM_CD			= :sql_osr_to_scheme
+        	WHERE  CLM_MTCH_ACCNT 					= :sql_osr_clm_mtch_accnt
+					AND    CLM_IGAIN_OP_SCHM_CD			= :sql_osr_current_scheme
+        	AND    nvl(CLM_IGAIN_OP_FLG,'N')= 'Y'
+					AND    CLM_BRKR_CMPT_FLG <>'N';
+			}
+			else if ( sql_osr_prdct_flg == 'U' )
+			{
+      	fn_userlog(c_ServiceName,"Processing IGain FP Scheme Change Reqst of:%s: from :%s: to :%s:",
+                               sql_osr_clm_mtch_accnt.arr,
+                               sql_osr_current_scheme.arr,
+                               sql_osr_to_scheme.arr);
+				EXEC SQL
+					UPDATE CLM_CLNT_MSTR
+					SET 	 CLM_IGAIN_FP_SCHM_CD			= :sql_osr_to_scheme
+        	WHERE  CLM_MTCH_ACCNT 					= :sql_osr_clm_mtch_accnt
+					AND    CLM_IGAIN_FP_SCHM_CD			= :sql_osr_current_scheme
+        	AND    nvl(CLM_IGAIN_FP_FLG,'N')= 'Y';
+			}
+			else if ( sql_osr_prdct_flg == 'O' )	/*** Ver 1.2 Ends **/
+			{																	 
+      	fn_userlog(c_ServiceName,"Processing OPM Scheme Change Request of :%s: from :%s: to :%s:",
+                               sql_osr_clm_mtch_accnt.arr,
+                               sql_osr_current_scheme.arr,
+                               sql_osr_to_scheme.arr);
+      	EXEC SQL
+        	UPDATE clm_clnt_mstr
+        	SET    CLM_OPT_SCHM_CD=	:sql_osr_to_scheme
+        	WHERE  CLM_MTCH_ACCNT = :sql_osr_clm_mtch_accnt
+					AND    CLM_OPT_SCHM_CD=	:sql_osr_current_scheme		/** Ver 1.2 **/
+        	/*AND    nvl(CLM_IGAIN_OP_FLG,'N')<> 'Y'						** Ver 1.2 **/ /** Ver 1.7 comment **/
+        	AND    nvl(CLM_OP20_FLG,'N')<> 'Y'					 			/** Ver 1.7 **/
+        	AND    CLM_BRKR_CMPT_FLG = 'N';
+			}
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_errlog(c_ServiceName,"S31060",SQLMSG,c_err_msg);
+        /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+        tpabort( 0 );  /** Ver 2.0 **/
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+      if(SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog(c_ServiceName,"No record found for :%s: with OPM as 'N'/I-Gain flag as Y",sql_osr_clm_mtch_accnt.arr);
+        i_clm_upd_success= 1;
+      }
+    }
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"Now updating  OSR_PRCS_FLG");
+    	fn_userlog(c_ServiceName,"i_clm_upd_success=:%d",i_clm_upd_success);
+    	fn_userlog(c_ServiceName,"sql_osr_clm_mtch_accnt=:%s:",sql_osr_clm_mtch_accnt.arr);
+    	fn_userlog(c_ServiceName,"sql_osr_prdct_flg=:%c:",sql_osr_prdct_flg);
+		}
+    EXEC SQL
+        UPDATE OSR_OPM_SUBS_RQST
+        SET    OSR_PRCS_FLG=decode(:i_clm_upd_success,1,'N',0,'Y'),
+               OSR_RQST_PRCS_DT= sysdate
+        WHERE  OSR_CLM_MTCH_ACCNT=:sql_osr_clm_mtch_accnt
+        AND    OSR_PRCS_FLG = 'N'
+				AND    nvl(OSR_PRDCT_FLG,'O')=:sql_osr_prdct_flg			/** Ver 1.2 **/
+        AND    to_char(OSR_SUBSC_DT,'dd-Mon-yyyy hh24:mi:ss') = :sql_osr_subsc_dt;
+
+      if(SQLCODE != 0)
+      {
+        fn_errlog(c_ServiceName,"S31065",SQLMSG,c_err_msg);
+        /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+        tpabort( 0 );  /** Ver 2.0 **/
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        return;
+      }
+  	sprintf ( c_msg, "Successfully processed mapping Request for [%s]", sql_osr_clm_mtch_accnt.arr); /*Ver 1.1 arr added*/
+		fn_userlog(c_ServiceName,"%s",c_msg);
+    i_process_cnt++;
+
+   /*** Ver 1.7 Starts ***/
+
+   /*** if( sql_osr_prdct_flg == 'X' && i_clm_upd_success != 1 )   *** Commented in Ver 1.8 ***/ 
+   if( sql_osr_prdct_flg == 'X' && i_clm_upd_success != 1 && sql_osr_map_unmap_flg == 'M' ) /*** Ver 1.8 ***/
+   {
+
+    fn_userlog(c_ServiceName,"Inside Send My Message/Notification block");
+ 
+    EXEC SQL 
+		SELECT to_char(sysdate,'DD-Mon-YYYY')
+			INTO :c_date
+			FROM DUAL; 
+
+     if(SQLCODE != 0)
+      {
+        fn_errlog(c_ServiceName,"S31070",SQLMSG,c_err_msg);
+        /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+        tpabort( 0 );  /** Ver 2.0 **/
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+
+    fn_userlog(c_ServiceName,"c_date :%s:",c_date);
+
+    sprintf(c_my_msg,"Congratulations! You can now benefit with the lower Options brokerage plan of Rs 20 per order and only Rs 5 per lot which is active in your account from %s",c_date); 
+ 
+     rtrim(c_my_msg);
+
+     fn_userlog(c_ServiceName,"c_my_msg :%s:",c_my_msg);
+   
+      EXEC SQL
+      INSERT  INTO  CSM_CLNT_SPEC_MSG
+      (
+        CSM_MTCH_ACCNT,
+        CSM_UPD_DT,
+        CSM_MSG_TYPE,
+        CSM_MESSAGE,
+        CSM_NEW,
+        CSM_REV_MSG_TYP
+      )
+      VALUES
+      (
+        :sql_osr_clm_mtch_accnt,
+        SYSDATE,
+        'OP20',
+        :c_my_msg,
+        'Y',
+        'B' 
+      );
+
+    if(SQLCODE != 0)
+    {
+     fn_errlog(c_ServiceName,"S31075",SQLMSG,c_err_msg);
+     /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+     tpabort( 0 );  /** Ver 2.0 **/
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );   
+    } 
+
+   }
+   /*** Ver 1.7 Ends ***/ 
+
+  }
+
+  EXEC SQL close opm_schm_rqst;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName,"S31080",SQLMSG,c_err_msg);
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+	/**** Ver 1.4 ***/
+
+  /**  EXEC SQL
+        UPDATE OSR_OPM_SUBS_RQST
+        SET    OSR_PRCS_FLG='X',
+               OSR_RQST_PRCS_DT= sysdate
+        WHERE  OSR_CLM_MTCH_ACCNT=:sql_osr_clm_mtch_accnt
+        AND    OSR_PRCS_FLG = 'N'
+				AND    trunc(OSR_SUBSC_DT) < trunc(sysdate)
+				AND    OSR_RQST_PRCS_DT is null;
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_errlog(c_ServiceName,"S31085",SQLMSG,c_err_msg);
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        return;
+      } ** Ver 1.7 comment **/
+	/*** Ver 1.4 Ends ***/
+
+/***************** Ver 1.5 Start ***************/
+  EXEC SQL
+    Declare bullet_schm_rqst CURSOR FOR
+			SELECT OSR_CLM_MTCH_ACCNT,
+             END_DATE FROM(	
+       SELECT OSR_CLM_MTCH_ACCNT,
+              MAX(TRUNC(OSR_SCHEME_END_DT)) END_DATE
+       FROM   OSR_OPM_SUBS_RQST,CLM_CLNT_MSTR
+       WHERE  OSR_CLM_MTCH_ACCNT=CLM_MTCH_ACCNT
+       AND    OSR_PRDCT_FLG='B'
+       AND    OSR_MAP_UNMAP_FLG='M'
+       AND    CLM_BULLET_SCHM_TRIAL_FLG ='T'
+			 AND		OSR_SCHEME_END_DT is not null
+      GROUP BY OSR_CLM_MTCH_ACCNT
+      HAVING MAX(TRUNC(OSR_SCHEME_END_DT)) < TRUNC(sysdate));
+
+     if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+     {
+      fn_errlog(c_ServiceName,"S31090",SQLMSG,c_err_msg);
+      /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+      tpabort( 0 );  /** Ver 2.0 **/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+
+    EXEC SQL
+    Open bullet_schm_rqst;
+
+		if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+		{
+			fn_errlog(c_ServiceName,"S31095",SQLMSG,c_err_msg);
+      /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+      tpabort( 0 );  /** Ver 2.0 **/
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+
+  while(1)
+  {
+    MEMSET(sql_osr_clm_mtch_accnt);
+    MEMSET(sql_osr_scheme_end_dt);
+
+    EXEC SQL
+      FETCH bullet_schm_rqst
+      INTO :sql_osr_clm_mtch_accnt,
+           :sql_osr_scheme_end_dt;
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog(c_ServiceName,"S31100",SQLMSG,c_err_msg);
+      EXEC SQL close bullet_schm_rqst;
+      /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+      tpabort( 0 );  /** Ver 2.0 **/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+     if(SQLCODE == NO_DATA_FOUND )
+    {
+      if(i_dmap_cnt > 0)
+      {
+        fn_userlog(c_ServiceName,"All records Processed / No more record to be processed");
+        break;
+      }
+      else
+      {
+       fn_userlog(c_ServiceName,"No Request to be processed today");
+       break;
+      }
+    }
+
+    SETNULL(sql_osr_clm_mtch_accnt);
+
+     if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"osr_clm_mtch_accnt =:%s:",sql_osr_clm_mtch_accnt.arr);
+      }
+
+  /* VER TOL : TUX on LINUX -- Changed blank space with \0 (Ravindra) */
+  if( fn_bullet_status_chng(c_ServiceName,sql_osr_clm_mtch_accnt.arr,'T','D','\0',sql_osr_scheme_end_dt.arr,c_err_msg)!=0)
+   {
+     EXEC SQL close bullet_schm_rqst;
+     /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+     tpabort( 0 );  /** Ver 2.0 **/
+     fn_userlog(c_ServiceName,"Error while calling fn_bullet_status_chng");
+     fn_errlog ( c_ServiceName, "S31105", TPMSG, c_err_msg );
+     Fadd32( ptr_fml_Ibuf, FML_ERR_MSG, c_err_msg, 0 );
+     tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuf, 0L, 0);
+   }
+   else
+   { 
+    sprintf ( c_msg, "Library called for mapping Request of [%s]", sql_osr_clm_mtch_accnt.arr);
+    fn_userlog(c_ServiceName,"%s",c_msg);
+    i_dmap_cnt++;
+   }
+  }
+   EXEC SQL close bullet_schm_rqst;
+
+	 fn_userlog(c_ServiceName,"Trial Demapping done for :%d: Reqsts",i_dmap_cnt);
+
+  if(SQLCODE != 0)
+  {
+   /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+   tpabort( 0 );  /** Ver 2.0 **/
+   fn_errlog(c_ServiceName,"S31110",SQLMSG,c_err_msg);
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+/***************** Ver 1.5 End *****************/
+ /**  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 ) Commented in Ver 2.0 **/
+ if (tpcommit(0) == -1)  /** Ver 2.0 **/
+  {
+    /** fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** Ver 2.0 **/
+    tpabort( 0 );  /** Ver 2.0 **/
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+
+	fn_userlog(c_ServiceName,"SFO_OPM_MAP completed successfully for :%d: Reqsts",i_process_cnt);
+	tpreturn( TPSUCCESS, SUCC_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+}

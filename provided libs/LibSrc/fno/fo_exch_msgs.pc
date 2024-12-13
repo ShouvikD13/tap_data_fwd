@@ -1,0 +1,2944 @@
+/****************************************************************************************************
+*		File Name : fo_exch_msgs.pc [library for Broadcast messages handling]			 											*	
+*		Ver 1.0 : Sandip Tambe																										 											*
+*		    1.1 : 06-Jul-2012 Sandip Tambe																				 											*
+*		    1.2 : 22-Aug-2012 Sandip Tambe[ Total Traded Quantity Change]    			 											*
+*       1.3 : 05-Nov-2012 Sandip Tambe [ Last Traded Time Change ]             											*
+*       1.4 : 17-Jan-2013 Swati A.B    [ Overnight at 3:30 Change ]            											*
+*		    1.5 : 22-Aug-2012 Sandip Tambe [Broker Suspention Handling and Debug level changes ]
+*       1.6 : 14-May-2013 Sandeep Patil[ Market Picture Details ( MSG Type  2020 ) Changes ]
+*       1.7 : 03-Oct-2013 Market Halt handling [Sandip Tambe ]
+*       1.8 : 19-Nov-2014 View to FML Changes  [Sachin Birje ]
+*       1.9 : 03-Jul-2015 FCM-FTQ Merger Changes [Anand Dhopte] 
+*       TOL : 01-Aug-2023 Tux on Linux [Agam]            
+****************************************************************************************************/
+#include  <stdlib.h>
+#include  <stdio.h>
+#include  <string.h>
+#include  <sqlca.h>
+#include  <fn_log.h>
+#include  <fo.h>
+#include <atmi.h>
+#include <fn_ddr.h>
+/*** #include <fo_view_def.h> ** Ver 1.8 **/
+#include <fo_view_def.h>   /** Ver 1.8 **/
+#include <fo_exch_msgs.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_fobse_bcast.h>
+#include <fn_fo_bse_convrtn.h>			/*** Ver 1.5 **/
+#include <fn_tuxlib.h>							/*** Ver 1.7 **/
+#include <sys/time.h>  /* Ver TOL tux on linux*/
+
+static short int si_mkt_stts;
+
+/****************************************************************************************
+*	function fn_brdmkt_stts_chng :To Process the session change message broadcast 				*
+*															   Here Only Opening (session 3) and Closing (session 4)	*
+*															  are handled as no FNO trading allowd in Pre-open session*
+*	input : struct st_sssn_chng_brd          																			  			*
+*					pipe Id [31]for FNO BSE	        																							*
+*				 	c_xchng_cd        																														*
+*				 	ServiceName,																																	*
+*				 	error message																																	*
+*	output :  0 on success                                            										*
+*					 -1 on failure																																*
+*					  																																						*
+****************************************************************************************/
+int fn_brdmkt_stts_chng(struct st_sssn_chng_brd *st_brd_ssnchng_msg,
+                        char *c_xchng_cd,
+                        char *c_ServiceName,
+                        char *c_errmsg )
+{
+	int i_ret_val;
+	long int li_mkt_type = ORDER_MKT;
+
+		fn_userlog(c_ServiceName ," session Received :%d:",st_brd_ssnchng_msg->si_cur_sssn);
+
+  if ( st_brd_ssnchng_msg->si_cur_sssn == CONTINUOUS_SESSION )
+  {
+    si_mkt_stts = OPEN;
+
+      fn_userlog(c_ServiceName,"Market Status Is :%d:",si_mkt_stts);
+  }
+  else if (  st_brd_ssnchng_msg->si_cur_sssn == CLOSING_SESSION )
+  {
+    si_mkt_stts = CLOSED;
+
+      fn_userlog(c_ServiceName,"Market Status Is :%d:",si_mkt_stts);
+  }
+	/** Ver 1.7 starts **/
+	else if(st_brd_ssnchng_msg->si_cur_sssn == DAY_STRT_OR_SSSN_END )
+	{
+		si_mkt_stts = PRE_OPEN ;
+	}	/** Ver 1.7 Ends **/
+  else			/* Decided not to handle other than continuous and closing session */ 
+  {
+		return 0;
+  }
+
+  i_ret_val = fn_fomrkt_stts_hndlr ( si_mkt_stts,
+                                     li_mkt_type,
+                                     c_xchng_cd,
+                                     c_ServiceName,
+                                     c_errmsg);
+  if (i_ret_val == -1)
+  {
+    fn_errlog(c_ServiceName,"L31005", LIBMSG, c_errmsg);
+    return -1;
+  }
+	return 0;
+}
+/************************************************************************************
+*	function fn_fomrkt_stts_hndlr:To Update xchng_mster with current xchange status		*
+*															  and insert record in FTM table about market pos.		*
+*															  Calls service SFO_UPD_XSTTS to updatexchange status	* 
+*	input : Market type : 1 for normal market																			  	*
+*					Market Status : 1 Open / 2-Close																					*
+*				 c_xchng_cd        																													*
+*				 ServiceName,																																*
+*				 error message																															*
+*	output :  0 on success                                            								*
+*					 -1 on failure																														*
+*					  																																				*
+************************************************************************************/
+
+int fn_fomrkt_stts_hndlr (short int si_mkt_stts,
+                          long int  li_mkt_type,
+                          char  *c_xchng_cd,
+                          char  *c_ServiceName,
+                          char  *c_errmsg)
+{
+  int i_ch_val;
+  char c_mkt_stts;
+  char c_mkt_typ;
+  struct vw_xchngstts st_stts;
+  int i_trn_val;
+  int i_rec_exists=0;
+  strcpy( st_stts.c_xchng_cd,c_xchng_cd);
+  
+	  fn_userlog(c_ServiceName,"Inside Function fn_fomrkt_stts_hndlr");
+    fn_userlog(c_ServiceName,"Exchange code is :%s:",c_xchng_cd);
+    fn_userlog(c_ServiceName,"Market Type Is :%ld:",li_mkt_type);
+    fn_userlog(c_ServiceName,"Market status Is :%d:",si_mkt_stts);
+
+  switch(si_mkt_stts)
+  {
+    case PRE_OPEN :
+			/** Ver 1.7 Starts **/
+			c_mkt_stts='\0';
+			fn_userlog(c_ServiceName,"Inside Session 0 case ");
+
+			EXEC SQL
+				SELECT decode(EXG_CRRNT_STTS,'O','X',EXG_CRRNT_STTS)
+				INTO   :c_mkt_stts
+				FROM 	 exg_xchng_mstr
+				WHERE  EXG_XCHNG_CD=:st_stts.c_xchng_cd;
+
+			if((SQLCODE != 0) && (SQLCODE !=NO_DATA_FOUND))
+			{
+				fn_errlog(c_ServiceName,"L31010",SQLMSG,c_errmsg);
+				return -1;
+			}
+			fn_userlog(c_ServiceName,"c_mkt_stts in session change =%c",c_mkt_stts);
+			break;
+			/** ver 1.7 Ends **/			
+    case PRE_OPEN_ENDED :
+    case POST_CLOSE :
+    return 0;
+    break;
+
+    case OPEN :
+
+         fn_userlog(c_ServiceName,"Inside OPEN case");
+
+       c_mkt_stts = 'O';
+			 EXEC SQL
+					SELECT 1
+					INTO :i_rec_exists
+					FROM exg_xchng_mstr
+					WHERE EXG_XCHNG_CD=:st_stts.c_xchng_cd
+					AND EXG_CRRNT_STTS ='O';
+				if((SQLCODE != 0) && (SQLCODE !=NO_DATA_FOUND))
+				{
+					fn_errlog(c_ServiceName,"L31015",SQLMSG,c_errmsg);
+					return -1;
+				}
+				else if(SQLCODE == NO_DATA_FOUND)
+				{
+					fn_userlog(c_ServiceName,"Now inserting record in FTM");
+					i_ch_val = fn_insert_ftm(c_ServiceName,c_mkt_stts,c_xchng_cd,c_errmsg);
+					if(i_ch_val == -1)
+					{
+  					fn_errlog ( c_ServiceName, "L31020", LIBMSG, c_errmsg );
+   					return -1;
+					}
+					fn_userlog(c_ServiceName,"After Inserting FTM");
+				}
+				else
+				{
+					fn_userlog(c_ServiceName,"Exchange Aleready Open");				/** Ver 1.5 **/
+					return 0;
+				}
+       break;
+
+    case CLOSED :
+
+         fn_userlog(c_ServiceName,"Inside CLOSED case");
+
+       c_mkt_stts = 'X';
+			 EXEC SQL
+					SELECT 1
+					INTO :i_rec_exists
+					FROM exg_xchng_mstr
+					WHERE EXG_XCHNG_CD=:st_stts.c_xchng_cd
+					AND EXG_CRRNT_STTS ='X';
+				if((SQLCODE != 0) && (SQLCODE !=NO_DATA_FOUND))
+				{
+					fn_errlog(c_ServiceName,"L31025",SQLMSG,c_errmsg);
+					return -1;
+				}
+				else if(SQLCODE == NO_DATA_FOUND)
+				{
+					fn_userlog(c_ServiceName,"Now inserting record in FTM");
+					i_ch_val = fn_insert_ftm(c_ServiceName,c_mkt_stts,c_xchng_cd,c_errmsg);
+					if(i_ch_val == -1)
+					{
+  					fn_errlog ( c_ServiceName, "L31030", LIBMSG, c_errmsg );
+   					return -1;
+					}
+					fn_userlog(c_ServiceName,"After Inserting FTM");
+				}
+				else
+				{
+					fn_userlog(c_ServiceName,"Exchange Aleready in X");				/** Ver 1.5 **/
+					return 0;
+				}
+       break;
+
+    case 'X' :
+
+         fn_userlog(c_ServiceName,"Inside X case");
+
+       c_mkt_stts = 'X';
+       break;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Inside check NORMAL_SEGMENT");
+  }
+  st_stts.c_crrnt_stts = c_mkt_stts;
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Market Status Is :%c:",st_stts.c_crrnt_stts);
+  }
+
+	i_ch_val = fn_upd_xchng_stts(&st_stts,
+															 c_ServiceName,
+															 c_errmsg );
+	
+  if (i_ch_val == -1)
+  {
+    fn_errlog(c_ServiceName,"L31035", LIBMSG, c_errmsg);
+    return -1;
+  }
+  return 0;
+}
+
+/**********************************************************************************
+*	function fn_upd_msg_brd :  To Make entry of News from BSE into FTM Table				* 
+*	input : struct st_news_brd        																							*
+*				 c_xchng_cd        																												*
+*				 ServiceName,																															*
+*				 error message																														*
+*	output :  0 on success                                            							*
+*					 -1 on failure																													*
+*					  																																			*
+**********************************************************************************/
+
+int fn_upd_msg_brd (char *c_ServiceName, struct st_news_brd st_var_news_brd, char  *c_err_msg )
+{
+  int i_tran_id;
+  int i_ret_val;
+  int i_hrs, i_mins, i_scnds;
+  char c_xchng_cd[4];
+  char    c_time[20];
+
+  strcpy ( c_xchng_cd, "BFO" );
+	if(DEBUG_MSG_LVL_3)													/**** Ver 1.3 Debug Level Added ****/
+	{	
+		fn_userlog(c_ServiceName,"Inside function fn_upd_msg_brd  ");
+	}
+  MEMSET(c_time);
+  i_hrs   = (int)st_var_news_brd.si_hrs;
+  i_mins  = (int)st_var_news_brd.si_mins;
+  i_scnds = (int)st_var_news_brd.si_scnds;
+  sprintf(c_time,"%02d:%02d:%02d",i_hrs,i_mins,i_scnds);
+  i_tran_id = fn_begintran(c_ServiceName , c_err_msg);
+  if ( i_tran_id == -1)
+  {
+    fn_errlog(c_ServiceName,"L31040", TPMSG, c_err_msg);
+    return -1 ;
+  }
+	if(DEBUG_MSG_LVL_3)                         /**** Ver 1.3 Debug Level Added ****/
+	{
+		fn_userlog(c_ServiceName,"News id :%ld:",st_var_news_brd.li_nws_id);
+		fn_userlog(c_ServiceName,"news headline:%s:",st_var_news_brd.c_nws_hl);
+	}
+
+  EXEC SQL
+    Insert into FTM_FO_TRD_MSG
+                    (FTM_XCHNG_CD ,
+                    FTM_MSG_ID ,
+                    FTM_MSG,
+                    FTM_TM
+                    )
+           values
+                    (
+                    :c_xchng_cd,
+                    'G', 
+                    :st_var_news_brd.c_nws_hl,
+                    TO_DATE (TO_CHAR(SYSDATE,'dd-Mon-yyyy')||' '||:c_time,'dd-Mon-yyyy hh24:mi:ss' )
+                    );
+
+   if ( SQLCODE != 0)
+  {
+    fn_errlog ( c_ServiceName, "L31045", SQLMSG,  c_err_msg );
+    fn_aborttran(c_ServiceName ,i_tran_id ,c_err_msg);
+    return ( -1 );
+  }
+  if ( fn_committran( c_ServiceName, i_tran_id, c_err_msg ) == -1 )
+  {
+    fn_errlog(c_ServiceName ,"L31050" ,SQLMSG,c_err_msg);
+    fn_aborttran(c_ServiceName ,i_tran_id ,c_err_msg);
+    return -1;
+  }
+	if(DEBUG_MSG_LVL_3)                         /** Ver 1.5 Debug level added **/
+	{
+		fn_userlog(c_ServiceName,"fn_up_msg_brd completed");
+	}
+return 0;
+}
+
+/**********************************************************************************
+*	function fn_stock_status_chg:  To Update the stock details in FTQ Table 				* 
+*	input : struct st_mkt_picture_dtls																							*
+*				 c_xchng_cd        																												*
+*				 ServiceName,																															*
+*				 error message																														*
+*	output :  0 on success                                            							*
+*					 -1 on failure																													*
+*					  																																			*
+**********************************************************************************/
+
+int fn_stock_status_chg(struct st_mkt_picture_dtls *ptr_st_mkt_pic,
+												char *c_xchng_cd,
+												char *c_ServiceName,
+												char *c_errmsg)
+{
+	int i_count =0;
+	int i_count1 =0,i_cnt;
+	int i_ch_val;
+	int i_trnsctn;
+  char    c_time[20];           /*** ver 1.3 **/
+  int     i_hrs, i_mins, i_scnds;   /*** ver 1.3 **/
+	double d_pcnt_chg_prev_cls=0.0;		
+	char *c_ftq_stock_code;
+	char c_stock[21];
+	char c_rout_str[4];
+	struct vw_contract st_cntrct;
+	struct vw_cntrt_gen_inf st_cntrctgeninfo;
+	struct st_sub_best_rt_qty_brd st_bst_strct[5];
+	long l_token_id;
+	EXEC SQL INCLUDE "table/ftq_fo_trd_qt.h";
+
+	strcpy(c_rout_str,"000");
+
+  /** ver 1.3 Starts ***/
+  if(DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog(c_ServiceName,"Hour :%d:",ptr_st_mkt_pic->si_hrs);
+    fn_userlog(c_ServiceName,"Min  :%d:",ptr_st_mkt_pic->si_mins);
+    fn_userlog(c_ServiceName,"Sec  :%d:",ptr_st_mkt_pic->si_scnds);
+  }
+  MEMSET(c_time);
+  i_hrs   = (int)ptr_st_mkt_pic->si_hrs;
+  i_mins  = (int)ptr_st_mkt_pic->si_mins;
+  i_scnds = (int)ptr_st_mkt_pic->si_scnds;
+  sprintf(c_time,"%02d:%02d:%02d",i_hrs,i_mins,i_scnds);
+  fn_userlog(c_ServiceName,"Packet Timestamp from Exchange :%s:",c_time);
+  /** ver 1.3 Ends  ***/
+
+		fn_userlog(c_ServiceName,"Inside fn_stock_status_chng and no of rec:%d:",ptr_st_mkt_pic->si_no_recs);
+	for(i_count =0 ; i_count < (ptr_st_mkt_pic->si_no_recs) ;i_count ++)
+	{
+	 d_pcnt_chg_prev_cls= 0.0;			
+	 if(DEBUG_MSG_LVL_3)
+	 {		
+		 fn_userlog(c_ServiceName ,"scrip_cd    :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_scrp_cd);
+		 fn_userlog(c_ServiceName ,"Open RT     :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_opn_rt);
+		 fn_userlog(c_ServiceName ,"Prv_cls_rt  :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_cls_rt);
+		 fn_userlog(c_ServiceName ,"High_rt		 :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_high_rt);
+		 fn_userlog(c_ServiceName ,"Low_rt			 :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_low_rt);
+		 fn_userlog(c_ServiceName ,"No_of_trd	 :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_no_of_trd);
+		 fn_userlog(c_ServiceName ,"Volume 		 :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_vol);
+		 fn_userlog(c_ServiceName ,"Value			 :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_val);
+		 fn_userlog(c_ServiceName ,"Lst_trd_qty :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_lst_trd_qty);
+		 fn_userlog(c_ServiceName ,"LTP/Close_rt:%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_lst_trd_rt);
+		 fn_userlog(c_ServiceName ,"Tot_Bid_qty :%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_tot_buy_qty);
+		 fn_userlog(c_ServiceName ,"Tot_offr_qty:%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_tot_sell_qty);
+		 fn_userlog(c_ServiceName ,"Trd_val_flg :%c:",ptr_st_mkt_pic->st_mkt_pic[i_count].c_trd_val_flg);
+		 fn_userlog(c_ServiceName ,"Trend			 :%c:",ptr_st_mkt_pic->st_mkt_pic[i_count].c_trend);
+		 fn_userlog(c_ServiceName ,"Six_lakh_flg:%c:",ptr_st_mkt_pic->st_mkt_pic[i_count].c_six_lakh_flg);
+		 fn_userlog(c_ServiceName ,"Lwr_crkt_lmt:%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_lowr_ckt_lmt);
+		 fn_userlog(c_ServiceName ,"Uppr_ckt_lmt:%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_upper_ckt_lmt);
+		 fn_userlog(c_ServiceName ,"Waighted_avg:%ld:",ptr_st_mkt_pic->st_mkt_pic[i_count].li_wightd_avg);
+		 fn_userlog(c_ServiceName ,"No_of_prc_pnts:%d:",ptr_st_mkt_pic->st_mkt_pic[i_count].si_no_of_prc_pnts);
+	 }
+		for(i_count1=0 ;i_count1 < ptr_st_mkt_pic->st_mkt_pic[i_count].si_no_of_prc_pnts ;i_count1++)
+		{
+
+			st_bst_strct[i_count1].li_bst_buy_rt=ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_bst_buy_rt;
+			st_bst_strct[i_count1].li_tot_buy_qty=ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_tot_buy_qty;
+			st_bst_strct[i_count1].li_bst_sell_rt =ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_bst_sell_rt;
+			st_bst_strct[i_count1].li_tot_sell_qty=	ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_tot_sell_qty;
+
+
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName ,":%d:Best_Buy_rt:%ld:",i_count1,ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_bst_buy_rt);
+				fn_userlog(c_ServiceName ,":%d:Tot_Buy_qty:%ld:",i_count1,ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_tot_buy_qty );
+				fn_userlog(c_ServiceName ,":%d:Best_Sell_rt:%ld:",i_count1,ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_bst_sell_rt );
+				fn_userlog(c_ServiceName ,":%d:Tot_sell_qty:%ld:",i_count1,ptr_st_mkt_pic->st_mkt_pic[i_count].st_bst_rt_qty[i_count1].li_tot_sell_qty );
+			}
+
+		}
+		sql_ftq_cls_trd_qty =ptr_st_mkt_pic->st_mkt_pic[i_count].li_lst_trd_qty;
+		
+		sql_ftq_bst1_offr_qty =st_bst_strct[0].li_tot_sell_qty;
+		sql_ftq_bst1_offr_prc =st_bst_strct[0].li_bst_sell_rt;
+
+		sql_ftq_bst2_offr_qty =st_bst_strct[1].li_tot_sell_qty;
+		sql_ftq_bst2_offr_prc =st_bst_strct[1].li_bst_sell_rt;
+	
+		sql_ftq_bst3_offr_qty =st_bst_strct[2].li_tot_sell_qty;
+		sql_ftq_bst3_offr_prc =st_bst_strct[2].li_bst_sell_rt;
+	
+		sql_ftq_bst4_offr_qty =st_bst_strct[3].li_tot_sell_qty;
+		sql_ftq_bst4_offr_prc =st_bst_strct[3].li_bst_sell_rt;
+	
+		sql_ftq_bst5_offr_qty	=st_bst_strct[4].li_tot_sell_qty;
+		sql_ftq_bst5_offr_prc =st_bst_strct[4].li_bst_sell_rt;
+	
+		sql_ftq_bst1_bid_qty =st_bst_strct[0].li_tot_buy_qty;
+		sql_ftq_bst1_bid_prc =st_bst_strct[0].li_bst_buy_rt;
+	
+		sql_ftq_bst2_bid_qty = st_bst_strct[1].li_tot_buy_qty;
+		sql_ftq_bst2_bid_prc = st_bst_strct[1].li_bst_buy_rt;
+	
+		sql_ftq_bst3_bid_qty = st_bst_strct[2].li_tot_buy_qty;
+		sql_ftq_bst3_bid_prc = st_bst_strct[2].li_bst_buy_rt;
+
+		sql_ftq_bst4_bid_qty = st_bst_strct[3].li_tot_buy_qty;
+		sql_ftq_bst4_bid_prc = st_bst_strct[3].li_bst_buy_rt;
+	
+		sql_ftq_bst5_bid_qty = st_bst_strct[4].li_tot_buy_qty;
+		sql_ftq_bst5_bid_prc = st_bst_strct[4].li_bst_buy_rt;
+
+		sql_ftq_prvs_cls_prc =ptr_st_mkt_pic->st_mkt_pic[i_count].li_cls_rt;
+		sql_ftq_avrg_trd_prc =ptr_st_mkt_pic->st_mkt_pic[i_count].li_wightd_avg;
+		sql_ftq_low_prc			=ptr_st_mkt_pic->st_mkt_pic[i_count].li_low_rt;
+		sql_ftq_hgh_prc			=ptr_st_mkt_pic->st_mkt_pic[i_count].li_high_rt;
+/** sql_ftq_tot_qty_trdd	=ptr_st_mkt_pic->st_mkt_pic[i_count].li_no_of_trd; *** Ver 1.2 **/
+		sql_ftq_tot_qty_trdd	=ptr_st_mkt_pic->st_mkt_pic[i_count].li_vol;				/** Ver 1.2 **/
+		sql_ftq_tot_val_trdd	=ptr_st_mkt_pic->st_mkt_pic[i_count].li_val;
+		sql_ftq_lst_trd_prc	=ptr_st_mkt_pic->st_mkt_pic[i_count].li_lst_trd_rt;
+		sql_ftq_lst_trd_qty	=ptr_st_mkt_pic->st_mkt_pic[i_count].li_lst_trd_qty;	
+		sql_ftq_indctr			=ptr_st_mkt_pic->st_mkt_pic[i_count].c_trend;
+		sql_ftq_tot_bid_qty	=ptr_st_mkt_pic->st_mkt_pic[i_count].li_tot_buy_qty;
+		sql_ftq_tot_offr_qty =ptr_st_mkt_pic->st_mkt_pic[i_count].li_tot_sell_qty;
+		sql_ftq_prvs_cls_prc	=ptr_st_mkt_pic->st_mkt_pic[i_count].li_cls_rt ;
+		sql_ftq_opn_prc			= ptr_st_mkt_pic->st_mkt_pic[i_count].li_opn_rt;	
+		sprintf(c_stock,"%ld",ptr_st_mkt_pic->st_mkt_pic[i_count].li_scrp_cd);
+	
+		sql_ftq_hgh_prc_rng = ptr_st_mkt_pic->st_mkt_pic[i_count].li_upper_ckt_lmt;
+		sql_ftq_low_prc_rng	= ptr_st_mkt_pic->st_mkt_pic[i_count].li_lowr_ckt_lmt;
+
+		l_token_id = ptr_st_mkt_pic->st_mkt_pic[i_count].li_scrp_cd;
+		
+		if(DEBUG_MSG_LVL_3)                         /**** Ver 1.3 Debug Level Added ***/
+		{
+			fn_userlog(c_ServiceName,"Calling Function bset_to_eba_token");
+		}
+		i_ch_val = fn_bse_to_eba_tkn( l_token_id,
+																	&st_cntrct,
+																	c_ServiceName,
+																	c_errmsg);
+		if ( i_ch_val == SYSTEM_ERROR )
+    {
+      fn_errlog ( c_ServiceName, "L31055", LIBMSG, c_errmsg );
+      return -1;
+    }
+		else if(i_ch_val == 2)
+		{
+			continue;
+		}
+    else if ( i_ch_val != 0 )
+    {
+			return 0;
+    }
+		if(DEBUG_MSG_LVL_3)                         /**** Ver 1.3 Debug Level Added ***/
+		{
+			fn_userlog(c_ServiceName,"After bse_to_eba_token ");
+		}
+    strcpy( st_cntrctgeninfo.c_xchng_cd ,c_xchng_cd);
+    st_cntrctgeninfo.c_prd_typ= st_cntrct.c_prd_typ ;
+    strcpy( st_cntrctgeninfo.c_undrlyng , st_cntrct.c_undrlyng ) ;
+    strcpy ( st_cntrctgeninfo.c_expry_dt , st_cntrct.c_expry_dt) ;
+    st_cntrctgeninfo.c_exrc_typ= st_cntrct.c_exrc_typ ;
+    st_cntrctgeninfo.c_opt_typ= st_cntrct.c_opt_typ ;
+    st_cntrctgeninfo.l_strike_prc = st_cntrct.l_strike_prc ;
+    st_cntrctgeninfo.c_ctgry_indstk = st_cntrct.c_ctgry_indstk;
+    st_cntrctgeninfo.l_ca_lvl = st_cntrct.l_ca_lvl;
+
+    rtrim( st_cntrctgeninfo.c_xchng_cd);
+    rtrim( st_cntrctgeninfo.c_undrlyng);
+    rtrim( st_cntrctgeninfo.c_expry_dt);
+	  if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Exchange Code Is :%s:",st_cntrctgeninfo.c_xchng_cd);
+      fn_userlog(c_ServiceName,"Product Type Is  :%c:",st_cntrctgeninfo.c_prd_typ);
+      fn_userlog(c_ServiceName,"Underlying Is    :%s:",st_cntrctgeninfo.c_undrlyng);
+      fn_userlog(c_ServiceName,"Expiry Date Is   :%s:",st_cntrctgeninfo.c_expry_dt);
+      fn_userlog(c_ServiceName,"Exercise Type Is :%c:",st_cntrctgeninfo.c_exrc_typ);
+      fn_userlog(c_ServiceName,"Option Type Is   :%c:",st_cntrctgeninfo.c_opt_typ);
+      fn_userlog(c_ServiceName,"Strike Price is  :%ld:",st_cntrctgeninfo.l_strike_prc);
+      fn_userlog(c_ServiceName,"Index/Stock      :%c:",st_cntrctgeninfo.c_ctgry_indstk);
+    }
+	  if ( sql_ftq_prvs_cls_prc != 0 )
+    {
+      d_pcnt_chg_prev_cls = (double)( sql_ftq_lst_trd_prc  -  sql_ftq_prvs_cls_prc   ) / (double) sql_ftq_prvs_cls_prc *  100.0 * 100.0;
+    }
+    else
+    {
+      d_pcnt_chg_prev_cls = 0;
+    }
+        			
+  i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+  if ( i_trnsctn == -1 )
+  {
+		fn_errlog(c_ServiceName,"L31060",SQLMSG ,c_errmsg);
+		return -1;
+  }
+	if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	{	
+			fn_userlog(c_ServiceName,"Before Updating FTQ Stock code :%s:",st_cntrctgeninfo.c_undrlyng);
+	}
+
+	EXEC SQL
+		UPDATE FTQ_FO_TRD_QT
+		set FTQ_OPN_PRC 			=:sql_ftq_opn_prc, 
+				FTQ_CLS_PRC 			=:sql_ftq_prvs_cls_prc,
+				FTQ_HGH_PRC 			=:sql_ftq_hgh_prc,
+				FTQ_LOW_PRC 			=:sql_ftq_low_prc,
+				FTQ_PRVS_CLS_PRC	=:sql_ftq_prvs_cls_prc,
+				FTQ_CHNG_PRVS_CLS =:d_pcnt_chg_prev_cls,				
+				FTQ_INDCTR 				=:sql_ftq_indctr,
+				FTQ_TOT_QTY_TRDD 	=:sql_ftq_tot_qty_trdd,
+				FTQ_TOT_VAL_TRDD 	=:sql_ftq_tot_val_trdd,
+				FTQ_LST_TRD_PRC 	=:sql_ftq_lst_trd_prc,
+				FTQ_LST_TRD_QTY 	=:sql_ftq_lst_trd_qty,
+				FTQ_AVRG_TRD_PRC 	=:sql_ftq_avrg_trd_prc,
+				FTQ_BST1_BID_PRC 	=:sql_ftq_bst1_bid_prc,
+				FTQ_BST1_BID_QTY 	=:sql_ftq_bst1_bid_qty,
+				FTQ_BST2_BID_PRC 	=:sql_ftq_bst2_bid_prc,
+				FTQ_BST2_BID_QTY 	=:sql_ftq_bst2_bid_qty,
+				FTQ_BST3_BID_PRC 	=:sql_ftq_bst3_bid_prc,
+				FTQ_BST3_BID_QTY 	=:sql_ftq_bst3_bid_qty, 
+				FTQ_BST4_BID_PRC 	=:sql_ftq_bst4_bid_prc,
+				FTQ_BST4_BID_QTY 	=:sql_ftq_bst4_bid_qty,
+				FTQ_BST5_BID_PRC 	=:sql_ftq_bst5_bid_prc,
+				FTQ_BST5_BID_QTY 	=:sql_ftq_bst5_bid_qty,
+				FTQ_BST1_OFFR_PRC	=:sql_ftq_bst1_offr_prc,
+				FTQ_BST1_OFFR_QTY	=:sql_ftq_bst1_offr_qty,
+				FTQ_BST2_OFFR_PRC	=:sql_ftq_bst2_offr_prc,
+				FTQ_BST2_OFFR_QTY	=:sql_ftq_bst2_offr_qty,
+				FTQ_BST3_OFFR_PRC	=:sql_ftq_bst3_offr_prc,
+				FTQ_BST3_OFFR_QTY	=:sql_ftq_bst3_offr_qty,
+				FTQ_BST4_OFFR_PRC	=:sql_ftq_bst4_offr_prc,
+				FTQ_BST4_OFFR_QTY	=:sql_ftq_bst4_offr_qty,
+				FTQ_BST5_OFFR_PRC	=:sql_ftq_bst5_offr_prc,
+				FTQ_BST5_OFFR_QTY	=:sql_ftq_bst5_offr_qty,
+				FTQ_TOT_BID_QTY		=:sql_ftq_tot_bid_qty,
+				FTQ_TOT_OFFR_QTY	=:sql_ftq_tot_offr_qty,
+			/* FTQ_LST_TRD_TM    = sysdate,					       *** Ver 1.3 Comment**/
+        FTQ_LST_TRD_TM    = TO_TIMESTAMP(TO_CHAR(SYSDATE,'dd-Mon-yyyy')||' '||:c_time,'dd-Mon-yyyy hh24:mi:ss' ),                                           /** Ver 1.3  **/
+				FTQ_HGH_PRC_RNG   = :sql_ftq_hgh_prc_rng,
+				FTQ_LOW_PRC_RNG   = :sql_ftq_low_prc_rng 								
+		WHERE FTQ_XCHNG_CD 		= :st_cntrctgeninfo.c_xchng_cd
+		AND FTQ_PRDCT_TYP			= :st_cntrctgeninfo.c_prd_typ 
+		AND FTQ_UNDRLYNG			= :st_cntrctgeninfo.c_undrlyng 
+		AND FTQ_EXPRY_DT			= :st_cntrctgeninfo.c_expry_dt 
+		AND FTQ_OPT_TYP				= :st_cntrctgeninfo.c_opt_typ
+		AND FTQ_STRK_PRC			= :st_cntrctgeninfo.l_strike_prc ;	
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog ( c_ServiceName, "L31065", SQLMSG,c_errmsg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+     	return -1; 
+    }
+		if(SQLCODE == NO_DATA_FOUND )
+		{
+			fn_userlog(c_ServiceName ,"No data found for stock code :%s:",st_cntrctgeninfo.c_undrlyng);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+			continue;
+		} 
+  	if( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+  	{
+    	fn_errlog ( c_ServiceName, "L31070", SQLMSG,c_errmsg );
+			return -1;
+  	}
+
+		if(DEBUG_MSG_LVL_3)                        /**** Ver 1.3 Debug Level Added ***/
+		{
+			fn_userlog(c_ServiceName,"After Updating FTQ ");
+		}
+	}	
+	return 0;
+}
+
+/**********************************************************************************
+*	function fn_bse_to_eba_tkn: To get contract details for token id from FCM Table	* 
+*	input : Token id received																												*
+*				 struct vw_contract																												*
+*				 ServiceName,																															*
+*				 error message																														*
+*	output :  0 on success with contract details in struct vw_contract							*
+*					 -1 on failure																													*
+*					  2 if no record found																									*
+**********************************************************************************/
+
+int fn_bse_to_eba_tkn(long int li_tkn, struct vw_contract *ptr_cntrct ,char * c_ServiceName ,char *c_err_msg)
+{
+
+  struct vw_nse_cntrct st_bse_dtls;
+	int i_ch_val;
+	if(DEBUG_MSG_LVL_3)                         /**** Ver 1.3 Debug Level Added ***/
+	{
+		fn_userlog(c_ServiceName,"Inside fn_bse_to_eba_token");
+	}
+	st_bse_dtls.l_token_id= li_tkn;
+	       
+  /*** Commented in Ver 1.9 ***  
+        EXEC SQL
+          SELECT  fcm_xchng_cd,
+                  fcm_prdct_typ,
+                  fcm_undrlyng,
+                  to_char(fcm_expry_dt,'DD-Mon-YYYY'),
+                  fcm_exer_typ,
+                  fcm_opt_typ,
+                  fcm_strk_prc,
+                  fcm_ca_lvl,
+                  fcm_indstk
+          INTO    :ptr_cntrct->c_xchng_cd,
+                  :ptr_cntrct->c_prd_typ,
+                  :ptr_cntrct->c_undrlyng,
+                  :ptr_cntrct->c_expry_dt,
+                  :ptr_cntrct->c_exrc_typ,
+                  :ptr_cntrct->c_opt_typ,
+                  :ptr_cntrct->l_strike_prc,
+                  :ptr_cntrct->l_ca_lvl,
+                  :ptr_cntrct->c_ctgry_indstk
+          FROM    fcm_fo_cntrct_mstr
+          WHERE   fcm_token_no  = :st_bse_dtls.l_token_id
+					AND 		fcm_xchng_cd = 'BFO';
+  ******/
+
+  /*** Ver 1.9 Starts ***/
+
+        EXEC SQL
+          SELECT  ftq_xchng_cd,
+                  ftq_prdct_typ,
+                  ftq_undrlyng,
+                  to_char(ftq_expry_dt,'DD-Mon-YYYY'),
+                  ftq_exer_typ,
+                  ftq_opt_typ,
+                  ftq_strk_prc,
+                  ftq_ca_lvl,
+                  ftq_indstk
+          INTO    :ptr_cntrct->c_xchng_cd,
+                  :ptr_cntrct->c_prd_typ,
+                  :ptr_cntrct->c_undrlyng,
+                  :ptr_cntrct->c_expry_dt,
+                  :ptr_cntrct->c_exrc_typ,
+                  :ptr_cntrct->c_opt_typ,
+                  :ptr_cntrct->l_strike_prc,
+                  :ptr_cntrct->l_ca_lvl,
+                  :ptr_cntrct->c_ctgry_indstk
+          FROM    ftq_fo_trd_qt       
+          WHERE   ftq_token_no  = :st_bse_dtls.l_token_id
+          AND     ftq_xchng_cd = 'BFO';
+
+  /*** Ver 1.9 Ends   ***/      
+
+        if ( (SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND))
+        {
+          fn_errlog ( c_ServiceName, "L31075", SQLMSG, c_err_msg);
+					return -1;
+				}
+				else if(SQLCODE == NO_DATA_FOUND)
+				{
+					if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+					{
+						fn_userlog(c_ServiceName ,"NO record found in FCM for token :%ld",st_bse_dtls.l_token_id);
+					}
+						return 2;
+				} 
+  return 0;
+}
+/**********************************************************************
+*	function fn_upd_opn_price: To Update Open Price in FTQ Table 				* 
+*	input :struct st_open_price_brd       															*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+int fn_upd_opn_price(char * c_ServiceName,
+										 char *c_xchng_cd,
+                      struct st_open_price_brd *ptr_st_opn_prc,
+                      char * c_errmsg)
+{
+	int i_ch_val;
+	int i_tran_id;
+	int i_count;
+	int i_hrs,i_min,i_secnds,i_mlscnds;
+	char c_stock[21];
+	char    c_time[20];   
+	char    c_mltime[20]; 
+	int  i_trnsctn;
+	long l_token_id;
+	struct vw_contract st_cntrct;
+
+	EXEC SQL INCLUDE "table/ftq_fo_trd_qt.h";
+
+	i_hrs = (int)ptr_st_opn_prc->st_opn_prc.si_hrs;
+	i_min =(int)ptr_st_opn_prc->st_opn_prc.si_mins;
+	i_secnds = (int)ptr_st_opn_prc->st_opn_prc.si_scnds;
+	i_mlscnds =(int)ptr_st_opn_prc->st_opn_prc.si_mlscnds;
+  sprintf(c_time,"%02d:%02d:%02d",i_hrs,i_min,i_secnds);
+  sprintf(c_mltime,"%02d:%02d:%02d.%03d",i_hrs,i_min,i_secnds,i_mlscnds);
+	fn_userlog(c_ServiceName , "Total records :%d:" ,ptr_st_opn_prc->st_opn_prc.si_no_recs);
+
+	for(i_count =0 ; i_count < ptr_st_opn_prc->st_opn_prc.si_no_recs ; i_count++)
+	{
+	 if(DEBUG_MSG_LVL_3)
+	 {
+			fn_userlog(c_ServiceName,"instrument code :%ld:",ptr_st_opn_prc->st_opn_prc.st_prc[i_count].li_scrip_cd);
+			fn_userlog(c_ServiceName,"Opening Price :%ld:",ptr_st_opn_prc->st_opn_prc.st_prc[i_count].li_price);
+			fn_userlog(c_ServiceName,"Trade flag :%c:",ptr_st_opn_prc->st_opn_prc.st_prc[i_count].c_traded );
+	 }
+
+	 l_token_id = ptr_st_opn_prc->st_opn_prc.st_prc[i_count].li_scrip_cd;
+
+	 if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	 {
+    fn_userlog(c_ServiceName,"Calling Function bset_to_eba_token");
+	 }
+    i_ch_val = fn_bse_to_eba_tkn( l_token_id,
+                                  &st_cntrct,
+                                  c_ServiceName,
+                                  c_errmsg);
+    if ( i_ch_val == SYSTEM_ERROR )
+    {
+      fn_errlog ( c_ServiceName, "L31080", LIBMSG, c_errmsg );
+      return -1;
+    }
+		else if(i_ch_val == 2)
+		{
+			continue;
+		}
+    else if ( i_ch_val != 0 )
+    {
+      return 0;
+    }
+		
+		sql_ftq_opn_prc =ptr_st_opn_prc->st_opn_prc.st_prc[i_count].li_price;
+
+		if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+			fn_userlog(c_ServiceName ,"Opnening price of :%ld: =  :%ld:",l_token_id,sql_ftq_opn_prc);
+		}
+ 
+ 		i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+  	if ( i_trnsctn == -1 )
+  	{
+    	fn_errlog(c_ServiceName,"L31085",SQLMSG ,c_errmsg);
+    	return -1;
+  	}
+		if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+  		fn_userlog(c_ServiceName,"Before Updating FTQ ");
+		}
+		EXEC SQL
+	
+	  UPDATE FTQ_FO_TRD_QT
+    set FTQ_OPN_PRC =:sql_ftq_opn_prc
+		WHERE FTQ_UNDRLYNG = :st_cntrct.c_undrlyng 
+		AND FTQ_XCHNG_CD 	 = :st_cntrct.c_xchng_cd
+		AND FTQ_EXPRY_DT   = :st_cntrct.c_expry_dt
+		AND FTQ_PRDCT_TYP  = :st_cntrct.c_prd_typ
+		AND FTQ_OPT_TYP    = :st_cntrct.c_opt_typ
+		AND FTQ_STRK_PRC	 = :st_cntrct.l_strike_prc;
+	
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog ( c_ServiceName, "L31090", SQLMSG,c_errmsg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+      return -1;
+    }
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName ,"No data found for stock code :%ld:",l_token_id);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+			continue;
+    }
+    if( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+    {
+      fn_errlog ( c_ServiceName, "L31095", SQLMSG,c_errmsg );
+      return -1;
+    }
+
+		if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+    	fn_userlog(c_ServiceName,"After Updating FTQ ");
+		}
+	}
+	return 0;
+}
+/**********************************************************************
+*	function fn_upd_cls_price: To Update Close Price in FTQ Table 			* 
+*	input :struct st_cls_price_brd        															*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+int fn_upd_cls_price(char * c_ServiceName,
+										 char *c_xchng_cd,	
+                      struct st_cls_price_brd *ptr_st_cls_prc,
+                      char * c_errmsg)
+{
+  int i_ch_val;
+  int i_tran_id;
+  int i_count;
+  int i_hrs,i_min,i_secnds,i_mlscnds;
+  char c_stock[21];
+  char    c_time[20];
+  char    c_mltime[20];
+  int  i_trnsctn;
+  long l_token_id;
+  struct vw_contract st_cntrct;
+
+  EXEC SQL INCLUDE "table/ftq_fo_trd_qt.h";
+
+  i_hrs = (int)ptr_st_cls_prc->st_cls_prc.si_hrs;
+  i_min =(int)ptr_st_cls_prc->st_cls_prc.si_mins;
+  i_secnds = (int)ptr_st_cls_prc->st_cls_prc.si_scnds;
+  i_mlscnds =(int)ptr_st_cls_prc->st_cls_prc.si_mlscnds;
+  sprintf(c_time,"%02d:%02d:%02d",i_hrs,i_min,i_secnds);
+  sprintf(c_mltime,"%02d:%02d:%02d.%03d",i_hrs,i_min,i_secnds,i_mlscnds);
+  fn_userlog(c_ServiceName , "Total records :%d:" ,ptr_st_cls_prc->st_cls_prc.si_no_recs);
+
+  for(i_count =0 ; i_count < ptr_st_cls_prc->st_cls_prc.si_no_recs ; i_count++)
+  {
+	 if(DEBUG_MSG_LVL_3)
+	 {
+			fn_userlog(c_ServiceName,"instrument code :%ld:",ptr_st_cls_prc->st_cls_prc.st_prc[i_count].li_scrip_cd);
+			fn_userlog(c_ServiceName,"Closing Price :%ld:",ptr_st_cls_prc->st_cls_prc.st_prc[i_count].li_price);
+			fn_userlog(c_ServiceName,"Trade flag :%c:",ptr_st_cls_prc->st_cls_prc.st_prc[i_count].c_traded );
+	 }
+
+	 l_token_id = ptr_st_cls_prc->st_cls_prc.st_prc[i_count].li_scrip_cd;
+
+   if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	 {
+    fn_userlog(c_ServiceName,"Calling Function bset_to_eba_token");
+	 }
+    i_ch_val = fn_bse_to_eba_tkn( l_token_id,
+                                  &st_cntrct,
+                                  c_ServiceName,
+                                  c_errmsg);
+    if ( i_ch_val == SYSTEM_ERROR )
+    {
+      fn_errlog ( c_ServiceName, "L31100", LIBMSG, c_errmsg );
+      return -1;
+    }
+		else if(i_ch_val == 2)
+		{
+			continue;
+		}
+    else if ( i_ch_val != 0 )
+    {
+      return 0;
+    }
+	  if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+			fn_userlog(c_ServiceName,"After fn_bse_to_eba_tkn inside closing price");
+		}
+		sql_ftq_cls_prc =ptr_st_cls_prc->st_cls_prc.st_prc[i_count].li_price;
+
+    fn_userlog(c_ServiceName ,"Closing price of :%ld: =  :%ld:",l_token_id,sql_ftq_cls_prc);
+
+    i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog(c_ServiceName,"L31105",SQLMSG ,c_errmsg);
+      return -1;
+    }
+	  if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+    	fn_userlog(c_ServiceName,"Before Updating FTQ ");
+		}
+
+    EXEC SQL
+
+    UPDATE FTQ_FO_TRD_QT
+    set FTQ_CLS_PRC =:sql_ftq_cls_prc
+    WHERE FTQ_UNDRLYNG = :st_cntrct.c_undrlyng
+    AND FTQ_XCHNG_CD   = :st_cntrct.c_xchng_cd
+    AND FTQ_EXPRY_DT   = :st_cntrct.c_expry_dt
+		AND FTQ_PRDCT_TYP  = :st_cntrct.c_prd_typ
+		AND FTQ_OPT_TYP    = :st_cntrct.c_opt_typ
+		AND FTQ_STRK_PRC	 = :st_cntrct.l_strike_prc;
+
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog ( c_ServiceName, "L31110", SQLMSG,c_errmsg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+      return -1;
+    }
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName ,"No data found for stock code :%ld:",l_token_id);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+			continue;
+    }
+    if( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+    {
+      fn_errlog ( c_ServiceName, "L31115", SQLMSG,c_errmsg );
+      return -1;
+    }
+
+	  if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+    	fn_userlog(c_ServiceName,"After Updating FTQ ");
+		}
+  }
+	return 0;
+}
+/**********************************************************************
+*	function fn_upd_opn_interest : To Update Open Interest in FUM Table * 
+*	input :struct st_opn_intrst_brd       															*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+
+int fn_upd_opn_interest( struct st_opn_intrst_brd *ptr_st_opn_instr_dtls,
+                         char *c_xchng_cd,
+                         char *c_ServiceName,
+                         char *c_errmsg)
+{
+	int i_ch_val;
+  int i_trnsctn;
+  int i_count;
+  int i_hrs,i_min,i_secnds,i_mlscnds;
+  char c_stock[21];
+  char    c_time[20];
+  char    c_mltime[20];
+	long l_token_id;
+	double d_oi =0.0;
+	struct vw_contract st_cntrct;
+	EXEC SQL INCLUDE  "table/fum_fo_undrlyng_mstr.h";
+	EXEC SQL INCLUDE  "table/ftq_fo_trd_qt.h";
+	if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	{
+		fn_userlog(c_ServiceName,"Inside Function fn_upd_opn_interest ");
+		fn_userlog(c_ServiceName,"No Of records in message :%d:",ptr_st_opn_instr_dtls->si_no_records);
+	}
+	for(i_count =0 ; i_count <ptr_st_opn_instr_dtls->si_no_records ; i_count++)
+	{
+	 if(DEBUG_MSG_LVL_3)
+	 {
+			fn_userlog(c_ServiceName,"Processing record %d of %d ",i_count,ptr_st_opn_instr_dtls->si_no_records);
+			fn_userlog(c_ServiceName,"Instrument id :%ld: ",ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_instr_id);
+			fn_userlog(c_ServiceName,"Open Intrest qty :%ld: ",ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_qty);
+			fn_userlog(c_ServiceName,"Open Intrest VAL :%lld: ",ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_val);
+			fn_userlog(c_ServiceName,"Open Intrest Change :%ld: ",ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_chng);
+	 }
+
+	 l_token_id =ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_instr_id; 
+
+	 if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	 {
+   	fn_userlog(c_ServiceName,"Calling Function bset_to_eba_token");
+	 }
+
+   i_ch_val = fn_bse_to_eba_tkn( l_token_id,
+                                  &st_cntrct,
+                                  c_ServiceName,
+                                  c_errmsg);
+    if ( i_ch_val == SYSTEM_ERROR )
+    {
+      fn_errlog ( c_ServiceName, "L31120", LIBMSG, c_errmsg );
+      return -1;
+    }
+    else if(i_ch_val == 2)
+    {
+      continue;
+    }
+    else if ( i_ch_val != 0 )
+    {
+      return 0;
+    }
+	 	if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	 	{
+    	fn_userlog(c_ServiceName,"After fn_bse_to_eba_tkn inside Open Interest");
+		}
+    rtrim( st_cntrct.c_xchng_cd);
+    rtrim( st_cntrct.c_undrlyng);
+    rtrim( st_cntrct.c_expry_dt);
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Exchange Code Is :%s:",st_cntrct.c_xchng_cd);
+      fn_userlog(c_ServiceName,"Product Type Is  :%c:",st_cntrct.c_prd_typ);
+      fn_userlog(c_ServiceName,"Underlying Is    :%s:",st_cntrct.c_undrlyng);
+      fn_userlog(c_ServiceName,"Expiry Date Is   :%s:",st_cntrct.c_expry_dt);
+      fn_userlog(c_ServiceName,"Exercise Type Is :%c:",st_cntrct.c_exrc_typ);
+      fn_userlog(c_ServiceName,"Option Type Is   :%c:",st_cntrct.c_opt_typ);
+      fn_userlog(c_ServiceName,"Strike Price is  :%ld:",st_cntrct.l_strike_prc);
+      fn_userlog(c_ServiceName,"Index/Stock      :%c:",st_cntrct.c_ctgry_indstk);
+    }
+
+	  i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog(c_ServiceName,"L31125",SQLMSG ,c_errmsg);
+      return -1;
+    }
+	/** Ver 1.1 Comment 	
+		sql_fum_oi = (double)ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_val;
+		sql_fum_volume =(double)ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_qty;
+		sql_ftq_crnt_oi=(double)ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_val; **/
+
+		sql_fum_oi = (double)ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_qty;/** Ver 1.1 **/
+		sql_ftq_crnt_oi=(double)ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_qty;/**Ver 1.1 **/
+		sql_ftq_chng_oi=(double)ptr_st_opn_instr_dtls->st_opn_intrst[i_count].li_opn_intrst_chng;
+
+    fn_userlog(c_ServiceName,"OI Before Updating FUM:%lf:",sql_fum_oi);
+		EXEC SQL
+			UPDATE FTQ_FO_TRD_QT
+			SET FTQ_CRNT_OI= round(:sql_ftq_crnt_oi,2),
+					FTQ_CHNG_OI= round(:sql_ftq_chng_oi,2)
+    	WHERE FTQ_UNDRLYNG = :st_cntrct.c_undrlyng
+    	AND FTQ_XCHNG_CD   = :st_cntrct.c_xchng_cd
+    	AND FTQ_EXPRY_DT   = :st_cntrct.c_expry_dt
+    	AND FTQ_PRDCT_TYP  = :st_cntrct.c_prd_typ
+    	AND FTQ_OPT_TYP    = :st_cntrct.c_opt_typ
+    	AND FTQ_STRK_PRC   = :st_cntrct.l_strike_prc;
+
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog ( c_ServiceName, "L31130", SQLMSG,c_errmsg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+      return -1;
+    }
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName ,"No data found for stock code :%ld:",l_token_id);
+    }
+
+ 		EXEC SQL
+    	UPDATE FUM_FO_UNDRLYNG_MSTR
+    	SET fum_oi = round(:sql_fum_oi,2)
+		/*			FUM_VOLUME = round(:sql_fum_volume,2)									** Ver 1.1 Comment **/
+    	WHERE FUM_XCHNG_CD = :st_cntrct.c_xchng_cd
+			AND   FUM_PRDCT_TYP = :st_cntrct.c_prd_typ 
+    	AND 	FUM_UNDRLYNG = :st_cntrct.c_undrlyng;
+
+
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog ( c_ServiceName, "L31135", SQLMSG,c_errmsg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+      return -1;
+    }
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName ,"No data found for stock code :%ld:",l_token_id);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+			continue;
+    }
+    if( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+    {
+      fn_errlog ( c_ServiceName, "L31140", SQLMSG,c_errmsg );
+      return -1;
+    }
+
+    fn_userlog(c_ServiceName,"After Updating FUM");
+	}
+	return 0;
+}
+/**********************************************************************
+*	function fn_upd_sensex_dtls:  To Update SENSEX Details							* 
+*	input :st_all_indx_dtl_brd            															*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*	Note : Presently not called Hence Not Handled												*
+**********************************************************************/
+
+int fn_upd_sensex_dtls(struct st_sensex_dtl_brd *ptr_st_sensex_dtl_brd,
+											 char *c_xchng_cd,
+											 char *c_ServiceName,
+											 char *c_errmsg)
+{
+	int i_tran_id;
+	int i_count;
+	int i_hrs,i_min,i_secnds,i_mlscnds;
+	char c_stock[21];
+	char    c_time[20];
+	char    c_mltime[20];
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Inside Function fn_upd_sensex_dtls ");
+		fn_userlog(c_ServiceName,"No Of records in message :%d:",ptr_st_sensex_dtl_brd->si_no_recs);
+		fn_userlog(c_ServiceName , "Current trading session =%d",ptr_st_sensex_dtl_brd->si_trdng_sssn);
+	}
+	for(i_count=0; i_count< ptr_st_sensex_dtl_brd->si_no_recs ;i_count++)
+	{
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName ,"index code is :%ld:",ptr_st_sensex_dtl_brd->st_sub_sen[i_count].li_indx_cd);
+			fn_userlog(c_ServiceName ,"day high :%ld:",ptr_st_sensex_dtl_brd->st_sub_sen[i_count].li_indx_high);
+			fn_userlog(c_ServiceName ,"Day Low :%ld:",ptr_st_sensex_dtl_brd->st_sub_sen[i_count].li_indx_low);
+			fn_userlog(c_ServiceName ,"index open Val :%ld:",ptr_st_sensex_dtl_brd->st_sub_sen[i_count].li_indx_opn);
+			fn_userlog(c_ServiceName ,"index close val:%ld:",ptr_st_sensex_dtl_brd->st_sub_sen[i_count].li_indx_cls);
+			fn_userlog(c_ServiceName ,"index current val :%ld:",ptr_st_sensex_dtl_brd->st_sub_sen[i_count].li_indx_val);
+			fn_userlog(c_ServiceName ,"index Id s :%s:",ptr_st_sensex_dtl_brd->st_sub_sen[i_count].c_index_id);
+		}	
+	}
+	
+	fn_userlog(c_ServiceName , "fn_upd_sensex_dtls completed");
+
+return 0;
+}
+
+/**********************************************************************
+*	function fn_upd_all_indices :  To Update Index Details							* 
+*	input :st_all_indx_dtl_brd            															*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+*	Note : Presently not called Hence Not Handled												*
+**********************************************************************/
+
+int fn_upd_all_indices(struct st_all_indx_dtl_brd *ptr_st_all_indx_dtl,
+                       char   *c_xchng_cd,
+                       char   *c_ServiceName,
+                       char   *c_errmsg)
+{
+	int 	i_tran_id;
+  int 	i_count;
+  int 	i_hrs,i_min,i_secnds,i_mlscnds;
+  char 	c_stock[21];
+  char  c_time[20];
+  char  c_mltime[20];
+	char  c_index_nm[7];
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Inside Function fn_upd_all_indices ");
+  	fn_userlog(c_ServiceName,"No Of records in message :%d:",ptr_st_all_indx_dtl->si_no_recs);
+  	fn_userlog(c_ServiceName , "Current trading session :%d:",ptr_st_all_indx_dtl->si_trdng_sssn);
+	}
+	for(i_count =0 ;i_count <ptr_st_all_indx_dtl->si_no_recs ;i_count ++)
+	{
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName ,"index code is :%ld:",ptr_st_all_indx_dtl->st_sub_indices[i_count].li_indx_cd);
+			fn_userlog(c_ServiceName ,"day high :%ld:",ptr_st_all_indx_dtl->st_sub_indices[i_count].li_indx_high);
+			fn_userlog(c_ServiceName ,"Day Low :%ld:",ptr_st_all_indx_dtl->st_sub_indices[i_count].li_indx_low);
+			fn_userlog(c_ServiceName ,"index open Val :%ld:",ptr_st_all_indx_dtl->st_sub_indices[i_count].li_indx_opn);
+			fn_userlog(c_ServiceName ,"index close val:%ld:",ptr_st_all_indx_dtl->st_sub_indices[i_count].li_indx_cls);
+			fn_userlog(c_ServiceName ,"index current val :%ld:",ptr_st_all_indx_dtl->st_sub_indices[i_count].li_indx_val);
+			fn_userlog(c_ServiceName ,"index Id s :%s:",ptr_st_all_indx_dtl->st_sub_indices[i_count].c_index_id);
+		}
+	
+		MEMSET(c_index_nm);
+		strcpy((char *)c_index_nm ,(char *)ptr_st_all_indx_dtl->st_sub_indices[i_count].c_index_id);
+		rtrim (c_index_nm);
+	 
+		fn_userlog(c_ServiceName,"count :%d: and Index Name =:%s:",i_count,c_index_nm);	
+	}
+	fn_userlog(c_ServiceName , "fn_upd_all_indices completed");
+	return 0;
+}
+
+/**********************************************************************
+*	function fn_trd_limit_exceed: to prcess Limit Exceed  UMS						* 
+*	input :structure st_trd_lmt_exceed																	*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+int fn_trd_limit_exceed(struct st_trd_lmt_exceed *ptr_st_lmt_exceed,
+                       char *c_xchng_cd,
+                       char *c_ServiceName,
+                       char *c_errmsg)
+{
+	int i_trnsctn;
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+  EXEC SQL END DECLARE SECTION;
+	if(DEBUG_MSG_LVL_3)
+	{	
+		fn_userlog(c_ServiceName,"Inside Trader Limit Exceeded");
+		fn_userlog(c_ServiceName,"message type 	:%ld:",ptr_st_lmt_exceed->li_msg_type);
+		fn_userlog(c_ServiceName,"member code 	:%ld:",ptr_st_lmt_exceed->li_member_cd);
+		fn_userlog(c_ServiceName,"trader code		:%ld:",ptr_st_lmt_exceed->li_trader_cd);
+		fn_userlog(c_ServiceName,"trading limit	:%lld:",ptr_st_lmt_exceed->ll_trd_limit);
+		fn_userlog(c_ServiceName,"limit used 		:%lld:",ptr_st_lmt_exceed->ll_lmt_used);
+		fn_userlog(c_ServiceName,"time					:%s:",ptr_st_lmt_exceed->uc_tm_stmp);
+		fn_userlog(c_ServiceName,"alert flag		:%c:",ptr_st_lmt_exceed->c_alert_flg);
+	}	
+    strcpy( (char *)sql_vc_msg.arr,"Trader Limit Exceeded"); /** Hard coded Message***/
+    SETLEN(sql_vc_msg);
+		if(ptr_st_lmt_exceed->c_alert_flg == 'C')/**** need to confirm value ***/ 
+		{
+			 i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+  		if ( i_trnsctn == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31145", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+
+  		EXEC SQL
+    		UPDATE  EXG_XCHNG_MSTR
+    		SET     EXG_BRKR_STTS    = 'C'		
+    		WHERE   EXG_XCHNG_CD     = :c_xchng_cd;
+
+ 		  if ( SQLCODE != 0 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31150", SQLMSG, c_errmsg );
+    		fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+			EXEC SQL
+    	INSERT INTO FTM_FO_TRD_MSG
+                ( FTM_XCHNG_CD,
+                  FTM_BRKR_CD,
+                  FTM_MSG_ID,
+                  FTM_MSG,
+                  FTM_TM )
+    	VALUES (:c_xchng_cd ,
+            '',
+            'G',
+            :sql_vc_msg,
+            sysdate);
+  		if (SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName, "L31155", SQLMSG, c_errmsg);
+    		fn_aborttran ( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+
+   		if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31160", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+		}
+	return 0;
+}
+
+/**********************************************************************
+*	function fn_brkr_susp_ums: to prcess Broker susp UMS								* 
+*	input :structure st_broker_susp																			*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+int fn_brkr_susp_ums(struct st_broker_susp *ptr_st_brkr_susp,
+											char *c_xchng_cd,
+											char *c_ServiceName,
+											char *c_errmsg)
+{
+	int i_trnsctn;
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+  EXEC SQL END DECLARE SECTION;
+	long l_total_limit=0;					/*** Ver 1.5 **/
+	char c_command[300];				  /*** Ver 1.5 **/
+	char c_message[100];				  /*** Ver 1.5 **/
+
+	MEMSET(c_command);					  /*** Ver 1.5 **/
+	MEMSET(c_message);					  /*** Ver 1.5 **/
+
+	ptr_st_brkr_susp->li_msg_type = fn_swap_long(ptr_st_brkr_susp->li_msg_type);/** Ver 1.5 **/
+	
+	if(DEBUG_MSG_LVL_0)
+	{ 																										
+		fn_userlog(c_ServiceName,"Inside Function fn_brkr_susp_ums ");
+		fn_userlog(c_ServiceName,"message recieved :%ld:",ptr_st_brkr_susp->li_msg_type);
+		fn_userlog(c_ServiceName,"Market Flag :%s:",ptr_st_brkr_susp->c_mrkt_flg);
+		fn_userlog(c_ServiceName,"Market Flag[0] :%c:",ptr_st_brkr_susp->c_mrkt_flg[0]);/** Ver 1.5 **/
+		fn_userlog(c_ServiceName,"Market Flag[1] :%c:",ptr_st_brkr_susp->c_mrkt_flg[1]);/** Ver 1.5 **/
+		fn_userlog(c_ServiceName,"Reason :%s:",ptr_st_brkr_susp->c_reason);
+	} 
+      strcpy( (char *)sql_vc_msg.arr,ptr_st_brkr_susp->c_reason);
+      SETLEN(sql_vc_msg);
+
+/**if((ptr_st_brkr_susp->c_mrkt_flg == "B") || (ptr_st_brkr_susp->c_mrkt_flg == "F"))** Ver 1.5 comment **/
+
+  if((ptr_st_brkr_susp->c_mrkt_flg[0] == 'B' || ptr_st_brkr_susp->c_mrkt_flg[0] == 'F') ||
+		 (ptr_st_brkr_susp->c_mrkt_flg[1] == 'B' || ptr_st_brkr_susp->c_mrkt_flg[1] == 'F')	
+		) /** Ver 1.5 **/
+	{
+			 i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+
+  		if ( i_trnsctn == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31165", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+
+  		EXEC SQL
+    		UPDATE  EXG_XCHNG_MSTR
+    		/**SET     EXG_BRKR_STTS    = 'C'					** Ver 1.5 comment ***/
+				SET     EXG_CLS_STTS ='R'							/** Ver 1.5 RRM status set to R in EXG_MSTR**/
+    		WHERE   EXG_XCHNG_CD     = :c_xchng_cd;
+
+ 		  if ( SQLCODE != 0 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31170", SQLMSG, c_errmsg );
+    		fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+
+			EXEC SQL
+    	INSERT INTO FTM_FO_TRD_MSG
+                ( FTM_XCHNG_CD,
+                  FTM_BRKR_CD,
+                  FTM_MSG_ID,
+                  FTM_MSG,
+                  FTM_TM )
+    	VALUES (:c_xchng_cd ,
+            '',
+            'T',															/** Ver 1.5 'G' changed to 'T' ***/
+            :sql_vc_msg,
+            sysdate);
+
+  		if (SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName, "L31175", SQLMSG, c_errmsg);
+    		fn_aborttran ( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+
+   		if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31180", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+
+			/** Ver 1.5 **/
+
+			sprintf(c_message,"Broker is in RRM /suspened in BSE derivative");		
+			sprintf(c_command,"ksh bfo_pos_alert_mail.sh 0 0 0 '%s'",c_message);
+  		fn_userlog(c_ServiceName,"c_command is=:%s:",c_command);
+  		system(c_command);
+
+			/** Ver 1.5 Ends**/
+	}
+	return 0;
+}
+
+/**********************************************************************
+*	function fn_trader_susp_ums: to prcess Trader susp UMS							* 
+*	input :structure st_trader_susp																			*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+
+int fn_trader_susp_ums(struct st_trader_susp *ptr_st_trdr_susp,
+											 char *c_xchng_cd,
+											 char *c_pipe_id,				/***	Ver	1.5	***/
+											 char *c_ServiceName,
+											 char *c_errmsg)
+{
+	int i_trnsctn;
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+  EXEC SQL END DECLARE SECTION;
+		ptr_st_trdr_susp->li_term_id = fn_swap_long(ptr_st_trdr_susp->li_term_id); /** Ver 1.5 **/
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName ,"inside trader suspended case");
+		fn_userlog(c_ServiceName,"message type :%ld:",ptr_st_trdr_susp->li_msg_type);
+		fn_userlog(c_ServiceName,"terminal id :%ld:",ptr_st_trdr_susp->li_term_id);
+		fn_userlog(c_ServiceName,"Pipe id :%s:",c_pipe_id);			/***  Ver 1.5 ***/
+		fn_userlog(c_ServiceName,"c_mrkt_flg[0] =:%c:",ptr_st_trdr_susp->c_mrkt_flg[0]);/** Ver 1.5 **/
+		fn_userlog(c_ServiceName,"c_mrkt_flg[1] =:%c:",ptr_st_trdr_susp->c_mrkt_flg[1]);/** Ver 1.5 **/
+	}
+/*	if((ptr_st_trdr_susp->c_mrkt_flg[0] == "B") || (ptr_st_trdr_susp->c_mrkt_flg[0] == "F"))** Ver 1.5 comment **/
+	if((ptr_st_trdr_susp->c_mrkt_flg[0] == 'B' || ptr_st_trdr_susp->c_mrkt_flg[0] == 'F') ||
+		 (ptr_st_trdr_susp->c_mrkt_flg[1] == 'B' || ptr_st_trdr_susp->c_mrkt_flg[1] == 'F')
+		 )/** Ver 1.5**/
+	{
+		  i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+  		if ( i_trnsctn == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31185", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+			
+      strcpy( (char *)sql_vc_msg.arr,ptr_st_trdr_susp->c_msg);
+      SETLEN(sql_vc_msg);
+			
+  		EXEC SQL
+    		UPDATE  OPM_ORD_PIPE_MSTR
+    		SET     OPM_REMARK 		= 'Trader SUSPENDED'		/** Hard coded message **/ 
+    		WHERE   OPM_XCHNG_CD	= :c_xchng_cd
+				AND			OPM_PIPE_ID	 	=	:c_pipe_id;			/***	Added In Ver 1.5	***/
+			/*** AND 		OPM_USER_ID =:ptr_st_trdr_susp->li_term_id; Commented In Ver 1.5	***/
+
+ 		  if ( SQLCODE != 0 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31190", SQLMSG, c_errmsg );
+    		fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+			EXEC SQL
+    	INSERT INTO FTM_FO_TRD_MSG
+                ( FTM_XCHNG_CD,
+                  FTM_BRKR_CD,
+                  FTM_MSG_ID,
+                  FTM_MSG,
+                  FTM_TM )
+    	VALUES (:c_xchng_cd ,
+            '',
+            'T',												/** Ver 1.5 'G' changed to 'T' ***/
+            :sql_vc_msg,
+            sysdate);
+  		if (SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName, "L31195", SQLMSG, c_errmsg);
+    		fn_aborttran ( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+
+   		if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31200", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+	}
+	return 0;
+}
+
+/**********************************************************************
+*	function fn_member_reactivated : to prcess reactivation UMS					* 
+*	input :structure st_mbr_reactv																			*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+
+int fn_member_reactivated(struct st_mbr_reactv *ptr_st_mbr_reactv ,
+											char *c_xchng_cd,
+											char *c_ServiceName,
+											char *c_errmsg)
+{
+	int i_trnsctn;
+	int i_count;
+	int i_susp_count=0;																	/*** Ver 1.5 **/
+	long l_trdr_id_exists=0;													/*** Ver 1.5 **/
+	char c_message[100];															/*** Ver 1.5 **/
+	char c_command[300];															/*** Ver 1.5 **/
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+  EXEC SQL END DECLARE SECTION;
+	MEMSET(c_message);															  /*** Ver 1.5 **/
+	MEMSET(c_command);															  /*** Ver 1.5 **/
+
+	ptr_st_mbr_reactv->li_msg_type = fn_swap_long(ptr_st_mbr_reactv->li_msg_type);	/** Ver 1.5 **/
+	ptr_st_mbr_reactv->li_no_of_rec = fn_swap_short(ptr_st_mbr_reactv->li_no_of_rec);/** Ver 1.5 **/
+
+	fn_userlog(c_ServiceName,"Inside Function fn_member_reactivated");
+	fn_userlog(c_ServiceName,"message recieved :%ld:",ptr_st_mbr_reactv->li_msg_type);
+	fn_userlog(c_ServiceName,"No Of Rec :%ld:",ptr_st_mbr_reactv->li_no_of_rec);
+	
+	strcpy((char *)sql_vc_msg.arr,ptr_st_mbr_reactv->c_msg);							/** Ver 1.5 **/
+	fn_userlog(c_ServiceName,"Reactivation Message from exchng :%s:",sql_vc_msg.arr);/** Ver 1.5 **/
+  SETLEN(sql_vc_msg);																													/** Ver 1.5  **/
+	
+	for(i_count =0 ; i_count <= ptr_st_mbr_reactv->li_no_of_rec ; i_count++)
+	{
+
+		ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_trdr_id = fn_swap_long(ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_trdr_id);
+		ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_NXActionId = fn_swap_long(ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_NXActionId);
+
+		fn_userlog(c_ServiceName,"Trader ID :%ld:",ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_trdr_id);
+		fn_userlog(c_ServiceName,"NXActionId:%ld:",ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_NXActionId);
+/*	}	** Ver 1.5 comment **/
+	
+
+ /* strcpy( (char *)sql_vc_msg.arr,"Member Reactivated");		** Ver 1.5  comment**/
+ /* SETLEN(sql_vc_msg);																			** Ver 1.5  comment**/
+
+	/*** Ver 1.5 Starts ***/
+	l_trdr_id_exists = 0;
+
+	EXEC SQL
+			SELECT 1 
+			INTO   :l_trdr_id_exists
+			FROM   OPM_ORD_PIPE_MSTR
+			WHERE  OPM_XCHNG_CD='BFO'
+			AND		 OPM_USER_ID = :ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_trdr_id;
+	if(SQLCODE != 0)
+	{
+		fn_errlog ( c_ServiceName, "L31205", SQLMSG, c_errmsg );
+		return -1;
+	}
+
+	fn_userlog(c_ServiceName,"l_trdr_id_exists in OPM is :%ld:",l_trdr_id_exists);	
+	
+	EXEC SQL
+		SELECT 	 count(*)
+		INTo 		:i_susp_count
+		FROM 		FUM_FO_UNDRLYNG_MSTR
+		WHERE 	FUM_XCHNG_CD='BFO'
+		AND  		FUM_BRKR_CLSOUT_FLG ='Y';
+
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog ( c_ServiceName, "L31210", SQLMSG, c_errmsg );
+		return -1;
+	}
+		/*** Ver 1.5 Ends ***/
+
+		/*if(ptr_st_mbr_reactv->st_trdr_dtls[i_count].li_trdr_id == '')	*** To Confirm ****//* Ver 1.5 comment **/
+
+	if(l_trdr_id_exists == 1 )	/***ver 1.5 ***/
+	{
+			i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+  		if ( i_trnsctn == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31215", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+			if(i_susp_count == 0 )									/** Ver 1.5 if condition added **/
+			{
+				fn_userlog(c_ServiceName,"BRKR_STTS and RRM STTS activated in member  REACTIVATION");
+
+  			EXEC SQL
+    			UPDATE  EXG_XCHNG_MSTR
+    			SET     EXG_BRKR_STTS    = 'A',		/** Hard coded 'A' **/
+									EXG_CLS_STTS ='N'							/** Ver 1.5 RRM status set to N in EXG_MSTR**/
+    			WHERE   EXG_XCHNG_CD     = :c_xchng_cd;
+			}																			/*** ver 1.5 starts ***/
+			else if(i_susp_count >0 )
+			{
+				fn_userlog(c_ServiceName,"BRKR_STTS not activated as some undrlyng in suspension in BFO");
+
+  			EXEC SQL
+    			UPDATE  EXG_XCHNG_MSTR
+    			SET     EXG_CLS_STTS = 'N'
+    			WHERE   EXG_XCHNG_CD     = :c_xchng_cd;
+			}																			/** ver 1.5 ends ***/
+ 		  if ( SQLCODE != 0 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31220", SQLMSG, c_errmsg );
+    		fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+
+			EXEC SQL
+    		INSERT INTO FTM_FO_TRD_MSG
+                	( FTM_XCHNG_CD,
+                  	FTM_BRKR_CD,
+                  	FTM_MSG_ID,
+                  	FTM_MSG,
+                  	FTM_TM )
+    		VALUES 		(		:c_xchng_cd ,
+            				'',
+            				'T',										/** Ver 1.5 'G' changed to 'T' ***/
+            				:sql_vc_msg,
+            				sysdate);
+  		if (SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName, "L31225", SQLMSG, c_errmsg);
+    		fn_aborttran ( c_ServiceName, i_trnsctn, c_errmsg );
+    		return -1;
+  		}
+   		if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31230", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+		}	/** Ver 1.5 added***/
+	}
+	sprintf(c_message,"%s.",ptr_st_mbr_reactv->c_msg);     				/*** Ver 1.5 ***/	
+	sprintf(c_command,"ksh bfo_pos_alert_mail.sh 0 0 0 '%s'",c_message);  /*** Ver 1.5 ***/
+  fn_userlog(c_ServiceName,"c_command is=:%s:",c_command);						/*** Ver 1.5 ***/
+  system(c_command);																									/*** Ver 1.5 ***/
+	return 0;
+}
+
+/**********************************************************************
+*	function fn_insert_ftm: to insert Record in FTM Table								* 
+*	input :Market Status  C-closed /O-open															*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+
+int fn_insert_ftm(char *c_ServiceName,char c_mkt_stts,char *c_xchng_cd,char * c_errmsg)
+{
+ int i_trn_val;
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+  EXEC SQL END DECLARE SECTION;
+  char c_msg[255];
+  char c_date[25];
+	int i_insert= 0;
+
+	fn_userlog(c_ServiceName,"Inside FTM Insert and c_mkt_stts is :%c:",c_mkt_stts);
+
+  if(c_mkt_stts =='O')
+  {
+					fn_userlog(c_ServiceName,"Inside Open  state in FTM insert");
+					EXEC SQL
+					/*	SELECT to_char(sysdate,'dd-Mon-yyyy HH:MI:SS')  ** Ver 1.5 comment **/
+						SELECT to_char(sysdate,'dd-Mon-yyyy')							/** Ver 1.5 **/
+						INTO :c_date
+						FROM  dual;
+					if (SQLCODE != 0)
+					{
+						fn_errlog(c_ServiceName,"L31235",SQLMSG,c_errmsg);
+						return -1;
+					}
+					rtrim(c_date);
+					strcpy(c_msg,"FNO BSE Normal Market has Opend for :");
+					strcat(c_msg,c_date); 
+        	strcpy( (char *)sql_vc_msg.arr,c_msg);
+        	SETLEN(sql_vc_msg);
+      		i_insert = 1;	
+  }
+  else if(c_mkt_stts == 'X')
+  {
+					fn_userlog(c_ServiceName,"Inside Close state in FTM insert");
+					EXEC SQL
+					/*	SELECT to_char(sysdate,'dd-Mon-yyyy HH:MI:SS')		 ** Ver 1.5 comment ***/
+						SELECT to_char(sysdate,'dd-Mon-yyyy')			/** Ver 1.5 **/
+						INTO :c_date
+						FROM  dual;
+					if (SQLCODE != 0)
+					{
+						fn_errlog(c_ServiceName,"L31240",SQLMSG,c_errmsg);
+						return -1;
+					}
+					rtrim(c_date);
+					strcpy(c_msg,"FNO BSE Normal Market has Closed for :");
+					strcat(c_msg,c_date); 
+        	strcpy( (char *)sql_vc_msg.arr,c_msg);
+        	SETLEN(sql_vc_msg);
+					i_insert=1;
+  }
+
+ if(i_insert == 1)
+ {	
+ 		i_trn_val = fn_begintran ( c_ServiceName,c_errmsg );
+  	if ( i_trn_val == -1 )
+  	{
+    	fn_errlog(c_ServiceName, "L31245", LIBMSG, c_errmsg);
+    	return -1;
+  	}
+
+  	/*** Inserting a record into the FTM_FO_TRD_MSG table with the time stamp ***/
+  	EXEC SQL
+    	INSERT INTO FTM_FO_TRD_MSG
+                ( FTM_XCHNG_CD,
+                  FTM_BRKR_CD,
+                  FTM_MSG_ID,
+                  FTM_MSG,
+                  FTM_TM )
+    	VALUES (:c_xchng_cd ,
+            '',
+            'G',
+            :sql_vc_msg,
+            sysdate);
+  		if (SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName, "L31250", SQLMSG, c_errmsg);
+    		fn_aborttran ( c_ServiceName, i_trn_val, c_errmsg );
+    		return -1;
+  		}
+
+  	i_trn_val = fn_committran ( c_ServiceName, i_trn_val, c_errmsg );
+  	if ( i_trn_val ==  -1 )
+  	{
+   		fn_errlog(c_ServiceName,"L31255",SQLMSG,c_errmsg);
+   		return -1;
+  	}
+ }	
+ return 0;
+}
+
+/**********************************************************************
+*	function fn_upd_time_diff :  To Update time difference In XCHNG_MSTR* 
+*	input :struct st_time_brd             															*
+*				 exchange code,																								*
+*				 ServiceName,																									*
+*				 error message																								*
+*	output :  0 on success																							*
+*					 -1 on failure																							*
+*																																			*
+**********************************************************************/
+
+int fn_upd_time_diff ( struct st_time_brd *st_var_time,char  *c_ServiceName,char *c_xchng_cd, char  *c_err_msg )
+{
+  EXEC SQL INCLUDE "table/exg_xchng_mstr.h";
+  int i_ch_val;
+  int i_cnt;
+  int i_tran_id;
+  short si_hours;
+  short si_minutes;
+  short si_seconds;
+
+   fn_userlog(c_ServiceName ," Inside fn_upd_time_diff function.");
+
+  si_hours = st_var_time->si_hrs;
+  si_minutes = st_var_time->si_mins;
+  si_seconds = st_var_time->si_scnds;
+  i_tran_id = fn_begintran ( c_ServiceName, c_err_msg );
+  if ( i_tran_id  == -1 )
+  {
+    fn_userlog ( c_ServiceName ,"Error while beginning the transaction." );
+    fn_errlog ( c_ServiceName, "L31260", LIBMSG,  c_err_msg );
+    return ( -1 );
+  }
+  EXEC SQL
+      UPDATE EXG_XCHNG_MSTR
+      SET EXG_TM_DIFF = SYSDATE - TO_DATE(TO_CHAR(SYSDATE,'dd-Mon-yyyy')||' '||
+                                  LPAD(:si_hours,2,'0')||':'||
+                                  LPAD(:si_minutes,2,'0')||':'||
+                                  LPAD(:si_seconds,2,'0'),'dd-Mon-yyyy hh24:mi:ss')
+      WHERE EXG_XCHNG_CD =:c_xchng_cd;
+
+  if ( SQLCODE != 0)
+  {
+     fn_aborttran( c_ServiceName,i_tran_id ,c_err_msg );
+     fn_errlog ( c_ServiceName, "L31265", SQLMSG, c_err_msg );
+     return ( -1 );
+
+  }
+
+  i_ch_val = fn_committran(c_ServiceName ,i_tran_id ,c_err_msg);
+
+  if(i_ch_val != 0 )
+  {
+    fn_errlog(c_ServiceName , "L31270",LIBMSG,c_err_msg);
+    fn_aborttran(c_ServiceName ,i_tran_id , c_err_msg);
+    return -1;
+  }
+  return 0;
+}
+/**************************************************************************************/
+/* fn_pos_alert_processing : Position ALert UMS Processing 														*/
+/* Input :struct st_pos_alrt_ums																											*/
+/*			 c_xchng_cd																																		*/
+/*			 c_ServiceName																																*/
+/*			 c_errmsg																																			*/
+/**************************************************************************************/
+
+/*******************Position ALert UMS Processing ****************/
+int fn_pos_alert_processing(struct st_pos_alrt_ums *ptr_st_pos_alrt,
+                       char *c_xchng_cd,
+                       char *c_ServiceName,
+                       char *c_errmsg)
+{
+	int i_trnsctn;
+	int i_count;
+	struct vw_contract st_cntrct;			/*** ver 1.5 **/
+  long l_token_id=0;								/*** ver 1.5 **/
+	int i_ch_val=0;										/*** ver 1.5 **/
+	char c_prdct_typ[20];							/*** ver 1.5 **/
+	char c_remark[300];							  /*** ver 1.5 **/
+	char c_message[200];							/*** ver 1.5 **/
+	char c_command[400];							/*** ver 1.5 **/
+	char c_asset_cd[20];							/** Ver 1.5 **/								
+	long long ll_total_limit=0;				/*** ver 1.5 **/
+	long long ll_utlz_limit=0;				/*** ver 1.5 **/
+	long long ll_to_reduce_rrm_limit=0;	/*** ver 1.5 **/
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+		varchar vc_undrlyng[7];
+  EXEC SQL END DECLARE SECTION;
+	MEMSET(c_command);
+	MEMSET(c_message);
+
+	ptr_st_pos_alrt->si_no_records = fn_swap_short(ptr_st_pos_alrt->si_no_records);/* Ver 1.5 **/
+
+	if(DEBUG_MSG_LVL_0)											/**** Ver 1.5 Debug Level Added ***/
+	{
+		fn_userlog(c_ServiceName,"Inside Postion Alert UMS Handling Function in fo_exch_msgs.pc");
+		fn_userlog(c_ServiceName,"No Of Records :%ld:",ptr_st_pos_alrt->si_no_records);
+	}
+
+	for(i_count= 0;i_count < ptr_st_pos_alrt->si_no_records ; i_count++)
+	{
+		fn_userlog(c_ServiceName,"processing record no:%d: for position alert",i_count);
+		/** Ver 1.5 starts ***/	
+		 l_token_id=0;	
+
+
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_instr_cd = fn_swap_long(ptr_st_pos_alrt->st_ums_alrt[i_count].li_instr_cd);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_alrt_type = fn_swap_long(ptr_st_pos_alrt->st_ums_alrt[i_count].li_alrt_type);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent = fn_swap_long(ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler1 = fn_swap_long( ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler1);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler2 = fn_swap_long( ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler2);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_rsvrd_fld1 = fn_swap_long( ptr_st_pos_alrt->st_ums_alrt[i_count].li_rsvrd_fld1);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_seg_type = fn_swap_long(ptr_st_pos_alrt->st_ums_alrt[i_count].li_seg_type);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler3 = fn_swap_long( ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler3);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ = fn_swap_short(ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state = fn_swap_short(ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].si_filler5 = fn_swap_short(ptr_st_pos_alrt->st_ums_alrt[i_count].si_filler5);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].si_clnt_type = fn_swap_short(ptr_st_pos_alrt->st_ums_alrt[i_count].si_clnt_type); 
+		ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler7 = fn_swap_ulnglng(ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler7);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler8 = fn_swap_ulnglng(ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler8);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler9 = fn_swap_ulnglng(ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler9);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler10= fn_swap_ulnglng(ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler10);
+    ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler11= fn_swap_ulnglng(ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler11);
+
+		if(DEBUG_MSG_LVL_3)
+		{
+       fn_userlog(c_ServiceName,"li_instr_cd=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_instr_cd);
+       fn_userlog(c_ServiceName,"li_alrt_type=:%ld",ptr_st_pos_alrt->st_ums_alrt[i_count].li_alrt_type); 
+       fn_userlog(c_ServiceName,"li_percent=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent/100);
+       fn_userlog(c_ServiceName,"li_filler1=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler1); 
+       fn_userlog(c_ServiceName,"li_filler2=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler2); 
+       fn_userlog(c_ServiceName,"li_rsvrd_fld1=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_rsvrd_fld1); 
+       fn_userlog(c_ServiceName,"li_seg_type=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_seg_type); 
+       fn_userlog(c_ServiceName,"li_filler3=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler3); 
+       fn_userlog(c_ServiceName,"si_prdct_typ=:%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ); 
+       fn_userlog(c_ServiceName, "si_rrm_state=:%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state); 
+       fn_userlog(c_ServiceName,"si_filler5=:%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_filler5); 
+       fn_userlog(c_ServiceName,"si_clnt_type=:%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_clnt_type); 
+			 fn_userlog(c_ServiceName,"li_filler7=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler7); 
+       fn_userlog(c_ServiceName,"li_filler8=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler8); 
+       fn_userlog(c_ServiceName,"li_filler9=:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler9); 
+       fn_userlog(c_ServiceName,"li_filler10 :%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler10);
+       fn_userlog(c_ServiceName,"li_filler11:%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_filler11);
+		}
+		/** Ver 1.5 Ends ***/			
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"Instrument Code :%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_instr_cd);
+			fn_userlog(c_ServiceName,"Alert Type :%ld",ptr_st_pos_alrt->st_ums_alrt[i_count].li_alrt_type);
+			fn_userlog(c_ServiceName,"Percentage used :%ld:",(ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent/100 ));
+			fn_userlog(c_ServiceName,"li_seg_type :%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_seg_type);
+			fn_userlog(c_ServiceName,"si_prdct_typ :%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ);
+			fn_userlog(c_ServiceName,"si_clnt_type :%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_clnt_type);
+			fn_userlog(c_ServiceName,"c_cp_code 	 :%s:",ptr_st_pos_alrt->st_ums_alrt[i_count].c_cp_code);
+			fn_userlog(c_ServiceName,"c_client_id  :%s:",ptr_st_pos_alrt->st_ums_alrt[i_count].c_client_id);
+			fn_userlog(c_ServiceName,"c_message is :%s:",ptr_st_pos_alrt->st_ums_alrt[i_count].c_message);
+			fn_userlog(c_ServiceName,"si_rrm_state is :%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state);			/** ver 1.5 ***/
+			fn_userlog(c_ServiceName,"c_inc_dec_stts is :%s:",ptr_st_pos_alrt->st_ums_alrt[i_count].c_inc_dec_stts);			/** ver 1.5 ***/
+
+		}
+
+	
+		fn_userlog(c_ServiceName," Segment Type is :%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_seg_type);
+
+		if(ptr_st_pos_alrt->st_ums_alrt[i_count].li_seg_type == 2)
+		{
+			fn_userlog(c_ServiceName ,"Derivative Position Alert UMS");
+			fn_userlog(c_ServiceName ,"alert type :%ld:",ptr_st_pos_alrt->st_ums_alrt[i_count].li_alrt_type);
+		
+			if(ptr_st_pos_alrt->st_ums_alrt[i_count].li_alrt_type == 1)
+			{
+				fn_userlog(c_ServiceName,"Inside Trading Member Alert");
+				fn_userlog(c_ServiceName,"Applicable Percent :%ld:", ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent);
+			}
+			else if (ptr_st_pos_alrt->st_ums_alrt[i_count].li_alrt_type == 2)
+			{
+				fn_userlog(c_ServiceName,"Inside Client Alert");
+				fn_userlog(c_ServiceName,"Applicable Percent :%ld:", ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent/100);
+				fn_userlog(c_ServiceName ,"product type is :%d:",ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ);
+				fn_userlog(c_ServiceName,"Message is :%s:",ptr_st_pos_alrt->st_ums_alrt[i_count].c_message);
+			  fn_userlog(c_ServiceName,"cp_code is :%s:",ptr_st_pos_alrt->st_ums_alrt[i_count].c_cp_code);
+				fn_userlog(c_ServiceName,"client code:%s:",ptr_st_pos_alrt->st_ums_alrt[i_count].c_client_id);
+				/***** Ver 1.5 Starts ***/
+				memset(c_asset_cd,'\0',sizeof(c_asset_cd));
+
+				l_token_id = ptr_st_pos_alrt->st_ums_alrt[i_count].li_instr_cd;
+
+				sprintf(c_asset_cd,"%ld",l_token_id);
+				fn_userlog(c_ServiceName,"l_token_id is :%ld",l_token_id);
+				fn_userlog(c_ServiceName,"c_asset_cd is :%s:",c_asset_cd);	
+				/*** Ver 1.5 comment **** 
+    		i_ch_val = fn_bse_to_eba_tkn( l_token_id,
+        		                          &st_cntrct,
+            		                      c_ServiceName,
+                		                  c_errmsg);
+    		if ( i_ch_val == SYSTEM_ERROR )
+    	 {
+      		fn_errlog ( c_ServiceName, "L31275", LIBMSG, c_errmsg );
+      		return -1;
+    	 }
+    	 else if(i_ch_val == 2)
+    	 {
+      		continue;
+    	 }
+    	 else if ( i_ch_val != 0 )
+    	 {
+      		return 0;
+    	 }
+			 ***** Ver 1.5 comment ends *****/
+				memset(vc_undrlyng.arr,'\0',sizeof(vc_undrlyng.arr));	
+
+			EXEC SQL
+				SELECT SEM_STCK_CD
+				INTO 	 :vc_undrlyng
+				FROM 	 SEM_STCK_MAP
+				WHERE  SEM_MAP_VL=:c_asset_cd
+				AND    SEM_ENTTY='13';
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+			{
+				fn_errlog(c_ServiceName,"L31280", SQLMSG, c_errmsg );
+				fn_userlog(c_ServiceName,"error in geting Underlyng:");
+				return -1;
+			}
+			if(SQLCODE == NO_DATA_FOUND )
+			{
+				fn_userlog(c_ServiceName,"NO data found in SEM for instrument code:%ld:",l_token_id);
+			}
+			
+			SETNULL(vc_undrlyng);
+			fn_userlog(c_ServiceName,"Underlyng to be SUSPENDED is :%s:",vc_undrlyng.arr);
+			/**** Ver 1.5 Ends *****/
+			
+			 if(	ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ == 2 ||
+						ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ == 3 	
+					)
+			 {
+					sprintf(c_prdct_typ,"FUTURE");
+			 }
+			 else if(	ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ == 4 ||
+								ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ == 5 	
+					)
+			 {
+					sprintf(c_prdct_typ,"OPTION");
+			 }
+			 else if(	ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ == 6 ||
+								ptr_st_pos_alrt->st_ums_alrt[i_count].si_prdct_typ == 7 	
+					)
+			 {
+					sprintf(c_prdct_typ,"FUTURE & OPTION");
+			 }
+			 if(ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state == 0)
+			 {
+					sprintf(c_remark,":%ld: Limit Utilized for :%s: Undrlyng in %s",ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent * 100,vc_undrlyng.arr,c_prdct_typ);
+				
+					fn_userlog(c_ServiceName,"Pls Disable the Underlying :%s: in :%s: with Exp :%s: strike_price :%d: Option Type :%c:", vc_undrlyng.arr, c_prdct_typ, st_cntrct.c_expry_dt, st_cntrct.l_strike_prc, st_cntrct.c_opt_typ);
+			 }
+			 else if(ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state == 1)
+			 {
+					strcpy( (char *)sql_vc_msg.arr,"Member is In RRM Mode");
+					sprintf(c_remark,"Member is In RRM Mode for Underlyng :%s:",vc_undrlyng.arr);
+					fn_userlog(c_ServiceName,"Inside SCRIP RRM ");
+			 }
+			 else if(ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state == 2 )
+			 {
+					strcpy( (char *)sql_vc_msg.arr,"Member is Out of RRM Mode");
+					fn_userlog(c_ServiceName,"Pls Enable the :%s: Underlyng in :%s:",vc_undrlyng.arr,c_prdct_typ);
+					sprintf(c_remark,"Member is Out OF RRM Mode for Underlyng :%s:",vc_undrlyng.arr);
+					fn_userlog(c_ServiceName,"SCRIP REACTIVATION for :%s:",vc_undrlyng.arr);
+			 }
+			 else
+			 {
+					sprintf(c_remark,"Default Message for POS Alrt UMS[1921]");
+					fn_userlog(c_ServiceName,"Invalid RRM State in 1921 UMS ");	
+			 }
+       strcpy( (char *)sql_vc_msg.arr,c_remark); 
+       SETLEN(sql_vc_msg);
+
+				/******* Ver 1.5 Ends ***/
+     /* 	strcpy( (char *)sql_vc_msg.arr,"Trader Limit Exceeded"); ** Hard coded Message***
+      	SETLEN(sql_vc_msg); * Ver 1.5 Comment***/
+			 
+				i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+
+  			if ( i_trnsctn == -1 )
+  			{
+    			fn_errlog ( c_ServiceName, "L31285", LIBMSG, c_errmsg );
+    			return -1;
+  			}
+				if( ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state == 1  ||
+					  ( ( ptr_st_pos_alrt->st_ums_alrt[i_count].li_percent / 100) >= 100 )	
+					)	/*** Ver 1.5 if added **/
+				{
+					fn_userlog(c_ServiceName,"Inside SCRIP SUSPENSION processing");
+  				EXEC SQL
+    				UPDATE  EXG_XCHNG_MSTR
+    				SET     EXG_BRKR_STTS    = 'C'		
+    				WHERE   EXG_XCHNG_CD     = :c_xchng_cd;
+
+ 		  		if ( SQLCODE != 0 )
+  				{
+    				fn_errlog ( c_ServiceName, "L31290", SQLMSG, c_errmsg );
+    				fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    				return -1;
+  				}
+				/*** ver 1.5 starts **/
+					fn_userlog(c_ServiceName,"After EXG_MSTR update with C");
+
+					EXEC SQL
+						UPDATE FUM_FO_UNDRLYNG_MSTR
+						SET FUM_BRKR_CLSOUT_FLG='Y'
+						WHERE FUM_UNDRLYNG = :vc_undrlyng;
+
+ 		  		if ( SQLCODE != 0 )
+  				{
+    				fn_errlog ( c_ServiceName, "L31295", SQLMSG, c_errmsg );
+    				fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    				return -1;
+  				}
+					fn_userlog(c_ServiceName,"After UNDRLYNG_MSTR update with Y");
+
+					ll_total_limit = 0.00;
+					ll_utlz_limit= 0.00;
+					ll_to_reduce_rrm_limit = 0.0;
+
+					sprintf(c_message,"BFO SCRIP %s is SUSPENDED AND BROKER IS IN CLOSEOUT",vc_undrlyng.arr);
+					sprintf(c_command,"ksh bfo_pos_alert_mail.sh %lld %lld %lld '%s'",ll_total_limit,ll_utlz_limit,ll_to_reduce_rrm_limit,c_message);
+  				fn_userlog(c_ServiceName,"c_command is=:%s:",c_command);
+
+			 	}
+				if(ptr_st_pos_alrt->st_ums_alrt[i_count].si_rrm_state == 2 )
+				{
+					fn_userlog(c_ServiceName,"Inside SCRIP Reactivation processing");
+					EXEC SQL
+						UPDATE  EXG_XCHNG_MSTR
+						SET     EXG_BRKR_STTS    = 'A'
+						WHERE   EXG_XCHNG_CD     = :c_xchng_cd
+						AND NOT EXISTS(	SELECT 	FUM_UNDRLYNG 
+														FROM 		FUM_FO_UNDRLYNG_MSTR 
+														WHERE 	FUM_XCHNG_CD=:c_xchng_cd
+														AND     FUM_BRKR_CLSOUT_FLG='Y'
+														AND			FUM_UNDRLYNG <> :vc_undrlyng
+													 );
+
+ 		  		if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  				{
+    				fn_errlog ( c_ServiceName, "L31300", SQLMSG, c_errmsg );
+    				fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    				return -1;
+  				}
+					if(sqlca.sqlerrd[2] >=1 )
+					{
+						fn_userlog(c_ServiceName,"After EXG_MSTR update with A");
+					}
+					else
+					{
+						fn_userlog(c_ServiceName,"Not updated Exchange master to A as some other undrlyng in MWPL");
+					}
+					EXEC SQL
+						UPDATE FUM_FO_UNDRLYNG_MSTR
+						SET FUM_BRKR_CLSOUT_FLG='N'
+						WHERE FUM_UNDRLYNG = :vc_undrlyng;
+
+ 		  		if ( SQLCODE != 0 )
+  				{
+    				fn_errlog ( c_ServiceName, "L31305", SQLMSG, c_errmsg );
+    				fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    				return -1;
+  				}
+					fn_userlog(c_ServiceName,"After UNDRLYNG_MSTR update with N for:%s:",vc_undrlyng.arr);
+
+					ll_total_limit = 0.00;
+					ll_utlz_limit= 0.00;
+					ll_to_reduce_rrm_limit = 0.0;
+
+					sprintf(c_message,"BFO SCRIP %s is REACTIVATED AND BROKER Is REACTIVATED",vc_undrlyng.arr);
+					sprintf(c_command,"ksh bfo_pos_alert_mail.sh %lld %lld %lld '%s'",ll_total_limit,ll_utlz_limit,ll_to_reduce_rrm_limit,c_message);
+
+  				fn_userlog(c_ServiceName,"c_command is=:%s:",c_command);
+				}	
+				/**** Ver 1.5 ends ***/
+
+				EXEC SQL
+    		INSERT INTO FTM_FO_TRD_MSG
+                ( FTM_XCHNG_CD,
+                  FTM_BRKR_CD,
+                  FTM_MSG_ID,
+                  FTM_MSG,
+                  FTM_TM )
+    		VALUES (:c_xchng_cd ,
+            		'',
+            		'T',											/** Ver 1.5 'G' changed to 'T' ***/
+            		:sql_vc_msg,
+            		sysdate);
+
+  			if (SQLCODE != 0 )
+  			{
+    			fn_errlog(c_ServiceName, "L31310", SQLMSG, c_errmsg);
+    			fn_aborttran ( c_ServiceName, i_trnsctn, c_errmsg );
+    			return -1;
+  			}
+
+   			if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+  			{
+    			fn_errlog ( c_ServiceName, "L31315", LIBMSG, c_errmsg );
+    			return -1;
+  			}
+			}
+			fn_userlog(c_ServiceName," Position alert for Derivative Over");
+  		system(c_command);		/** ver 1.5 **/
+		}
+	}
+	fn_userlog(c_ServiceName,"position alert UMS processing Completed");	
+	return 0;
+}
+
+/******************************************************************************************
+* Function : fn_upd_xchng_stts 																													  *
+* Input		 : vw_xchngstts, ServiceName 																										*
+* Output   : SUCCESS or FAILURE with error message																				*
+* Purpose  : To update EXG_XCHNG_MSTR to set EXG_CRRNT_STTS to pen or close 							*
+******************************************************************************************/
+
+int fn_upd_xchng_stts(struct vw_xchngstts *ptr_st_stts,
+                       char *c_ServiceName,
+                       char *c_errmsg)
+{
+		int i_trnsctn=0;
+		int i_ch_val = -1;
+		char  c_raise_trigger_type [30]={'\0'};					/** Ver 1.7 null set **/          
+
+		i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+  
+		if ( i_trnsctn == -1 )
+  	{
+  		fn_errlog ( c_ServiceName, "L31320", LIBMSG, c_errmsg );
+  		return -1;
+  	}
+	  if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+			fn_userlog(c_ServiceName,"Before Update c_crrnt_stts :%c:",ptr_st_stts->c_crrnt_stts);
+			fn_userlog(c_ServiceName,"Before Updatec_xchng_cd    :%s:",ptr_st_stts->c_xchng_cd);
+		}
+  	EXEC SQL
+      UPDATE  EXG_XCHNG_MSTR
+      SET     EXG_CRRNT_STTS    = :ptr_st_stts->c_crrnt_stts
+      WHERE   EXG_XCHNG_CD      = :ptr_st_stts->c_xchng_cd;
+
+    if ( SQLCODE != 0 )
+    {
+    	fn_errlog ( c_ServiceName, "L31325", SQLMSG, c_errmsg );
+    	fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )c_errmsg, 0, 0 );
+    }
+
+    /*** Ver 1.4 Starts ***/
+    if ( ptr_st_stts->c_crrnt_stts == 'X')
+    {
+      EXEC SQL
+      UPDATE  EXG_XCHNG_MSTR
+      SET     EXG_TMP_MKT_STTS  = :ptr_st_stts->c_crrnt_stts
+      WHERE   EXG_XCHNG_CD      = :ptr_st_stts->c_xchng_cd ;
+
+      if ( SQLCODE != 0 )
+      {
+        fn_errlog ( c_ServiceName, "L31330", SQLMSG, c_errmsg );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+        tpreturn ( TPFAIL, ERR_BFR, ( char * )c_errmsg, 0, 0 );
+      }
+    }
+    /*** Ver 1.4 Ends   ***/
+
+    if ( ptr_st_stts->c_crrnt_stts == 'O' )		/** Ver 1.5  OPEN changed to 'O' ***/
+    {
+    	strcpy ( c_raise_trigger_type , "TRG_ORD_OPN");
+    }
+    else
+    {
+    	strcpy ( c_raise_trigger_type , "TRG_ORD_CLS");
+    }
+		 if ( c_raise_trigger_type[0] != '\0' )  /* VER TOL : TUX on LINUX -- Changed NULL to "\0" */
+  	{
+      fn_pst_trg ( c_ServiceName,
+                   c_raise_trigger_type,
+                   c_raise_trigger_type,
+                   ptr_st_stts->c_xchng_cd);
+  	}
+
+    if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+    {
+    	fn_errlog ( c_ServiceName, "L31335", LIBMSG, c_errmsg );
+    	return -1;
+    }
+	  if(DEBUG_MSG_LVL_3)											/**** Ver 1.3 Debug Level Added ***/
+	  {
+			fn_userlog(c_ServiceName,"EXG_CRRNT_STTS Updated with :%c:against :%s:",ptr_st_stts->c_crrnt_stts,ptr_st_stts->c_xchng_cd);
+		}
+		return 0;
+}
+/**** Ver 1.5 Starts ***/
+/******************************************************************************************
+* Function : fn_rrm_ums_processing[1920]																								  *
+* Input		 : st_rrm_alrt_ums, ServiceName, c_xchng_cd 																		*
+* Output   : SUCCESS or FAILURE with error message																				*
+* Purpose  : To Insert Alert in FTM and send mail for LIMIT Utilization details 					*
+******************************************************************************************/
+int fn_rrm_ums_processing(struct st_rrm_alrt_ums *ptr_st_rrm_alrt_ums,
+                          char * c_xchng_cd,
+                          char *c_ServiceName,
+                          char *c_errmsg)
+{
+ int i_trn_val;
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+  EXEC SQL END DECLARE SECTION;
+  char c_msg[255]={'\0'};
+  char c_date[25];
+	char c_message[256] ;
+	char c_command[400];
+	int  i_insert= 0;
+	int  i_count =0;
+	long long ll_total_limit=0;
+	long long ll_utlz_limit=0;
+	long long ll_to_reduce_rrm_limit=0;
+
+	MEMSET(c_message);
+	MEMSET(c_command);
+
+	ptr_st_rrm_alrt_ums->li_msg_type = fn_swap_long(ptr_st_rrm_alrt_ums->li_msg_type);
+	ptr_st_rrm_alrt_ums->si_no_records = fn_swap_short(ptr_st_rrm_alrt_ums->si_no_records);
+
+	fn_userlog(c_ServiceName,"No of records in RRM UMS=:%d:",ptr_st_rrm_alrt_ums->si_no_records);
+	
+	for(i_count = 0 ; i_count < ptr_st_rrm_alrt_ums->si_no_records ;i_count ++)
+	{
+			ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_segment_typ = fn_swap_long(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_segment_typ);
+			ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].si_event= fn_swap_short(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].si_event);
+	
+			ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_value = fn_swap_ulnglng(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_value);		
+			ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_value = fn_swap_ulnglng(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_value);		
+			ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_rrm_value = fn_swap_ulnglng(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_rrm_value);		
+			ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_prcnt = fn_swap_ulnglng(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_prcnt);		
+			ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1 = fn_swap_long(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1);
+
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"Event in RRM UMS =:%d:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].si_event);
+			fn_userlog(c_ServiceName,"Segment Type  =:%ld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_segment_typ);
+			fn_userlog(c_ServiceName,"Total Value=:%lld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_value);
+			fn_userlog(c_ServiceName,"Utilized Value=:%lld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_value);
+			fn_userlog(c_ServiceName,"RRM Value=:%lld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_rrm_value);
+			fn_userlog(c_ServiceName,"Utlized percent=:%lld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_prcnt);
+			fn_userlog(c_ServiceName,"FILLER VALUE =:%ld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1);
+		}
+
+		if( ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_segment_typ == 2 && 
+				ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].si_event == 4 )
+		{
+			fn_userlog(c_ServiceName,"Limit Utilization Notification for Derivative  in RRM UMS ");
+
+			ll_total_limit = ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_value;
+			ll_utlz_limit  = ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_value;
+			ll_to_reduce_rrm_limit = ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_rrm_value;
+
+			sprintf(c_msg,"LIMIT DETAILS Total:%lld:Utilized:%lld:RRM_LIMIT:%lld:",ll_total_limit,ll_utlz_limit,ll_to_reduce_rrm_limit);
+			sprintf(c_message,"Total Utilized Percentage is =:%lld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_prcnt);         
+
+      strcpy( (char *)sql_vc_msg.arr,c_msg); 
+      SETLEN(sql_vc_msg);
+			i_trn_val = fn_begintran( c_ServiceName, c_errmsg );
+
+  		if ( i_trn_val == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31340", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+			if( ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_prcnt/100 >= 100)
+			{
+
+				fn_userlog(c_ServiceName,"ll_utlzd_prcnt  received is :%lld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1/100);
+
+				EXEC SQL
+						UPDATE exg_xchng_mstr
+						SET    EXG_BRKR_STTS='C',
+									 EXG_CLS_STTS = 'C'
+						WHERE  EXG_XCHNG_CD='BFO';
+
+				if(SQLCODE != 0 )
+				{
+    			fn_errlog(c_ServiceName, "L31345", SQLMSG, c_errmsg);
+    			fn_aborttran ( c_ServiceName, i_trn_val, c_errmsg );
+    			return -1;
+				}
+				fn_userlog(c_ServiceName,"Broker under closeout state in BFO");
+
+			} /** confirm with sandeep for below as it is filler for future use in IML doc **/
+			else if(ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1/100 >= 100 )
+			{
+				fn_userlog(c_ServiceName,"Valur received in Filler and is :%lld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1/100);
+				EXEC SQL
+						UPDATE exg_xchng_mstr
+						SET    EXG_BRKR_STTS='C',
+									 EXG_CLS_STTS = 'C'
+						WHERE  EXG_XCHNG_CD='BFO';
+				if(SQLCODE != 0 )
+				{
+    			fn_errlog(c_ServiceName, "L31350", SQLMSG, c_errmsg);
+    			fn_aborttran ( c_ServiceName, i_trn_val, c_errmsg );
+    			return -1;
+				}
+				fn_userlog(c_ServiceName,"Broker SET under closeout state in BFO as filler value >=100");
+			}	
+
+			EXEC SQL
+				INSERT INTO FTM_FO_TRD_MSG
+                ( FTM_XCHNG_CD,
+                  FTM_BRKR_CD,
+                  FTM_MSG_ID,
+                  FTM_MSG,
+                  FTM_TM )
+    		VALUES (:c_xchng_cd ,
+            		'',
+            		'T',
+            		:sql_vc_msg,
+            		sysdate);
+  		if (SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName, "L31355", SQLMSG, c_errmsg);
+    		fn_aborttran ( c_ServiceName, i_trn_val, c_errmsg );
+    		return -1;
+  		}
+
+   		if ( fn_committran( c_ServiceName, i_trn_val, c_errmsg ) == -1 )
+  		{
+    		fn_errlog ( c_ServiceName, "L31360", LIBMSG, c_errmsg );
+    		return -1;
+  		}
+			if(	ll_total_limit == 0 && 
+					ll_utlz_limit == 0 	&& 
+					ll_to_reduce_rrm_limit == 0 &&
+					ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].ll_utlzd_prcnt == 0
+				)
+			{
+				fn_userlog(c_ServiceName,"Utilized percentage is :%ld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1);
+				sprintf(c_message,"Total Utilized Percentage is =:%ld:",ptr_st_rrm_alrt_ums->st_sub_rrm_alrt[i_count].li_filler1/100);         
+				
+			}
+			sprintf(c_command,"ksh bfo_pos_alert_mail.sh %lld %lld %lld '%s'",ll_total_limit,ll_utlz_limit,ll_to_reduce_rrm_limit,c_message);
+
+      fn_userlog(c_ServiceName,"c_command is=:%s:",c_command);
+    	system(c_command);
+		}
+	}
+	return 0;
+}
+
+/******************************************************************************************
+* Function : fn_insert_ftm_msg																													  *
+* Input		 : c_message , ServiceName, c_xchng_cd 			 																		*
+* Output   : SUCCESS or FAILURE with error message																				*
+* Purpose  : To Insert Alert in FTM and send mail                               					*
+******************************************************************************************/
+
+int fn_insert_ftm_msg (char *c_ServiceName, char * c_message,char * c_xchng_cd, char  *c_err_msg )
+{
+  int i_tran_id;
+  int i_ret_val;
+  char    c_time[20];
+
+  strcpy ( c_xchng_cd, "BFO" );
+	
+	fn_userlog(c_ServiceName,"Inside function fn_insert_ftm  ");
+	rtrim(c_message);
+	rtrim(c_xchng_cd);
+
+  i_tran_id = fn_begintran(c_ServiceName , c_err_msg);
+
+  if ( i_tran_id == -1)
+  {
+    fn_errlog(c_ServiceName,"L31365", TPMSG, c_err_msg);
+    return -1 ;
+  }
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Input Exchange Code :%s:",c_xchng_cd);
+		fn_userlog(c_ServiceName,"Message From Exchnange :%s:",c_message);
+	}
+
+  EXEC SQL
+    Insert into FTM_FO_TRD_MSG
+                    (FTM_XCHNG_CD ,
+                    FTM_MSG_ID ,
+                    FTM_MSG,
+                    FTM_TM
+                    )
+           values
+                    (
+                    :c_xchng_cd,
+                    'T', 
+                    :c_message,
+										sysdate
+                    );
+
+  if ( SQLCODE != 0)
+  {
+    fn_errlog ( c_ServiceName, "L31370", SQLMSG,  c_err_msg );
+    fn_aborttran(c_ServiceName ,i_tran_id ,c_err_msg);
+    return ( -1 );
+  }
+  if ( fn_committran( c_ServiceName, i_tran_id, c_err_msg ) == -1 )
+  {
+    fn_errlog(c_ServiceName ,"L31375" ,SQLMSG,c_err_msg);
+    fn_aborttran(c_ServiceName ,i_tran_id ,c_err_msg);
+    return -1;
+  }
+	fn_userlog(c_ServiceName,"fn_insert_ftm completed");
+	return 0;
+}
+
+/******************************************************************************************
+* Function : fn_prcs_capitl_info_ums[1922]																								*
+* Input		 : st_cap_utlztn, ServiceName, c_xchng_cd 																			*
+* Output   : SUCCESS or FAILURE with error message																				*
+* Purpose  : To Insert Alert in FTM and send mail for LIMIT Utilization details 					*
+******************************************************************************************/
+int fn_prcs_capitl_info_ums(char *c_ServiceName,
+                            struct st_cap_utlztn *ptr_st_cap_utlztn,
+                            char * c_xchng_cd,
+                            char *c_errmsg)
+{
+ int i_trn_val;
+ int i_ret_val=0;
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar sql_vc_msg[255];
+    varchar sql_ftm_tm[22+1];
+  EXEC SQL END DECLARE SECTION;
+  char c_msg[255]={'\0'};
+  char c_date[25];
+	int  i_insert= 0;
+	long long ll_total_limit=0;
+	long long ll_utlz_limit=0;
+	long long ll_to_reduce_rrm_limit=0;
+	int  i_count =0;
+	int  i_trnsctn=0;
+	char c_command[400];
+	char c_message[256] ;
+	char c_err_msg[256] ;
+	MEMSET(c_command);
+	MEMSET(c_message);
+	
+	fn_userlog(c_ServiceName," Inside fn_prcs_capitl_info_ums ");
+
+	ptr_st_cap_utlztn->li_refrnc_tag = fn_swap_long(ptr_st_cap_utlztn->li_refrnc_tag);
+	ptr_st_cap_utlztn->si_no_records = fn_swap_short(ptr_st_cap_utlztn->si_no_records);
+	ptr_st_cap_utlztn->si_alert_typ = fn_swap_short(ptr_st_cap_utlztn->si_alert_typ);
+	
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Reference Tag :%ld:",ptr_st_cap_utlztn->li_refrnc_tag);
+		fn_userlog(c_ServiceName,"No of records :%d:",ptr_st_cap_utlztn->si_no_records);
+		fn_userlog(c_ServiceName,"Alert type is :%d:",ptr_st_cap_utlztn->si_alert_typ);
+	}
+
+	for(i_count = 0 ; i_count < ptr_st_cap_utlztn->si_no_records ; i_count++)
+	{
+		ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_member_cd = fn_swap_long(ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_member_cd);
+		ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd = fn_swap_long(ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd);
+		ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts = fn_swap_short(ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts);
+		 ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_membr_stts = fn_swap_short(ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_membr_stts);
+		
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"Member Code   :%ld:",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_member_cd);
+			fn_userlog(c_ServiceName,"Limit Utilized:%ld:",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd);
+			fn_userlog(c_ServiceName,"Increase/Decrease status:%d:0- Inc 1: Dec",ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts);
+			fn_userlog(c_ServiceName,"Member Status :%d: 0-Active, 1- RRM , 2-Out of RRM",ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_membr_stts);
+			fn_userlog(c_ServiceName,"Market Type :%c:[1- Eqty,2-Der,3-SLB]",ptr_st_cap_utlztn->st_sub_utlztn[i_count].c_mrkt_typ);
+			fn_userlog(c_ServiceName,"Message  :%s:",ptr_st_cap_utlztn->st_sub_utlztn[i_count].c_message);
+		}
+
+		if(ptr_st_cap_utlztn->st_sub_utlztn[i_count].c_mrkt_typ == '2' &&
+			 ptr_st_cap_utlztn->si_alert_typ == 0
+			)
+		{
+			ll_total_limit = ptr_st_cap_utlztn->st_sub_utlztn[i_count].ll_tot_col;  
+			ll_utlz_limit  = ptr_st_cap_utlztn->st_sub_utlztn[i_count].ll_utlz_col; 
+			ll_to_reduce_rrm_limit = ptr_st_cap_utlztn->st_sub_utlztn[i_count].ll_avail_col;
+
+			sprintf(c_msg,"LIMIT DETAILS Total:%lld:Utilized:%lld:CAP_LIMIT:%lld:",ll_total_limit,ll_utlz_limit,ll_to_reduce_rrm_limit);
+
+      strcpy( (char *)sql_vc_msg.arr,c_msg); 
+      SETLEN(sql_vc_msg);
+
+			if(	(	ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd  >= 7000 &&
+						ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd   < 8000) 
+				)
+			{
+				fn_userlog(c_ServiceName,"%ld: % Cash UTilezed in BSE FNO",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd /100);
+
+				if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 0 )
+					sprintf(c_message,"BFO Limit Utiliziation increased to :%ld:",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+				else if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 1 )
+					sprintf(c_message,"BFO Limit Utiliziation decreased to :%ld:",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+			}
+
+			else if(	(	ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd  >= 8000 &&
+						ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd   < 8500) 
+				)
+			{
+				fn_userlog(c_ServiceName,":%ld: Percent Cash UTilezed in BSE FNO",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+
+				if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 0 )
+					sprintf(c_message,"BFO Limit Utiliziation increased to :%ld:%",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+				else if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 1 )
+					sprintf(c_message,"BFO Limit Utiliziation decreased to :%ld:%",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+			}
+
+			else if(	(	ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd  >= 8500 &&
+						ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd   < 9000)
+				)
+			{
+				fn_userlog(c_ServiceName,":%ld: Percent Cash UTilezed in BSE FNO",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+
+				if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 0 )
+					sprintf(c_message,"BFO Limit Utiliziation increased to :%ld:%",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+				else if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 1 )
+					sprintf(c_message,"BFO Limit Utiliziation decreased to :%ld: %",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+			}
+
+			else if(	(	ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd  >= 9000 &&
+						ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd  < 10000) 
+				)
+			{
+				fn_userlog(c_ServiceName,":%ld: Percent Cash UTilezed in BSE FNO",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+
+				if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 0 )
+					sprintf(c_message,"BFO Limit Utiliziation increased to 90%",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+				else if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 1 )
+					sprintf(c_message,"BFO Limit Utiliziation decreased to :%ld: Percent",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd / 100);
+			}
+			else if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_percnt_utlzd >= 10000 
+				)
+			{
+				fn_userlog(c_ServiceName,"100 % Cash UTilezed in BSE FNO");
+
+				if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 0 )
+				{
+					sprintf(c_message,"BFO Limit Utiliziation increased to 100%");
+					fn_userlog(c_ServiceName,"100 Percent Cash utilized in BSE FNO");
+
+      		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+      		if ( i_trnsctn == -1 )
+      		{
+        		fn_errlog(c_ServiceName,"L31380",SQLMSG ,c_err_msg);
+        		return -1;
+      		}
+					EXEC SQL
+						UPDATE EXG_XCHNG_MSTR
+						SET    EXG_CRRNT_STTS='C',
+									 EXG_CLS_STTS='C'
+						WHERE EXG_XCHNG_CD='BFO';
+
+					if(SQLCODE != 0 )
+					{
+						fn_errlog(c_ServiceName,"L31385",SQLMSG,c_err_msg);
+						fn_userlog(c_ServiceName,"Failed in Updating Broker Status to C for BFO");
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						return -1;
+					}
+					if( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+    			{
+      			fn_errlog ( c_ServiceName, "L31390", SQLMSG,c_err_msg );
+      			return -1;
+    			}
+				}
+				else if( ptr_st_cap_utlztn->st_sub_utlztn[i_count].si_inc_dec_stts == 1 )
+				{
+					sprintf(c_message,"BFO Limit Utiliziation decreased to 100%");
+				}
+			}
+			else
+			{
+				ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_filler1 = fn_swap_long(ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_filler1);
+				fn_userlog(c_ServiceName,"Percentage in FILLER1 =:%ld",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_filler1/100);
+				sprintf(c_message,"%ld Percent Limit is Utilezed in BSE Derivative",ptr_st_cap_utlztn->st_sub_utlztn[i_count].li_filler1);
+			}
+			
+
+		  i_ret_val = fn_insert_ftm_msg( c_ServiceName,
+                                     c_message,
+                                     c_xchng_cd,
+                                     c_err_msg
+                                   );
+      if(i_ret_val == -1)
+      {
+          fn_userlog(c_ServiceName,"Faild in FTM insert for Capital Utilization Details");
+					return -1;
+      }
+			fn_userlog(c_ServiceName,"After Successfull call to fn_insert_ftm_msg");	
+		}
+
+		sprintf(c_command,"ksh bfo_pos_alert_mail.sh %lld %lld %lld '%s'",ll_total_limit,ll_utlz_limit,ll_to_reduce_rrm_limit,c_message);
+
+  	fn_userlog(c_ServiceName,"c_command is=:%s:",c_command);
+  	system(c_command);
+	}
+	fn_userlog(c_ServiceName," fn_prcs_capitl_info_ums Completed successfuly");
+	return 0;
+}
+
+/**** Ver 1.5 Ends ***/
+
+/***  Ver 1.6 Starts  ***/
+
+int fn_mrkt_pctr_dtls (struct st_mrkt_pctr_dtls *ptr_st_mrkt_pctr,
+                        char *c_xchng_cd,
+                        char *c_ServiceName,
+                        char *c_errmsg)
+{
+  char  c_time[20];
+  char  c_rout_str[4];
+  char  *c_ftq_stock_code;
+
+  int i_count =0;
+  int i_count1=0;
+  int i_cnt=0;
+  int i_ch_val =0;
+  int i_trnsctn;
+  int i_hrs=0;
+  int i_mins = 0;
+  int i_scnds = 0;
+
+  long l_token_id = 0;
+
+  double d_pcnt_chg_prev_cls = 0.0;
+
+  struct vw_contract st_cntrct;
+  struct vw_cntrt_gen_inf st_cntrctgeninfo;
+  struct st_bid_offr_dtls st_bidoffr_dtls[5];
+
+  EXEC SQL INCLUDE "table/ftq_fo_trd_qt.h";
+
+  fn_userlog(c_ServiceName,"Inside Function Market Picture Details ( 2020 ).");
+
+	if(DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog(c_ServiceName,"Hour :%d:",ptr_st_mrkt_pctr->si_hrs);
+    fn_userlog(c_ServiceName,"Min  :%d:",ptr_st_mrkt_pctr->si_mins);
+    fn_userlog(c_ServiceName,"Sec  :%d:",ptr_st_mrkt_pctr->si_scnds);
+  }
+
+  MEMSET(c_time);
+
+  i_hrs   = (int)ptr_st_mrkt_pctr->si_hrs;
+  i_mins  = (int)ptr_st_mrkt_pctr->si_mins;
+  i_scnds = (int)ptr_st_mrkt_pctr->si_scnds;
+
+  sprintf(c_time,"%02d:%02d:%02d",i_hrs,i_mins,i_scnds);
+
+  fn_userlog(c_ServiceName,"Packet Timestamp from Exchange :%s:",c_time);
+
+  for(i_count =0 ; i_count < (ptr_st_mrkt_pctr->si_no_of_rcrds) ;i_count ++)
+  {
+    d_pcnt_chg_prev_cls= 0.0;
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName ,"Underlying   :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_scrp_cd);
+      fn_userlog(c_ServiceName ,"Open Rate    :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_opn_rt);
+      fn_userlog(c_ServiceName ,"Previous Closing Price :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_prvs_cls_rt);
+      fn_userlog(c_ServiceName ,"High Rate    :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_high_rt);
+      fn_userlog(c_ServiceName ,"Low Rate     :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_low_rt);
+      fn_userlog(c_ServiceName ,"No. Of Trades:%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_no_of_trds);
+      fn_userlog(c_ServiceName ,"Volume       :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_volume);
+      fn_userlog(c_ServiceName ,"Value        :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_value);
+      fn_userlog(c_ServiceName ,"Last Traded Qty :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_lst_trd_qty);
+      fn_userlog(c_ServiceName ,"Last Trade Price :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_lst_trd_prc);
+			fn_userlog(c_ServiceName ,"Closing Price :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_clsng_rt);
+      fn_userlog(c_ServiceName ,"Total Bid Qty  :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_total_bid_qty);
+      fn_userlog(c_ServiceName ,"Total Offer Qty :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_total_offer_qty);
+      fn_userlog(c_ServiceName ,"Lower Circuit Limit :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_lwr_crct_lmt);
+      fn_userlog(c_ServiceName ,"Upper Circuit Limit :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_uppr_crct_lmt);
+      fn_userlog(c_ServiceName ,"Weaighted Avg. Price :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_wghtd_avg_prc);
+      fn_userlog(c_ServiceName ,"No_of_prc_pnts :%d:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].si_no_of_prc_pnts);
+    }
+
+    for(i_count1=0 ;i_count1 < ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].si_no_of_prc_pnts ;i_count1++)
+    {
+      st_bidoffr_dtls[i_count1].li_best_bid_rt   = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_bid_rt;
+      st_bidoffr_dtls[i_count1].li_best_bid_qty  = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_bid_qty;
+      st_bidoffr_dtls[i_count1].li_best_offr_rt  = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_offr_rt;
+      st_bidoffr_dtls[i_count1].li_best_offr_qty = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_offr_qty;
+
+			if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName ,"Best Bid Rate :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_bid_rt);
+        fn_userlog(c_ServiceName ,"Best Bid Qty :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_bid_qty);
+        fn_userlog(c_ServiceName ,"Best Offer Rate :%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_offr_rt);
+        fn_userlog(c_ServiceName ,"Best Offer Qty:%ld:",ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].st_bid_offr_qty[i_count1].li_best_offr_qty);
+      }
+    }
+
+		sql_ftq_bst1_offr_qty = st_bidoffr_dtls[0].li_best_offr_qty;
+		sql_ftq_bst1_offr_prc = st_bidoffr_dtls[0].li_best_offr_rt;
+
+		sql_ftq_bst2_offr_qty = st_bidoffr_dtls[1].li_best_offr_qty;
+		sql_ftq_bst2_offr_prc = st_bidoffr_dtls[1].li_best_offr_rt;
+
+		sql_ftq_bst3_offr_qty = st_bidoffr_dtls[2].li_best_offr_qty;
+		sql_ftq_bst3_offr_prc = st_bidoffr_dtls[2].li_best_offr_rt;
+
+		sql_ftq_bst4_offr_qty = st_bidoffr_dtls[3].li_best_offr_qty;
+		sql_ftq_bst4_offr_prc = st_bidoffr_dtls[3].li_best_offr_rt;
+
+		sql_ftq_bst5_offr_qty = st_bidoffr_dtls[4].li_best_offr_qty;
+		sql_ftq_bst5_offr_prc = st_bidoffr_dtls[4].li_best_offr_rt;
+
+		sql_ftq_bst1_bid_qty = st_bidoffr_dtls[0].li_best_bid_qty;
+		sql_ftq_bst1_bid_prc = st_bidoffr_dtls[0].li_best_bid_rt;
+
+		sql_ftq_bst2_bid_qty = st_bidoffr_dtls[1].li_best_bid_qty;
+		sql_ftq_bst2_bid_prc = st_bidoffr_dtls[1].li_best_bid_rt;
+
+		sql_ftq_bst3_bid_qty = st_bidoffr_dtls[2].li_best_bid_qty;
+		sql_ftq_bst3_bid_prc = st_bidoffr_dtls[2].li_best_bid_rt;
+
+		sql_ftq_bst4_bid_qty = st_bidoffr_dtls[3].li_best_bid_qty;
+		sql_ftq_bst4_bid_prc = st_bidoffr_dtls[3].li_best_bid_rt;
+
+		sql_ftq_bst5_bid_qty = st_bidoffr_dtls[4].li_best_bid_qty;
+		sql_ftq_bst5_bid_prc = st_bidoffr_dtls[4].li_best_bid_rt;
+
+		sql_ftq_prvs_cls_prc  = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_prvs_cls_rt;
+		sql_ftq_avrg_trd_prc  = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_wghtd_avg_prc;
+		
+		sql_ftq_low_prc       = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_low_rt;
+		sql_ftq_hgh_prc       = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_high_rt;
+		sql_ftq_tot_qty_trdd  = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_volume;
+		sql_ftq_tot_val_trdd  = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_value;
+		sql_ftq_lst_trd_prc   = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_lst_trd_prc;
+		sql_ftq_lst_trd_qty   = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_lst_trd_qty;
+		sql_ftq_indctr        = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].c_trend;
+		sql_ftq_tot_bid_qty   = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_total_bid_qty;
+		sql_ftq_tot_offr_qty  = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_total_offer_qty;
+		sql_ftq_opn_prc       = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_opn_rt;
+		sql_ftq_hgh_prc_rng   = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_uppr_crct_lmt;
+		sql_ftq_low_prc_rng   = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_lwr_crct_lmt;
+
+		l_token_id = ptr_st_mrkt_pctr->st_mrkt_pctr[i_count].li_scrp_cd;
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Before Call To fn_bse_to_eba_tkn.");
+    }
+
+    i_ch_val = fn_bse_to_eba_tkn( l_token_id,
+                                  &st_cntrct,
+                                  c_ServiceName,
+                                  c_errmsg);
+
+      if ( i_ch_val == SYSTEM_ERROR )
+      {
+        fn_errlog ( c_ServiceName, "L31395", LIBMSG, c_errmsg );
+        return -1;
+      }
+      else if(i_ch_val == 2)
+      {
+        continue;
+      }
+      else if ( i_ch_val != 0 )
+      {
+        return 0;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"After bse_to_eba_token ");
+
+			}
+
+			strcpy( st_cntrctgeninfo.c_xchng_cd ,c_xchng_cd);
+			st_cntrctgeninfo.c_prd_typ= st_cntrct.c_prd_typ ;
+			strcpy( st_cntrctgeninfo.c_undrlyng , st_cntrct.c_undrlyng ) ;
+			strcpy ( st_cntrctgeninfo.c_expry_dt , st_cntrct.c_expry_dt) ;
+			st_cntrctgeninfo.c_exrc_typ= st_cntrct.c_exrc_typ ;
+			st_cntrctgeninfo.c_opt_typ= st_cntrct.c_opt_typ ;
+			st_cntrctgeninfo.l_strike_prc = st_cntrct.l_strike_prc ;
+			st_cntrctgeninfo.c_ctgry_indstk = st_cntrct.c_ctgry_indstk;
+			st_cntrctgeninfo.l_ca_lvl = st_cntrct.l_ca_lvl;
+
+			rtrim( st_cntrctgeninfo.c_xchng_cd);
+			rtrim( st_cntrctgeninfo.c_undrlyng);
+			rtrim( st_cntrctgeninfo.c_expry_dt);
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName,"Exchange Code Is :%s:",st_cntrctgeninfo.c_xchng_cd);
+				fn_userlog(c_ServiceName,"Product Type Is  :%c:",st_cntrctgeninfo.c_prd_typ);
+				fn_userlog(c_ServiceName,"Underlying Is    :%s:",st_cntrctgeninfo.c_undrlyng);
+				fn_userlog(c_ServiceName,"Expiry Date Is   :%s:",st_cntrctgeninfo.c_expry_dt);
+				fn_userlog(c_ServiceName,"Exercise Type Is :%c:",st_cntrctgeninfo.c_exrc_typ);
+				fn_userlog(c_ServiceName,"Option Type Is   :%c:",st_cntrctgeninfo.c_opt_typ);
+				fn_userlog(c_ServiceName,"Strike Price is  :%ld:",st_cntrctgeninfo.l_strike_prc);
+				fn_userlog(c_ServiceName,"Index/Stock      :%c:",st_cntrctgeninfo.c_ctgry_indstk);
+			}
+
+			if ( sql_ftq_prvs_cls_prc != 0 )
+      {
+        d_pcnt_chg_prev_cls = (double)( sql_ftq_lst_trd_prc  -  sql_ftq_prvs_cls_prc   ) / (double) sql_ftq_prvs_cls_prc *  100.0 * 100.0;
+      }
+      else
+      {
+        d_pcnt_chg_prev_cls = 0;
+      }
+
+      i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+
+      if ( i_trnsctn == -1 )
+      {
+        fn_errlog(c_ServiceName,"L31400",SQLMSG ,c_errmsg);
+        return -1;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"Before Updating FTQ Stock code :%s:",st_cntrctgeninfo.c_undrlyng);
+      }
+
+      EXEC SQL
+      UPDATE FTQ_FO_TRD_QT
+      set FTQ_OPN_PRC       =:sql_ftq_opn_prc,
+          FTQ_CLS_PRC       =:sql_ftq_prvs_cls_prc,
+          FTQ_HGH_PRC       =:sql_ftq_hgh_prc,
+          FTQ_LOW_PRC       =:sql_ftq_low_prc,
+          FTQ_PRVS_CLS_PRC  =:sql_ftq_prvs_cls_prc,
+          FTQ_CHNG_PRVS_CLS =:d_pcnt_chg_prev_cls,
+					FTQ_INDCTR        =:sql_ftq_indctr,
+					FTQ_TOT_QTY_TRDD  =:sql_ftq_tot_qty_trdd,
+					FTQ_TOT_VAL_TRDD  =:sql_ftq_tot_val_trdd,
+					FTQ_LST_TRD_PRC   =:sql_ftq_lst_trd_prc,
+				  FTQ_LST_TRD_QTY   =:sql_ftq_lst_trd_qty,
+				  FTQ_AVRG_TRD_PRC  =:sql_ftq_avrg_trd_prc,
+					FTQ_BST1_BID_PRC  =:sql_ftq_bst1_bid_prc,
+					FTQ_BST1_BID_QTY  =:sql_ftq_bst1_bid_qty,
+					FTQ_BST2_BID_PRC  =:sql_ftq_bst2_bid_prc,
+					FTQ_BST2_BID_QTY  =:sql_ftq_bst2_bid_qty,
+					FTQ_BST3_BID_PRC  =:sql_ftq_bst3_bid_prc,
+					FTQ_BST3_BID_QTY  =:sql_ftq_bst3_bid_qty,
+					FTQ_BST4_BID_PRC  =:sql_ftq_bst4_bid_prc,
+					FTQ_BST4_BID_QTY  =:sql_ftq_bst4_bid_qty,
+				  FTQ_BST5_BID_PRC  =:sql_ftq_bst5_bid_prc,
+				  FTQ_BST5_BID_QTY  =:sql_ftq_bst5_bid_qty,
+				  FTQ_BST1_OFFR_PRC =:sql_ftq_bst1_offr_prc,
+				  FTQ_BST1_OFFR_QTY =:sql_ftq_bst1_offr_qty,
+				  FTQ_BST2_OFFR_PRC =:sql_ftq_bst2_offr_prc,
+				  FTQ_BST2_OFFR_QTY =:sql_ftq_bst2_offr_qty,
+				  FTQ_BST3_OFFR_PRC =:sql_ftq_bst3_offr_prc,
+				  FTQ_BST3_OFFR_QTY =:sql_ftq_bst3_offr_qty,
+				  FTQ_BST4_OFFR_PRC =:sql_ftq_bst4_offr_prc,
+				  FTQ_BST4_OFFR_QTY =:sql_ftq_bst4_offr_qty,
+				  FTQ_BST5_OFFR_PRC =:sql_ftq_bst5_offr_prc,
+				  FTQ_BST5_OFFR_QTY =:sql_ftq_bst5_offr_qty,
+				  FTQ_TOT_BID_QTY   =:sql_ftq_tot_bid_qty,
+				  FTQ_TOT_OFFR_QTY  =:sql_ftq_tot_offr_qty,
+				  FTQ_LST_TRD_TM    = TO_TIMESTAMP(TO_CHAR(SYSDATE,'dd-Mon-yyyy')||' '||:c_time,'dd-Mon-yyyy hh24:mi:ss' ),
+				  FTQ_HGH_PRC_RNG   = :sql_ftq_hgh_prc_rng,
+				  FTQ_LOW_PRC_RNG   = :sql_ftq_low_prc_rng
+
+			WHERE FTQ_XCHNG_CD    = :st_cntrctgeninfo.c_xchng_cd
+    AND FTQ_PRDCT_TYP     = :st_cntrctgeninfo.c_prd_typ
+    AND FTQ_UNDRLYNG      = :st_cntrctgeninfo.c_undrlyng
+    AND FTQ_EXPRY_DT      = :st_cntrctgeninfo.c_expry_dt
+    AND FTQ_OPT_TYP       = :st_cntrctgeninfo.c_opt_typ
+    AND FTQ_STRK_PRC      = :st_cntrctgeninfo.l_strike_prc ;
+
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog ( c_ServiceName, "L31405", SQLMSG,c_errmsg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+      return -1;
+    }
+
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName ,"No data found for stock code :%s:",st_cntrctgeninfo.c_undrlyng);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+      continue;
+    }
+
+		if( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+    {
+      fn_errlog ( c_ServiceName, "L31410", SQLMSG,c_errmsg );
+      return -1;
+    }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"After Updating FTQ ");
+    }
+  }
+
+  return 0;
+}
+
+/***  Ver 1.6 Ends  ***/

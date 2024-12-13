@@ -1,0 +1,17 @@
+build bat_can_asord
+build crt_exg_rcs
+build bat_recal_opttp
+build cln_logpip_rdr
+build cln_ors_srvr
+build bat_cnt_splt
+build bat_dly_oblg
+build bat_clsprc_dwld
+build cln_timer_signal
+build bat_bill_dtls
+build cln_brd_prcsQ
+build bat_fobse_errqres
+build bat_conv_to_fut
+build cln_brd_enq
+build bat_imupld
+build bat_brok_dwld
+build bat_fo_errqres

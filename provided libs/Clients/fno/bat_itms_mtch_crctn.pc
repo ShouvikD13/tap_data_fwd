@@ -1,0 +1,762 @@
+/************************************************************************************/
+/** Program Name : bat_itms_mtch_crctn.pc                                           */
+/**                                                                                 */
+/** Description  : This program will run on daily basis. This will find the match   */
+/**                id and pan of suspended account,and check where another Active   */
+/**                Idirect account exists associated with same PAN.IF present then  */ 
+/**                update Active Match Id in place of suspended match Id for those  */
+/**                PAN numbers.                                                     */
+/************************************************************************************/
+/** Version Detail:                                                                 */
+/************************************************************************************/
+/** Ver 1.0 : Initial relase: Sanjeet																								*/
+/** Ver 1.1 : Batch Transaction time Increased : Sandip T		                        */         
+/** Ver 1.2 : COMP CODE CLOUMN ADDED/NVL REMOVED  :  Sandip T												*/
+/** Ver 1.3 : Spira  RQ : 2381 :  Sandip T																					*/
+/** Ver 1.4	: Spira	 IN : 2114 :  Viraj Yadav																				*/
+/************************************************************************************/
+
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fml_mf.h>
+#include <fn_ddr.h>
+#include <string.h>
+#include <fml_rout.h>
+#include <stdlib.h>
+#include <fn_read_debug_lvl.h>
+#define SQLROWCOUNT  sqlca.sqlerrd[2]
+#define TRAN_TIME 600					/** Ver 1.1 **/
+char c_ServiceName[33];
+char c_errmsg[100];
+int fn_insert_log(int ,char *,char*,char *,char *);
+int fn_autocrct_desg_stts(char *) ;  /** ver 1.3 **/
+
+void bat_itms_mtch_crctn(int argc, char *argv[] )
+{
+  varchar c_match_id[10];
+  varchar c_pan_no[10];
+  varchar	c_comp_cd[4];
+  varchar c_emp_id[10];
+  varchar c_user_id[9];
+  char 		c_act_deact_stts;
+  char    c_ied_flag;
+  int 		i_trnsctn;
+  int 		i_ret_val;
+  int 		actv_mtch_id_cnt;
+  int 		actv_mtch_cnt;
+  int 		l_count=0;
+  int     failure_cnt=0; 
+	int     ixd_count=0;
+  char  c_command[350];
+  
+  sql_cursor	cur_iom_data;	
+
+  strcpy ( c_ServiceName, argv[0] );
+  INITBATDBGLVL(argv[0]);
+
+  fn_userlog ( c_ServiceName, "Batch process %s started", argv[0] );
+ 
+  /*i_trnsctn = fn_begintran( c_ServiceName, c_errmsg ); **/
+  i_trnsctn = tpbegin( TRAN_TIME, 0 );		/** Ver 1.1 **/
+  if(i_trnsctn == -1)
+  {
+      /*fn_errlog( c_ServiceName, "S31005",LIBMSG,c_errmsg); **/
+      fn_errlog( c_ServiceName, "S31010",TPMSG,c_errmsg); /** Ver 1.1 **/
+      return ;
+  }
+
+	EXEC SQL
+  SELECT 	count( distinct IED_PAN_NO)
+  INTO 		:l_count
+ 	FROM 		uac_usr_accnts,IED_ITMS_EMP_DTLS,ICD_INFO_CLIENT_DTLS
+ 	WHERE 	IED_PAN_NO=icd_pan_no         /** ver 1.2 nvl removed ***/
+  AND     IED_COMP_CD!='0000'          /** Ver 1.2 added **/
+ 	AND 		UAC_CLM_MTCH_ACCNT=IED_MATCH_ID
+ 	AND 		UAC_ACT_DEACT_FLG in('C','S')
+ 	AND 		icd_user_id=UAC_USR_ID;
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+    fn_userlog(c_ServiceName,"Failed To Get Current position Data");
+    fn_errlog( c_ServiceName, "S31015",SQLMSG, c_errmsg);
+		/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); ** Ver 1.1 comment **/
+		tpabort(0);		/** Ver 1.1 **/
+    return ;
+  }
+
+  fn_userlog(c_ServiceName,"data present for suspended account :%d:",l_count);
+	if(l_count == 0)
+	{
+		fn_userlog(c_ServiceName,"No suspended account found.");
+		/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg);  ** Ver 1.1 **/
+		tpabort(0);		/** Ver 1.1 **/
+    return ;
+  }
+  
+  EXEC SQL ALLOCATE	:cur_iom_data;
+	EXEC SQL EXECUTE
+		BEGIN
+  	OPEN   	:cur_iom_data FOR
+ 		SELECT 	distinct IED_COMP_CD,
+ 						IED_PAN_NO,
+ 						IED_MATCH_ID,
+            trim(IED_EMP_ID),
+					 	UAC_USR_ID,
+ 						UAC_ACT_DEACT_FLG,
+            IED_DESIGNATE_FLAG 
+ 		FROM 		uac_usr_accnts,IED_ITMS_EMP_DTLS,ICD_INFO_CLIENT_DTLS
+ 		WHERE 	IED_PAN_NO=icd_pan_no        /** Ver 1.2 nvl removed **/
+    AND     IED_COMP_CD!='0000'          /** Ver 1.2 **/            
+ 		AND 		UAC_CLM_MTCH_ACCNT=IED_MATCH_ID
+ 		AND 		UAC_ACT_DEACT_FLG in('C','S')
+ 		AND			icd_user_id=UAC_USR_ID
+		order by IED_COMP_CD;
+	END;
+  END-EXEC;
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+  	fn_errlog( c_ServiceName, "S31020", SQLMSG, c_errmsg );
+		/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); ** Ver 1.1 **/
+		tpabort(0);		/** Ver 1.1 **/
+  	return;
+  }
+
+  
+  while( 1 )
+ 	{
+  	MEMSET(c_comp_cd);
+  	MEMSET(c_pan_no);
+  	MEMSET(c_match_id);
+  	MEMSET(c_user_id);
+    MEMSET(c_emp_id);
+    MEMSET(c_ied_flag);
+  	c_act_deact_stts=' '; 
+		ixd_count=0;    
+    
+  	EXEC SQL  
+  	FETCH :cur_iom_data
+  	INTO 	:c_comp_cd,
+    	   	:c_pan_no,
+      	 	:c_match_id,
+          :c_emp_id,
+       		:c_user_id,
+       		:c_act_deact_stts,
+          :c_ied_flag;
+  	if (SQLCODE != 0 )
+  	{
+			if(SQLCODE == NO_DATA_FOUND )
+    	{
+     		EXEC SQL CLOSE :cur_iom_data;
+     		break;
+    	}
+    	fn_errlog( c_ServiceName, "S31025", SQLMSG, c_errmsg  );
+    	EXEC SQL CLOSE :cur_iom_data;
+			/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); ** Ver 1.1 */
+			tpabort(0);		/** Ver 1.1 **/
+    	return;
+  	}
+	  SETNULL(c_comp_cd);
+	  SETNULL(c_match_id);
+	  SETNULL(c_pan_no);
+	  SETNULL(c_emp_id);
+    actv_mtch_id_cnt=0;     
+		fn_userlog(c_ServiceName,"Processing for record:%s-%s-%s-%s:",c_comp_cd.arr,c_emp_id.arr,c_pan_no.arr,c_match_id.arr);
+    fn_userlog ( c_ServiceName, "the active match account count before sql query: :%d:",actv_mtch_id_cnt ); 
+    	
+    EXEC SQL
+  	SELECT	count(1)
+  	INTO		:actv_mtch_id_cnt
+  	from 		uac_usr_accnts,ICD_INFO_CLIENT_DTLS
+  	where   icd_pan_no =:c_pan_no			/** Ver 1.2 nvl removed **/
+  	and 		UAC_ACT_DEACT_FLG='A'
+  	and 		icd_user_id=UAC_USR_ID
+  	and  		uac_clm_mtch_accnt  not in (select  IED_MATCH_ID
+        																from 		IED_ITMS_EMP_DTLS
+        																where 	IED_PAN_NO=:c_pan_no
+        																and 		ied_comp_cd=:c_comp_cd
+                                        and     IED_EMP_ID=:c_emp_id
+        																);
+  	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  	{
+    	fn_userlog(c_ServiceName,"Failed To Get count of active account");
+    	fn_errlog( c_ServiceName, "S31030",SQLMSG, c_errmsg);
+			/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg);  ** Ver 1.1 **/
+			tpabort(0);		/** Ver 1.1 **/
+    	EXEC SQL CLOSE :cur_iom_data;
+    	return ;
+  	}
+  
+   fn_userlog ( c_ServiceName,"sql count of active account :%d:",actv_mtch_id_cnt);
+   fn_userlog ( c_ServiceName,"Suspended account number :%s:",c_match_id.arr); 
+   EXEC SQL 
+   	select count(1) 
+   	INTO  :ixd_count 
+   	from  IXD_ITMS_XCPTN_DTLS 
+   	where IXD_PAN_NO =  :c_pan_no 
+   	and IXD_MATCH_ID =  :c_match_id
+   	and IXD_COMP_CD  =  :c_comp_cd;
+     
+   	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    {
+      fn_userlog(c_ServiceName,"Failed To Get count of ixd account");
+      fn_errlog( c_ServiceName, "S31035",SQLMSG, c_errmsg);
+			/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg);  ** Ver 1.1 **/
+			tpabort(0);		/** Ver 1.1 **/
+    	EXEC SQL CLOSE :cur_iom_data;
+      return ;
+    }
+    fn_userlog( c_ServiceName, "IXD COUNT for :%s-%s-%s: is  :%d:", c_comp_cd.arr,c_pan_no.arr,c_match_id.arr,ixd_count );  
+   if (actv_mtch_id_cnt > 0)
+   {
+		 if(fn_insert_log(ixd_count,c_comp_cd.arr,c_emp_id.arr,c_pan_no.arr,c_match_id.arr) != 0 )
+		 {
+   		fn_errlog(c_ServiceName,"S31040",SQLMSG,c_errmsg);
+   		failure_cnt++;
+   		continue;
+		 }
+     if( actv_mtch_id_cnt == 1 )
+     {
+		 	fn_userlog(c_ServiceName,"Inside Single active account for pan:%s:",c_pan_no.arr);
+     	EXEC SQL
+     		UPDATE  IED_ITMS_EMP_DTLS
+     				set IED_MATCH_ID=(
+                       select UAC_CLM_MTCH_ACCNT
+                       from uac_usr_accnts,ICD_INFO_CLIENT_DTLS
+                       where uac_usr_id=icd_user_id
+                       and icd_pan_no=:c_pan_no
+                       and uac_act_deact_flg='A'),
+							 	IED_CRT_MOD_BY='SYS-EBAITMS_PAN_COR',
+				 				IED_CRT_MOD_DT=sysdate
+     			where IED_COMP_CD=:c_comp_cd
+     			and 	IED_PAN_NO=:c_pan_no
+     			and 	IED_MATCH_ID=:c_match_id
+     			and 	IED_EMP_ID=:c_emp_id 
+     			and 	IED_MATCH_ID not in
+                     (select UAC_CLM_MTCH_ACCNT
+                     from uac_usr_accnts,ICD_INFO_CLIENT_DTLS
+                     where uac_usr_id=icd_user_id
+                     and icd_pan_no=:c_pan_no
+                     and uac_act_deact_flg='A'); 
+     	if(SQLCODE != 0  && SQLCODE != NO_DATA_FOUND )
+     	{
+       	fn_errlog(c_ServiceName,"S31045",SQLMSG,c_errmsg);
+       	/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); ** Ver 1.1 **/
+				tpabort(0);		/** Ver 1.1 **/
+    	 	EXEC SQL CLOSE :cur_iom_data;
+       	return;
+     	} 
+    
+     	fn_userlog (c_ServiceName, "update ied table records  : <%ld> for :%s-%s:", SQLROWCOUNT,c_pan_no.arr,c_comp_cd.arr);
+     	if(SQLROWCOUNT != 1 )
+		 	{
+       	fn_errlog(c_ServiceName,"S31050",SQLMSG,c_errmsg);
+       	/*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); * Ver 1.1 **/
+				tpabort(0);		/** Ver 1.1 **/
+    	 	EXEC SQL CLOSE :cur_iom_data;
+       	return;
+		 	} 
+     	if ( ixd_count  > 0 )  /** Exception also to be corrected for Match Id **/
+     	{
+     		EXEC SQL
+     			update IXD_ITMS_XCPTN_DTLS 
+					set ixd_match_id=(select UAC_CLM_MTCH_ACCNT
+                       		from uac_usr_accnts,ICD_INFO_CLIENT_DTLS
+                       		where uac_usr_id=icd_user_id
+                       		and icd_pan_no=:c_pan_no
+                       		and uac_act_deact_flg='A'
+													),
+					  IXD_CRT_MOD_BY='SYS-EBAITMS_PAN_COR',
+						IXD_CRT_MOD_DT=sysdate
+						where ixd_comp_cd=:c_comp_cd 
+						and ixd_match_id=:c_match_id 
+						and ixd_pan_no = :c_pan_no
+						and ixd_emp_id=:c_emp_id;
+
+    	 	if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+     	 	{
+      			fn_errlog(c_ServiceName, "S31055", SQLMSG, c_errmsg );
+      			/**fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );   ** Ver 1.1 **/
+						tpabort(0);		/** Ver 1.1 **/
+    	 			EXEC SQL CLOSE :cur_iom_data;
+      			return;
+     	 	}
+     	 	fn_userlog (c_ServiceName, "%ld-records updated IXD for:<%s-%s>", SQLROWCOUNT,c_match_id.arr,c_comp_cd.arr);
+		  }
+    } /** End of active account count is 1 **/ 
+    else
+    {
+		 fn_userlog(c_ServiceName,"Inside More than one active account for pan:%s:",c_pan_no);
+     EXEC SQL
+     	insert into IED_ITMS_EMP_DTLS
+     	(
+     		IED_COMP_CD,
+     		IED_EMP_ID,
+     		IED_PAN_NO,
+     		IED_CRT_MOD_BY,
+     		IED_CRT_MOD_DT,
+     		IED_MATCH_ID,
+     		IED_DESIGNATE_FLAG
+     	)
+      select :c_comp_cd,
+            :c_emp_id,
+            icd_pan_no,
+            'SYS-EBAITMS_PAN_COR',
+            sysdate,
+            UAC_CLM_MTCH_ACCNT, 
+            :c_ied_flag
+     from uac_usr_accnts,ICD_INFO_CLIENT_DTLS
+     where uac_usr_id=icd_user_id
+     and icd_pan_no=:c_pan_no
+     and uac_act_deact_flg ='A';
+
+     if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND )
+     {
+      fn_errlog(c_ServiceName,"S31060",SQLMSG,c_errmsg);
+      /*fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); * Ver 1.1 **/
+			tpabort(0);		/** Ver 1.1 **/
+    	EXEC SQL CLOSE :cur_iom_data;
+      return;
+     }
+     fn_userlog (c_ServiceName, "%ld-records inserted into IED for : <%%s-%s>", SQLROWCOUNT,c_pan_no,c_comp_cd );
+     
+     EXEC SQL
+     delete from IED_ITMS_EMP_DTLS 
+						where ied_comp_cd=:c_comp_cd 
+						and ied_match_id=:c_match_id 
+					  and ied_pan_no=:c_pan_no
+						and ied_emp_id=:c_emp_id;
+
+     if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+     {
+      fn_errlog(c_ServiceName, "S31065", SQLMSG, c_errmsg );
+      /*fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );   **/
+			tpabort(0);		/** Ver 1.1 **/
+    	EXEC SQL CLOSE :cur_iom_data;
+      return;
+     }
+     fn_userlog (c_ServiceName, "%ld-records delete from  IED for: <%s-%s>",SQLROWCOUNT ,c_pan_no.arr,c_comp_cd.arr);
+     if ( ixd_count  > 0 )  /** ipdate exception with old old match Id **/ 
+     {
+    	EXEC SQL
+    	 insert into IXD_ITMS_XCPTN_DTLS
+    	 (
+   				IXD_COMP_CD,
+   				IXD_EMP_ID,
+   				IXD_MATCH_ID, 
+   				IXD_PAN_NO,
+   				IXD_ISIN_NO,
+   				IXD_STCK_CD,
+   				IXD_FROM_DATE,
+   			  IXD_TO_DATE,
+   				IXD_TRD_ALLWD,
+   			  IXD_CRT_MOD_BY,
+   				IXD_CRT_MOD_DT
+				)
+   			select
+   			  IED_COMP_CD, 	
+   				IED_EMP_ID,
+   				IED_MATCH_ID,
+  	 			IED_PAN_NO,
+  				IXD_ISIN_NO,
+   				IXD_STCK_CD,
+  				IXD_FROM_DATE,
+   				IXD_TO_DATE,
+   				IXD_TRD_ALLWD,
+   			 	'SYS-EBAITMS_PAN_COR',
+   				SYSDATE
+   		 from IXD_ITMS_XCPTN_DTLS,IED_ITMS_EMP_DTLS
+  		 where IXD_COMP_CD=IED_COMP_CD
+			 and   IXD_EMP_ID=IED_EMP_ID
+			 and   IXD_PAN_NO= IED_PAN_NO 
+			 and   IXD_PAN_NO=:c_pan_no  
+			 and   IED_EMP_ID=:c_emp_id 
+   		 and   IXD_COMP_CD=:c_comp_cd;
+     if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND )
+     {
+      fn_errlog(c_ServiceName,"S31070",SQLMSG,c_errmsg);
+      /**fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); ** Ver 1.1 */
+			tpabort(0);		/** Ver 1.1 **/
+    	EXEC SQL CLOSE :cur_iom_data;
+      return;
+     }
+     fn_userlog (c_ServiceName, "records created in IXD for :%s-%s: are <%ld>",c_pan_no.arr,c_comp_cd.arr,SQLROWCOUNT );
+     	EXEC SQL
+     		delete from IXD_ITMS_XCPTN_DTLS 
+				where ixd_comp_cd=:c_comp_cd 
+				and ixd_match_id=:c_match_id 
+				and ixd_pan_no =:c_pan_no 
+				and ixd_emp_id =:c_emp_id;
+
+     	if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+     	{
+      	fn_errlog(c_ServiceName, "S31075", SQLMSG, c_errmsg );
+      	/*fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );   ** Ver 1.1 **/
+				tpabort(0);		/** Ver 1.1 **/
+    		EXEC SQL CLOSE :cur_iom_data;
+      	return;
+     	}
+     	fn_userlog (c_ServiceName, ":%ld:records delete from IED for: <%s-%s>", SQLROWCOUNT,c_pan_no.arr,c_comp_cd.arr);
+		 } /** end of exception correction **/
+    }/** end of active account count more than 1 **/
+   }
+	 else
+	 {
+		actv_mtch_cnt=0;
+		fn_userlog(c_ServiceName,"Inside No active account or already processed for PAN:%s-%s.",c_pan_no.arr,c_comp_cd.arr);
+
+    EXEC SQL
+  		SELECT	count(1)
+  		INTO		:actv_mtch_cnt
+  		from 		uac_usr_accnts,ICD_INFO_CLIENT_DTLS,IED_ITMS_EMP_DTLS
+  		where  icd_user_id=UAC_USR_ID
+			and    icd_pan_no =:c_pan_no					/** Ver 1.2 nvl removed **/
+			and    icd_pan_no = ied_pan_no				/** Ver 1.1 **/
+  		and 		UAC_ACT_DEACT_FLG='A'
+  		and 		UAC_CLM_MTCH_ACCNT=IED_MATCH_ID;
+  	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  	{
+    	fn_userlog(c_ServiceName,"Failed To Get count of active account");
+    	fn_errlog( c_ServiceName, "S31080",SQLMSG, c_errmsg);
+			/** fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); ** Ver 1.1 **/
+			tpabort(0);		/** Ver 1.1 **/
+    	EXEC SQL CLOSE :cur_iom_data;
+    	return ;
+  	}
+		if(actv_mtch_cnt > 0)
+		{
+		  if(fn_insert_log(ixd_count,c_comp_cd.arr,c_emp_id.arr,c_pan_no.arr,c_match_id.arr) != 0 )
+		  {
+   			fn_errlog(c_ServiceName,"S31085",SQLMSG,c_errmsg);
+   			failure_cnt++;
+   			continue;
+		 	}
+			if(ixd_count > 0 )
+			{
+     		EXEC SQL
+     			delete from IXD_ITMS_XCPTN_DTLS 
+								 where ixd_comp_cd=:c_comp_cd 
+								 and ixd_match_id=:c_match_id 
+								 and ixd_pan_no =:c_pan_no 
+								 and ixd_emp_id =:c_emp_id;
+
+     		if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+     		{
+      		fn_errlog(c_ServiceName, "S31090", SQLMSG, c_errmsg );
+      		/*fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );   Ver 1.1 **/
+					tpabort(0);		/** Ver 1.1 **/
+    			EXEC SQL CLOSE :cur_iom_data;
+      		return;
+     		}
+				fn_userlog(c_ServiceName,"%ld: IXD rows deleted for %s-%s-%s-%s",SQLROWCOUNT,c_comp_cd.arr,c_match_id.arr,c_pan_no.arr,c_emp_id.arr);
+			}
+     	EXEC SQL
+     			delete from IED_ITMS_EMP_DTLS 
+								 where ied_comp_cd=:c_comp_cd 
+								 and ied_match_id=:c_match_id 
+					  		 and ied_pan_no=:c_pan_no
+								 and ied_emp_id=:c_emp_id;
+
+     if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+     {
+      fn_errlog(c_ServiceName, "S31095", SQLMSG, c_errmsg );
+      /*fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );   Ver 1.1 **/
+			tpabort(0);		/** Ver 1.1 **/
+    	EXEC SQL CLOSE :cur_iom_data;
+      return;
+     }
+		 fn_userlog(c_ServiceName,"%ld: IED rows deleted for %s-%s-%s-%s",SQLROWCOUNT,c_comp_cd.arr,c_match_id.arr,c_pan_no.arr,c_emp_id.arr);
+		}
+		else
+		{
+			fn_userlog(c_ServiceName," No active account present for pan-%s: and comp:%s:",c_pan_no.arr,c_comp_cd.arr); 
+		}
+	 }/** End of else for no active account **/
+	}  /****end of while loop**/ 
+  EXEC SQL CLOSE :cur_iom_data;
+  /*if ( fn_committran( c_ServiceName, i_trnsctn,c_errmsg ) == -1 ) Ver 1.1. **/
+  if( tpcommit(0) == -1 )
+  {
+     /* fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg); ** Ver 1.1 **/
+		 tpabort(0);		/** Ver 1.1 **/
+     fn_errlog ( c_ServiceName, "S31100", LIBMSG, c_errmsg );
+     return;
+  }
+	/** Ver 1.3 starts **/
+	for(l_count=0;l_count < 3 ; l_count++)
+	{
+		MEMSET(c_comp_cd);
+		if(l_count== 0)
+		{
+			strcpy ( c_comp_cd.arr, "ISEC" );
+		}
+		else if(l_count ==1)
+		{
+			strcpy ( c_comp_cd.arr, "IPRD" );
+		}
+		else if (l_count==2)
+		{
+			strcpy ( c_comp_cd.arr, "IVEN" );
+		}
+		else
+		{
+			strcpy ( c_comp_cd.arr, "NA" );
+			fn_userlog(c_ServiceName,"Invalid company");
+		}
+		fn_userlog(c_ServiceName,"processing Designate correction for-%s",c_comp_cd.arr);
+  	i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );	
+  	if(i_trnsctn == -1)
+  	{
+      fn_errlog( c_ServiceName, "S31105",LIBMSG,c_errmsg);
+      return ;
+  	}   
+		i_ret_val=fn_autocrct_desg_stts(c_comp_cd.arr);
+		if(i_ret_val != 0 )
+		{
+     	fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg);
+     	fn_errlog ( c_ServiceName, "S31110", LIBMSG, c_errmsg );
+     	return;
+		}
+  	if ( fn_committran( c_ServiceName, i_trnsctn,c_errmsg ) == -1 )
+  	{
+     	fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg);
+     	fn_errlog ( c_ServiceName, "S31115", LIBMSG, c_errmsg );
+     	return;
+  	}
+	}
+	/** Ver 1.3 ends **/
+  fn_userlog ( c_ServiceName, "Batch process completed", argv[0] );
+  
+  /***********mailer for auto corrected data********/
+  sprintf( c_command, "ksh $HOME/sh_scripts/update_matchid_dtls.sh");
+  system(c_command);
+  return;
+}
+int fn_bat_init ( int argc, char *argv[] )
+{ 
+	fn_var = bat_itms_mtch_crctn;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+	fn_userlog (c_ServiceName,"-------------------------END--------------------");
+	return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+	return 0;
+}
+int fn_insert_log(int i_ixd_cnt_log,char *c_comp_cd,char *c_emp_id,char *c_pan_no,char *c_match_id)
+{
+  varchar c_match_id_log[10];
+  varchar c_pan_no_log[10];
+  varchar	c_comp_cd_log[4];
+  varchar c_emp_id_log[10];
+		
+	  MEMSET(c_comp_cd_log);
+	  MEMSET(c_match_id_log);
+	  MEMSET(c_pan_no_log);
+	  MEMSET(c_emp_id_log);
+		EXEC SQL
+			SELECT trim(:c_comp_cd),trim(:c_emp_id),trim(:c_pan_no),trim(:c_match_id)
+			into :c_comp_cd_log,
+					:c_emp_id_log,
+					:c_pan_no_log,
+					:c_match_id_log
+			from DUAL;
+	  SETNULL(c_comp_cd_log);
+	  SETNULL(c_match_id_log);
+	  SETNULL(c_pan_no_log);
+	  SETNULL(c_emp_id_log);
+
+		fn_userlog(c_ServiceName,"Inside making log entry for:%d-%s-%s-%s-%s:",i_ixd_cnt_log,c_comp_cd_log.arr,c_emp_id_log.arr,c_pan_no_log.arr,c_match_id_log.arr);
+   	if(i_ixd_cnt_log > 0)
+    {
+    	EXEC SQL
+    		insert into IXD_ITMS_XCPTN_DTLS_LOG
+    		(
+   				IXD_COMP_CD,
+   				IXD_EMP_ID,
+   				IXD_MATCH_ID, 
+   				IXD_PAN_NO,
+   				IXD_ISIN_NO,
+   				IXD_STCK_CD,
+   				IXD_FROM_DATE,
+   			  IXD_TO_DATE,
+   				IXD_TRD_ALLWD,
+   			  IXD_CRT_MOD_BY,
+   				IXD_CRT_MOD_DT,
+   				IXD_LOG_DT
+				)
+   			select
+   				IXD_COMP_CD,
+   				IXD_EMP_ID,
+   				IXD_MATCH_ID,
+  	 			IXD_PAN_NO,
+  				IXD_ISIN_NO,
+   				IXD_STCK_CD,
+  				IXD_FROM_DATE,
+   				IXD_TO_DATE,
+   				IXD_TRD_ALLWD,
+   			 	IXD_CRT_MOD_BY,
+   				IXD_CRT_MOD_DT ,
+   				SYSDATE
+   		 from IXD_ITMS_XCPTN_DTLS
+  		 where IXD_PAN_NO=:c_pan_no_log   /** As per fetched record **/
+   		 and IXD_MATCH_ID=:c_match_id_log
+   		 and IXD_COMP_CD=:c_comp_cd_log;
+     
+   
+   	if(SQLCODE != 0 )
+   	{
+   		fn_errlog(c_ServiceName,"S31120",SQLMSG,c_errmsg);
+   		return -1;
+   	}
+   	fn_userlog (c_ServiceName,"Record inserted IXD_ITMS_XCPTN_DTLS_LOG : <%ld>", SQLROWCOUNT); 
+   }
+ 
+   EXEC SQL
+   	insert into IED_ITMS_EMP_DTLS_LOG
+   	(
+   		IED_COMP_CD,
+   		IED_EMP_ID ,
+   		IED_PAN_NO ,
+   		IED_CRT_MOD_BY,
+   		IED_CRT_MOD_DT ,
+   		IED_LOG_DATE    ,
+   		IED_MATCH_ID, 
+   		IED_DESIGNATE_FLAG
+   	)
+   	select
+   		IED_COMP_CD,
+   		IED_EMP_ID ,
+   		IED_PAN_NO ,
+   		IED_CRT_MOD_BY,
+   		IED_CRT_MOD_DT ,
+   		sysdate  ,
+   		IED_MATCH_ID,
+   		IED_DESIGNATE_FLAG
+   	FROM IED_ITMS_EMP_DTLS
+   	where IED_COMP_CD=:c_comp_cd_log
+   	and IED_PAN_NO=:c_pan_no_log
+   	and IED_MATCH_ID=:c_match_id_log
+   	and IED_EMP_ID=:c_emp_id_log; 
+   
+   	if(SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31125",SQLMSG,c_errmsg);
+      return -1;
+    }
+    fn_userlog (c_ServiceName,"Record inserted in IED_ITMS_EMP_DTLS_LOG : <%ld>", SQLROWCOUNT);
+ return 0;
+}
+/** Ver 1.3 function definition **/
+int fn_autocrct_desg_stts(char *c_comp_cd)
+{
+	int i_tot_ins=0;
+	int i_tot_upd=0;
+	fn_userlog(c_ServiceName,"Inside Auto correction of Designate Mapping for:",c_comp_cd);
+	EXEC SQL
+	  insert into IED_ITMS_EMP_DTLS_LOG
+    (
+      IED_COMP_CD,
+      IED_EMP_ID ,
+      IED_PAN_NO ,
+      IED_CRT_MOD_BY,
+      IED_CRT_MOD_DT ,
+      IED_LOG_DATE    ,
+      IED_MATCH_ID,
+      IED_DESIGNATE_FLAG
+    )
+    select
+      IED_COMP_CD,
+      IED_EMP_ID ,
+      IED_PAN_NO ,
+      IED_CRT_MOD_BY,
+      IED_CRT_MOD_DT ,
+      sysdate  ,
+      IED_MATCH_ID,
+      IED_DESIGNATE_FLAG
+    FROM IED_ITMS_EMP_DTLS,HEE_HR_EMP_EXTRCT				/** 1.4 join used instead of in **/
+    where IED_COMP_CD=:c_comp_cd
+    AND HEE_SOURCE=decode('ISEC','ISEC','ICICI SECURITIES','IPRD','ICICI PRUDENTIAL','IVEN','ICICI VENTURE','NA')
+		AND HEE_EMPL_STATUS=decode(:c_comp_cd,'ISEC','Y','IPRD','A','IVEN','Y')
+    AND IED_PAN_NO=HEE_NATIONAL_ID
+    AND decode(nvl(HEE_DESGNT_FLG,'N'),'Y','D','A') !=nvl(IED_DESIGNATE_FLAG,'A');
+		/*
+    FROM IED_ITMS_EMP_DTLS
+    where IED_COMP_CD=:c_comp_cd
+		AND IED_PAN_NO in
+							( select distinct HEE_NATIONAL_ID 
+								from HEE_HR_EMP_EXTRCT,IED_ITMS_EMP_DTLS 
+								where hee_source=decode(:c_comp_cd,'ISEC','ICICI SECURITIES','IPRD','ICICI PRUDENTIAL','IVEN','ICICI VENTURE','NA')
+								and IED_COMP_CD=:c_comp_cd
+								and IED_PAN_NO=HEE_NATIONAL_ID 
+								and decode(nvl(HEE_DESGNT_FLG,'N'),'Y','D','N') !=nvl(IED_DESIGNATE_FLAG,'N')
+								*and decode(nvl(HEE_DESGNT_FLG,'N'),'Y','D','N') ='D' 
+								and nvl(IED_DESIGNATE_FLAG,'N')!='D' 
+							); ** Ver 1.4 commented */
+   	if(SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31130",SQLMSG,c_errmsg);
+      return -1;
+    }
+	i_tot_ins=sqlca.sqlerrd[2];	
+	fn_userlog(c_ServiceName,"LOG inserted for Auto Designate Mapping for- %s-toatl records-%d", c_comp_cd,i_tot_ins);
+	if(i_tot_ins > 0 )
+	{
+		EXEC SQL
+			UPDATE IED_ITMS_EMP_DTLS
+			SET IED_DESIGNATE_FLAG='D'
+			where IED_COMP_CD=:c_comp_cd
+			AND  IED_DESIGNATE_FLAG !='D' /** added in ver 1.4 **/
+			and IED_PAN_NO in 
+							( select distinct HEE_NATIONAL_ID 
+								from HEE_HR_EMP_EXTRCT
+								where hee_source=decode(:c_comp_cd,'ISEC','ICICI SECURITIES','IPRD','ICICI PRUDENTIAL','IVEN','ICICI VENTURE','NA')
+								and decode(nvl(HEE_DESGNT_FLG,'N'),'Y','D','N') ='D' 
+								and HEE_EMPL_STATUS=decode(:c_comp_cd,'ISEC','Y','IPRD','A','IVEN','Y')
+							);
+   	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog(c_ServiceName,"S31135",SQLMSG,c_errmsg);
+      return -1;
+    }
+		i_tot_upd=sqlca.sqlerrd[2];	
+		fn_userlog(c_ServiceName,"Auto correction of Designate Mapping for- %s-toatl records-%d", c_comp_cd,i_tot_upd);
+		    EXEC SQL
+      UPDATE IED_ITMS_EMP_DTLS
+      SET IED_DESIGNATE_FLAG='A'
+      where IED_COMP_CD=:c_comp_cd
+			AND IED_DESIGNATE_FLAG='D'  /** added in ver 1.4 **/
+      and IED_PAN_NO in
+              ( select distinct HEE_NATIONAL_ID
+                from HEE_HR_EMP_EXTRCT
+                where hee_source=decode(:c_comp_cd,'ISEC','ICICI SECURITIES','IPRD','ICICI PRUDENTIAL','IVEN','ICICI VENTURE','NA')
+                and decode(nvl(HEE_DESGNT_FLG,'N'),'Y','D','N') ='N'
+								and HEE_EMPL_STATUS=decode(:c_comp_cd,'ISEC','Y','IPRD','A','IVEN','Y')
+						/*		and IED_DESIGNATE_FLAG='D'   * commented in ver 1.4 **/
+              );
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog(c_ServiceName,"S31140",SQLMSG,c_errmsg);
+      return -1;
+    }
+		fn_userlog(c_ServiceName,"Auto correction of DP to Non DP Mapping for- %s-toatl records-%d", c_comp_cd,sqlca.sqlerrd[2]);
+
+	}
+	else
+	{
+		fn_userlog(c_ServiceName," No records to Auto correction of Designate Mapping for- %s", c_comp_cd);
+	}
+	return 0;
+}

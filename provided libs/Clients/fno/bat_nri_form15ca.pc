@@ -1,0 +1,1265 @@
+/**********************************************************************************/
+/*																																								*/
+/*  Program       : bat_nri_form15ca.pc                                       		*/
+/*                                                                            		*/
+/*  Description   : It takes i/p data from temp tds report table and generates o/p*/ 
+/*									csv file then mails it to the client ops, 		  							*/
+/*									which is thereafter used to generate form 15ca for NRIs   		*/
+/*                                                                            		*/
+/*	Input					: <prog nm> <currency rt>																				*/
+/*                                                                            		*/
+/*  Output        : o/p file mailed                                           		*/
+/*                                                                            		*/
+/*  Log           :                                                           		*/
+/*                                                                            		*/
+/*  Ver 1.0        18-Sep-2009      Prakash|Nilesh          Initial release	  		*/
+/*  Ver 1.1        12-Apr-2010      Prakash     handling IDA joint account pan no */
+/*  Ver 1.2        31-Aug-2010      Vijay-Commented the Payout Value reconcilation*/
+/*  Ver 1.3        11-Nov-2013      Samip M | Changes for PINS/Non Pins Input			*/ 
+/*  Ver 1.4        22-Mar-2016      Samip M | Validation for activation flag			*/
+/**********************************************************************************/
+
+#include <string.h>
+#include <ctype.h>
+#include <time.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <atmi.h>
+#include <sqlca.h>
+#include <userlog.h>
+/* application headers */
+#include <fn_read_debug_lvl.h>
+#include <eba.h>
+
+#define MAX_FIRMS 10
+
+int fn_certno_incrmnt( char c_certno[] );
+
+struct st_cafirm_certno
+{
+	char c_cafirm[50];
+	char c_certno[10];
+};
+
+void main( int argc, char* argv[] )
+{
+	TPINIT *ptr_tpinfo;
+	FILE *ptr_op_file;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+		EXEC SQL INCLUDE "table/ipd_info_personal_dtls.h";
+		EXEC SQL INCLUDE "table/iad_info_address_dtls.h";
+		EXEC SQL INCLUDE "table/ida_info_dp_accnts.h";
+		EXEC SQL INCLUDE "table/nri_chartered_accnt_mstr.h";
+		EXEC SQL INCLUDE "table/nri_remitter_mstr.h";
+
+		short ind_eba_clnt_nm;
+		short ind_clnt_full_addr;
+		char c_holding_period;
+		char c_mtch_accnt[10+1]; 
+		varchar c_eba_clnt_nm[100];
+		varchar c_clnt_full_addr[200];
+		varchar c_bnk_accnt[20];
+		varchar c_sell_dt[11+2];
+		varchar c_credit_dt[11+2];
+		varchar c_ca_firm[50];
+		double d_inr_sell_prceed;
+		double d_tot_tax;
+    double d_cmp_val;
+
+    sql_cursor  sys_cursor;	/*** Added for Ver 1.3 **/
+
+	EXEC SQL END DECLARE SECTION;
+
+	char c_ServiceName[32+1];
+	char c_event_msg[256];
+	char *c_ebalog_path;
+  char c_file_path[256];
+	char c_tag[32];
+	char c_temp_tm[6+1];
+	char c_dname[8+1];
+	char c_nature_of_gain[25];
+	char c_op_remark[50];
+	char c_command[100];
+	char c_nri_flg;			/*** Added for Ver 1.3 ***/
+	double d_short_tot_amt;
+	double d_tot_payout_amt;
+	double d_tot_bdc_amt;
+	double d_curr_factor;
+	double d_net_payout_amt;
+	double d_sum_payout_amt=0.0;
+  double d_sum_bdc=0.0;
+  double d_long_tax=0.0;
+  double d_net_long_payout_amt=0.0;
+
+	int i_trnsctn;
+	int i_oppterm_exist;
+	int i_corp_exceptn_exist;
+	int i_firm_count;
+	int i_cnt;
+
+	struct st_cafirm_certno st_firm_cert[MAX_FIRMS];
+  time_t curtime;
+
+	INITBATDBGLVL( argv[0] );
+	strcpy( c_ServiceName, argv[0] );
+
+	/* Allocate space to typed buffer pointer */
+	ptr_tpinfo = (TPINIT *) tpalloc( "TPINIT", NULL, MIN_FML_BUF_LEN );
+  if( ptr_tpinfo == (TPINIT*) NULL )
+  {
+    errlog( c_ServiceName, "S31005", TPMSG, DEF_USR, DEF_SSSN, c_event_msg );
+    exit(-1);
+  }
+
+	if( tuxgetenv( "ORA_GRP" ) == NULL )
+  {
+    errlog( c_ServiceName, "S31010", TPMSG, DEF_USR, DEF_SSSN, c_event_msg );
+    tpfree( (char *) ptr_tpinfo );
+    exit(-1);
+  }
+
+	c_ebalog_path = tuxgetenv( "EBALOG_PATH" );
+  if(	c_ebalog_path == NULL )
+  {
+    errlog( c_ServiceName, "S31015", TPMSG, DEF_USR, DEF_SSSN, c_event_msg );
+    tpfree( (char *) ptr_tpinfo );
+    exit(-1);
+  }
+
+	strcpy( ptr_tpinfo->passwd, "\0" );
+  strcpy( ptr_tpinfo->usrname, "\0" );
+  ptr_tpinfo->flags = 0;
+  strcpy( ptr_tpinfo->grpname, tuxgetenv( "ORA_GRP" ) );
+  strcpy( ptr_tpinfo->cltname, c_ServiceName );
+	sprintf( c_tag, "%s_%s", c_ServiceName, "na" );
+
+	/* Join the system application */
+	if( tpinit( (TPINIT *) ptr_tpinfo ) == -1 )
+  {
+    errlog( c_ServiceName, "S31020", TPMSG, DEF_USR, DEF_SSSN, c_event_msg );
+    tpfree( ( char * ) ptr_tpinfo );
+    exit(-1);
+  }
+
+	userlog( "DBG: %s connected to %s. ", c_ServiceName, ptr_tpinfo->grpname );
+
+	/* Free the space allocated to typed buffer pointer */
+  tpfree( (char *) ptr_tpinfo );
+
+	if( fn_rgstr_bat( 'R', c_ServiceName, "NA", "BO" ) != 1 )
+  {
+    errlog( c_ServiceName, "S31025", TPMSG, DEF_USR, DEF_SSSN, c_event_msg );
+		strcpy( c_event_msg, "bat_nri_form15ca : 1 instance already running" );
+    fn_bat_pst_msg( c_ServiceName, c_event_msg, c_tag );
+    tpterm();
+    exit(-1);
+  }
+	
+	fn_bat_pst_msg( c_ServiceName, "bat_nri_form15ca :Batch started processing", c_tag );
+
+	/* Open the Resource Manager */
+	if( tpopen() == -1 )
+  {
+    errlog( c_ServiceName, "S31030", TPMSG, DEF_USR, DEF_SSSN, c_event_msg );
+    fn_bat_pst_msg( c_ServiceName, "Unable to Connect to database..", c_tag );
+    fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+    tpterm();
+    exit(-1);
+  }
+
+	if( argc != 3 )					/*** Changed from 2 to 3 for Ver 1.3 ***/
+	{
+		userlog( "Invalid Arguments: USAGE - <prog name> <currency factor> <Pins/NonPins>" ); /*** P/N added for Ver 1.3 **/
+		fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+		tpclose();
+   	tpterm();
+    exit(-1);
+	}
+
+	/* Business logic start */
+
+	d_curr_factor = atof( argv[1] );
+	c_nri_flg = argv[2][0];
+/**	strcpy(c_nri_flg,argv[2]); **/
+
+	if( DEBUG_MSG_LVL_3 ) {
+		userlog( "d_curr_factor      	  :%lf:", d_curr_factor );
+		userlog( "c_nri_flg      	  :%c:", c_nri_flg );
+	}
+
+	MEMSET( sql_nrm_remitter_stts );
+	MEMSET( sql_nrm_comp_typ );
+	MEMSET( sql_nrm_pan );
+	MEMSET( sql_nrm_tan );
+	MEMSET( sql_nrm_addr_areacd );
+	MEMSET( sql_nrm_addr_rangecd );
+	MEMSET( sql_nrm_ao_typ );
+	MEMSET( sql_nrm_ao_nmbr );
+	MEMSET( sql_nrm_remitter_nm );
+	MEMSET( sql_nrm_addr_door_nmbr );
+	MEMSET( sql_nrm_addr_premise_bldg_vlg );
+	MEMSET( sql_nrm_addr_rd_po );
+	MEMSET( sql_nrm_addr_city_district );
+	MEMSET( sql_nrm_addr_locality );
+	MEMSET( sql_nrm_addr_state );
+	MEMSET( sql_nrm_addr_pin );
+	MEMSET( sql_nrm_email_id );
+	MEMSET( sql_nrm_std_cd );
+	MEMSET( sql_nrm_phn_nmbr );
+	MEMSET( sql_nrm_princpl_business_plc );
+	MEMSET( sql_nrm_other_cntry_nm );
+	MEMSET( sql_nrm_currency );
+	MEMSET( sql_nrm_bnk_nm );
+	MEMSET( sql_nrm_bnk_brnch );
+	MEMSET( sql_nrm_bnk_brnch_brs_cd );
+	MEMSET( sql_nrm_remitter_typ );
+	MEMSET( sql_nrm_autorzd_signtry_nm );
+	MEMSET( sql_nrm_son_of );
+	MEMSET( sql_nrm_designation );
+	MEMSET( sql_nrm_place );
+	MEMSET( st_firm_cert );
+	MEMSET( c_command );
+
+
+	/* generating o/p file absolute name */
+	curtime = time(NULL);
+	strftime ( c_temp_tm, 7, "%H%M%S", localtime ( &curtime ) );
+	strftime ( c_dname, 9, "%Y%m%d", localtime ( &curtime ) );
+  if(c_nri_flg == 'P')    /** Condition added for Ver 1.3 **/
+		sprintf( c_file_path, "%s/%s/nri/N15ca_%s.csv", c_ebalog_path, c_dname, c_temp_tm );
+	/*** Added for Ver 1.3 **/
+	else if (c_nri_flg == 'N')
+    sprintf( c_file_path, "%s/%s/nri/NP_N15ca_%s.csv", c_ebalog_path, c_dname, c_temp_tm );		
+
+	if( DEBUG_MSG_LVL_3 ) {
+  	userlog( "O/P File Path :%s:",c_file_path );
+	}
+
+	ptr_op_file = fopen( c_file_path, "w+" );
+  if( ptr_op_file == NULL )
+  {
+   	errlog( c_ServiceName, "S31035", UNXMSG, DEF_USR, DEF_SSSN, c_event_msg );
+    fn_bat_pst_msg( c_ServiceName, "System error occured. ERROR in Opening file..", c_tag );
+		fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+		tpclose();
+   	tpterm();
+    exit(-1);
+  }
+
+	/* o/p file header line */
+	fprintf( ptr_op_file, "RemitterStatus|CompanyType|RemitterPAN|RemitterTAN|Area|Range|AOType|AONum|Name|FlatNo|Building|Road|Area|City|State|PIN|Email|STDCode|Phone|BusinessPlace|OtherPlace|NRIName|NRIAddr|NRIPAN|NRIPlace|NRIOther|NRICountry|OtherCountry|NRIPhone|NRIEmail|NRIStatus|NRICoType|CAName|CAFirm|BlockNo|Premises|Street|Locality|City|State|PIN|RegnNo|CertDT|CertNo|Country|Currency|USTotalAmt|TotalAmt|Bank|Branch|BSRCode|RemitDt|USTDS|TDS|TaxRate|USNetAmt|NetAmt|TDSDt|Nature|RemitType|AuthPerson|FatherName|Designation|Place|Remarks|AckNo|TradeDate\n" );
+
+	/* gathering values for fixed columns of o/p file */
+  /* Ver 1.3 removes indicator from not null fields */
+	EXEC SQL
+		SELECT 
+			NRM_REMITTER_STTS,
+			NRM_COMP_TYP,
+			NRM_PAN,
+			NRM_TAN,
+			NRM_ADDR_AREACD,
+			NRM_ADDR_RANGECD,
+			NRM_AO_TYP,
+			NRM_AO_NMBR,
+			NRM_REMITTER_NM,
+			NRM_ADDR_DOOR_NMBR,
+			NRM_ADDR_PREMISE_BLDG_VLG,
+			NRM_ADDR_RD_PO,
+			NRM_ADDR_LOCALITY,
+			NRM_ADDR_CITY_DISTRICT,
+			NRM_ADDR_STATE,
+			NRM_ADDR_PIN,
+			NRM_EMAIL_ID,
+			NRM_STD_CD,
+			NRM_PHN_NMBR,
+			NRM_PRINCPL_BUSINESS_PLC,
+			NRM_OTHER_CNTRY_NM,
+			NRM_CURRENCY,
+			NRM_BNK_NM,
+			NRM_BNK_BRNCH,
+			NRM_BNK_BRNCH_BRS_CD,
+			NRM_REMITTER_TYP,
+			NRM_AUTORZD_SIGNTRY_NM,
+			NRM_SON_OF,
+			NRM_DESIGNATION,
+			NRM_PLACE,
+	  	NRM_TDS_RT
+		INTO
+			:sql_nrm_remitter_stts,
+			:sql_nrm_comp_typ :ind_nrm_comp_typ,
+			:sql_nrm_pan  :ind_nrm_pan,
+			:sql_nrm_tan  :ind_nrm_tan,
+			:sql_nrm_addr_areacd  :ind_nrm_addr_areacd,
+			:sql_nrm_addr_rangecd :ind_nrm_addr_rangecd,
+			:sql_nrm_ao_typ :ind_nrm_ao_typ,
+	  	:sql_nrm_ao_nmbr  :ind_nrm_ao_nmbr,
+			:sql_nrm_remitter_nm,
+			:sql_nrm_addr_door_nmbr :ind_nrm_addr_door_nmbr,
+			:sql_nrm_addr_premise_bldg_vlg  :ind_nrm_addr_premise_bldg_vlg,
+			:sql_nrm_addr_rd_po :ind_nrm_addr_rd_po,
+			:sql_nrm_addr_locality  :ind_nrm_addr_locality,
+			:sql_nrm_addr_city_district,
+			:sql_nrm_addr_state,
+  		:sql_nrm_addr_pin,
+			:sql_nrm_email_id,
+			:sql_nrm_std_cd :ind_nrm_std_cd,
+			:sql_nrm_phn_nmbr,
+			:sql_nrm_princpl_business_plc ,
+			:sql_nrm_other_cntry_nm :ind_nrm_other_cntry_nm,
+			:sql_nrm_currency,
+			:sql_nrm_bnk_nm,
+			:sql_nrm_bnk_brnch,
+			:sql_nrm_bnk_brnch_brs_cd,
+			:sql_nrm_remitter_typ :ind_nrm_remitter_typ,
+			:sql_nrm_autorzd_signtry_nm :ind_nrm_autorzd_signtry_nm,
+			:sql_nrm_son_of :ind_nrm_son_of,
+			:sql_nrm_designation  :ind_nrm_designation,
+			:sql_nrm_place  :ind_nrm_place,
+			:sql_nrm_tds_rt
+		FROM
+			NRI_REMITTER_MSTR ;
+
+		if( SQLCODE != 0 )
+    {
+    	errlog( c_ServiceName, "S31040", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+			fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+			fclose( ptr_op_file );
+			tpclose();
+    	tpterm();
+      exit(-1);
+    }	
+
+		userlog( "DBG: Paased good" );
+
+		/* store all distinct firm and its cert_no in struct array. increment cert_no element from this struct for the respective firm element. o/p file will use cert_no of struct. Finally update last increment in CA Master */
+
+		i_firm_count = 0;
+
+		EXEC ORACLE OPTION (char_map=string);
+
+		EXEC SQL
+			SELECT	NCA_CA_FIRM_NM,
+							NCA_CERTIFICATE_NMBR							
+			INTO	:st_firm_cert
+			FROM 	NRI_CHARTERED_ACCNT_MSTR
+			WHERE NCA_ACTIVE_FLG = 'A' ;										/* only one active CA per firm constrained implemented at front end */
+
+		if( SQLCODE != 0 )
+    {
+			if( SQLCODE == NO_DATA_FOUND )									/* always gives NDF even some rows selected into struct */
+			{
+				if( sqlca.sqlerrd[2] == 0 )
+				{
+    			errlog( c_ServiceName, "S31045", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      		fn_bat_pst_msg( c_ServiceName, "Data missing. No CA in active status..", c_tag );
+					fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+					fclose( ptr_op_file );
+					tpclose();
+    			tpterm();
+      		exit(-1);
+				}
+			}
+			else
+			{
+    		errlog( c_ServiceName, "S31050", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+				fclose( ptr_op_file );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+			}
+    }
+	
+		i_firm_count = sqlca.sqlerrd[2];
+
+		if( DEBUG_MSG_LVL_3 ) {
+		userlog( "i_firm_count       :%d:", i_firm_count );
+		}
+
+  EXEC SQL ALLOCATE :sys_cursor;		/*** Added for Ver 1.3 ***/
+
+	if(c_nri_flg == 'P')		/** Condition added for Ver 1.3 **/
+	{
+		/* getting root rows of o/p file by clubbing entries as Short term and Long term */
+		/*** Commented and added with sys_cursor for Ver 1.3 ***/
+	  /**EXEC SQL
+			DECLARE cur_sl_club CURSOR FOR***/
+    EXEC SQL  EXECUTE
+     BEGIN
+      OPEN  :sys_cursor FOR
+      SELECT	DTR_BNK_ACCNT,
+						 	DTR_HOLDING_PERIOD,
+						 	DTR_SELL_DT,
+						 	DTR_CREDIT_DT,
+						 	DTR_CA_FIRM,
+						 	sum(DTR_INR_SELL_PRCEED),
+						 	sum(DTR_TOT_TAX)
+      FROM		TEMP_DAILY_TDS_REPORT
+      WHERE		DTR_ACCNT_TYP = 'NRE'
+      GROUP BY DTR_BNK_ACCNT,
+             	 DTR_HOLDING_PERIOD,
+             	 DTR_SELL_DT,
+							 DTR_CREDIT_DT,
+             	 DTR_CA_FIRM ;
+     END;
+    END-EXEC;
+	}
+
+	/*** Start for Ver 1.3 ***/
+	/**if(c_nri_flg == 'N')***/
+	else
+	{
+	  EXEC SQL	EXECUTE
+		 BEGIN
+			OPEN :sys_cursor FOR
+      SELECT	DTR_BNK_ACCNT,
+						 	DTR_HOLDING_PERIOD,
+						 	DTR_SELL_DT,
+						 	DTR_CREDIT_DT,
+						 	DTR_CA_FIRM,
+						 	sum(DTR_INR_SELL_PRCEED),
+						 	sum(DTR_TOT_TAX)
+      FROM		DTR_DAILY_TDS_REPORT, MDC_MISC_DR_CR
+      WHERE		DTR_ACCNT_TYP = 'NRE'
+			AND			trunc(MDC_ENTRY_DT) = trunc(SYSDATE)
+			AND			DTR_CRDT_NMBR = MDC_CRDT_NMBR
+			AND 		MDC_PRDCT_TYP = 'NPT'
+			AND			DTR_TXNS_STATUS = 'T'
+			AND			DTR_PIN_FLG = 'N'
+      GROUP BY DTR_BNK_ACCNT,
+             	 DTR_HOLDING_PERIOD,
+             	 DTR_SELL_DT,
+							 DTR_CREDIT_DT,
+             	 DTR_CA_FIRM ;
+		END;
+	END-EXEC;
+	}
+
+  if ( SQLCODE != 0 )
+  {
+      errlog( c_ServiceName, "S31055", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg  );
+      EXEC SQL FREE :sys_cursor;
+      fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+      fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+      fclose( ptr_op_file );
+      tpclose();
+      tpterm();
+      exit(-1);
+  }
+	/*** End for Ver 1.3 ***/
+
+/*** Commneted for Ver 1.3 ***/
+/***		EXEC SQL OPEN cur_sl_club;
+		if( SQLCODE != 0 )
+  	{
+      if( SQLCODE == NO_DATA_FOUND )
+      {
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+  			fn_bat_pst_msg( c_ServiceName, "bat_nri_form15ca No record to be processed", c_tag );
+  			tpclose();
+  			tpterm();
+  			exit(0);
+      }
+
+    	errlog( c_ServiceName, "S31060", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+			fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+			fclose( ptr_op_file );
+			tpclose();
+    	tpterm();
+      exit(-1);
+		}****/
+
+		while(1)
+		{
+			MEMSET( c_bnk_accnt ); 		/* MEMSET preferred over SETNULL as proc does not change 
+																			 varchar array or length members if NULL fetched (or selected) */
+			MEMSET( c_credit_dt );
+			MEMSET( c_ca_firm );
+			MEMSET( c_eba_clnt_nm );
+			MEMSET( c_clnt_full_addr );
+			MEMSET( c_nature_of_gain );
+			MEMSET( c_op_remark );
+			MEMSET( sql_ida_pan_no1 );
+			MEMSET( sql_iad_country_cd );
+			MEMSET( sql_iad_tel_res );
+			MEMSET( sql_ipd_email );
+			MEMSET( sql_nca_signing_ca_nm );
+			MEMSET( sql_nca_ca_firm_nm );
+			MEMSET( sql_nca_addr_door_nmbr );
+			MEMSET( sql_nca_addr_premise_bldg_vlg );
+			MEMSET( sql_nca_addr_rd_po );
+			MEMSET( sql_nca_addr_area );
+			MEMSET( sql_nca_addr_city_district );
+			MEMSET( sql_nca_addr_state );
+			MEMSET( sql_nca_addr_pin );
+			MEMSET( sql_nca_ca_register_nmbr );
+			MEMSET( sql_nca_certificate_dt );
+			MEMSET( sql_nca_certificate_nmbr );
+
+
+			d_inr_sell_prceed = 0.0;
+			d_tot_tax = 0.0;
+			d_tot_bdc_amt = 0.0;
+			d_short_tot_amt = 0.0;
+			d_net_payout_amt = 0.0;
+
+			EXEC SQL
+				/**FETCH cur_sl_club***//*** Commented and Added for Ver 1.3 ***/
+				FETCH :sys_cursor
+				INTO	:c_bnk_accnt,
+							:c_holding_period,
+							:c_sell_dt,
+							:c_credit_dt,
+							:c_ca_firm,
+							:d_inr_sell_prceed,
+							:d_tot_tax ;
+			
+    	if( SQLCODE != 0 )
+    	{
+      	if( SQLCODE == NO_DATA_FOUND )
+     	 	{
+					userlog( "ALL done.." );
+					break;
+      	}
+
+    		errlog( c_ServiceName, "S31065", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+	      EXEC SQL CLOSE :sys_cursor;	/** Added for Ver 1.3 **/
+ 		    EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+				fclose( ptr_op_file );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+			}
+		
+      SETNULL(c_sell_dt);  									/* as c_sell_dt is accessed further outside while loop */
+	
+			if( DEBUG_MSG_LVL_3 ) {
+				userlog( "c_bnk_accnt       	  :%s:", c_bnk_accnt.arr );
+				userlog( "c_holding_period   	  :%c:", c_holding_period );
+				userlog( "c_sell_dt      	      :%s:", c_sell_dt.arr );
+				userlog( "c_credit_dt      	    :%s:", c_credit_dt.arr );
+				userlog( "c_ca_firm      	      :%s:", c_ca_firm.arr );
+				userlog( "d_inr_sell_prceed  	  :%lf:", d_inr_sell_prceed );
+				userlog( "d_tot_tax      	      :%lf:", d_tot_tax );
+			}
+
+			/* Gathering customer specific details */
+			EXEC SQL
+				SELECT	NVL(IPD_FIRST_NAME,' ') ||' '||NVL(IPD_MIDDLE_NAME,' ') || ' ' || NVL(IPD_LAST_NAME,' '),
+								IAD_ADDRESS_1||' '||IAD_ADDRESS_2||' '||IAD_ADDRESS_3||' '||
+								IAD_ADDRESS_4||' '||IAD_CITY_CD||' '||IAD_STATE_CD||' '||IAD_COUNTRY_CD ,										
+								IDA_PAN_NO1,										
+								IAD_COUNTRY_CD,										
+								IAD_TEL_RES,										
+								IPD_EMAIL,
+								CLB_CLM_MTCH_ACCNT										
+				INTO	:c_eba_clnt_nm :ind_eba_clnt_nm,
+							:c_clnt_full_addr :ind_clnt_full_addr,
+							:sql_ida_pan_no1 :ind_ida_pan_no1,
+							:sql_iad_country_cd :ind_iad_country_cd, 
+							:sql_iad_tel_res :ind_iad_tel_res,
+							:sql_ipd_email :ind_ipd_email,
+							:c_mtch_accnt
+				FROM  IPD_INFO_PERSONAL_DTLS,											
+							IAD_INFO_ADDRESS_DTLS,											
+							UAC_USR_ACCNTS,											
+							ICD_INFO_CLIENT_DTLS,											
+							IDA_INFO_DP_ACCNTS,
+							CLB_BNK_ACCTS									
+				WHERE ICD_USER_ID         = UAC_USR_ID											
+				AND   ICD_SERIAL_NO       = IPD_SERIAL_NO											
+				AND   ICD_SERIAL_NO       = IAD_SERIAL_NO											
+				AND	  ICD_SERIAL_NO       = IDA_SERIAL_NO										
+				AND   IPD_TYPE            = 'APPLICANT'											
+				AND   IAD_ADDRESS_TYPE    = 'APPLICANT_CORR'											
+				AND 	IDA_DP_TYPE =  DECODE(:c_nri_flg,'P','NRE_PINS','N','NRE_NON_PINS')	/** DECODE added for Ver 1.3 ***/
+				AND   UAC_CLM_MTCH_ACCNT  = CLB_CLM_MTCH_ACCNT
+				AND		CLB_BNK_ACCT_NMBR = :c_bnk_accnt
+				AND		UAC_ACT_DEACT_FLG NOT IN ('S','C')			/** Ver 1.4 **/
+				AND		rownum < 2;																										/* Ver 1.1 rownum added */
+
+			if( SQLCODE != 0 )
+    	{
+    		errlog( c_ServiceName, "S31070", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. Infopool dtls missing..", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+        EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+				fclose( ptr_op_file );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+    	}	
+
+			if( DEBUG_MSG_LVL_3 ) {
+				userlog( "c_eba_clnt_nm         :%s:", c_eba_clnt_nm.arr );
+				userlog( "c_clnt_full_addr   	  :%s:", c_clnt_full_addr.arr );
+				userlog( "sql_ida_pan_no1       :%s:", sql_ida_pan_no1.arr );
+				userlog( "sql_iad_country_cd    :%s:", sql_iad_country_cd.arr );
+				userlog( "sql_iad_tel_res       :%s:", sql_iad_tel_res.arr );
+				userlog( "sql_ipd_email         :%s:", sql_ipd_email.arr );
+				userlog( "c_mtch_accnt          :%s:", c_mtch_accnt );
+			}
+
+			/* Gathering chartered accountant (C.A.) related details */
+			EXEC SQL
+				SELECT  NCA_SIGNING_CA_NM,
+								NCA_CA_FIRM_NM,
+								NCA_ADDR_DOOR_NMBR,
+								NCA_ADDR_PREMISE_BLDG_VLG,
+								NCA_ADDR_RD_PO,
+								NCA_ADDR_AREA,
+								NCA_ADDR_CITY_DISTRICT,
+								NCA_ADDR_STATE,
+								NCA_ADDR_PIN,
+								NCA_CA_REGISTER_NMBR,
+								to_char( sysdate, 'dd/mm/yyyy' )
+				INTO  :sql_nca_signing_ca_nm  :ind_nca_signing_ca_nm,
+							:sql_nca_ca_firm_nm :ind_nca_ca_firm_nm,
+							:sql_nca_addr_door_nmbr :ind_nca_addr_door_nmbr,
+							:sql_nca_addr_premise_bldg_vlg  :ind_nca_addr_premise_bldg_vlg,
+							:sql_nca_addr_rd_po :ind_nca_addr_rd_po,
+							:sql_nca_addr_area  :ind_nca_addr_area,
+							:sql_nca_addr_city_district :ind_nca_addr_city_district,
+							:sql_nca_addr_state :ind_nca_addr_state,
+							:sql_nca_addr_pin :ind_nca_addr_pin,
+							:sql_nca_ca_register_nmbr :ind_nca_ca_register_nmbr,
+							:sql_nca_certificate_dt :ind_nca_certificate_dt
+				FROM  NRI_CHARTERED_ACCNT_MSTR
+				WHERE upper(NCA_CA_FIRM_NM) = upper(:c_ca_firm)																			/* case insensitive matching */
+				AND		NCA_ACTIVE_FLG = 'A' ;
+
+			if( SQLCODE != 0 )
+    	{
+    		errlog( c_ServiceName, "S31075", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. No active CA for this firm..", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+        EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+				fclose( ptr_op_file );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+    	}	
+
+			for( i_cnt=0; i_cnt<i_firm_count; i_cnt++ )
+			{
+				if( strcmp( sql_nca_ca_firm_nm.arr, st_firm_cert[i_cnt].c_cafirm ) == 0 )
+				{
+					strcpy( sql_nca_certificate_nmbr.arr, st_firm_cert[i_cnt].c_certno );
+
+					userlog( "DBG: sql_nca_certificate_nmbr:%s:", sql_nca_certificate_nmbr.arr );
+
+					if( fn_certno_incrmnt( st_firm_cert[i_cnt].c_certno ) == -1 )
+					{
+    				errlog( c_ServiceName, "S31080", DEFMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      			fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+						fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+		        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+   			    EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+						fclose( ptr_op_file );
+						tpclose();
+    				tpterm();
+      			exit(-1);
+
+					}
+
+					userlog( "DBG: st_firm_cert[i].c_certno:%s:", st_firm_cert[i_cnt].c_certno );
+
+					break;
+				} 
+			}
+
+			if( DEBUG_MSG_LVL_3 ) {
+				userlog( "sql_nca_signing_ca_nm :%s:", sql_nca_signing_ca_nm.arr );
+				userlog( "sql_nca_ca_firm_nm    :%s:", sql_nca_ca_firm_nm.arr );
+				userlog( "sql_nca_addr_door_nmbr:%s:", sql_nca_addr_door_nmbr.arr );
+				userlog( "sql_nca_addr_premise_bldg_vlg :%s:", sql_nca_addr_premise_bldg_vlg.arr );
+				userlog( "sql_nca_addr_rd_po    :%s:", sql_nca_addr_rd_po.arr );
+				userlog( "sql_nca_addr_area     :%s:", sql_nca_addr_area.arr );
+				userlog( "sql_nca_addr_city_district:%s:", sql_nca_addr_city_district.arr );
+				userlog( "sql_nca_addr_state    :%s:", sql_nca_addr_state.arr );
+				userlog( "sql_nca_addr_pin      :%s:", sql_nca_addr_pin.arr );
+				userlog( "sql_nca_ca_register_nmbr:%s:", sql_nca_ca_register_nmbr.arr );
+				userlog( "sql_nca_certificate_dt:%s:", sql_nca_certificate_dt.arr );
+				userlog( "sql_nca_certificate_nmbr:%s:", sql_nca_certificate_nmbr.arr );
+			}
+
+			/* Gathering amount related columns */
+			i_oppterm_exist = 0;
+
+		if(c_nri_flg == 'P')
+		{
+			EXEC SQL
+				SELECT 1
+				INTO	:i_oppterm_exist
+				FROM 	dual
+				WHERE	EXISTS
+								( SELECT 1
+									FROM	TEMP_DAILY_TDS_REPORT	
+									WHERE	DTR_BNK_ACCNT = :c_bnk_accnt
+									AND		DTR_HOLDING_PERIOD = DECODE( :c_holding_period, 'S', 'L', 'L', 'S' )
+								);
+
+		}
+		else
+		{
+			      EXEC SQL
+        SELECT 1
+        INTO  :i_oppterm_exist
+        FROM  dual
+        WHERE EXISTS
+                ( SELECT 1
+									FROM DTR_DAILY_TDS_REPORT
+                  WHERE DTR_BNK_ACCNT = :c_bnk_accnt
+                  AND   DTR_HOLDING_PERIOD = DECODE( :c_holding_period, 'S', 'L', 'L', 'S' )
+                );
+		}
+
+			if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    	{
+    		errlog( c_ServiceName, "S31085", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+        EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+				fclose( ptr_op_file );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+    	}	
+
+			userlog( "DBG: i_oppterm_exist      :%d:", i_oppterm_exist );
+
+		if(c_nri_flg == 'P')		/*** Condition added for Ver 1.3 ***/
+		{
+			EXEC SQL
+				SELECT	sum( BDC_AMNT )												/* ABS not required as always positive */
+				INTO	:d_tot_bdc_amt
+				FROM	BDC_BNK_DBCR
+				WHERE	( BDC_CLNT_MTCH_ACCNT, 
+								BDC_XCHNG_CD, 
+								BDC_SGMNT_CD, 
+								BDC_STTLMNT_NMBR ) in  
+									(	SELECT distinct NTC_CLM_MTCH_ACCNT,
+																		NTC_XCHNG_CD,
+																	  NTC_SGMNT_CD,
+																		NTC_STTLMNT_NMBR
+										FROM	NTC_NRI_TDS_CLLCTD
+										WHERE NTC_CLM_MTCH_ACCNT = :c_mtch_accnt
+										AND   trunc(NTC_TRD_DT) = :c_sell_dt )
+				AND		BDC_DB_CR_FLG = 'C';
+		}
+		else
+		{
+			EXEC SQL
+				SELECT sum(DTR_INR_SELL_PRCEED)
+				INTO :d_tot_bdc_amt
+				FROM DTR_DAILY_TDS_REPORT
+				WHERE
+						DTR_CLM_MTCH_ACCNT = :c_mtch_accnt AND
+						trunc(DTR_SELL_DT) = :c_sell_dt;
+		}
+					
+			if( SQLCODE != 0 )
+    	{
+    		errlog( c_ServiceName, "S31090", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+        EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+				fclose( ptr_op_file );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+    	}
+			userlog( "DBG: d_tot_bdc_amt :%lf:", d_tot_bdc_amt );
+
+			if( i_oppterm_exist == 0 )
+			{
+				userlog( "DBG: In not opoosite term exists" );
+				d_tot_payout_amt = d_tot_bdc_amt;
+				d_net_payout_amt = d_tot_payout_amt - d_tot_tax;
+			}
+
+			if( i_oppterm_exist == 1 ) 
+			{
+				userlog( "DBG: In opoosite term exists" );
+
+			if(c_nri_flg == 'P')	/*** Condition added for Ver 1.3 ***/
+			{
+				EXEC SQL
+					SELECT 	sum( DTR_INR_SELL_PRCEED )										/* ABS not required as always positive */
+					INTO	 :d_short_tot_amt
+      		FROM   TEMP_DAILY_TDS_REPORT
+      		WHERE	 DTR_ACCNT_TYP = 'NRE'
+					AND		 DTR_BNK_ACCNT = :c_bnk_accnt
+					AND		 DTR_HOLDING_PERIOD = 'S'
+					AND		 DTR_SELL_DT = :c_sell_dt
+					AND		 DTR_CREDIT_DT = :c_credit_dt
+					AND		 DTR_CA_FIRM = :c_ca_firm ;
+			}
+			else
+			{
+        EXEC SQL
+          SELECT  sum( DTR_INR_SELL_PRCEED )
+          INTO   :d_short_tot_amt
+          FROM  DTR_DAILY_TDS_REPORT
+          WHERE  DTR_ACCNT_TYP = 'NRE'
+          AND    DTR_BNK_ACCNT = :c_bnk_accnt
+          AND    DTR_HOLDING_PERIOD = 'S'
+          AND    DTR_SELL_DT = :c_sell_dt
+          AND    DTR_CREDIT_DT = :c_credit_dt
+          AND    DTR_CA_FIRM = :c_ca_firm ;
+			}
+
+				if( SQLCODE != 0 )
+    		{
+    			errlog( c_ServiceName, "S31095", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      		fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+					fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+	        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+	        EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+					fclose( ptr_op_file );
+					tpclose();
+    			tpterm();
+      		exit(-1);
+	    	}	
+				userlog( "DBG: d_short_tot_amt :%lf:", d_short_tot_amt );
+
+				if( c_holding_period == 'S' )
+				{
+
+				 if(c_nri_flg == 'P')		/*** Condition added for Ver 1.3 ***/
+				 {
+					EXEC SQL
+						SELECT 	sum( DTR_TOT_TAX )										/* ABS not required as always positive */
+						INTO	 :d_long_tax
+      			FROM   TEMP_DAILY_TDS_REPORT
+      			WHERE	 DTR_ACCNT_TYP = 'NRE'
+						AND		 DTR_BNK_ACCNT = :c_bnk_accnt
+						AND		 DTR_HOLDING_PERIOD = 'L'
+						AND		 DTR_SELL_DT = :c_sell_dt
+						AND		 DTR_CREDIT_DT = :c_credit_dt
+						AND		 DTR_CA_FIRM = :c_ca_firm ;
+				 }
+				 else
+				 {
+          EXEC SQL
+            SELECT  nvl(sum( DTR_TOT_TAX ),0)
+            INTO   :d_long_tax
+            FROM   DTR_DAILY_TDS_REPORT
+            WHERE  DTR_ACCNT_TYP = 'NRE'
+            AND    DTR_BNK_ACCNT = :c_bnk_accnt
+            AND    DTR_HOLDING_PERIOD = 'L'
+            AND    DTR_SELL_DT = :c_sell_dt
+            AND    DTR_CREDIT_DT = :c_credit_dt
+            AND    DTR_CA_FIRM = :c_ca_firm ;
+				 }
+
+					if( SQLCODE != 0 )
+    			{
+    				errlog( c_ServiceName, "S31100", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      			fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+						fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+		        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+		        EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+						fclose( ptr_op_file );
+						tpclose();
+    				tpterm();
+      			exit(-1);
+	    		}	
+
+					d_net_long_payout_amt = d_tot_bdc_amt - d_short_tot_amt - d_long_tax;  
+
+					/* if Long term payout amount in o/p file is negative then put only single short term entry in o/p file */
+					if( d_net_long_payout_amt <= 0.0F )
+					{
+						d_tot_payout_amt = d_tot_bdc_amt;
+						d_net_payout_amt = d_tot_payout_amt - d_tot_tax - d_long_tax;
+					}
+
+					else
+					{
+						d_tot_payout_amt = d_short_tot_amt;      		   				/* for Short term forgot effect of brokerage */
+						d_net_payout_amt = d_tot_payout_amt - d_tot_tax;
+					}
+				}
+
+				else if( c_holding_period == 'L' )
+				{
+					d_net_long_payout_amt = d_tot_bdc_amt - d_short_tot_amt - d_tot_tax;  
+
+					if( d_net_long_payout_amt <= 0.0F )
+					{	
+						continue;
+					}
+
+					else
+					{
+						d_tot_payout_amt = d_tot_bdc_amt - d_short_tot_amt;  		/* for Long term given all effect of brokerage */
+						d_net_payout_amt = d_tot_payout_amt - d_tot_tax;
+					}
+				}
+			}	
+
+			if( DEBUG_MSG_LVL_3 ) {
+				userlog( "d_tot_payout_amt :%lf:", d_tot_payout_amt );
+				userlog( "d_tot_tax        :%lf:", d_tot_tax );
+				userlog( "d_net_payout_amt :%lf:", d_net_payout_amt );
+			}
+
+			/* Gathering Remark column of o/p file */
+			i_corp_exceptn_exist = 0;	
+
+		if(c_nri_flg == 'P')	/** Condition added for Ver 1.3 ***/
+		{	
+		 	EXEC SQL
+				SELECT 1
+				INTO	:i_corp_exceptn_exist	
+				FROM	dual
+				WHERE EXISTS 
+							( SELECT 1
+								FROM	NPINS_CORPACTN_EXCEPTN_MSTR,
+											TEMP_DAILY_TDS_REPORT
+								WHERE	DTR_BNK_ACCNT = :c_bnk_accnt
+								AND		DTR_SCRPT_NM = PCE_STCK_NM );
+
+			if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    	{
+    		errlog( c_ServiceName, "S31105", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+        EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+        EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+				fclose( ptr_op_file );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+	    }
+		}
+
+			if( i_corp_exceptn_exist == 1 )
+			{
+				strcpy( c_op_remark, "To be confirmed by PINS team" ); 
+			}
+
+			if( c_holding_period == 'S' )
+			{
+				strcpy( c_nature_of_gain, "Short term capital gains" ); 
+			}
+			else if( c_holding_period = 'L' )
+			{
+				strcpy( c_nature_of_gain, "Long term capital gains" ); 
+			}
+
+			if( DEBUG_MSG_LVL_3 ) {
+				userlog( "c_op_remark      :%s:", c_op_remark );
+				userlog( "c_nature_of_gain :%s:", c_nature_of_gain );
+			}
+
+      d_sum_payout_amt = d_sum_payout_amt + d_tot_payout_amt ;
+ 
+
+			/* printing into op file */
+			fprintf( ptr_op_file, "%s|", sql_nrm_remitter_stts.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_comp_typ.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_pan.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_tan.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_areacd.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_rangecd.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_ao_typ.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_ao_nmbr.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_remitter_nm.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_door_nmbr.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_premise_bldg_vlg.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_rd_po.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_locality.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_city_district.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_state.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_addr_pin.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_email_id.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_std_cd.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_phn_nmbr.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_princpl_business_plc.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_other_cntry_nm.arr );
+
+			fprintf( ptr_op_file, "%s|", c_eba_clnt_nm.arr );
+			fprintf( ptr_op_file, "%s|", c_clnt_full_addr.arr );
+			fprintf( ptr_op_file, "%s|", sql_ida_pan_no1.arr );
+			fprintf( ptr_op_file, "%s|", sql_iad_country_cd.arr );
+			fprintf( ptr_op_file, "|" ); 																			/* col 26 is hardcoded NULL */
+			fprintf( ptr_op_file, "%s|", sql_iad_country_cd.arr );
+			fprintf( ptr_op_file, "|" ); 																			/* col 28 is hardcoded NULL */
+			fprintf( ptr_op_file, "%s|", sql_iad_tel_res.arr );
+			fprintf( ptr_op_file, "%s|", sql_ipd_email.arr );
+			fprintf( ptr_op_file, "Others|" ); 																/* col 31 is hardcoded to Others */
+			fprintf( ptr_op_file, "|" ); 																			/* col 32 is hardcoded NULL */
+
+			fprintf( ptr_op_file, "%s|", sql_nca_signing_ca_nm.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_ca_firm_nm.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_addr_door_nmbr.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_addr_premise_bldg_vlg.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_addr_rd_po.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_addr_area.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_addr_city_district.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_addr_state.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_addr_pin.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_ca_register_nmbr.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_certificate_dt.arr );
+			fprintf( ptr_op_file, "%s|", sql_nca_certificate_nmbr.arr );
+
+			fprintf( ptr_op_file, "%s|", sql_iad_country_cd.arr );
+
+			fprintf( ptr_op_file, "%s|", sql_nrm_currency.arr );
+			
+			fprintf( ptr_op_file, "%.2lf|", d_tot_payout_amt / d_curr_factor );
+			fprintf( ptr_op_file, "%.2lf|", d_tot_payout_amt );
+
+			fprintf( ptr_op_file, "%s|", sql_nrm_bnk_nm.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_bnk_brnch.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_bnk_brnch_brs_cd.arr );
+
+			fprintf( ptr_op_file, "%s|", c_credit_dt.arr );
+			fprintf( ptr_op_file, "%.2lf|", d_tot_tax / d_curr_factor );
+			fprintf( ptr_op_file, "%.2lf|", d_tot_tax );
+
+			fprintf( ptr_op_file, "%.2lf|", sql_nrm_tds_rt );
+
+			fprintf( ptr_op_file, "%.2lf|", d_net_payout_amt / d_curr_factor );
+			fprintf( ptr_op_file, "%.2lf|", d_net_payout_amt );
+			fprintf( ptr_op_file, "%s|", c_credit_dt.arr );
+			fprintf( ptr_op_file, "%s|", c_nature_of_gain );
+
+			fprintf( ptr_op_file, "%s|", sql_nrm_remitter_typ.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_autorzd_signtry_nm.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_son_of.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_designation.arr );
+			fprintf( ptr_op_file, "%s|", sql_nrm_place.arr );
+
+			fprintf( ptr_op_file, "%s|", c_op_remark );
+			fprintf( ptr_op_file, "|" ); 																			/* col 67 is hardcoded NULL */
+			fprintf( ptr_op_file, "%s", c_sell_dt.arr );
+
+			fprintf( ptr_op_file, "\n" );
+			
+    }
+
+    EXEC SQL CLOSE :sys_cursor; /** Added for Ver 1.3 **/
+    EXEC SQL FREE :sys_cursor; /** Added for Ver 1.3 **/
+
+		fclose( ptr_op_file );
+
+    if( DEBUG_MSG_LVL_3 ) {
+    	userlog( "Total Payout amount   :%lf:", d_sum_payout_amt );
+    }
+
+	/***Commented in Ver 1.2 
+  * Verification requested by Ops that sum of payout amnt in o/p file (excluding tax) must be equal to sum of BDC amnt*
+
+    EXEC SQL 
+       SELECT  sum( BDC_AMNT )     
+       into :d_sum_bdc
+       FROM  BDC_BNK_DBCR
+       WHERE ( BDC_CLNT_MTCH_ACCNT,
+               BDC_XCHNG_CD,
+               BDC_SGMNT_CD,
+               BDC_STTLMNT_NMBR ) in
+                 ( SELECT distinct NTC_CLM_MTCH_ACCNT,
+                                   NTC_XCHNG_CD,
+                                   NTC_SGMNT_CD,
+                                   NTC_STTLMNT_NMBR
+                   FROM  NTC_NRI_TDS_CLLCTD
+                   WHERE trunc(NTC_TRD_DT) = :c_sell_dt )
+        AND   BDC_DB_CR_FLG = 'C';
+
+	  if( SQLCODE != 0 )
+    {
+    	errlog( c_ServiceName, "S31110", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+      fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+      tpclose();
+      tpterm();
+      exit(-1);
+    }
+
+    if( DEBUG_MSG_LVL_3 ) {
+    	userlog( "Total Payout amount   :%lf:", d_sum_payout_amt );
+      userlog( "Total BDC amount      :%lf:", d_sum_bdc );
+    }
+
+	* difference of double data type done in ORACLE to fix decimal mismatch issue *
+    EXEC SQL 
+		  SELECT :d_sum_bdc - :d_sum_payout_amt
+      INTO :d_cmp_val
+	    FROM dual;
+
+	  if( SQLCODE != 0 )
+	  {
+      errlog( c_ServiceName, "S31115", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+	    fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+	    fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+	    tpclose();
+	    tpterm();
+	    exit(-1);
+	  }
+
+    if( DEBUG_MSG_LVL_3 ) {
+      userlog( "Difference      :%lf:", d_cmp_val );
+    }
+
+    if ( d_cmp_val > 0.0F )
+    {
+    	errlog( c_ServiceName, "S31120", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      fn_bat_pst_msg( c_ServiceName, "Total output amount doesn't match. contact system support.", c_tag );
+      fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+      tpclose();
+      tpterm();
+      exit(-1);
+    }  
+****/
+
+		/* updating last certificate no of this run to the CA master */
+		i_trnsctn = tpbegin( TRAN_TIMEOUT, 0 );
+  	if ( i_trnsctn == -1 )
+  	{
+    	errlog( c_ServiceName, "S31125", UNXMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+			fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+			tpclose();
+    	tpterm();
+      exit(-1);
+  	}
+
+		for( i_cnt=0; i_cnt<i_firm_count; i_cnt++ )
+		{
+			EXEC SQL
+				UPDATE	NRI_CHARTERED_ACCNT_MSTR
+				SET		NCA_CERTIFICATE_NMBR = :st_firm_cert[i_cnt].c_certno,
+							NCA_CERTIFICATE_DT = sysdate
+				WHERE	NCA_CA_FIRM_NM = :st_firm_cert[i_cnt].c_cafirm ;
+
+			if( SQLCODE != 0 )
+  	  {
+    		errlog( c_ServiceName, "S31130", SQLMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      	fn_bat_pst_msg( c_ServiceName, "System error occured. contact system support.", c_tag );
+				fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+				tpclose();
+    		tpterm();
+      	exit(-1);
+    	}	
+		}
+
+		i_trnsctn = tpcommit(0);
+  	if ( i_trnsctn == -1 )
+  	{
+      tpabort(0);
+    	errlog( c_ServiceName, "S31135", UNXMSG, DEF_USR, DEF_SSSN, c_event_msg );
+      fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+			fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+			tpclose();
+    	tpterm();
+      exit(-1);
+  	}
+
+		sprintf( c_command, "ksh sndmail_15ca_csv.sh %s", c_file_path );
+  	userlog( "Mail send command :%s", c_command );
+		system(c_command);
+
+	fn_rgstr_bat( 'U', c_ServiceName, "NA", "BO" );
+  fn_bat_pst_msg( c_ServiceName, "bat_nri_form15ca completed sucessfully", c_tag );
+  tpclose();
+  tpterm();
+  exit(0);
+	
+}
+
+int fn_certno_incrmnt( char c_certno[] )
+{
+	/* it is pre-requesite that certificate no should be alphanumeric( starting alphas + trailing digital sequence )
+		 e.g. A0001, a0001, AAD0000010 etc */
+
+	char c_certno_alpha[10];
+  char c_certno_digit[10];
+  char c_temp[10];
+
+  int i_certno_len;
+  int i_certno_alpha_len;
+  int i_certno_digit_len;
+  int i_temp_len;
+  int i_cnt;
+  int j;
+  int i_incrementable;
+
+  long l_certno_digit_seq;
+
+  MEMSET( c_certno_alpha );
+  MEMSET( c_certno_digit );
+  MEMSET( c_temp );
+
+  i_certno_len = strlen( c_certno );
+
+  for( i_cnt=0; i_cnt<i_certno_len; i_cnt++ )
+  {
+    if( isdigit( c_certno[i_cnt] ) != 0 )
+    {
+      strncpy( c_certno_alpha, c_certno, i_cnt );
+      strcpy( c_certno_digit, &c_certno[i_cnt]);
+      break;
+    }
+  }
+
+  i_certno_alpha_len = strlen( c_certno_alpha );
+  i_certno_digit_len = strlen( c_certno_digit );
+
+  l_certno_digit_seq = atol( c_certno_digit );
+  l_certno_digit_seq++;
+  sprintf( c_temp, "%ld", l_certno_digit_seq );
+  i_temp_len = strlen( c_temp );
+
+  if( ( strlen( c_temp ) > i_certno_digit_len ) )
+  {
+    i_incrementable = 1;
+
+    for( i_cnt=0 ; i_cnt<i_certno_digit_len-1; i_cnt++ )
+    {
+      c_certno_digit[i_cnt]='0';
+    }
+    c_certno_digit[i_certno_digit_len - 1]='1';
+
+    for( i_cnt=i_certno_alpha_len-1; i_cnt>=0; i_cnt-- )
+    {
+      if( toupper(c_certno_alpha[i_cnt]) != 'Z' )
+      {
+        c_certno_alpha[i_cnt] += 1;
+        i_incrementable = 0;
+        break;
+      }
+			else
+			{
+				c_certno_alpha[i_cnt] -= 25;
+			}
+    }
+
+    if( i_incrementable == 1 )
+    {
+      userlog( "System Error. The Cerificate no. Can not be incremented further.. \n" );
+			return -1;
+    }
+  }
+  else
+  {
+    c_certno_digit[ i_certno_digit_len - strlen( c_temp ) ] = '\0';
+    strcat( c_certno_digit, c_temp );
+  }
+
+  sprintf(c_certno, "%s%s", c_certno_alpha, c_certno_digit );
+	return 0;
+}

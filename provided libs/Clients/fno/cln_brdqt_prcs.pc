@@ -1,0 +1,858 @@
+/********************************************************************************************************/
+/*  Program           : CLN_BRDQT_PRCS																																	*/
+/*                                                                            													*/
+/*  Input             : C_PIPE_ID                                             													*/
+/*                                                                            													*/
+/*  Output            :                                                       													*/
+/*                                                                            													*/
+/*  Description       : This process is used to update the quotes																				*/ 
+/*																																																			*/  
+/*  Log 							: New Release (Vishnu N)																													*/
+/*										: 1.1	-  07-Mar-2014 Error case handled (Vishnu N)																*/ 
+/*                    : 1.2 -  05-Feb-2015 Proper Closing of program(Sachin B)                          */
+/*                    : 1.3 -  26-Mar-2015 Function Call fn_nse_to_eba_tkn commented  ( Sandeep Patil ) */
+/*                    : 1.4 -  09-Apr-2022 MInor Changes : Open Inerest Capturing     ( Sandeep Patil ) */
+/*                    : TOL -  11-Aug-2023 Tux on Linux  (Agam)                                         */
+/********************************************************************************************************/
+
+/**** C header ****/
+#include <stdio.h>
+#include <sqlca.h>
+#include <sys/socket.h>
+#include <unistd.h> 
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+
+#include <pthread.h>
+#include <netinet/in.h>
+
+#include <fo_view_def.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_scklib_tap.h>
+#include <fo_exg_brd_lib.h>
+#include<errno.h>
+#include <fn_span_lib.h>
+
+/* Process specific header  */
+#include <fn_env.h>
+#include <fn_log.h>
+#include <brd_cln_srvr.h>
+#include <fn_fil_log.h>
+#include <fn_ddr.h>
+#include <fn_msgq.h>
+#include <fo_shm.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <fml_rout.h>
+#include <fn_signal.h>
+#include <fn_read_debug_lvl.h>
+#include <signal.h>  /* Added in Ver TOL */
+#include <fo_exg_rcv_lib.h>  /* Added in Ver TOL */
+
+#define MAX_BCAST_PACKET_LEN 516 
+#define QUE_EMPTY 1             
+#define INNER_DONT_EXIT 1
+#define INNER_EXIT 0 
+
+void fn_sgnl_usr2(int i_sig_no);
+void fn_sgnl_usr1(int i_sig_no);
+void fn_sigbrdalarm_hnd(int signo);
+
+struct st_q_details *st_q_data=NULL;
+
+char c_pipe_id [ 5+1 ];
+char c_tbt_mod;	
+
+int  i_dmp_val;
+int	 i_lzo_ret_val;
+int i_exit_stts;
+int i_send_qid;
+int i_flg;
+int i_msgq_typ;
+long l_timer_val;
+long l_sleep_time;
+
+
+char  c_qspace_name[10]; 
+char  c_q_name[10];     
+
+long int li_port;
+
+struct st_q_message
+{
+long l_msg_type;
+char c_buffer_msg[516];
+};
+
+char c_ServiceName [33];
+
+void fn_gettime(void);
+char c_time[12];
+
+void CLN_BRDQT_PRCS( int argc, char *argv[] )
+{
+	char c_err_msg [256];
+  char c_rout_id[3];
+	char c_run_mod;
+  char c_rout_str[4];
+	char *ptr_c_tmp;
+  char c_xchng_cd_tmp[3+1];  /** Ver 1.4 **/
+
+  int i_ch_val;
+  int i_ferr[5];
+  int i_loop;
+  int i_ret_val;
+  int i_rout_val;
+  int i_tmp;
+
+  long li_buf_len;
+  long li_last_traded_time=0;
+  long li_last_traded_time_tmp=0;
+ 
+  FBFR32 *ptr_fml_Sbuf;
+
+  struct st_q_message st_q_msg;
+  struct st_bcast_pack_data st_bcastdata;
+	  long int li_closing_price;
+  long int li_last_traded_price;
+	struct st_brdcst_msgs st_brdcst_sndq_msg;
+  struct st_brd_q_data st_brd_qdata;
+  struct st_brd_q_data st_temp_brd_qdata;
+	struct vw_contract st_cntrct;
+	struct vw_cntrct_qt st_cntrct_short_qt;
+  struct vw_cntrctlong_qt st_cntrct_long_qt;
+  struct st_cntrct_qt st_cntrct_shrt_qt;    
+  struct st_cntrctlong_qt st_cntrct_lng_qt; 
+  struct st_interactive_only_mbp_data st_only_mbp;
+  struct st_interactive_only_mbp_data st_temp_only_mbp;
+
+  /** Ver 1.2 **********	
+	sigset_t set;
+  sigset_t new;
+
+  sigemptyset(&new);
+  sigaddset(&new, SIGUSR2);
+  pthread_sigmask(SIG_BLOCK, &new, NULL);
+  *** Ver 1.2 *****/
+
+	strcpy(c_ServiceName, argv[0]);
+
+	INITBATDBGLVL(argv[0]);
+
+  ptr_fml_Sbuf  = (FBFR32 *)tpalloc("FML32", NULL, 1024 );
+  if ( ptr_fml_Sbuf == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31005", UNXMSG, c_err_msg);
+    exit(0);
+  }
+  
+  
+  i_exit_stts = DONT_EXIT;
+
+  while ( i_exit_stts == DONT_EXIT )
+  {
+    li_buf_len = sizeof( st_brd_qdata );
+
+    memset(&st_brd_qdata,'\0',sizeof(struct st_brd_q_data));
+    MEMSET(st_cntrct_long_qt);
+    MEMSET(st_cntrct_short_qt);
+
+    if ( fn_read_msg_q ( i_send_qid,
+                         (void *)&st_brd_qdata,
+                         &li_buf_len,
+                         c_ServiceName,
+                         c_err_msg       ) == -1 )
+    {
+      fn_userlog(c_ServiceName," Error in Reading MSG Queue ");
+    }
+
+		memset(&st_only_mbp,'\0',sizeof(struct st_interactive_mbo_data));
+		memcpy(&st_only_mbp,st_brd_qdata.st_brd_data.st_brd_only_mbp.st_only_mbp,sizeof(st_brd_qdata.st_brd_data.st_brd_only_mbp.st_only_mbp));
+
+    if(DEBUG_MSG_LVL_3)
+    {
+	   fn_userlog(c_ServiceName,"Message Type :%ld:",st_brd_qdata.l_msg_typ);
+	  }
+    if(DEBUG_MSG_LVL_1)
+    {
+	   fn_userlog(c_ServiceName,"Before Going to sleep for :%ld:",l_sleep_time );
+    }
+
+    usleep(l_sleep_time);
+
+		MEMSET(st_cntrct);	/** Ver 1.1 **/
+ 
+		/***  Commented In Ver 1.3
+
+		i_ch_val = fn_nse_to_eba_tkn ( st_brd_qdata.l_msg_typ,
+                                     &st_cntrct,
+                                     c_rout_str,
+                                     c_ServiceName,
+                                     c_err_msg );
+
+		** Ver 1.1 Starts **
+		if(i_ch_val == -1)
+		{
+			fn_userlog(c_ServiceName," Error in fn_nse_to_eba_tkn");
+      continue;
+		}
+		** Ver 1.2 Ends **
+
+		st_cntrct_short_qt.l_eba_cntrct_id = st_cntrct.l_eba_cntrct_id ;
+    strcpy( st_cntrct_short_qt.c_xchng_cd , st_cntrct.c_xchng_cd ) ;
+    st_cntrct_short_qt.c_prd_typ = st_cntrct.c_prd_typ;
+    strcpy( st_cntrct_short_qt.c_undrlyng , st_cntrct.c_undrlyng ) ;
+    strcpy( st_cntrct_short_qt.c_expry_dt , st_cntrct.c_expry_dt ) ;
+    st_cntrct_short_qt.c_exrc_typ = st_cntrct.c_exrc_typ ;
+    st_cntrct_short_qt.c_opt_typ = st_cntrct.c_opt_typ ;
+    st_cntrct_short_qt.l_strike_prc = st_cntrct.l_strike_prc ;
+    st_cntrct_short_qt.c_ctgry_indstk = st_cntrct.c_ctgry_indstk ;
+    st_cntrct_short_qt.l_ca_lvl = st_cntrct.l_ca_lvl ;
+
+	  Comment Ends  *******************/
+	
+		st_cntrct_short_qt.l_eba_cntrct_id  = st_brd_qdata.l_msg_typ;     /***  Added In Ver 1.3 ***/
+    st_cntrct_short_qt.c_indctr = st_only_mbp.c_net_change_indicator;
+    st_cntrct_short_qt.l_open_prc = st_only_mbp.li_open_price;
+    st_cntrct_short_qt.l_high_prc = st_only_mbp.li_high_price;
+    st_cntrct_short_qt.l_low_prc = st_only_mbp.li_low_price;
+    st_cntrct_short_qt.l_lst_trdd_prc = st_only_mbp.li_last_traded_price;
+    st_cntrct_short_qt.l_close_prc = st_only_mbp.li_closing_price;
+    li_closing_price = st_only_mbp.li_closing_price;
+    li_last_traded_price = st_only_mbp.li_last_traded_price;
+
+		if(li_closing_price == 0)
+    {
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"Inside Closing Price Check");
+      }
+      st_cntrct_short_qt.l_chng_prvs_close_prc = 0;
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName," l_chng_prvs_close_prc Is :%ld:",st_cntrct_short_qt.l_chng_prvs_close_prc);
+      }
+    }
+    else
+    {
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"CLOSING PRICE IS :%ld:",li_closing_price);
+        fn_userlog(c_ServiceName,"LAST TRADED PRICE IS :%ld:",li_last_traded_price);
+      }
+
+      st_cntrct_short_qt.l_chng_prvs_close_prc = ((li_closing_price - li_last_traded_price)/li_closing_price) * 100;
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName," l_chng_prvs_close_prc Is :%ld:",st_cntrct_short_qt.l_chng_prvs_close_prc);
+      }
+    }
+
+ 	   fn_cpy_ddr(st_cntrct_short_qt.c_rout_crt);
+
+		/*** Long Quote **/
+		
+    /***  Commented In Ver 1.3
+
+		st_cntrct_long_qt.l_eba_cntrct_id  = st_cntrct.l_eba_cntrct_id ;
+    strcpy( st_cntrct_long_qt.c_xchng_cd, st_cntrct.c_xchng_cd ) ;
+    st_cntrct_long_qt.c_prd_typ= st_cntrct.c_prd_typ ;
+    strcpy( st_cntrct_long_qt.c_undrlyng, st_cntrct.c_undrlyng ) ;
+    strcpy( st_cntrct_long_qt.c_expry_dt, st_cntrct.c_expry_dt ) ;
+    st_cntrct_long_qt.c_exrc_typ = st_cntrct.c_exrc_typ ;
+    st_cntrct_long_qt.c_opt_typ = st_cntrct.c_opt_typ ;
+    st_cntrct_long_qt.l_strike_prc = st_cntrct.l_strike_prc ;
+    st_cntrct_long_qt.c_ctgry_indstk = st_cntrct.c_ctgry_indstk ;
+    st_cntrct_long_qt.l_ca_lvl = st_cntrct.l_ca_lvl ;
+
+	  *************************************/
+
+	  st_cntrct_long_qt.l_eba_cntrct_id = st_brd_qdata.l_msg_typ;     /***  Added In Ver 1.3  ***/
+    st_cntrct_long_qt.l_lst_trdd_prc = st_only_mbp.li_last_traded_price;
+    st_cntrct_long_qt.l_lst_trdd_qty = st_only_mbp.li_last_traded_quantity;
+    st_cntrct_long_qt.l_tot_trdd_qty = st_only_mbp.li_volume_traded_today;
+    li_last_traded_time = st_only_mbp.li_last_traded_time;
+    fn_long_to_timearr (st_cntrct_long_qt.c_lst_trdd_time ,st_only_mbp.li_last_traded_time);
+
+    st_cntrct_long_qt.l_avg_trdd_prc = st_only_mbp.li_average_trade_price;
+    st_cntrct_long_qt.d_tot_bid_qty  = st_only_mbp.d_total_buy_quantity;
+    st_cntrct_long_qt.d_tot_offr_qty = st_only_mbp.d_total_sell_quantity;
+
+		for(i_tmp = 0; i_tmp < MAX_BOFR_BBID; i_tmp++)
+    {
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,":%d:Exchange Best Bid Qty Is :%ld:",i_tmp,st_only_mbp.st_mbpinfo[i_tmp].li_quantity);
+      fn_userlog(c_ServiceName,":%d:Exchange Best Bid Price Is :%ld:",i_tmp, st_only_mbp.st_mbpinfo[i_tmp].li_price);
+      fn_userlog(c_ServiceName,":%d:Exchange Best Offer Qty Is :%ld:",i_tmp,st_only_mbp.st_mbpinfo[i_tmp + 5].li_quantity);
+      fn_userlog(c_ServiceName,":%d:Exchange Best Offer  Price Is :%ld:",i_tmp, st_only_mbp.st_mbpinfo[i_tmp + 5].li_price);
+    }
+
+      st_cntrct_long_qt.l_bst_bid_qty[ i_tmp ]  = st_only_mbp.st_mbpinfo[i_tmp].li_quantity;
+      st_cntrct_long_qt.l_bst_bid_prc[ i_tmp ]  = st_only_mbp.st_mbpinfo[i_tmp].li_price;
+      st_cntrct_long_qt.l_bst_offr_qty[ i_tmp ] = st_only_mbp.st_mbpinfo[i_tmp + 5].li_quantity;
+      st_cntrct_long_qt.l_bst_offr_prc[ i_tmp ] = st_only_mbp.st_mbpinfo[i_tmp + 5].li_price;
+
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,":%d:Best Bid Qty Is :%ld:",i_tmp,st_cntrct_long_qt.l_bst_bid_qty[ i_tmp ]);
+      fn_userlog(c_ServiceName,":%d:Best Bid Price Is :%ld:",i_tmp,st_cntrct_long_qt.l_bst_bid_prc[ i_tmp ]);
+      fn_userlog(c_ServiceName,":%d:Best Offer Qty Is :%ld:",i_tmp,st_cntrct_long_qt.l_bst_offr_qty[ i_tmp ]);
+      fn_userlog(c_ServiceName,":%d:Best Offer  Price Is :%ld:",i_tmp, st_cntrct_long_qt.l_bst_offr_prc[ i_tmp ]);
+    }
+
+    }
+    
+    if(DEBUG_MSG_LVL_1)
+    {
+     fn_userlog(c_ServiceName,"Before Raising the Alarm for :%ld: of time :%ld: Micro Sec",st_brd_qdata.l_msg_typ,l_timer_val);
+    }
+	
+    ualarm(l_timer_val,0);
+    i_flg =INNER_DONT_EXIT;
+
+		while( i_flg == INNER_DONT_EXIT)
+		{ 
+			li_buf_len = sizeof( st_brd_qdata );
+      memset(&st_temp_brd_qdata,'\0',sizeof(struct st_brd_q_data));
+      if(DEBUG_MSG_LVL_1)
+      {
+       fn_userlog(c_ServiceName,"Inside no i_flg == INNER_DONT_EXIT for :%ld:",st_brd_qdata.l_msg_typ);
+      }
+
+			i_ch_val = fn_read_spcd_msg_q(i_send_qid,
+                             st_brd_qdata.l_msg_typ,
+                             (void *)&st_temp_brd_qdata,
+                             &li_buf_len,
+                             c_ServiceName,
+                             c_err_msg       );
+
+			if(i_ch_val == NO_DATA)
+			{
+        if( DEBUG_MSG_LVL_1)
+        {
+         fn_userlog(c_ServiceName,"Inside no more data found in Queue :%ld:",st_brd_qdata.l_msg_typ);
+        }
+
+				break;
+			}
+			else if (i_ch_val == -1)
+			{
+			  fn_userlog(c_ServiceName," Error in Reading MSG Queue ");
+        break;				
+			}
+			
+		  memset(&st_temp_only_mbp,'\0',sizeof(struct st_interactive_mbo_data));
+    	memcpy(&st_temp_only_mbp,st_temp_brd_qdata.st_brd_data.st_brd_only_mbp.st_only_mbp,sizeof(st_temp_brd_qdata.st_brd_data.st_brd_only_mbp.st_only_mbp));	
+
+    li_last_traded_time_tmp = st_temp_only_mbp.li_last_traded_time;
+
+    if(DEBUG_MSG_LVL_1)
+    {
+     fn_userlog(c_ServiceName," li_last_traded_time_tmp :%ld:",li_last_traded_time_tmp);
+     fn_userlog(c_ServiceName," li_last_traded_time :%ld:",li_last_traded_time);
+    }
+
+    if( li_last_traded_time_tmp < li_last_traded_time)
+    {
+      if(DEBUG_MSG_LVL_1)
+      {
+       fn_userlog(c_ServiceName,"Inside li_last_traded_time_tmp < li_last_traded_time");  
+      }
+      continue;
+    } 
+  
+    if(DEBUG_MSG_LVL_1)
+    {
+       if(li_last_traded_time_tmp== li_last_traded_time) {
+        fn_userlog(c_ServiceName,"Inside li_last_traded_time_tmp== li_last_traded_time is same for :%ld:",st_brd_qdata.l_msg_typ); }
+    }
+
+		/***  Commented In Ver 1.3
+
+
+    st_cntrct_short_qt.l_eba_cntrct_id = st_cntrct.l_eba_cntrct_id ;
+    strcpy( st_cntrct_short_qt.c_xchng_cd , st_cntrct.c_xchng_cd ) ;
+    st_cntrct_short_qt.c_prd_typ = st_cntrct.c_prd_typ;
+    strcpy( st_cntrct_short_qt.c_undrlyng , st_cntrct.c_undrlyng ) ;
+    strcpy( st_cntrct_short_qt.c_expry_dt , st_cntrct.c_expry_dt ) ;
+    st_cntrct_short_qt.c_exrc_typ = st_cntrct.c_exrc_typ ;
+    st_cntrct_short_qt.c_opt_typ = st_cntrct.c_opt_typ ;
+    st_cntrct_short_qt.l_strike_prc = st_cntrct.l_strike_prc ;
+    st_cntrct_short_qt.c_ctgry_indstk = st_cntrct.c_ctgry_indstk ;
+    st_cntrct_short_qt.l_ca_lvl = st_cntrct.l_ca_lvl ;
+
+		*****************************************/
+	
+	  st_cntrct_short_qt.l_eba_cntrct_id  = st_brd_qdata.l_msg_typ;     /***  Added In Ver 1.3  ***/
+    st_cntrct_short_qt.c_indctr = st_temp_only_mbp.c_net_change_indicator;
+    st_cntrct_short_qt.l_open_prc = st_temp_only_mbp.li_open_price;
+    st_cntrct_short_qt.l_high_prc = st_temp_only_mbp.li_high_price;
+    st_cntrct_short_qt.l_low_prc = st_temp_only_mbp.li_low_price;
+    st_cntrct_short_qt.l_lst_trdd_prc = st_temp_only_mbp.li_last_traded_price;
+    st_cntrct_short_qt.l_close_prc = st_temp_only_mbp.li_closing_price;
+    li_closing_price = st_temp_only_mbp.li_closing_price;
+    li_last_traded_price = st_temp_only_mbp.li_last_traded_price;
+
+    if(li_closing_price == 0)
+    {
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"Inside Closing Price Check");
+      }
+      st_cntrct_short_qt.l_chng_prvs_close_prc = 0;
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName," l_chng_prvs_close_prc Is :%ld:",st_cntrct_short_qt.l_chng_prvs_close_prc);
+      }
+    }
+    else
+    {
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"CLOSING PRICE IS :%ld:",li_closing_price);
+        fn_userlog(c_ServiceName,"LAST TRADED PRICE IS :%ld:",li_last_traded_price);
+      }
+
+      st_cntrct_short_qt.l_chng_prvs_close_prc = ((li_closing_price - li_last_traded_price)/li_closing_price) * 100;
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName," l_chng_prvs_close_prc Is :%ld:",st_cntrct_short_qt.l_chng_prvs_close_prc);
+      }
+    }
+
+    fn_cpy_ddr(st_cntrct_short_qt.c_rout_crt);
+
+    /***  Commented In Ver 1.3
+
+    st_cntrct_long_qt.l_eba_cntrct_id  = st_cntrct.l_eba_cntrct_id ;
+    strcpy( st_cntrct_long_qt.c_xchng_cd, st_cntrct.c_xchng_cd ) ;
+    st_cntrct_long_qt.c_prd_typ= st_cntrct.c_prd_typ ;
+    strcpy( st_cntrct_long_qt.c_undrlyng, st_cntrct.c_undrlyng ) ;
+    strcpy( st_cntrct_long_qt.c_expry_dt, st_cntrct.c_expry_dt ) ;
+    st_cntrct_long_qt.c_exrc_typ = st_cntrct.c_exrc_typ ;
+    st_cntrct_long_qt.c_opt_typ = st_cntrct.c_opt_typ ;
+    st_cntrct_long_qt.l_strike_prc = st_cntrct.l_strike_prc ;
+    st_cntrct_long_qt.c_ctgry_indstk = st_cntrct.c_ctgry_indstk ;
+    st_cntrct_long_qt.l_ca_lvl = st_cntrct.l_ca_lvl ;
+
+		***************************************************/
+
+    st_cntrct_long_qt.l_eba_cntrct_id = st_brd_qdata.l_msg_typ;     /***  Added In Ver 1.3  ***/
+    st_cntrct_long_qt.l_lst_trdd_prc = st_temp_only_mbp.li_last_traded_price;
+    st_cntrct_long_qt.l_lst_trdd_qty = st_temp_only_mbp.li_last_traded_quantity;
+    st_cntrct_long_qt.l_tot_trdd_qty = st_temp_only_mbp.li_volume_traded_today;
+
+    fn_long_to_timearr (st_cntrct_long_qt.c_lst_trdd_time ,st_temp_only_mbp.li_last_traded_time);
+
+    st_cntrct_long_qt.l_avg_trdd_prc = st_temp_only_mbp.li_average_trade_price;
+    st_cntrct_long_qt.d_tot_bid_qty  = st_temp_only_mbp.d_total_buy_quantity;
+    st_cntrct_long_qt.d_tot_offr_qty = st_temp_only_mbp.d_total_sell_quantity;
+
+		    for(i_tmp = 0; i_tmp < MAX_BOFR_BBID; i_tmp++)
+    {
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,":%d:Exchange Best Bid Qty Is :%ld:",i_tmp,st_temp_only_mbp.st_mbpinfo[i_tmp].li_quantity);
+      fn_userlog(c_ServiceName,":%d:Exchange Best Bid Price Is :%ld:",i_tmp, st_temp_only_mbp.st_mbpinfo[i_tmp].li_price);
+      fn_userlog(c_ServiceName,":%d:Exchange Best Offer Qty Is :%ld:",i_tmp,st_temp_only_mbp.st_mbpinfo[i_tmp + 5].li_quantity);
+      fn_userlog(c_ServiceName,":%d:Exchange Best Offer  Price Is :%ld:",i_tmp, st_temp_only_mbp.st_mbpinfo[i_tmp + 5].li_price);
+    }
+
+      st_cntrct_long_qt.l_bst_bid_qty[ i_tmp ]  = st_temp_only_mbp.st_mbpinfo[i_tmp].li_quantity;
+      st_cntrct_long_qt.l_bst_bid_prc[ i_tmp ]  = st_temp_only_mbp.st_mbpinfo[i_tmp].li_price;
+      st_cntrct_long_qt.l_bst_offr_qty[ i_tmp ] = st_temp_only_mbp.st_mbpinfo[i_tmp + 5].li_quantity;
+      st_cntrct_long_qt.l_bst_offr_prc[ i_tmp ] = st_temp_only_mbp.st_mbpinfo[i_tmp + 5].li_price;
+
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,":%d:Best Bid Qty Is :%ld:",i_tmp,st_cntrct_long_qt.l_bst_bid_qty[ i_tmp ]);
+      fn_userlog(c_ServiceName,":%d:Best Bid Price Is :%ld:",i_tmp,st_cntrct_long_qt.l_bst_bid_prc[ i_tmp ]);
+      fn_userlog(c_ServiceName,":%d:Best Offer Qty Is :%ld:",i_tmp,st_cntrct_long_qt.l_bst_offr_qty[ i_tmp ]);
+      fn_userlog(c_ServiceName,":%d:Best Offer  Price Is :%ld:",i_tmp, st_cntrct_long_qt.l_bst_offr_prc[ i_tmp ]);
+    }
+
+    }
+	 
+		}
+
+    ualarm(10000000,0);
+
+    /*** Ver 1.4 starts Here ***/
+    strcpy(c_xchng_cd_tmp,"NFO");
+    st_cntrct_short_qt.d_crnt_oi=0;
+    if( c_tbt_mod == '1' )
+    {
+      EXEC SQL
+        SELECT NVL(FTQ_CRNT_OI,0)
+          INTO :st_cntrct_short_qt.d_crnt_oi
+          FROM FTQ_FO_TRD_QT
+         WHERE FTQ_TOKEN_NO=:st_cntrct_long_qt.l_eba_cntrct_id
+          AND  FTQ_XCHNG_CD=:c_xchng_cd_tmp;
+      if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND && SQLCODE != TOO_MANY_ROWS_FETCHED)
+      {
+        fn_errlog ( c_ServiceName, "S31010", SQLMSG, c_err_msg );
+      }
+    }
+    /*** Ver 1.4 ENds Here ***/
+    MEMSET(st_cntrct_lng_qt);
+    MEMSET(st_cntrct_shrt_qt);
+ 
+		memcpy ( &st_cntrct_lng_qt, &st_cntrct_long_qt, sizeof( struct st_cntrctlong_qt ) );
+    memcpy ( &st_cntrct_shrt_qt, &st_cntrct_short_qt, sizeof( struct st_cntrct_qt ) );
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Open Price Is :%ld:",st_cntrct_shrt_qt.l_open_prc);
+      fn_userlog(c_ServiceName,"High Price Is :%ld:",st_cntrct_shrt_qt.l_high_prc);
+      fn_userlog(c_ServiceName,"Low Price Is :%ld:",st_cntrct_shrt_qt.l_low_prc);
+      fn_userlog(c_ServiceName,"LTP Is :%ld:",st_cntrct_shrt_qt.l_lst_trdd_prc);
+      fn_userlog(c_ServiceName,"Closing Price Is :%ld:",st_cntrct_shrt_qt.l_close_prc);
+    }
+
+    if( Fchg32( ptr_fml_Sbuf, FFO_CBUF, 0, (char *)&st_cntrct_lng_qt, sizeof( struct st_cntrctlong_qt )) == -1)
+    {
+      fn_errlog ( c_ServiceName, "S31015", FMLMSG, c_err_msg );
+    }
+
+    if( Fchg32( ptr_fml_Sbuf, FML_SBUF, 0, (char *)&st_cntrct_shrt_qt, sizeof( struct st_cntrct_qt )) == -1)
+    {
+      fn_errlog ( c_ServiceName, "S31020", FMLMSG, c_err_msg );
+    }
+
+    if(DEBUG_MSG_LVL_2)
+    {
+     fn_gettime();
+     fn_userlog(c_ServiceName,"TIME_STATS NDF inside fn_bcast_only_mbp Before SFO_UPD_QTLNGQT at :%s:",c_time);
+    }
+
+    i_ch_val = tpacall("SFO_UPD_QTLNGQT", (char *)ptr_fml_Sbuf, 0, TPNOREPLY|TPSIGRSTRT);
+
+    if( i_ch_val == -1 )
+    {
+      fn_errlog ( c_ServiceName, "S31025", LIBMSG, c_err_msg );
+    }
+
+    if(DEBUG_MSG_LVL_2)
+    {
+     fn_gettime();
+     fn_userlog(c_ServiceName,"TIME_STATS NDF inside fn_bcast_only_mbp Before SFO_UPD_QTLNGQT at :%s:",c_time);
+    }
+		
+		if( c_tbt_mod == '1' )
+    {
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Before Call To SFO_INS_CNT");
+    }
+
+		i_ch_val = tpacall("SFO_INS_CNT", (char *)ptr_fml_Sbuf, 0, TPNOREPLY|TPSIGRSTRT);
+
+    if( i_ch_val == -1 )
+    {
+      fn_errlog ( c_ServiceName, "S31030", LIBMSG, c_err_msg );
+    }	
+
+  }
+
+  
+	}
+}
+
+int fn_bat_init(int argc, char *argv[])
+{
+  int  i_ch_val ;
+	int  i_loop;
+  int  i_ret_cd;
+
+  char c_ServiceName [ 33 ];
+	char c_pipe_id [ 5+1 ];
+  char c_err_msg[256];
+	char *ptr_c_tmp;
+	char *ptr_timer_val;
+  char c_filename[256];
+
+  strcpy( c_ServiceName, "cln_brdqt_prcs" );
+
+  if( argc != 5)
+  {
+    fn_userlog(c_ServiceName,
+    "Usage - CLN_BRDQT_PRCS <Exchange qualifier> <Exchange code> <pipe_id> <Req Type>");
+    return ( -1 );
+  }
+  
+	i_ch_val = fn_create_pipe( );
+  if( i_ch_val == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31035",LIBMSG, c_err_msg);
+    fn_userlog(c_ServiceName, "Can't create log pipe");
+   	return -1; 
+  }
+
+	strcpy( c_pipe_id, argv[1] );
+
+	fn_userlog(c_ServiceName,"Inside init function");
+
+	sprintf( c_filename, "%s/%s.ini", getenv("BIN"), c_pipe_id);
+
+
+	fn_userlog(c_ServiceName,"c_filename :%s:",c_filename);
+	i_ch_val = fn_init_prcs_spc( c_ServiceName,
+                              c_filename,
+                              "cln_brdqt_prcs" );
+  if( i_ch_val == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31040", LIBMSG, c_err_msg);
+		return -1;  
+ 
+  }
+
+	if(strcmp(argv[4],"FUTIDX_QUEUE") == 0 )
+	{
+		fn_userlog(c_ServiceName," INSide FUTIDX_QUEUE");
+
+  	ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName,"FUTIDX_QUEUE");
+	}
+	else if(strcmp(argv[4],"FUTSTK_QUEUE") == 0 )
+	{
+	  ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName,"FUTSTK_QUEUE");
+	}
+	else if(strcmp(argv[4],"OPTIDX_QUEUE") == 0 )
+	{
+	  ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName,"OPTIDX_QUEUE");
+	}
+	else if(strcmp(argv[4],"OPTSTK_QUEUE") == 0 )
+	{
+		ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName,"OPTSTK_QUEUE");
+	}
+	else
+	{
+		fn_userlog(c_ServiceName,"INSide else");
+	}
+
+	if( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"S31045", LIBMSG, c_err_msg);
+		return -1;
+  }
+
+	fn_userlog(c_ServiceName,"After fn_get_prcs_spc");
+ 	i_msgq_typ = atoi(ptr_c_tmp);
+  fn_userlog(c_ServiceName, " QUEUE ID :%s:",ptr_c_tmp);
+
+  if(fn_crt_msg_q(&i_send_qid, i_msgq_typ, CLIENT, c_ServiceName, c_err_msg) == -1)
+  {
+     fn_userlog(c_ServiceName,"EBA : Failed to take access of Transmit queque.");
+     return ( -1 );
+  }
+
+  i_ch_val = fn_flush_q(  i_send_qid,
+                          c_ServiceName,
+                          c_err_msg);
+  if( i_ch_val == -1 )
+  {
+     fn_userlog(c_ServiceName,"EBA : Failed to Flush Transmit queque.");
+     return ( -1 );
+  }
+
+  if(strcmp(argv[4],"FUTIDX_QUEUE") == 0 )
+  {
+    fn_userlog(c_ServiceName," INSide FUTIDX_QUEUE");
+
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"FUTIDX_TIMER");
+  }
+  else if(strcmp(argv[4],"FUTSTK_QUEUE") == 0 )
+  {
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"FUTSTK_TIMER");
+  }
+  else if(strcmp(argv[4],"OPTIDX_QUEUE") == 0 )
+  {
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"OPTIDX_TIMER");
+  }
+  else if(strcmp(argv[4],"OPTSTK_QUEUE") == 0 )
+  {
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"OPTSTK_TIMER");
+  }
+  else
+  {
+    fn_userlog(c_ServiceName,"INSide else");
+  }
+
+  if( ptr_timer_val == NULL )
+  {
+    fn_errlog(c_ServiceName,"S31050", LIBMSG, c_err_msg);
+    return -1;
+  }
+
+  l_timer_val = atol(ptr_timer_val);
+
+  fn_userlog(c_ServiceName, " Timer Val :%ld:",l_timer_val);
+
+
+  if(strcmp(argv[4],"FUTIDX_QUEUE") == 0 )
+  {
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"FUTIDX_SLEEP");
+  }
+  else if(strcmp(argv[4],"FUTSTK_QUEUE") == 0 )
+  {
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"FUTSTK_SLEEP");
+  }
+  else if(strcmp(argv[4],"OPTIDX_QUEUE") == 0 )
+  {
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"OPTIDX_SLEEP");
+  }
+  else if(strcmp(argv[4],"OPTSTK_QUEUE") == 0 )
+  {
+    ptr_timer_val = (char *)fn_get_prcs_spc(c_ServiceName,"OPTSTK_SLEEP");
+  }
+  else
+  {
+    fn_userlog(c_ServiceName,"INSide else");
+  }
+
+  if( ptr_timer_val == NULL )
+  {
+    fn_errlog(c_ServiceName,"S31055", LIBMSG, c_err_msg);
+    return -1;
+  }
+
+  l_sleep_time = atol(ptr_timer_val);
+
+  fn_userlog(c_ServiceName, " Timer Val :%ld:",l_sleep_time);
+
+
+  if ( fn_set_sgn_hnd ( SIGALRM,
+                        fn_sigbrdalarm_hnd,
+                        c_ServiceName,
+                        c_err_msg        ) == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31060", LIBMSG, c_err_msg);
+    return ( -1 );
+  }
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog(c_ServiceName,"After fn_set_sgn_hnd for SIGALRM in bat_init");
+  }
+	
+	fn_userlog(c_ServiceName,"After fn_crt_msg_q");
+
+  if ( fn_set_sgn_hnd ( SIGUSR1, fn_sgnl_usr1, c_ServiceName, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31065", LIBMSG, c_err_msg );
+    return -1;
+  }
+
+	if ( fn_set_sgn_hnd ( SIGUSR2, fn_sgnl_usr2, c_ServiceName, c_err_msg ) == -1 )
+	{
+  	fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg );
+  	return -1;
+	}
+
+  i_ret_cd = fn_get_shm_id(CLIENT,c_ServiceName,0,c_err_msg);
+
+  if( i_ret_cd == -1)
+  {
+    fn_errlog( c_ServiceName, "S31075","", c_err_msg );
+    return -1;
+  }
+
+  i_ret_cd = fn_attach_shm((void *)&st_q_data,c_ServiceName,c_err_msg);
+  if( i_ret_cd == -1)
+  {
+   fn_errlog( c_ServiceName, "S31080","", c_err_msg );
+   return -1;
+  } 
+
+  ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName,"TBT_MODE");
+  
+  if( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"S31085", LIBMSG, c_err_msg);
+    return -1;
+  }
+
+  c_tbt_mod = *ptr_c_tmp;
+
+  fn_var = CLN_BRDQT_PRCS;
+
+  return ( 0 );
+}
+
+void fn_bat_term(int argc,
+                 char *argv[] )
+{
+  /** tpfree((char*)st_q_data); ** Ver 1.2 **/
+  return;
+}
+
+
+int fn_prcs_trg(char *c_ServiceName,
+                 int i_trg_typ)
+{
+  return ( 0 );
+}
+void fn_sgnl_usr2(int i_sig_no)
+{
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog("CLN_BRDQT_PRCS","CLN_BRDQT_PRCS SIGUSER2 exit");
+	}
+  i_flg =EXIT;       /** Ver 1.2 **/
+  i_exit_stts = EXIT;
+  fn_set_break_q();  /** Ver 1.2 **/
+  return;
+}
+
+void fn_sgnl_usr1(int i_sig_no)
+{
+  int i;
+  int i_no_element=0;
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog("CLN_BRDQT_PRCS","CLN_BRDQT_PRCS SIGUSER1 :%d:",i_sig_no );
+  }
+  
+  i_no_element = st_q_data[0].i_qid;
+  fn_userlog("CLN_BRDQT_PRCS","i_no_element :%d: queue id :%d:",i_no_element,i_msgq_typ);
+
+  for(i=1;i<=i_no_element;i++) 
+  {
+   if( st_q_data[i].i_qid == i_msgq_typ )
+   {
+    l_timer_val = st_q_data[i].l_timer;
+    l_sleep_time = st_q_data[i].l_sleep_time;
+    break;
+   }
+  }
+  fn_userlog(c_ServiceName,"New l_timer_val  :%ld:",l_timer_val);
+  fn_userlog(c_ServiceName,"New l_sleep_time :%ld:",l_sleep_time);
+
+}
+
+void fn_sigbrdalarm_hnd(int signo)
+{
+
+ if(DEBUG_MSG_LVL_1)
+ { 
+  fn_userlog(c_ServiceName, "Alaram Expired");
+ } 
+ i_flg=INNER_EXIT;
+}
+

@@ -1,0 +1,637 @@
+/******************************************************************************/
+/*  Program           : SFO_DLV_CANSQ                                         */
+/*                                                                            */
+/*  Input             : FFO_XCHNG_CD                                          */
+/*                      FFO_PRDCT_TYP                                         */
+/*                      FFO_UNDRLYNG                                          */
+/*                      FFO_OPT_TYP                                           */
+/*                      FFO_EXPRY_DT                                          */
+/*                      FFO_EXER_TYP                                          */
+/*                      FFO_STRK_PRC                                          */
+/*                      FFO_CTGRY_INDSTK                                      */
+/*                      FFO_LST_TRD_PRC                                       */
+/*                      FFO_ERR_MSG                                           */
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       : This service cancels and square off pending           */
+/*                      orders in intra day mode and if fails then            */
+/*                      sends next contract for processing in that match acc  */
+/*                                                                            */
+/*  Log               :                                                       */
+/*                                                                            */
+/******************************************************************************/
+/*  22-Jul-2019     Ver 1.0       Suchita Dabir      Initial Release          */
+/*  16-Jul-2021     Ver 1.1       Kalpesh Patil      CR-ISEC14-155199_LTP_in  */
+/*                                                   remarks_for_system_square_off_LODM */ 
+/*  07-Mar-2023     Ver 1.2    -   FNO lock user changes - Mahesh             */
+/******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fml_def.h>
+#include <fn_log.h>
+#include <fo_view_def.h>
+#include <fn_span_lib.h>
+#include <fo_fml_def.h>
+#include <fn_tuxlib.h>
+#include <fo.h>
+#include <fn_pos.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_session.h>
+#include <fn_read_debug_lvl.h>  
+
+void SFO_DLV_CANSQ(  TPSVCINFO *rqst )
+{
+  FBFR32 *ptr_fml_Ibuf = NULL;
+
+  char   c_ServiceName [ 33 ];
+  char   c_err_msg [ 256 ];
+  char   c_svc_nm[33];
+  char   c_xchng_cd [4];
+  char   c_user_id[9];
+  char   c_remarks[130];
+  char   c_ordr_rfrnc[18+1];
+  char   c_pipe_id[2+1];
+  char   c_narration_id[4];
+  varchar c_exp_dt[LEN_DATE];
+
+  char   c_nkd_blkd_flg = '\0';
+  char   c_sq_flw = '\0';
+  char   c_slm_flg = '\0';
+  char   c_ordr_flw = '\0';
+  char   c_span_flag = '\0'; 
+  char   c_spl_flg = '\0';
+  char   c_ord_typ = '\0';
+  char	 c_imtm_remarks[256] = "\0";
+  char	 c_cln_mtch_accnt[12] = "\0";
+  char   c_channel[4] = "\0";
+  char   c_alias[9] = "\0";
+  long int li_sssn_id = 0; 
+  int    i_record_exists = 0;
+  int    i_mtm_lmtneg_flg = 0;
+  int    i_insuff_lmt_flg = 0;
+  int    i_pending_ordr_exists = 0;
+  int    i_returncode = 0;
+  int    i_trnsctn = 0;
+	char   c_prcs_flag = 'F';
+ 
+  long   li_lot_size = 0;
+  long int   li_lmt_rt = 0;
+  long int   li_dsclsd_qty = 0;
+  long int   li_stp_lss_tgr_prc = 0;
+  long l_opnpos_qty = 0;
+  long l_cancel_qty = 0;
+  long l_cntrct_val = 0;
+  long l_strk_prc_rs = 0;
+  double d_cntrct_val = 0;
+	double d_spot_prc = 0.0;     /* Added in Ver 1.1  */
+ 
+  struct vw_contract st_cntrct;
+ 
+  MEMSET(c_ServiceName);
+  MEMSET(c_err_msg);
+  MEMSET(c_xchng_cd);
+  MEMSET(c_user_id);
+  MEMSET(c_remarks);
+  MEMSET(c_ordr_rfrnc);
+  MEMSET(c_pipe_id);
+  MEMSET(c_narration_id);
+  MEMSET(c_svc_nm);
+  MEMSET(c_exp_dt); 
+  MEMSET(st_cntrct);
+  strcpy (c_user_id, "system" );
+
+  ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName,rqst->name );
+
+  fn_userlog(c_ServiceName," ---------- SFO_DLV_CANSQ started -----------");
+  
+  i_returncode = fn_unpack_fmltovar_dflt ( c_ServiceName,
+                                      c_err_msg,
+                                      ptr_fml_Ibuf,
+                                      11,                                                              /* Changed 10 to 11 In Ver 1.1 */
+                                      FFO_EBA_MTCH_ACT_NO,(char*)c_cln_mtch_accnt, "NULL",
+                                      FFO_XCHNG_CD,(char*)st_cntrct.c_xchng_cd, "NULL",
+                                      FFO_PRDCT_TYP,(char*)&st_cntrct.c_prd_typ, "*",
+                                      FFO_UNDRLYNG, (char*)st_cntrct.c_undrlyng, "*",
+                                      FFO_EXPRY_DT, (char*)st_cntrct.c_expry_dt, "*",
+                                      FFO_EXER_TYP, (char*)&st_cntrct.c_exrc_typ, "*",
+                                      FFO_OPT_TYP, (char*)&st_cntrct.c_opt_typ, "-",
+                                      FFO_STRK_PRC, (char*)&st_cntrct.l_strike_prc, "-1",
+                                      FFO_STATUS_FLG,(char*)&c_span_flag,"*",
+                                      FFO_CTGRY_INDSTK, (char*)&st_cntrct.c_ctgry_indstk, "*",
+																			FFO_FUT_PRC,(char*)&d_spot_prc, "-1");                     /* Added in Ver 1.1 */
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+    tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+  }
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"Processing For :%s:-:%c:-:%s:-:%s:-:%c:-:%ld:-:%s:-:%c:-:%c:-:%c:",c_cln_mtch_accnt,st_cntrct.c_prd_typ,st_cntrct.c_undrlyng,st_cntrct.c_expry_dt,st_cntrct.c_opt_typ,st_cntrct.l_strike_prc,st_cntrct.c_xchng_cd,st_cntrct.c_exrc_typ,st_cntrct.c_ctgry_indstk,c_span_flag);
+  }
+
+  rtrim(st_cntrct.c_expry_dt);
+  rtrim(st_cntrct.c_undrlyng);
+  rtrim(st_cntrct.c_xchng_cd);
+
+  strcpy((char *)c_exp_dt.arr,st_cntrct.c_expry_dt);
+  SETLEN(c_exp_dt);
+
+  /*** In INTRADAY MODE,If limit is insufficient,
+	     Then,Go for cancellation or square off,
+			 according to the pending orders in that respective contract ***/
+
+   i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+   if ( i_trnsctn == -1 )
+   {
+     fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg  );
+		 c_prcs_flag = 'F';
+		 fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+     tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+   }
+
+   /* i_returncode = fn_lock_usr( c_ServiceName,c_cln_mtch_accnt); *** Ver 1.2 ***/
+   i_returncode = fn_lock_fno( c_ServiceName,c_cln_mtch_accnt); 	/*** Ver 1.2 ***/
+
+   if ( i_returncode == -1 )
+   {
+     fn_errlog( c_ServiceName, "S31015", LIBMSG, c_err_msg  );
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		 c_prcs_flag = 'F';
+		 fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+     tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+   }
+
+   if( c_span_flag == 'N' )
+   {
+        EXEC SQL
+        SELECT ABS(FOP_OPNPSTN_QTY),
+               FOP_OPNPSTN_FLW,
+               fop_ibuy_qty + ABS( fop_isell_qty) + fop_exbuy_qty  + ABS(fop_exsell_qty) as  CAN_QTY
+        INTO   :l_opnpos_qty,
+               :c_ordr_flw,
+               :l_cancel_qty
+        FROM   FOP_FO_OPTIONS_PSTN
+        WHERE  FOP_CLM_MTCH_ACCNT  = :c_cln_mtch_accnt
+        AND    FOP_XCHNG_CD        = :st_cntrct.c_xchng_cd
+        AND    FOP_PRDCT_TYP       = :st_cntrct.c_prd_typ
+        AND    FOP_OPT_TYP         = :st_cntrct.c_opt_typ
+        AND    FOP_EXER_TYP        = :st_cntrct.c_exrc_typ
+        AND    FOP_UNDRLYNG        = :st_cntrct.c_undrlyng
+        AND    FOP_EXPRY_DT        = :st_cntrct.c_expry_dt
+        AND    FOP_STRK_PRC        = :st_cntrct.l_strike_prc
+        AND    (      fop_ibuy_qty   > 0
+                  OR  fop_isell_qty  < 0
+                  OR  fop_exbuy_qty  > 0
+                  OR  fop_exsell_qty < 0
+                  OR  FOP_OPNPSTN_QTY > 0
+               );
+  }
+  else if ( c_span_flag == 'Y' )
+  {
+        EXEC SQL
+        SELECT ABS(FCP_OPNPSTN_QTY),
+               FCP_OPNPSTN_FLW,
+               FCP_IBUY_QTY+ ABS( FCP_ISELL_QTY ) + FCP_EXBUY_QTY + ABS( FCP_EXSELL_QTY ) as CAN_QTY
+        INTO   :l_opnpos_qty,
+               :c_ordr_flw,
+               :l_cancel_qty
+        FROM  FCP_FO_SPN_CNTRCT_PSTN
+        WHERE FCP_CLM_MTCH_ACCNT = :c_cln_mtch_accnt
+          AND FCP_XCHNG_CD        = :st_cntrct.c_xchng_cd
+          AND FCP_PRDCT_TYP       = :st_cntrct.c_prd_typ
+          AND FCP_OPT_TYP         = :st_cntrct.c_opt_typ
+          AND FCP_EXER_TYP        = :st_cntrct.c_exrc_typ
+          AND FCP_STRK_PRC        = :st_cntrct.l_strike_prc
+          AND FCP_UNDRLYNG        = :st_cntrct.c_undrlyng
+          AND FCP_EXPRY_DT        = :c_exp_dt
+          AND    (      fcp_ibuy_qty   > 0
+                    OR  fcp_isell_qty  < 0
+                    OR  fcp_exbuy_qty  > 0
+                    OR  fcp_exsell_qty < 0
+                    OR  FCP_OPNPSTN_QTY > 0
+                 );
+  }
+
+  if ( SQLCODE != 0 ) 
+  {
+    fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		c_prcs_flag = 'F';
+		fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+    tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+  }
+
+
+  if( l_cancel_qty > 0 )
+  {
+			EXEC SQL
+			  SELECT  1
+			  INTO    :i_pending_ordr_exists
+			  FROM    dual
+			  WHERE   exists
+			  (
+			    SELECT  1
+			    FROM    fod_fo_ordr_dtls
+			    WHERE   fod_clm_mtch_accnt  = :c_cln_mtch_accnt
+			    AND     fod_xchng_cd        = :st_cntrct.c_xchng_cd
+			    AND     fod_prdct_typ       = :st_cntrct.c_prd_typ
+			    AND     fod_undrlyng        = :st_cntrct.c_undrlyng
+			    AND     FOD_EXPRY_DT        = to_date(:st_cntrct.c_expry_dt,'DD-Mon-YYYY')
+			    AND     fod_exer_typ        = :st_cntrct.c_exrc_typ
+			    AND     fod_opt_typ         = :st_cntrct.c_opt_typ
+			    AND     fod_strk_prc        = :st_cntrct.l_strike_prc
+			    AND     fod_ordr_stts       = 'Q' 
+			   );
+
+			  if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+			  {
+			    fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg  );
+			    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+					c_prcs_flag = 'F';
+					fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+			    tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+			  }
+     
+				if(  i_pending_ordr_exists > 0 )
+				{
+
+						if( c_span_flag == 'N' )
+						{
+						    EXEC SQL
+						         UPDATE FOP_FO_OPTIONS_PSTN
+									     SET     FOP_MTM_FLG =  DECODE( FOP_MTM_FLG,'D','O',FOP_MTM_FLG )
+						          WHERE FOP_CLM_MTCH_ACCNT  = :c_cln_mtch_accnt
+						            AND FOP_XCHNG_CD        = :st_cntrct.c_xchng_cd
+						            AND FOP_PRDCT_TYP       = :st_cntrct.c_prd_typ
+						            AND FOP_OPT_TYP         = :st_cntrct.c_opt_typ
+						            AND FOP_EXER_TYP        = :st_cntrct.c_exrc_typ
+						            AND FOP_UNDRLYNG        = :st_cntrct.c_undrlyng
+						            AND FOP_EXPRY_DT        = :st_cntrct.c_expry_dt
+						            AND FOP_STRK_PRC        = :st_cntrct.l_strike_prc;
+
+								if ( SQLCODE != 0 )
+								{
+								      fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+								      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+											c_prcs_flag = 'F';
+											fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+								      tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+								}
+					  }
+					 	else if ( c_span_flag == 'Y' )
+					  {
+										EXEC SQL
+										     UPDATE FCP_FO_SPN_CNTRCT_PSTN
+										        SET    FCP_MTM_FLG = DECODE( FCP_MTM_FLG,'D','O',FCP_MTM_FLG )
+										      WHERE FCP_CLM_MTCH_ACCNT  = :c_cln_mtch_accnt
+										        AND FCP_XCHNG_CD        = :st_cntrct.c_xchng_cd
+										        AND FCP_PRDCT_TYP       = :st_cntrct.c_prd_typ
+										        AND FCP_OPT_TYP         = :st_cntrct.c_opt_typ
+										        AND FCP_EXER_TYP        = :st_cntrct.c_exrc_typ
+										        AND FCP_STRK_PRC        = :st_cntrct.l_strike_prc
+										        AND FCP_UNDRLYNG        = :st_cntrct.c_undrlyng
+										        AND FCP_EXPRY_DT        = :c_exp_dt;
+										if ( SQLCODE != 0 )
+										{
+										      fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+										      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+													c_prcs_flag = 'F';
+													fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+										      tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+										}
+
+					  }
+						i_returncode = fn_ins_lodm_opt_rep_tbl ( c_ServiceName,
+						                                   c_err_msg,
+						                                   &st_cntrct,
+						                                   c_cln_mtch_accnt,
+						                   "SOME ORDER IN QUEUE STATE - POSITION EXITING LODM");
+
+						if ( i_returncode != 0 )
+						{
+						         fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg  );
+						         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+										 c_prcs_flag = 'F';
+										 fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+						         tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+						}
+
+						if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+						{
+										fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+										fn_errlog( c_ServiceName, "S31045", LIBMSG, c_err_msg  );
+										c_prcs_flag = 'F';
+										fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+										tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+						}    
+
+            c_prcs_flag = 'F';
+            fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg); 
+
+            tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )NULL, 0, 0 ); 
+        }  /**** pending orders in q status ******/
+
+
+		    EXEC SQL
+		         DECLARE cur_can_ordr  CURSOR FOR
+		    SELECT  fod_ordr_rfrnc,
+		            fod_pipe_id
+	 	    FROM    fod_fo_ordr_dtls
+        WHERE   fod_clm_mtch_accnt  = :c_cln_mtch_accnt
+          AND     fod_xchng_cd        = :st_cntrct.c_xchng_cd
+          AND     fod_prdct_typ       = :st_cntrct.c_prd_typ
+          AND     fod_undrlyng        = :st_cntrct.c_undrlyng
+          AND     FOD_EXPRY_DT        = to_date(:st_cntrct.c_expry_dt,'DD-Mon-YYYY')
+          AND     fod_exer_typ        = :st_cntrct.c_exrc_typ
+          AND     fod_opt_typ         = :st_cntrct.c_opt_typ
+          AND     fod_strk_prc        = :st_cntrct.l_strike_prc
+  		    AND     fod_ordr_stts       IN  ('P','R','O');
+
+			  EXEC SQL
+			    OPEN cur_can_ordr;
+
+			  if ( SQLCODE != 0 )
+			  {
+			        fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg  );
+			        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); 
+							c_prcs_flag = 'F';
+							fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+			        tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+			  }
+
+			  while(1)
+			  {
+						  EXEC SQL
+						    FETCH cur_can_ordr
+						    INTO  :c_ordr_rfrnc,
+						          :c_pipe_id;
+
+						  if ( SQLCODE != 0 )
+						  {
+									 if ( SQLCODE == NO_DATA_FOUND )
+									 {
+									   break;
+									 }
+									 fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+									 fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+									 EXEC SQL CLOSE cur_can_ordr;
+									 c_prcs_flag = 'F';
+									 fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+									 tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+						  }
+						  strcpy(c_remarks,"System placed Cancellation");
+              strcpy( c_channel,"SYS");
+              strcpy(c_alias,"*" );
+						  fn_userlog(c_ServiceName,"suchita-%s:check cancellation for ",c_ordr_rfrnc);
+              
+						  if( c_span_flag == 'N' )
+						  {
+								 i_returncode = fn_call_svc_fml ( c_ServiceName,
+								                                  c_err_msg,
+								                                  "SFO_CANCEL_OPT",
+								                                  0,
+								                                  9, 
+								                                  0,
+								                                  FFO_USR_ID,
+								                                   (char *)c_user_id,
+								                                  FFO_SSSN_ID,
+								                                   (char *)&li_sssn_id,
+								                                  FFO_XCHNG_CD,
+								                                   (char *)st_cntrct.c_xchng_cd,
+								                                  FFO_EBA_MTCH_ACT_NO,
+								                                   (char *)c_cln_mtch_accnt,
+								                                  FFO_ORDR_RFRNC,
+								                                   (char *)c_ordr_rfrnc,
+								                                  FFO_XCHNG_RMRKS,
+								                                   (char *)c_remarks,
+								                                  FFO_CHANNEL,
+								                                   (char *)c_channel,  
+								                                  FFO_ALIAS,                              
+								                                   (char *)c_alias,
+								                                  FFO_PIPE_ID,
+								                                   (char *)c_pipe_id );
+
+						  }
+						  else if( c_span_flag == 'Y' )
+						  {
+
+                strcpy(c_remarks,"System placed Cancellation SYSPHYLODM");
+ 
+						    i_returncode = fn_call_svc_fml ( c_ServiceName,
+						                                     c_err_msg,  
+						                                     "SFO_SPN_CANCEL",
+						                                     0,
+						                                     9,
+						                                     0,
+						                                     FFO_USR_ID, 
+						                                       (char *)c_user_id,
+						                                     FFO_SSSN_ID,
+						                                       (char *)&li_sssn_id,
+						                                     FFO_XCHNG_CD,
+						                                       (char *)st_cntrct.c_xchng_cd,
+						                                     FFO_EBA_MTCH_ACT_NO,
+						                                       (char *)c_cln_mtch_accnt,
+						                                     FFO_ORDR_RFRNC, 
+						                                       (char *)c_ordr_rfrnc,
+						                                     FFO_XCHNG_RMRKS, 
+						                                       (char *)c_remarks,
+						                                     FFO_CHANNEL,
+						                                       (char *)c_channel,  
+						                                     FFO_ALIAS,                     
+						                                       (char *)c_alias,
+						                                     FFO_PIPE_ID, 
+						                                       (char *)c_pipe_id );
+						 }
+
+						 if ( i_returncode != SUCC_BFR )
+						 {
+						   fn_errlog( c_ServiceName, "S31060", LIBMSG, c_err_msg  );
+						   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+							 c_prcs_flag = 'F';
+							 fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+						   tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+						 }
+						 else
+						 {
+							sprintf(c_imtm_remarks,"SENDING CANCELLATION REQUEST FOR [%s]",c_ordr_rfrnc);
+
+						  i_returncode = fn_ins_lodm_opt_rep_tbl ( c_ServiceName,
+                                          c_err_msg,
+                                          &st_cntrct,
+                                          c_cln_mtch_accnt,
+                                          c_imtm_remarks);
+
+						  if ( i_returncode != 0 )
+						  {
+                fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg  );
+                fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+								c_prcs_flag = 'F';
+								fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+                tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+							 }
+					   }
+			  } /*** while **/
+			  EXEC SQL
+			    CLOSE cur_can_ordr;
+	 }
+   else if ( l_opnpos_qty > 0 )
+   {
+
+			   if( c_ordr_flw == 'B' )
+			   {
+			      c_sq_flw  = 'S';
+			   }   
+			   else
+			   {
+			     fn_userlog(c_ServiceName,"NOT AN LONG CALL/PUT POSITION");
+			   }
+
+			   c_slm_flg = MARKET;
+			   li_lmt_rt = 0;
+			   li_dsclsd_qty = 0;
+			   li_stp_lss_tgr_prc = 0;
+			   c_spl_flg = PHYSICAL_DLVRY_SQOFF; 
+         c_ord_typ = GOOD_TILL_TODAY;
+         strcpy( c_channel,"SYS");
+         strcpy(c_alias,"*" );
+
+			   if( c_span_flag == 'N' )
+			   {
+			       strcpy( c_svc_nm, "SFO_OPT_PLC_ORD");
+			   }
+			   else if( c_span_flag == 'Y' )
+			   {
+			       strcpy( c_svc_nm, "SFO_SPN_PLC_ORD");
+			   }
+
+				if(DEBUG_MSG_LVL_0)
+				{
+				  fn_userlog(c_ServiceName,"st_cntrct.c_xchng_cd :%s:",st_cntrct.c_xchng_cd);
+				  fn_userlog(c_ServiceName,"st_cntrct.c_prd_typ :%c: st_cntrct.c_ctgry_indstk :%c: st_cntrct.c_undrlyng :%s: st_cntrct.c_expry_dt :%s: st_cntrct.c_exrc_typ :%c: st_cntrct.c_opt_typ :%c: st_cntrct.l_strike_prc :%ld:",st_cntrct.c_prd_typ,st_cntrct.c_ctgry_indstk,st_cntrct.c_undrlyng,st_cntrct.c_expry_dt,st_cntrct.c_exrc_typ,st_cntrct.c_opt_typ,st_cntrct.l_strike_prc);
+				} 
+ 
+			   EXEC SQL
+			    SELECT  ftq_min_lot_qty
+			    INTO    :li_lot_size
+			    FROM    ftq_fo_trd_qt
+			    WHERE   ftq_xchng_cd  = :st_cntrct.c_xchng_cd
+			    AND     ftq_prdct_typ = :st_cntrct.c_prd_typ
+			    AND     ftq_indstk    = :st_cntrct.c_ctgry_indstk
+			    AND     ftq_undrlyng  = :st_cntrct.c_undrlyng
+			    AND     ftq_expry_dt  = to_date(:st_cntrct.c_expry_dt,'DD-Mon-YYYY') 
+			    AND     ftq_exer_typ  = :st_cntrct.c_exrc_typ
+			    AND     ftq_opt_typ   = :st_cntrct.c_opt_typ
+			    AND     ftq_strk_prc  = :st_cntrct.l_strike_prc;
+
+			    if ( SQLCODE != 0 )
+			    {
+			      fn_errlog( c_ServiceName, "S31070", SQLMSG, c_err_msg  );
+			      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						c_prcs_flag = 'F';
+						fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+			      tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+			    }
+			  
+			    if( li_lot_size > l_opnpos_qty )
+			    {
+			      fn_errlog( c_ServiceName, "B28570", DEFMSG, c_err_msg  );
+			      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						c_prcs_flag = 'F';
+					  fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+			      tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+			    }
+				/*** Ver 1.1	Start  ***/
+					d_spot_prc = d_spot_prc/100;
+					MEMSET(c_remarks);                                                   /*** Added in Ver 1.1 ***/
+					sprintf(c_remarks,"System Placed Squareoff LTP@%lf",d_spot_prc);    /*** Added in Ver 1.1 ***/
+
+			    fn_userlog(c_ServiceName,"In sqr off :check :%s: i_trnsctn :%d: :%s:",c_svc_nm,i_trnsctn,c_user_id);
+
+			    i_returncode = fn_call_svc_fml ( c_ServiceName,
+			                                     c_err_msg,
+			                                     "SFO_ORD_ROUT",
+			                                      0,
+			                                      25,         /*** Changed 23 to 25 in Ver 1.1 ***/      
+			                                      2,
+			          FFO_SVC_NAME, (char *)c_svc_nm,
+			          FFO_USR_ID, (char *)c_user_id,
+			          FFO_SSSN_ID, (char *)&li_sssn_id,
+			          FFO_XCHNG_CD, (char *)st_cntrct.c_xchng_cd,
+			          FFO_EBA_MTCH_ACT_NO, (char *)c_cln_mtch_accnt,
+			          FFO_PRDCT_TYP, (char *)&st_cntrct.c_prd_typ,
+			          FFO_UNDRLYNG, (char *)st_cntrct.c_undrlyng,
+			          FFO_EXPRY_DT, (char *)st_cntrct.c_expry_dt,
+			          FFO_EXER_TYP, (char *)&st_cntrct.c_exrc_typ,
+			          FFO_OPT_TYP , (char *)&st_cntrct.c_opt_typ,
+			          FFO_STRK_PRC, (char *)&st_cntrct.l_strike_prc,
+			          FFO_CTGRY_INDSTK , (char *)&st_cntrct.c_ctgry_indstk,
+			          FFO_ORDR_FLW, (char *)&c_sq_flw,
+			          FFO_LMT_MKT_SL_FLG , (char *)&c_slm_flg,
+			          FFO_ORD_TYP , (char *)&c_ord_typ,
+			          FFO_DSCLSD_QTY , (char * )&li_dsclsd_qty,
+			          FFO_STP_LSS_TGR , (char * )&li_stp_lss_tgr_prc,
+			          FFO_ORD_TOT_QTY, (char *)&li_lot_size,
+			          FFO_LMT_RT, (char * )&li_lmt_rt,
+			          FFO_SPL_FLG , (char *)&c_spl_flg,
+			          FFO_CHANNEL, (char *)c_channel, 
+			          FFO_ALIAS, (char *)c_alias,      
+			          FFO_NKD_BLKD_FLG,(char *)&c_nkd_blkd_flg,
+								FFO_XCHNG_RMRKS,(char *)c_remarks,            /*** Added In Ver 1.1 ***/
+								FFO_REMARKS,(char *)c_remarks,                /*** Added In Ver 1.1 ***/ 
+			          FFO_ORDR_RFRNC, (char *)c_ordr_rfrnc, NULL,
+			          FFO_PIPE_ID, (char *)c_pipe_id, NULL);       
+						
+						/*** Ver 1.1 End  ***/ 
+
+			    if ( i_returncode != SUCC_BFR )
+			    {
+			      fn_errlog( c_ServiceName, "S31075", LIBMSG, c_err_msg  );
+			      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						c_prcs_flag = 'F';
+						fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+			      tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+			    }
+          else
+          {
+
+              sprintf(c_imtm_remarks,"PLACED A SQUARE OFF ORDER WITH REFERENCE NO [%s]",c_ordr_rfrnc);
+
+              i_returncode = fn_ins_lodm_opt_rep_tbl ( c_ServiceName,
+                                          c_err_msg,
+                                          &st_cntrct,
+                                          c_cln_mtch_accnt,
+                                          c_imtm_remarks);
+
+              if ( i_returncode != 0 )
+              {
+                fn_errlog( c_ServiceName, "S31080", SQLMSG, c_err_msg  );
+                fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+								c_prcs_flag = 'F';
+								fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+                tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+              }
+           }
+
+   }
+
+   if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+   {
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          fn_errlog( c_ServiceName, "S31085", LIBMSG, c_err_msg  );
+					c_prcs_flag = 'F';
+					fn_loopback_cansq( c_ServiceName,c_cln_mtch_accnt,&st_cntrct,c_prcs_flag,c_span_flag,c_err_msg);
+          tpreturn(TPFAIL, ERR_BFR, (char *)NULL, 0, 0 );
+   }
+   tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )NULL, 0, 0 );
+}
+

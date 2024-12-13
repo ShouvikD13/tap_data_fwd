@@ -1,0 +1,442 @@
+/******************************************************************************/
+/*  Program       : cln_bse_exch_smltr.pc		  																*/
+/*                                                                            */
+/*  Description   : Simulator Program 																				*/
+/*                                                                            */
+/*  Input         : <pipe ID> <Exchange code> <pipe_id>  						          */
+/*                                                                            */
+/*  Output        : Success/Failure                                           */
+/*                                                                            */
+/*  Log           : Ver 1.0 : Sachin Birje.                                   */
+/*                                                                            */
+/******************************************************************************/
+
+#include <string.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+
+#include <fn_log.h>
+#include <fn_env.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fml_def.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fo_fml_def.h>
+#include <fo_bse_exch_smltr_lib.h>
+#include <fn_msgq.h>
+#include <fn_read_debug_lvl.h>
+
+int Z;
+#define INIT(x,y)  for(Z=0; Z< y; Z++) x[Z] =0
+#define TOTAL_FML 9
+#define ACK   'A'
+#define TRD   'T'
+# define  MAX_SCK_MSG   1024
+
+/* Global variables */
+char c_serviceName[33];
+char c_err_msg[256];
+char c_bps_xchng_cd[3+1];
+int i_sndqid = 0;
+
+EXEC SQL BEGIN DECLARE SECTION;
+  char sql_c_xchng_cd[3+1];
+  char sql_c_pipe_id[2+1];
+	varchar sql_c_nxt_trd_date[LEN_DATE];
+	char sql_c_trd_ref[ 8+1 ];
+EXEC SQL END DECLARE SECTION;
+
+int fn_rgstr_bat ( char c_flag,
+                   char *c_pgm_name,
+                   char *sql_c_xchng_cd,
+                   char *sql_c_pipe_id );
+
+void CLN_BSE_EXCH_SMLTR( int argc, char *argv[])
+{
+  FBFR32 *ptr_fml_Sbuf;
+	FBFR32 *ptr_fml_Rbuf;
+
+  union st_rcv_reply_data st_buf_dat;
+
+	long l_len_Rbuf;
+	int i_choice = 0;
+	int i_dwnld_flg;
+	int	i_deferred_dwnld_flg;
+  int i_err[TOTAL_FML];
+  int i_ferr[TOTAL_FML];
+	int i_read_size;
+	int i_loop;
+	int	i_ch_val;
+	
+	char c_skip_ordref[18+1];
+	char c_rcv_call;
+
+	INITBATDBGLVL( argv[0] );
+	memset( &st_buf_dat, 0 , sizeof(union st_rcv_reply_data) );
+
+	/* allocate fml buffer */
+  ptr_fml_Sbuf  = (FBFR32 *)tpalloc("FML32", NULL, 2*MAX_SCK_MSG );
+  if ( ptr_fml_Sbuf == NULL )
+  {
+    fn_errlog(c_serviceName, "S31005", TPMSG, c_err_msg);
+		printf( "System error. Contact system support\n" );
+    return ;
+  }
+
+	ptr_fml_Rbuf = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  if ( ptr_fml_Rbuf == NULL )
+  {
+    fn_errlog(c_serviceName, "S31010", TPMSG, c_err_msg);
+		tpfree ( (char *) ptr_fml_Sbuf );
+		printf( "System error. Contact system support\n" );
+    return ;
+  }
+
+	/* Gathering common input for sfo_rcv_clnt */
+	i_dwnld_flg = NOT_DOWNLOAD;
+	i_deferred_dwnld_flg = 0;
+	strcpy( c_skip_ordref, "abcdefghijklmnop18" );
+
+	EXEC SQL
+  	SELECT to_char ( EXG_NXT_TRD_DT, 'dd-mon-yyyy' ),
+           to_char ( EXG_NXT_TRD_DT, 'yyyymmdd' )
+    into :sql_c_nxt_trd_date,
+         :sql_c_trd_ref
+    FROM EXG_XCHNG_MSTR
+    WHERE EXG_XCHNG_CD = :sql_c_xchng_cd;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_serviceName,"S31015", SQLMSG, c_err_msg);
+		printf( "System error. Contact system support\n" );
+		tpfree ( (char *) ptr_fml_Sbuf );
+		tpfree ( (char *) ptr_fml_Rbuf );
+    return;
+  }
+
+	SETNULL( sql_c_nxt_trd_date );
+		
+	if( DEBUG_MSG_LVL_3 )  {
+  	fn_userlog(c_serviceName,"i_dwnld_flg:%d:",i_dwnld_flg);
+  	fn_userlog(c_serviceName,"i_deferred_dwnld_flg:%d:",i_deferred_dwnld_flg);
+  	fn_userlog(c_serviceName,"sql_c_nxt_trd_date:%s:",sql_c_nxt_trd_date.arr);
+  	fn_userlog(c_serviceName,"sql_c_pipe_id:%s:",sql_c_pipe_id);
+  	fn_userlog(c_serviceName,"sql_c_xchng_cd:%s:",sql_c_xchng_cd);
+  	fn_userlog(c_serviceName,"sql_c_trd_ref:%s:",sql_c_trd_ref);
+  	fn_userlog(c_serviceName,"c_skip_ordref:%s:",c_skip_ordref);
+	}
+
+	while( i_choice != CH_EXIT )
+	{
+		/* Display console options */
+		printf ( "\n\n\t BSE Exchange simulator for [%s]\n", sql_c_pipe_id );
+    printf ( "1. Order \n" );
+    printf ( "2. Convert from Market to Limit \n" );
+    printf ( "3. Order Triggering \n" );
+    printf ( "4. IOC Order Cancellation \n" );
+    printf ( "5. Trade \n" );
+    printf ( "6. Exit \n" );
+    printf ( "\n   Enter choice : " );
+    scanf  ( "\n%d", &i_choice);
+
+		switch( i_choice )
+		{
+			case CH_ORDER :
+											c_rcv_call = ACK;
+											i_ch_val =  fn_bse_simu_ord( i_sndqid,
+																			 &st_buf_dat,
+																			 &i_read_size,
+																			 sql_c_xchng_cd,
+																			 sql_c_pipe_id,
+																			 sql_c_nxt_trd_date.arr,		
+																			 sql_c_trd_ref,
+																			 c_serviceName,
+																			 c_err_msg ); 
+											fn_userlog(c_serviceName,"i_ch_val = %d",i_ch_val);
+											if(i_ch_val == -1)
+											{
+												c_rcv_call = NO;
+    										printf( "System error. Contact system support\n" );
+											}
+											if(i_ch_val == -2)
+											{
+												c_rcv_call = NO;
+											}
+											break;
+
+      case CH_MKTLMT_CONVRTN :
+                      c_rcv_call = ACK;
+                      if( fn_bse_simu_conv_mktlmt( &st_buf_dat, &i_read_size, c_serviceName, c_err_msg ) == -1 )
+                      {
+                        c_rcv_call = NO;
+                        printf( "System error. Contact system support\n" );
+                      }   
+                      break;
+			case CH_TRADE :
+											c_rcv_call = TRD;
+											if( fn_bse_simu_trd( &st_buf_dat, &i_read_size, c_serviceName, c_err_msg ) == -1 )
+											{
+												c_rcv_call = NO;
+    										printf( "System error. Contact system support\n" );
+											}
+											break;	
+			case CH_TRIG  :
+										  c_rcv_call = ACK;
+											if( fn_bse_simu_trg( &st_buf_dat, &i_read_size, c_serviceName, c_err_msg ) == -1 )
+											{
+												c_rcv_call = NO;
+    										printf( "System error. Contact system support\n" );
+											}
+											break;	
+			case CH_IOC_CANCEL :
+										  c_rcv_call = ACK;
+											if( fn_simu_bse_ioc_cancel( &st_buf_dat, &i_read_size, c_serviceName, c_err_msg ) == -1 )
+											{
+												c_rcv_call = NO;
+    										printf( "System error. Contact system support\n" );
+											}
+											break; 	
+			case CH_EXIT :
+        							printf ( "Quiting simulator ...\n" );
+											c_rcv_call = NO;
+											break;	
+      default :
+        				printf ( "Invalid choice entered, pls try again\n" );
+								c_rcv_call = NO;
+								break;	
+		}
+
+		if( c_rcv_call == ACK || c_rcv_call == TRD ) 
+    {
+      INIT( i_err,  TOTAL_FML );
+      INIT( i_ferr, TOTAL_FML );
+
+			if( DEBUG_MSG_LVL_3 )  {
+      	fn_userlog(c_serviceName,"i_read_size:%d:",i_read_size);
+      	fn_userlog(c_serviceName,"size:%d:", sizeof(st_buf_dat));
+			}
+
+      i_err[0] = Fchg32( ptr_fml_Sbuf, FFO_CBUF, 0, (char *)&st_buf_dat, i_read_size );
+      i_ferr[0] = Ferror32;
+      i_err[1] =  Fchg32( ptr_fml_Sbuf, FFO_TMPLT, 0, (char *)&i_read_size, 0 );
+      i_ferr[1] = Ferror32;
+      i_err[2] = Fchg32( ptr_fml_Sbuf, FFO_BIT_FLG, 0, (char *)&i_dwnld_flg, 0 );
+      i_ferr[2] = Ferror32;
+      i_err[3] = Fchg32( ptr_fml_Sbuf, FFO_NXT_TRD_DT, 0 , (char *)sql_c_nxt_trd_date.arr, 0 );
+      i_ferr[3] = Ferror32;
+      i_err[4] = Fchg32( ptr_fml_Sbuf, FFO_PIPE_ID,0, (char *)sql_c_pipe_id, 0 );
+      i_ferr[4] = Ferror32;
+      i_err[5] = Fchg32( ptr_fml_Sbuf, FFO_XCHNG_CD,0, (char *)sql_c_xchng_cd, 0 );
+      i_ferr[5] = Ferror32;
+      i_err[6] = Fchg32( ptr_fml_Sbuf, FFO_REF_NO, 0,(char *)sql_c_trd_ref, 0 );
+      i_ferr[6] = Ferror32;
+      i_err[7] = Fchg32( ptr_fml_Sbuf, FFO_ORDR_RFRNC, 0,(char *)c_skip_ordref, 0 );
+      i_ferr[7] = Ferror32;
+      i_err[8] = Fchg32( ptr_fml_Sbuf, FFO_DWNLD_FLG, 0,(char *)&i_deferred_dwnld_flg, 0 );
+      i_ferr[8] = Ferror32;
+
+      for( i_loop=0; i_loop<=8; i_loop++ )
+      {
+        if(i_err[i_loop] == -1)
+        {
+        	fn_errlog(c_serviceName, "S31020", FMLMSG, c_err_msg);
+          fn_userlog(c_serviceName,"Error [%d] in Fchange at [%d], for pipe [%s] ", i_ferr[i_loop],i_loop, sql_c_pipe_id );
+					c_rcv_call = NO;
+					printf( "System error. Contact system support\n" );
+          break;
+        }
+      }
+
+			if( c_rcv_call == ACK )
+			{
+      	if( tpcall( "SFO_BRCV_CLNT", 
+										(char *)ptr_fml_Sbuf,
+										0,
+									  (char **)&ptr_fml_Rbuf,
+										&l_len_Rbuf, 0) == -1 )
+  	    {
+    	    fn_errlog(c_serviceName, "S31025", TPMSG, c_err_msg);
+					printf( "System error. Contact system support\n" );
+       		continue;
+      	}
+
+			}
+			else if( c_rcv_call == TRD )
+			{
+			  if( tpcall( "SFO_BTRD_CLNT",
+                    (char *)ptr_fml_Sbuf,
+                    0,
+                    (char **)&ptr_fml_Rbuf,
+                    &l_len_Rbuf, 0) == -1 )
+        {
+          fn_errlog(c_serviceName, "S31030", TPMSG, c_err_msg);
+          printf( "System error. Contact system support\n" );
+          continue;
+        }
+
+			}
+
+    }
+
+	} /* while ends */
+
+	tpfree ( (char *) ptr_fml_Sbuf );
+	tpfree ( (char *) ptr_fml_Rbuf );
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+	char c_fileName[256];
+  char c_qname[8];
+  char *ptr_c_tmp;
+
+  int i_ipc_sndq;
+	int	i_tran_id;
+  int i_ch_val;
+
+  if (argc != 4)
+  {
+    fn_userlog( c_serviceName,
+                "Invalid number of arguments Usage - %s <pipe_id> <Exchange code> <pipe_id>", c_serviceName );
+		printf( "Usage - exch_smltr <pipe_id> <exch_cd> <pipe_id>\n");
+    return -1;
+  }
+
+	strcpy( c_serviceName, argv[0] );
+	strcpy( c_bps_xchng_cd, argv[2] );
+	strcpy( sql_c_pipe_id, argv[3] );
+
+	/* Initialize the Routing string */
+	fn_init_ddr_pop ( argv[3], TRADING_SECTION, COMMON);
+
+  fn_userlog(c_serviceName,"sql_c_pipe_id:%s:",sql_c_pipe_id);
+
+  /* Get exchange code from the database */
+  EXEC SQL
+           SELECT    OPM_XCHNG_CD
+           INTO      :sql_c_xchng_cd
+           FROM      OPM_ORD_PIPE_MSTR
+           WHERE     OPM_PIPE_ID = :sql_c_pipe_id;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_serviceName,"S31035", SQLMSG, c_err_msg);
+    printf( "System error. Contact system support\n" );
+    return ( -1 );
+  }
+
+  fn_userlog(c_serviceName,"sql_c_xchng_cd:%s:",sql_c_xchng_cd);	
+
+	/* Get access on send queue */
+	ptr_c_tmp = ( char * ) fn_get_prcs_spc( c_serviceName, 
+																					"SEND_QUEUE" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog( c_serviceName, "S31040", LIBMSG, c_err_msg );
+    printf( "System error. Contact system support\n" );
+    return -1;
+  }
+  i_ipc_sndq  = atoi ( ptr_c_tmp );
+
+  i_ch_val = fn_crt_msg_q ( &i_sndqid,
+                      			i_ipc_sndq,
+                      			CLIENT,
+                      			c_serviceName,
+                      			c_err_msg       );
+	if( i_ch_val == -1 )
+  {
+    fn_errlog(c_serviceName, "S31045", LIBMSG, c_err_msg);
+    printf( "System error. Contact system support\n" );
+    return -1;
+  }
+   fn_userlog(c_serviceName," i_sndqid :%d:",i_sndqid);
+
+	/* bps update of esr client */
+	i_ch_val = fn_rgstr_bat ( 'R', "cln_bse_esr_clnt", c_bps_xchng_cd, sql_c_pipe_id );
+  if ( i_ch_val == -2 )
+  {
+    fn_userlog( c_serviceName, "%s - Client process already running", argv[0] );
+    printf( "Exchange might be already connected \n" );
+    return -1;
+  }
+
+	i_tran_id = fn_begintran ( c_serviceName, c_err_msg );
+	if ( i_tran_id == -1 )
+  {
+    fn_errlog(c_serviceName, "S31050", LIBMSG, c_err_msg );
+		return -1;
+  }	
+	
+	/* update login stts */
+	EXEC SQL
+    UPDATE opm_ord_pipe_mstr
+    SET opm_login_stts = 1
+    WHERE opm_pipe_id = :sql_c_pipe_id;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_serviceName,"S31055", SQLMSG, c_err_msg);
+    printf( "System error. Contact system support\n" );
+    return -1;
+  }
+	
+	i_ch_val = fn_committran ( c_serviceName, i_tran_id, c_err_msg );
+  if ( i_ch_val == -1 )
+  {
+    fn_errlog(c_serviceName, "S31060", LIBMSG, c_err_msg );
+		return -1;
+  }	
+	
+  fn_var = CLN_BSE_EXCH_SMLTR;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+	fn_rgstr_bat ( 'U', "cln_bse_esr_clnt", c_bps_xchng_cd, sql_c_pipe_id );
+	fn_simu_exit(sql_c_pipe_id,c_serviceName, c_err_msg);
+  fn_userlog( argv[0], "Client process %s ended", argv[0] );
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}
+
+int fn_rgstr_bat ( char c_flag,
+                   char *c_pgm_name,
+                   char *sql_c_xchng_cd,
+                   char *sql_c_pipe_id )
+{
+  int     i_ch_val;
+  char    c_retmsg[256];
+
+  if ( ( strcmp ( sql_c_xchng_cd, "NA" ) == 0 ) &&
+       ( strcmp ( sql_c_pipe_id, "NA"  ) == 0 )    )
+  {
+    return 0;
+  }
+
+  i_ch_val = fn_call_svc_fml ( c_serviceName,
+                               c_retmsg,
+                               "SVC_RGSTR_BAT",
+                               TPNOTRAN,
+                               4,
+                               0,
+                               FML_GAME_REG_FLG, ( char * )&c_flag,
+                               FML_GMS_NM, ( char * )c_pgm_name,
+                               FML_ORD_XCHNG_CD, ( char * )sql_c_xchng_cd,
+                               FML_USR_ZIP_CD, ( char * )sql_c_pipe_id );
+  if ( i_ch_val != SUCC_BFR )
+  {
+    fn_errlog ( c_pgm_name, "S31065", LIBMSG, c_retmsg );
+    return i_ch_val;
+  }
+
+  return 0;
+}

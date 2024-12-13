@@ -1,0 +1,1844 @@
+/**************************************************************************************/
+/*   Service       : bat_mrgnplg_mail_sms.pc                                          */
+/*                                                                                    */
+/*   Purpose       : Upload of Margin pledge Details to click database tables         */
+/*                                                                                    */
+/*   Input Param   :                                                                  */
+/*                                                                                    */
+/*   Output        : Success/Failure                                                  */
+/*                                                                                    */
+/*                                                                                    */
+/*   Version       : Ver 1.0 | 29-Jul-2020 Tanmay Patel                               */
+/*                   Ver 1.1 | 16-Sep-2020 Tanmay Patel                               */  
+/*                   Ver 1.2 | 02-Nov-2020 Tanmay Patel                               */
+/*                                                                                    */
+/*   LOG           : 1.0  New Release  CR-ISEC14-138293 : Margin Pledge               */
+/*                 : 1.1  CR-ISEC04-142511 Fixing issue for haircut value 100         */
+/*                 : 1.2  CR 142905 SAM Pledge */
+/**************************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fml_def.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fml_rout.h>
+#include <fn_ddr.h>
+#include <eba.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>
+
+#define MAX_REC 2000
+#define LOCAL_TRAN_TIMEOUT 600
+
+#define PLG_SUCC_MULIPL_STK 227
+#define PLG_SUCC_SINGLE_STK 237
+
+int fn_snd_mymsg_sms_notfcn(char *c_ServiceName,
+                            FBFR32 **ptr_fml_Sendbuffer,
+                            char *c_user_id,
+                            long l_sssn_id,
+                            char *c_mtch_acc,
+                            char *c_csm_msg_typ,
+                            char c_msg_rqst_typ,
+                            char *c_err_msg);
+
+
+
+FBFR32    *ptr_fml_Sbuffer;
+FBFR32    *ptr_fml_Rbuffer;
+
+int   i =0;
+int   i_sms_id;
+int   i_ret_val;
+int   i_ch_val;
+int   i_msg_code;
+int   i_err[10];
+int   i_mode;
+int   i_rows_fetched;
+int   i_count_mpu = 0;
+int   i_count_mpd = 0;
+int   i_seq_num = 0;
+int   i_cnt = 0;
+int   i_counter = 0;
+int   i_suc_log_exist = 0;  /** Ver 1.2 **/
+int   i_rej_log_exist = 0;  /** Ver 1.2 **/
+int   i_conf_rec_exist = 0; /** Ver 1.2 **/
+int   i_rej_rec_exist = 0;  /** Ver 1.2 **/
+int   i_seq_num_suc = 0;    /** Ver 1.2 **/
+int   i_seq_num_rej = 0;    /** Ver 1.2 **/
+int   i_count_mpd_rej = 0;  /** Ver 1.2 **/
+int   i_count_mpd_widr = 0; /** Ver 1.2 **/
+int   i_cnt_total = 0;      /** Ver 1.2 **/
+
+int   i_max_rec_per_fetch = MAX_REC;
+
+long  li_len_tobuf;
+long  l_bufferlength;
+long  l_rec_cnt=0;
+long  l_recv_buff_len = 0;  /** Ver 1.2 **/
+
+char  c_ServiceName[33];
+char  c_err_msg[256];
+char  c_trd_dt[12];
+char  c_msg[256];
+char c_clm_mtch_accnt[11];
+char c_xchng_cd[4] = {'\0'};
+char c_req_typ;
+char c_req_id;
+char c_doc_typ[7];
+varchar c_tmp_rowid[19];
+char c_msg_typ = 'G';   /** Change from 'A' to 'G' in Ver 1.2 **/
+
+EXEC SQL INCLUDE "table/lsm_lck_sms_msg_mstr.h";
+EXEC SQL INCLUDE "table/gsd_global_sms_dtls.h";
+
+struct mrgn_plg_user_dtls
+{
+  long   l_rcrd_id;
+  char   c_clnt_nm[100+1];
+  char   c_clm_mtch_accnt[10+1];
+  char   c_email_id1[100+1];
+  char   c_run_dt [12+1];
+  char   c_doc_typ[6+1];
+  long   l_seq_no;
+  char   file_name[51];
+};
+
+struct mrgn_plg_stk_dtls
+{
+  char   c_clm_mtch_accnt[10+1];
+  char   c_stock_name[30+1];
+  char   c_stock_code[6+1];
+  long   l_plg_qnty;
+  double d_haircut;
+  double d_amount;
+  double d_limit;
+  char   c_doc_typ[6+1];
+  char   c_run_dt [12+1];
+  long   l_cwd_rcrd_id;
+  long   l_seq_no;      /** Ver 1.2 **/
+  long   l_rem_qnty;    /** Ver 1.2 **/
+};
+
+
+int fn_upld_tmpMPU(void);
+int fn_upld_tmpMPU_D(void);
+int fn_ins_MPU(void);
+int fn_upld_tmpMPD(void);
+int fn_ins_MPD(void);
+int fn_ins_log_hdr(void);
+int fn_upld_tmpMPD_REJ(void);  /** Ver 1.2 **/
+int fn_upld_tmpMPD_WIDR(void); /** Ver 1.2 **/
+
+void BAT_MRGNPLG_MAIL_SMS (int argc, char* argv[] )
+{
+
+  int   i_trnsctn = 0;
+
+  strcpy(c_ServiceName, "bat_mrgnplg_mail_sms");
+
+  sprintf ( c_msg, "Batch process %s started", argv[0] );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  if(argc != 7)
+  {
+    sprintf(c_msg,"Usage: %s <NFO> <NFO> <NA> <TRD_DT><S-sms/M-mail/A-Both><Mail/SMS_typ[P-Pledge W-Unpledge]>",argv[0]);
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    fn_userlog (c_ServiceName,"Usage : <bat_mrgplg_mail_sms> <NFO> <NFO> <NA> <TRD_DT><S-sms/M-mail/A-Both><Mail/SMS_typ[P-Pledge W-Unpledge]>");
+    return;
+  }
+
+
+  INITBATDBGLVL(argv[0]);
+  strcpy(c_trd_dt,argv[4]);
+
+  c_req_typ= argv[5][0];
+  c_req_id  = argv[6][0];
+
+  fn_userlog (c_ServiceName," c_req_typ :%c:",c_req_typ);
+  fn_userlog (c_ServiceName," c_req_id  :%c:",c_req_id);
+
+  if ( c_req_id == 'P' )  
+  i_sms_id =227;
+  else if (c_req_id == 'D' )
+  i_sms_id =230;
+  else if (c_req_id != 'W' )  /** Added in Ver 1.2 **/
+   fn_userlog (c_ServiceName,"Invalid Request Id. P-Pledge_request/D-Already_block_share");
+
+  fn_userlog (c_ServiceName," i_sms_id :%d:",i_sms_id);
+
+/**** Ver 1.2 Starts ****/
+
+  if ( c_req_id == 'P' )
+  {
+      i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+
+      if ( i_trnsctn == -1 )
+      {
+        fn_errlog(c_ServiceName,"S31005",LIBMSG,c_err_msg);
+        return;
+      }
+
+      EXEC SQL
+      SELECT COUNT(1)
+      INTO   :i_suc_log_exist  
+      FROM   TMP_MRGPLG_MAIL_LOG
+      WHERE  MML_DOC_TYP = 'PLGSUC'
+      AND    TRUNC(MML_DATE) = :c_trd_dt;
+
+      if( SQLCODE != 0 )
+      {
+        fn_errlog(c_ServiceName,"S31010",SQLMSG,c_err_msg );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        return;
+      }
+
+      EXEC SQL
+      SELECT COUNT(1)
+      INTO   :i_rej_log_exist
+      FROM   TMP_MRGPLG_MAIL_LOG
+      WHERE  MML_DOC_TYP = 'PLGREJ'
+      AND    TRUNC(MML_DATE) = :c_trd_dt;
+
+      if( SQLCODE != 0 )
+      {
+        fn_errlog(c_ServiceName,"S31015",SQLMSG,c_err_msg );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        return;
+      }
+
+      if ( i_suc_log_exist < 1 || i_rej_log_exist < 1)
+      {
+        EXEC SQL
+        DELETE FROM TMP_POD_PLG_ORDR_DTLS WHERE ( trunc(POD_INS_DT) < :c_trd_dt or POD_SND_STTS ='N');        
+          
+        if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+        {
+          fn_errlog(c_ServiceName,"S31020",SQLMSG,c_err_msg );
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          return;
+        }
+
+      }
+ 
+      EXEC SQL    
+      INSERT INTO TMP_POD_PLG_ORDR_DTLS
+      (
+        POD_ORDR_NO,
+        POD_STCK_CD,
+        POD_ORDR_QTY,
+        POD_ORDR_DT,
+        POD_HAIRCUT,
+        POD_ORDR_VL,
+        POD_ISIN_NO,
+        POD_DP_CLNT_ACCNT,
+        POD_DP_ACCNT,
+        POD_CLNT_MTCH_ACCNT,
+        POD_PLG_REV_TYP,
+        POD_ORDR_STTS,
+        POD_CONF_QTY,
+        POD_RJCT_QTY,
+        POD_RMRKS,
+        POD_BP_ID,
+        POD_CHANNEL,
+        POD_PRCSD_QTY,
+        POD_INS_DT,    
+        POD_SND_STTS  
+      )
+      SELECT 
+      POD_ORDR_NO,
+      POD_STCK_CD,
+      POD_ORDR_QTY,
+      POD_ORDR_DT,
+      POD_HAIRCUT,
+      POD_ORDR_VL,
+      POD_ISIN_NO,
+      POD_DP_CLNT_ACCNT,
+      POD_DP_ACCNT,
+      POD_CLNT_MTCH_ACCNT,
+      POD_PLG_REV_TYP,
+      POD_ORDR_STTS,
+      POD_CONF_QTY,
+      POD_RJCT_QTY,
+      POD_RMRKS,
+      POD_BP_ID,
+      POD_CHANNEL,
+      POD_PRCSD_QTY,
+      :c_trd_dt,    
+      'N'
+      FROM   POD_PLG_ORDR_DTLS,PTD_TIFP_DTLS
+      WHERE  POD_ORDR_STTS   in ('C','J')
+      AND    POD_PLG_REV_TYP = 'P'
+      AND    PTD_PLG_REV_TYP = 'P'
+      AND    TRUNC(PTD_TIFP_RUN_DT) = :c_trd_dt
+      AND    POD_STCK_CD = PTD_STCK_CD
+      AND    POD_ORDR_NO = PTD_POD_REF_NO
+      AND    POD_CLNT_MTCH_ACCNT=PTD_CLM_MTCH_ACCNT
+      AND    POD_ORDR_NO NOT in ( select POD_ORDR_NO from TMP_POD_PLG_ORDR_DTLS );
+
+      if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_errlog(c_ServiceName,"S31025",SQLMSG,c_err_msg );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        return;
+      }
+      else if ( SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog (c_ServiceName,"NO records found");
+        return;
+      }
+
+      if ( tpcommit(0) == -1 )
+      {
+         fn_errlog(c_ServiceName, "S31030", TPMSG, c_err_msg );
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         return;
+      }
+  }
+
+/***** Ver 1.2 Ends *****/
+  if (c_req_typ == 'S' || c_req_typ == 'A' ) /** c_req_typ == 'A' added in Ver 1.2 **/
+  {
+
+    FBFR32* ptr_fml_Sendbuffer;
+    FBFR32* ptr_fml_Recbuffer;  /** Ver 1.2 **/
+ 
+    EXEC SQL BEGIN DECLARE SECTION;
+     varchar v_mbl_no[11];
+    EXEC SQL END DECLARE SECTION;
+
+    i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog(c_ServiceName,"S31035",LIBMSG,c_err_msg);
+      return;
+    }
+
+    EXEC SQL
+    DELETE FROM TMP_MRGPLG_SMS_DTLS; 
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    {
+      fn_userlog(c_ServiceName,"Error in TMP Insert.");
+      fn_errlog(c_ServiceName,"S31040",SQLMSG,c_err_msg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+
+    fn_userlog (c_ServiceName,"select Records..");
+
+    if ( c_req_id == 'P' )
+    {
+       
+       EXEC SQL
+       INSERT INTO TMP_MRGPLG_SMS_DTLS
+       (
+         TMP_USR_ID   , 
+         TMP_MATCH_ID , 
+         TMP_DEP_ID   ,
+         TMP_APP_ID   ,
+         TMP_MOBILE_NO, 
+         TMP_SMS_TXT  
+       )
+       (
+       SELECT  UAC_USR_ID,
+               UAC_CLM_MTCH_ACCNT,
+               LSM_DEPT_ID,
+               LSM_APP_ID,
+               IAD_MOBILE_10DGT,
+               REPLACE (REPLACE (REPLACE (LSM_MSG_TXT,'STCK_CODE',stk_cd), 'NUM',Count), 'QTY',qnty)
+       FROM    UAC_USR_ACCNTS,
+               IAD_INFO_ADDRESS_DTLS,
+               ICD_INFO_CLIENT_DTLS,
+               LSM_LCK_SMS_MSG_MSTR,
+               ( SELECT Count,
+                       Match_id,
+                       trim(POD_STCK_CD) stk_cd,
+                       0 qnty
+                 FROM  ( SELECT min(POD.POD_ORDR_NO) ORD_NO,Match_id,NUM-1 Count
+                         FROM   ( SELECT count(distinct POD_STCK_CD) NUM,
+                                         POD_CLNT_MTCH_ACCNT         Match_id
+                                  FROM   TMP_POD_PLG_ORDR_DTLS
+                                  WHERE  POD_ORDR_STTS   = 'C'
+                                  AND    POD_PLG_REV_TYP = 'P'
+                                  AND    POD_SND_STTS    = 'N'
+                                  group by POD_CLNT_MTCH_ACCNT
+                                  having count(distinct POD_STCK_CD ) > 1
+                                 ),
+                         TMP_POD_PLG_ORDR_DTLS POD
+                         WHERE Match_id = POD.POD_CLNT_MTCH_ACCNT
+                         AND   POD.POD_ORDR_STTS   = 'C'
+                         AND   POD.POD_PLG_REV_TYP = 'P'
+                         AND   POD.POD_SND_STTS    = 'N'
+                         group by NUM-1,Match_id
+                        ),
+                        TMP_POD_PLG_ORDR_DTLS P
+                 WHERE ORD_NO =P.POD_ORDR_NO
+                 AND   P.POD_SND_STTS ='N'
+                 UNION ALL
+                 SELECT NUM-1 Count,
+                        Match_id,
+                        trim(POD.POD_STCK_CD) stk_cd,
+                        sum(POD.POD_ORDR_QTY) qnty
+                 FROM   ( SELECT count(distinct(POD_STCK_CD)) NUM,
+                                 POD_CLNT_MTCH_ACCNT          Match_id
+                          FROM   TMP_POD_PLG_ORDR_DTLS
+                          WHERE  POD_ORDR_STTS   = 'C'
+                          AND   POD_PLG_REV_TYP = 'P'
+                          AND    POD_SND_STTS ='N'
+                          group by POD_CLNT_MTCH_ACCNT
+                          having count(distinct(POD_STCK_CD)) < 2
+                        ),
+                        TMP_POD_PLG_ORDR_DTLS POD
+                 WHERE  Match_id = POD.POD_CLNT_MTCH_ACCNT
+                 AND    POD.POD_ORDR_STTS   = 'C'
+                 AND    POD.POD_PLG_REV_TYP = 'P'
+                 AND    POD.POD_SND_STTS ='N'
+                 group by POD.POD_STCK_CD,Match_id,NUM-1
+               )
+       WHERE   UAC_USR_ID    = ICD_USER_ID
+       AND     ICD_SERIAL_NO = IAD_SERIAL_NO
+       AND     IAD_ADDRESS_TYPE = 'APPLICANT_CORR'
+       AND     IAD_MOBILE_10DGT IS NOT NULL
+       AND     LSM_SMS_ID = (Decode(Count,0,237,227))
+       AND     UAC_CLM_MTCH_ACCNT = Match_id
+       );
+
+/********* Comment Starts Ver 1.2 ****************
+               ( SELECT Count, 
+                        Match_id,
+                        trim(PTD_STCK_CD) stk_cd, 
+                        0 qnty 
+                 FROM  ( SELECT min(POD.POD_ORDR_NO) ORD_NO,Match_id,NUM-1 Count 
+                         FROM   ( SELECT count(distinct POD_STCK_CD) NUM,
+                                         POD_CLNT_MTCH_ACCNT         Match_id
+                                  FROM   POD_PLG_ORDR_DTLS,
+                                  PTD_TIFP_DTLS  
+                                  WHERE  POD_ORDR_STTS   = 'C' 
+                                  AND    POD_PLG_REV_TYP = 'P' 
+                                  AND    PTD_PLG_REV_TYP = 'P'  
+                                  AND    TRUNC(PTD_TIFP_RUN_DT) = :c_trd_dt 
+                                  AND    POD_STCK_CD = PTD_STCK_CD 
+                                  AND    POD_ORDR_NO = PTD_POD_REF_NO
+                                  AND    POD_CLNT_MTCH_ACCNT=PTD_CLM_MTCH_ACCNT 
+                                  group by POD_CLNT_MTCH_ACCNT
+                                  having count(distinct POD_STCK_CD ) > 1  
+                                 ),
+                 	       POD_PLG_ORDR_DTLS POD,
+                 	       PTD_TIFP_DTLS PTD
+                         WHERE Match_id = POD.POD_CLNT_MTCH_ACCNT
+                         AND   POD.POD_ORDR_STTS   = 'C' 
+                         AND   POD.POD_PLG_REV_TYP = 'P' 
+                         AND   PTD.PTD_PLG_REV_TYP = 'P'  
+                         AND   TRUNC(PTD.PTD_TIFP_RUN_DT) = :c_trd_dt
+                         AND   POD.POD_STCK_CD = PTD.PTD_STCK_CD 
+                         AND   POD.POD_ORDR_NO = PTD.PTD_POD_REF_NO
+                         AND   POD.POD_CLNT_MTCH_ACCNT=PTD.PTD_CLM_MTCH_ACCNT 
+                         group by NUM-1,Match_id
+                        ),
+                       PTD_TIFP_DTLS P
+                 WHERE ORD_NO =P.PTD_POD_REF_NO
+                 AND   TRUNC(P.PTD_TIFP_RUN_DT) = :c_trd_dt
+                 UNION ALL
+                 SELECT NUM-1 Count,
+                        Match_id,
+                        trim(POD.POD_STCK_CD) stk_cd,
+                        sum(POD.POD_ORDR_QTY) qnty 
+                 FROM   ( SELECT count(distinct(POD_STCK_CD)) NUM,
+                                 POD_CLNT_MTCH_ACCNT          Match_id,
+                          FROM   POD_PLG_ORDR_DTLS,PTD_TIFP_DTLS  
+                          WHERE  POD_ORDR_STTS   = 'C' 
+                          AND   POD_PLG_REV_TYP = 'P' 
+                          AND   PTD_PLG_REV_TYP = 'P' 
+                          AND   TRUNC(PTD_TIFP_RUN_DT) = :c_trd_dt
+                          AND   POD_STCK_CD = PTD_STCK_CD 
+                          AND   POD_ORDR_NO = PTD_POD_REF_NO 
+                          AND   POD_CLNT_MTCH_ACCNT=PTD_CLM_MTCH_ACCNT 
+                          group by POD_CLNT_MTCH_ACCNT
+                          having count(distinct(POD_STCK_CD)) < 2
+                        ),
+                        POD_PLG_ORDR_DTLS POD,
+                        PTD_TIFP_DTLS PTD
+                 WHERE  Match_id = POD.POD_CLNT_MTCH_ACCNT
+                 AND    POD.POD_ORDR_STTS   = 'C' 
+                 AND    POD.POD_PLG_REV_TYP = 'P' 
+                 AND    PTD.PTD_PLG_REV_TYP = 'P'
+                 AND    TRUNC(PTD.PTD_TIFP_RUN_DT) = :c_trd_dt
+                 AND    POD.POD_STCK_CD = PTD.PTD_STCK_CD 
+                 AND    POD.POD_ORDR_NO = PTD.PTD_POD_REF_NO  
+                 AND    POD.POD_CLNT_MTCH_ACCNT=PTD.PTD_CLM_MTCH_ACCNT 
+                 group by POD.POD_STCK_CD,Match_id,NUM-1 
+               ) A
+       WHERE   UAC_USR_ID    = ICD_USER_ID
+       AND     ICD_SERIAL_NO = IAD_SERIAL_NO
+       AND     IAD_ADDRESS_TYPE = 'APPLICANT_CORR'
+       AND     IAD_MOBILE_10DGT IS NOT NULL
+       AND     LSM_SMS_ID = (Decode(Count,0,237,227))
+       AND     UAC_CLM_MTCH_ACCNT = Match_id
+       );
+****************** Comment End Ver 1.2 *******************/
+    }
+    else if ( c_req_id == 'D' )
+    {
+
+           fn_userlog(c_ServiceName,"Inser recort for block model");
+
+       EXEC SQL
+       INSERT INTO TMP_MRGPLG_SMS_DTLS
+       (
+         TMP_USR_ID,
+         TMP_MATCH_ID,
+         TMP_DEP_ID,
+         TMP_APP_ID,
+         TMP_MOBILE_NO,
+         TMP_SMS_TXT
+       )
+       (
+         SELECT  DISTINCT UAC_USR_ID,
+                 UAC_CLM_MTCH_ACCNT, 
+                 LSM_DEPT_ID,
+                 LSM_APP_ID,
+                 IAD_MOBILE_10DGT,
+                 LSM_MSG_TXT
+         FROM    UAC_USR_ACCNTS,
+                 IAD_INFO_ADDRESS_DTLS,
+                 ICD_INFO_CLIENT_DTLS,
+                 LSM_LCK_SMS_MSG_MSTR,
+                 DBD_DP_BLCK_DTLS
+         WHERE   DBD_PLG_MODE ='B'
+         AND     DBD_SAM_BLCKD_QTY >0
+         AND     UAC_USR_ID    = ICD_USER_ID
+         AND     ICD_SERIAL_NO = IAD_SERIAL_NO
+         AND     IAD_ADDRESS_TYPE = 'APPLICANT_CORR'
+         AND     IAD_MOBILE_10DGT IS NOT NULL
+         AND     LSM_SMS_ID = :i_sms_id
+         AND     UAC_CLM_MTCH_ACCNT = DBD_CLM_MTCH_ACCNT
+       );
+
+    }
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in TMP Insert.");
+      fn_errlog(c_ServiceName,"S31045",SQLMSG,c_err_msg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+
+    if ( tpcommit(0) == -1 )
+    {
+       fn_errlog(c_ServiceName, "S31050", TPMSG, c_err_msg );
+       fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       return;
+    }
+
+    EXEC SQL
+    SELECT COUNT(1)
+    INTO   :l_rec_cnt
+    FROM TMP_MRGPLG_SMS_DTLS;
+    if(SQLCODE != 0 )
+    {
+       fn_userlog(c_ServiceName,"Error in Selecting Data.");
+       fn_errlog(c_ServiceName,"S31055",SQLMSG, c_err_msg);
+       return ;
+    }
+
+    if( l_rec_cnt == 0 )
+    {
+      fn_userlog(c_ServiceName, "No records for SMS...");
+      return;
+    } 
+     
+    for (i = 0; i < l_rec_cnt; i++)
+    {
+
+      MEMSET(sql_lsm_dept_id);
+      MEMSET(sql_lsm_app_id);
+      MEMSET(v_mbl_no);
+      MEMSET(sql_lsm_msg_txt);
+      MEMSET(sql_gsd_usr_id);
+      MEMSET(sql_gsd_cstm_id);
+      MEMSET(sql_gsd_msg_hdr);
+      MEMSET(sql_gsd_bus_user_grp);
+      MEMSET(c_tmp_rowid);
+     
+      EXEC SQL
+      SELECT TMP_DEP_ID,
+             TMP_APP_ID,
+             TMP_MOBILE_NO,
+             TMP_SMS_TXT,             
+             TMP_USR_ID,
+             TMP_MATCH_ID,
+             rowid
+      INTO   :sql_lsm_dept_id,
+             :sql_lsm_app_id,
+             :v_mbl_no,
+             :sql_lsm_msg_txt,
+             :sql_gsd_usr_id,
+             :sql_gsd_cstm_id,
+             :c_tmp_rowid 
+      FROM   TMP_MRGPLG_SMS_DTLS
+      WHERE  ROWNUM < 2;
+
+      if(SQLCODE != 0 )
+      {
+         fn_userlog(c_ServiceName,"Error in Selecting Data.");
+         fn_errlog(c_ServiceName,"S31060",SQLMSG, c_err_msg);
+         return ;
+
+      }
+
+
+      
+      SETLEN(sql_lsm_msg_txt);
+      SETLEN(c_tmp_rowid);
+
+      SETNULL(sql_lsm_app_id);
+      SETNULL(sql_lsm_dept_id);
+      SETNULL(v_mbl_no);
+      SETNULL(sql_lsm_msg_txt);
+      SETNULL(sql_gsd_usr_id);
+      SETNULL(sql_gsd_cstm_id);
+      SETNULL(c_tmp_rowid);
+
+      strcpy(sql_gsd_msg_hdr.arr,"PLEDGE");
+      strcpy(sql_gsd_bus_user_grp.arr,"NA");
+
+      SETLEN(sql_gsd_msg_hdr);
+      SETLEN(sql_gsd_bus_user_grp);
+
+      SETNULL(sql_gsd_msg_hdr);
+      SETNULL(sql_gsd_bus_user_grp);
+
+      if(DEBUG_MSG_LVL_5)
+      {
+        fn_userlog(c_ServiceName,"Before adding in ptr_fml_Sendbuffer");
+        fn_userlog(c_ServiceName,"Application is :%s:",sql_lsm_app_id.arr);
+        fn_userlog(c_ServiceName,"Department is  :%s:",sql_lsm_dept_id.arr);
+        fn_userlog(c_ServiceName,"Mobile No is   :%s:",v_mbl_no.arr);
+/**        fn_userlog(c_ServiceName,"Message string :%s:",sql_lsm_msg_txt.arr); **/
+        fn_userlog(c_ServiceName,"user id        :%s:",sql_gsd_usr_id.arr);
+        fn_userlog(c_ServiceName,"Match account  :%s:",sql_gsd_cstm_id.arr);
+        fn_userlog(c_ServiceName,"Message Header :%s:",sql_gsd_msg_hdr.arr);
+        fn_userlog(c_ServiceName,"User Group     :%s:",sql_gsd_bus_user_grp.arr);
+      }
+
+      ptr_fml_Sendbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+      if(ptr_fml_Sendbuffer == NULL)
+      {
+        return ;
+      }
+      ptr_fml_Recbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+      if(ptr_fml_Recbuffer == NULL)
+      {
+        tpfree((char *) ptr_fml_Sendbuffer);
+        return ;
+      }
+
+      i_err[0] = Fadd32(ptr_fml_Sendbuffer,FML_ARD_APPLCTN_RFRNC,(char *)sql_lsm_app_id.arr,0);
+      i_err[1] = Fadd32(ptr_fml_Sendbuffer,FML_ORD_DP_ID,(char *)sql_lsm_dept_id.arr,0);
+      i_err[2] = Fadd32(ptr_fml_Sendbuffer,FML_USR_MBL_NMBRS,(char *)v_mbl_no.arr,0);
+      i_err[3] = Fadd32(ptr_fml_Sendbuffer,FML_SYS_MSG,(char *)sql_lsm_msg_txt.arr,0);
+      i_err[4] = Fadd32(ptr_fml_Sendbuffer,FML_USR_ID, (char *)sql_gsd_usr_id.arr, 0);
+      i_err[5] = Fadd32(ptr_fml_Sendbuffer,FML_MATCH_ACCNT , (char *)sql_gsd_cstm_id.arr, 0);
+      i_err[6] = Fadd32(ptr_fml_Sendbuffer,FML_MKT_MSG, (char *)sql_gsd_msg_hdr.arr, 0);
+      i_err[7] = Fadd32(ptr_fml_Sendbuffer,FML_SEC_GRP, (char *)sql_gsd_bus_user_grp.arr, 0);
+
+      for(i_counter = 0; i_counter < 8; i_counter++)
+      {
+        if(i_err[i_counter] == -1 )
+          {
+            fn_userlog(c_ServiceName,"i_counter :%d:",i_counter);
+            fn_errlog(c_ServiceName, "S31065",SQLMSG, c_err_msg);     
+            tpfree((char *) ptr_fml_Sendbuffer);
+            return ;
+
+          }
+      }
+
+      if( fn_snd_mymsg_sms_notfcn(c_ServiceName,&ptr_fml_Sendbuffer,sql_gsd_usr_id.arr,DEF_SSSN,
+                                  sql_gsd_cstm_id.arr,"PLEDGE",c_msg_typ,c_err_msg) != 0)
+      {
+        fn_userlog(c_ServiceName,"Error while calling fn_snd_sms_notification");
+        fn_errlog(c_ServiceName, "S31070",LIBMSG, c_err_msg);
+        tpfree((char *)ptr_fml_Sendbuffer);
+        return ;
+      }
+
+      /** Ver 1.2 Starts **/
+
+      fn_userlog(c_ServiceName,"Calling service SVC_SND_SMSALRT ........");
+ 
+      if( tpcall("SVC_SND_SMSALRT",(char *)ptr_fml_Sendbuffer,0,(char **)&ptr_fml_Recbuffer,&l_recv_buff_len,TPNOTRAN) != 0 )
+      {
+        fn_userlog(c_ServiceName,"Error while calling SVC_SND_SMSALRT ");
+        fn_errlog(c_ServiceName, "S31075",LIBMSG, c_err_msg);
+
+/**        tpfree((char *)ptr_fml_Sendbuffer);
+        return ;                *** Testing ***********/
+      }
+
+      /** Ver 1.2 Ends **/
+
+       i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+
+       if ( i_trnsctn == -1 )
+       {
+         fn_errlog(c_ServiceName,"S31080",LIBMSG,c_err_msg);
+         return;
+       }
+
+       EXEC SQL
+       DELETE FROM TMP_MRGPLG_SMS_DTLS
+       WHERE  rowid = :c_tmp_rowid;
+
+      if(SQLCODE != 0 )
+      {
+         fn_userlog(c_ServiceName,"Error in Selecting Data.");
+         fn_errlog(c_ServiceName,"S31085",SQLMSG, c_err_msg);
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         return ;
+      }
+
+       if ( tpcommit(0) == -1 )
+       {
+         fn_errlog(c_ServiceName, "S31090", TPMSG, c_err_msg );
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         return;
+       }
+    }
+      tpfree((char *)ptr_fml_Sendbuffer);
+     
+  }
+  if (c_req_typ == 'M' || c_req_typ == 'A')
+  {
+
+     EXEC SQL
+     TRUNCATE  TABLE TMP_MRGN_PLG_USER;
+
+     if(SQLCODE != 0)
+     {
+       fn_errlog(c_ServiceName, "S31095", SQLMSG, c_err_msg );
+       return ;
+     }
+    
+     EXEC SQL
+     TRUNCATE  TABLE TMP_MRGN_PLG_STK_DTLS;
+
+     if(SQLCODE != 0)
+     {
+       fn_errlog(c_ServiceName, "S31100", SQLMSG, c_err_msg );
+       return ;
+     }
+ 
+     if ( c_req_id == 'P' )
+     {
+       i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+       if ( i_trnsctn == -1 )
+       {
+         fn_errlog(c_ServiceName,"S31105",LIBMSG,c_err_msg);
+         return;
+       }
+
+       /****** Ver 1.2 Starts ******/
+        EXEC SQL
+        select count(1)
+        INTO   :i_conf_rec_exist
+        from   TMP_POD_PLG_ORDR_DTLS
+        WHERE  POD_ORDR_STTS = 'C'
+        AND    trunc(POD_INS_DT) = :c_trd_dt;
+
+        if(SQLCODE != 0)
+        {
+          fn_errlog(c_ServiceName, "S31110", SQLMSG, c_err_msg );
+          return ;
+        }
+        EXEC SQL
+        select count(1)
+        INTO   :i_rej_rec_exist
+        from   TMP_POD_PLG_ORDR_DTLS
+        WHERE  POD_ORDR_STTS = 'J'
+        AND    trunc(POD_INS_DT) = :c_trd_dt;
+
+        if(SQLCODE != 0)
+        {
+          fn_errlog(c_ServiceName, "S31115", SQLMSG, c_err_msg );
+          return ;
+        }
+
+
+        if ( i_conf_rec_exist > 0 && i_suc_log_exist < 1)
+        { 
+          EXEC  SQL
+           EXECUTE
+            BEGIN
+             RESET_SEQUENCE('SEQ_MRGN_PLGSUC');
+            END;
+          END-EXEC;
+
+          EXEC SQL
+          INSERT INTO TMP_MRGPLG_MAIL_LOG
+          (
+            MML_DOC_TYP,
+            MML_DATE
+          )
+          VALUES
+          (
+            'PLGSUC',
+            SYSDATE
+          );
+
+          if(SQLCODE != 0)
+          {
+            fn_errlog(c_ServiceName, "S31120", SQLMSG, c_err_msg );
+            return ;
+          }
+        }
+
+        if ( i_rej_rec_exist > 0 && i_rej_log_exist < 1)
+        {
+
+          EXEC  SQL
+           EXECUTE
+            BEGIN
+             RESET_SEQUENCE('SEQ_MRGN_PLGREJ');
+            END;
+         END-EXEC;
+
+          EXEC SQL
+          INSERT INTO TMP_MRGPLG_MAIL_LOG
+          (
+            MML_DOC_TYP,
+            MML_DATE
+          )
+          VALUES
+          (
+            'PLGREJ',
+            SYSDATE
+          );
+
+          if(SQLCODE != 0)
+          {
+            fn_errlog(c_ServiceName, "S31125", SQLMSG, c_err_msg );
+            return ;
+          }
+        }       
+
+
+       if ( i_conf_rec_exist > 0 )
+       {
+
+         EXEC SQL
+         SELECT SEQ_MRGN_PLGSUC.NEXTVAL
+         INTO    :i_seq_num_suc
+         FROM    dual;
+
+         if(SQLCODE != 0)
+         {
+           fn_errlog(c_ServiceName, "S31130", SQLMSG, c_err_msg );
+           return ;
+         }
+
+         i_ret_val = fn_upld_tmpMPD();
+       }
+
+       if ( i_rej_rec_exist > 0 )
+       {
+
+         EXEC SQL
+         SELECT SEQ_MRGN_PLGREJ.NEXTVAL
+         INTO    i_seq_num_rej
+         FROM    dual;
+
+         if(SQLCODE != 0)
+         {
+           fn_errlog(c_ServiceName, "S31135", SQLMSG, c_err_msg );
+           return ;
+         }
+
+         i_ret_val = fn_upld_tmpMPD_REJ();
+       }
+       
+       /*** Ver 1.2 Ends ***/
+
+       if(i_ret_val == -1)
+       {
+         fn_errlog(c_ServiceName, "S31140",SQLMSG, c_err_msg);
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         return;
+       }
+
+        if(DEBUG_MSG_LVL_0)
+       {
+         fn_userlog(c_ServiceName,"Data In The Temporary Table Uploaded Successfully");
+       }
+
+       if ( tpcommit(0) == -1 )
+       {
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         fn_errlog(c_ServiceName, "S31145", TPMSG, c_err_msg );
+         return;
+       }
+
+     }
+     
+     /*** Ver 1.2 Starts ***/
+     else if ( c_req_id == 'W' )
+     {
+       i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+       if ( i_trnsctn == -1 )
+       {
+         fn_errlog(c_ServiceName,"S31150",LIBMSG,c_err_msg);
+         return;
+       }
+
+       i_ret_val = fn_upld_tmpMPD_WIDR();
+  
+       if(DEBUG_MSG_LVL_0)
+       {
+         fn_userlog(c_ServiceName,"Data In The Temporary Table Uploaded Successfully");
+       }
+
+       if ( tpcommit(0) == -1 )
+       {
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         fn_errlog(c_ServiceName, "S31155", TPMSG, c_err_msg );
+         return;
+       }
+     } 
+     /*** Ver 1.2 Ends ***/
+
+     i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+
+     if ( i_trnsctn == -1 )
+     {
+       fn_errlog(c_ServiceName,"S31160",LIBMSG,c_err_msg);
+       return;
+     }
+
+     if ( c_req_id == 'W' )  /** Change from D to W in Ver 1.2 **/
+     i_ret_val = fn_upld_tmpMPU_D();
+     else
+     i_ret_val = fn_upld_tmpMPU();
+    
+
+     if(i_ret_val == -1)
+     {
+       fn_errlog(c_ServiceName, "S31165",SQLMSG, c_err_msg);
+       fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       return;
+     }
+
+     if(DEBUG_MSG_LVL_0)
+     {
+       fn_userlog(c_ServiceName,"Data In The Temporary Table Uploaded Successfully");
+     }
+
+     if ( tpcommit(0) == -1 )
+     {
+       fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       fn_errlog(c_ServiceName, "S31170", TPMSG, c_err_msg );
+       return;
+     }
+
+     if( i_count_mpu > 0 )
+     {
+       ptr_fml_Rbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+       if (ptr_fml_Rbuffer == NULL)
+       {
+         fn_errlog(c_ServiceName, "S31175", TPMSG,c_err_msg );
+         fn_userlog(c_ServiceName,"Click Upload:Unable to Allocate Receive Memory ..");
+         return ;
+       }
+
+       i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+       if ( i_trnsctn == -1 )
+       {
+         fn_errlog(c_ServiceName,"S31180",LIBMSG,c_err_msg);
+         return;
+       }
+
+       i_ret_val = fn_ins_MPU();
+  
+       if(i_ret_val == -1)
+       {
+         fn_errlog(c_ServiceName, "S31185",LIBMSG,c_err_msg );
+         fn_aborttran( c_ServiceName, i_trnsctn,c_err_msg  );
+         fn_dstry_rs (ptr_fml_Sbuffer );
+         fn_dstry_rs (ptr_fml_Rbuffer );
+         return;
+       }
+
+       if(DEBUG_MSG_LVL_0)
+       {
+         fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",sqlca.sqlerrd[2]);
+       }
+
+       if(DEBUG_MSG_LVL_0)
+       {
+         fn_userlog(c_ServiceName,"After Successful Call To Function fn_ins_MPU");
+       }
+
+       /***** Ver 1.2 Starts *****/
+
+       i_ret_val = fn_ins_MPD();
+ 
+       if(i_ret_val == -1)
+       {
+         fn_errlog(c_ServiceName, "S31190",LIBMSG,c_err_msg );
+         fn_aborttran( c_ServiceName, i_trnsctn,c_err_msg  );
+         fn_dstry_rs (ptr_fml_Sbuffer );
+         fn_dstry_rs (ptr_fml_Rbuffer );
+         return;
+       }
+
+       if(DEBUG_MSG_LVL_0)
+       {
+         fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",sqlca.sqlerrd[2]);
+       }
+
+       if(DEBUG_MSG_LVL_0)
+       {
+         fn_userlog(c_ServiceName,"After Successful Call To Function fn_ins_MPD");
+       }
+
+       if ( c_req_id == 'P' )
+       {
+         if ( i_conf_rec_exist > 0 )
+         {
+           strcpy(c_doc_typ,"PLGSUC");
+           i_seq_num = i_seq_num_suc;
+
+           i_ret_val =  fn_ins_log_hdr();
+
+           if(i_ret_val == -1)
+           {
+             fn_aborttran( c_ServiceName, i_trnsctn,c_err_msg  );
+             fn_userlog(c_ServiceName,"Failed to upload FMD");
+             fn_dstry_rs ( ptr_fml_Sbuffer );
+             fn_dstry_rs ( ptr_fml_Rbuffer );
+             return ;
+           }
+         }
+         if ( i_rej_rec_exist > 0 )
+         {
+           strcpy(c_doc_typ,"PLGREJ");
+           i_seq_num = i_seq_num_rej;
+
+           i_ret_val =  fn_ins_log_hdr();
+
+           if(i_ret_val == -1)
+           {
+             fn_aborttran( c_ServiceName, i_trnsctn,c_err_msg  );
+             fn_userlog(c_ServiceName,"Failed to upload FMD");
+             fn_dstry_rs ( ptr_fml_Sbuffer );
+             fn_dstry_rs ( ptr_fml_Rbuffer );
+             return ;
+           }
+         }
+        
+         EXEC SQL
+         UPDATE TMP_POD_PLG_ORDR_DTLS
+         SET    POD_SND_STTS ='Y'
+         WHERE  POD_SND_STTS ='N';
+
+         if(SQLCODE != 0)
+         {
+           fn_errlog(c_ServiceName, "S31195", SQLMSG, c_err_msg );
+           return ;
+         }
+       }
+       else
+       {
+         strcpy(c_doc_typ,"UNPLGS");
+         i_seq_num = 1;
+
+         i_ret_val =  fn_ins_log_hdr();
+
+         if(i_ret_val == -1)
+         {
+           fn_aborttran( c_ServiceName, i_trnsctn,c_err_msg  );
+           fn_userlog(c_ServiceName,"Failed to upload FMD");
+           fn_dstry_rs ( ptr_fml_Sbuffer );
+           fn_dstry_rs ( ptr_fml_Rbuffer );
+           return ;
+         }
+       }
+
+       /***** Ver 1.2 Ends *****/
+
+       if(DEBUG_MSG_LVL_0)
+       {
+         fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",sqlca.sqlerrd[2]);
+       }
+
+       if ( tpcommit(0) == -1 )
+       {
+         fn_aborttran( c_ServiceName, i_trnsctn,c_err_msg  );
+         fn_errlog(c_ServiceName, "S31200", TPMSG,c_err_msg  );
+         fn_dstry_rs ( ptr_fml_Sbuffer );
+         fn_dstry_rs ( ptr_fml_Rbuffer );
+         return;
+       }
+     }
+     else
+     {
+       fn_userlog(c_ServiceName,"No records for Process...");
+       return;
+     }
+  }
+    fn_userlog(c_ServiceName,"Process completed sucessfully");
+    return;  /** Vre 1.2 **/
+}
+
+int fn_upld_tmpMPD()
+{
+
+  EXEC  SQL
+   EXECUTE
+    BEGIN
+     RESET_SEQUENCE('SEQ_MRG_PLGSUC_RECNO');
+    END;
+  END-EXEC;
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"Error in sequence number resetting");
+    fn_errlog(c_ServiceName,"S31205",SQLMSG,c_err_msg);
+    return -1;
+  }
+
+  fn_userlog(c_ServiceName,"uploading in TMP MPD..........");
+
+  EXEC SQL
+   INSERT INTO TMP_MRGN_PLG_STK_DTLS
+   ( MPD_CLM_MTCH_ACCNT, 
+     MPD_STK_NAME, 
+     MPD_STK_CD,             
+     MPD_PLG_QTY,            
+     MPD_HAIRCUT,             
+     MPD_AMOUNT, 
+     MPD_LIMIT, 
+     MPD_DOC_TYP,             
+     MPD_DATE, 
+     MPD_RECORD_ID,
+     MPD_SEQ_NO 
+   )
+   (
+     SELECT POD_CLNT_MTCH_ACCNT,
+            STK_STCK_NM,
+            STK_STCK_CD,
+            Qnty,         
+            STK_PLG_HAIRCUT,
+            DECODE(STK_PLG_HAIRCUT,100,0, limit * (100/(100- STK_PLG_HAIRCUT)) ),  /** Decode Added in Ver 1.1 for Fixing Divide by 0 issue when Haircut is 100 **/
+            limit,
+            'PLGSUC',
+           :c_trd_dt,
+            SEQ_MRG_PLGSUC_RECNO.NEXTVAL,       
+           :i_seq_num_suc  /** Ver 1.2 **/
+     FROM  STK_STK_MSTR,
+ /** Ver 1.2 Starts **/
+           ( SELECT  POD_CLNT_MTCH_ACCNT,
+                     POD_STCK_CD,
+                     SUM(POD_ORDR_QTY) Qnty,
+                     SUM(POD_ORDR_VL) limit                
+             FROM    TMP_POD_PLG_ORDR_DTLS
+             WHERE   POD_ORDR_STTS   = 'C'
+             AND     POD_PLG_REV_TYP = 'P'
+             AND     POD_SND_STTS    = 'N'
+             group by POD_CLNT_MTCH_ACCNT,POD_STCK_CD
+ /** Ver 1.2 Ends **/
+             /********************************************** 
+             FROM    POD_PLG_ORDR_DTLS,PTD_TIFP_DTLS
+             WHERE   POD_ORDR_STTS   = 'C'
+             AND     POD_PLG_REV_TYP = 'P'
+             AND     PTD_PLG_REV_TYP = 'P'
+             AND     TRUNC(PTD_TIFP_RUN_DT) = :c_trd_dt
+             AND     POD_STCK_CD = PTD_STCK_CD
+             AND     POD_ORDR_NO = PTD_POD_REF_NO
+             AND     POD_CLNT_MTCH_ACCNT=PTD_CLM_MTCH_ACCNT
+             group by POD_CLNT_MTCH_ACCNT,POD_STCK_CD
+             ******* Commented in Ver 1.2 ***/
+           )
+     WHERE  trim(STK_STCK_CD) = trim(POD_STCK_CD)
+   );
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in TMP_MPD Upload");
+      fn_errlog(c_ServiceName,"S31210",SQLMSG,c_err_msg );
+      return -1;
+    }
+
+  i_count_mpd = sqlca.sqlerrd[2];
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",i_count_mpd);
+  }
+ return 0;
+}
+
+/*********** Ver 1.2 Ends ***********/
+
+int fn_upld_tmpMPD_REJ()
+{
+
+  EXEC  SQL
+   EXECUTE
+    BEGIN
+     RESET_SEQUENCE('SEQ_MRG_PLGSUC_RECNO');
+    END;
+  END-EXEC;
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"Error in sequence number resetting");
+    fn_errlog(c_ServiceName,"S31215",SQLMSG,c_err_msg);
+    return -1;
+  }
+
+  fn_userlog(c_ServiceName,"uploading in TMP MPD..........");
+
+  EXEC SQL
+   INSERT INTO TMP_MRGN_PLG_STK_DTLS
+   ( MPD_CLM_MTCH_ACCNT,
+     MPD_STK_NAME,
+     MPD_STK_CD,
+     MPD_PLG_QTY,
+     MPD_DOC_TYP,
+     MPD_DATE,
+     MPD_RECORD_ID,
+     MPD_SEQ_NO
+   )
+   (
+     SELECT POD_CLNT_MTCH_ACCNT,
+            STK_STCK_NM,
+            STK_STCK_CD,
+            Qnty,
+            'PLGREJ',
+           :c_trd_dt,
+            SEQ_MRG_PLGSUC_RECNO.NEXTVAL,
+           :i_seq_num_rej
+     FROM  STK_STK_MSTR,
+           ( SELECT  POD_CLNT_MTCH_ACCNT,
+                     POD_STCK_CD,
+                     SUM(POD_ORDR_QTY) Qnty,
+                     SUM(POD_ORDR_VL) limit
+             FROM    TMP_POD_PLG_ORDR_DTLS
+             WHERE   POD_ORDR_STTS   = 'J'
+             AND     POD_PLG_REV_TYP = 'P'
+             AND     POD_SND_STTS    = 'N'
+             group by POD_CLNT_MTCH_ACCNT,POD_STCK_CD
+           )
+     WHERE  trim(STK_STCK_CD) = trim(POD_STCK_CD)
+   );
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in TMP_MPD Upload for reject");
+      fn_errlog(c_ServiceName,"S31220",SQLMSG,c_err_msg );
+      return -1;
+    }
+
+  i_count_mpd_rej = sqlca.sqlerrd[2];
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",i_count_mpd_rej);
+  }
+ return 0;
+}
+
+fn_upld_tmpMPD_WIDR()
+{
+
+  EXEC  SQL
+   EXECUTE
+    BEGIN
+     RESET_SEQUENCE('SEQ_MRG_PLGSUC_RECNO');
+    END;
+  END-EXEC;
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"Error in sequence number resetting");
+    fn_errlog(c_ServiceName,"S31225",SQLMSG,c_err_msg);
+    return -1;
+  }
+
+  fn_userlog(c_ServiceName,"uploading in TMP MPD..........");
+
+  EXEC SQL
+   INSERT INTO TMP_MRGN_PLG_STK_DTLS
+   ( MPD_CLM_MTCH_ACCNT,
+     MPD_STK_NAME,
+     MPD_STK_CD,
+     MPD_PLG_QTY,
+     MPD_REM_QTY,
+     MPD_DOC_TYP,
+     MPD_DATE,
+     MPD_RECORD_ID,
+     MPD_SEQ_NO
+   )
+   (
+     SELECT POD_CLNT_MTCH_ACCNT,
+            STK_STCK_NM,
+            STK_STCK_CD,
+            Qnty,
+            DBD_SAM_BLCKD_QTY,
+            'UNPLGS',
+            :c_trd_dt,
+            SEQ_MRG_PLGSUC_RECNO.NEXTVAL,
+            1 
+     FROM  STK_STK_MSTR,DBD_DP_BLCK_DTLS,
+           ( SELECT  POD_CLNT_MTCH_ACCNT,
+                     POD_STCK_CD,
+                     SUM(POD_ORDR_QTY) Qnty,
+                     SUM(POD_ORDR_VL) limit
+             FROM    POD_PLG_ORDR_DTLS,PTD_TIFP_DTLS
+             WHERE   POD_ORDR_STTS   = 'C'
+             AND     POD_PLG_REV_TYP = 'W'
+             AND     TRUNC(PTD_TIFP_RUN_DT) = :c_trd_dt
+             AND     POD_STCK_CD = PTD_STCK_CD
+             AND     POD_ORDR_NO = PTD_POD_REF_NO
+             AND     POD_CLNT_MTCH_ACCNT=PTD_CLM_MTCH_ACCNT
+             group by POD_CLNT_MTCH_ACCNT,POD_STCK_CD
+           )
+     WHERE  trim(STK_STCK_CD) = trim(POD_STCK_CD)
+     AND    trim(POD_STCK_CD) = trim(DBD_STCK_CD)
+     AND    POD_CLNT_MTCH_ACCNT = DBD_CLM_MTCH_ACCNT
+   );
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in TMP_MPD Upload for reject");
+      fn_errlog(c_ServiceName,"S31230",SQLMSG,c_err_msg );
+      return -1;
+    }
+
+  i_count_mpd_widr = sqlca.sqlerrd[2];
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",i_count_mpd_widr);
+  }
+ return 0;
+}
+/*********** Ver 1.2 Ends ***********/
+
+int fn_upld_tmpMPU()
+{
+
+  EXEC  SQL
+    EXECUTE
+      BEGIN
+        RESET_SEQUENCE('SEQ_MRG_PLG_RECNO');
+      END;
+  END-EXEC;
+
+  if(SQLCODE != 0)
+  {
+      fn_userlog(c_ServiceName,"Error in sequence number resetting");
+      fn_errlog(c_ServiceName,"S31235",SQLMSG,c_err_msg);
+      return -1;
+  }
+
+  EXEC  SQL
+    EXECUTE
+      BEGIN
+        RESET_SEQUENCE('SEQ_MRG_PLG_RECNO1');
+      END;
+  END-EXEC;
+
+  if(SQLCODE != 0)
+  {
+      fn_userlog(c_ServiceName,"Error in sequence number resetting");
+      fn_errlog(c_ServiceName,"S31240",SQLMSG,c_err_msg);
+      return -1;
+  }
+
+  EXEC  SQL
+    EXECUTE
+      BEGIN
+        RESET_SEQUENCE('SEQ_MRG_PLG_RECNO2');
+      END;
+  END-EXEC;
+
+  if(SQLCODE != 0)
+  {
+      fn_userlog(c_ServiceName,"Error in sequence number resetting");
+      fn_errlog(c_ServiceName,"S31245",SQLMSG,c_err_msg);
+      return -1;
+  }
+
+  fn_userlog(c_ServiceName,"uploading in TMP MPU..........");
+
+  EXEC SQL
+    INSERT INTO
+        TMP_MRGN_PLG_USER
+        (
+          MPU_RECORD_NO,
+          MPU_USER_NM,
+          MPU_CLM_MTCH_ACCNT,
+          MPU_EMAIL_1,
+          MPU_STMTDT,
+          MPU_DOC_TYP,
+          MPU_SEQ_NO,
+          MPU_FILE_NM
+        )
+        (
+          SELECT
+          decode(MPD_DOC_TYP,'PLGSUC',SEQ_MRG_PLG_RECNO.NEXTVAL,SEQ_MRG_PLG_RECNO1.NEXTVAL),
+          USR_USR_NM,
+          UAC_CLM_MTCH_ACCNT,
+          USR_EMAIL_ADDRSS,
+          :c_trd_dt,
+          MPD_DOC_TYP,   /** Ver 1.2 **/
+          MPD_SEQ_NO,    /** Ver 1.2 **/
+          to_char(sysdate,'YYYYMMDD')||'_'||MPD_DOC_TYP||'_'||MPD_SEQ_NO||'_'||SEQ_MRG_PLG_RECNO2.NEXTVAL   /** MPD_SEQ_NO Added in Ver 1.2 **/
+          /**'PLGSUC',
+          1,
+          to_char(sysdate,'YYYYMMDD')||'_'||'PLGSUC'||'_'||SEQ_MRG_PLG_RECNO2.NEXTVAL ** Commented in Ver 1.2 **/
+         FROM (
+                SELECT DISTINCT USR_USR_NM,
+                       UAC_CLM_MTCH_ACCNT,
+                       USR_EMAIL_ADDRSS,
+                       MPD_DOC_TYP,     /** Ver 1.2 **/
+                       MPD_SEQ_NO       /** Ver 1.2 **/
+                FROM   UAC_USR_ACCNTS,
+                       USR_USER_MASTER,
+                       TMP_MRGN_PLG_STK_DTLS 
+                WHERE  UAC_USR_ID = USR_USR_ID
+                AND    UAC_CLM_MTCH_ACCNT = MPD_CLM_MTCH_ACCNT
+              ) 
+        );
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in TMP_MPD Upload");
+      fn_errlog(c_ServiceName,"S31250",SQLMSG,c_err_msg );
+      return -1;
+    }
+
+  i_count_mpu = sqlca.sqlerrd[2];
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",i_count_mpu);
+  }
+ return 0;
+}
+
+
+int fn_upld_tmpMPU_D()
+{
+
+  EXEC  SQL
+    EXECUTE
+      BEGIN
+        RESET_SEQUENCE('SEQ_MRG_PLG_RECNO');
+      END;
+  END-EXEC;
+
+  if(SQLCODE != 0)
+  {
+      fn_userlog(c_ServiceName,"Error in sequence number resetting");
+      fn_errlog(c_ServiceName,"S31255",SQLMSG,c_err_msg);
+      return -1;
+  }
+
+  EXEC  SQL
+    EXECUTE
+      BEGIN
+        RESET_SEQUENCE('SEQ_MRG_PLG_RECNO2');
+      END;
+  END-EXEC;
+
+  if(SQLCODE != 0)
+  {
+      fn_userlog(c_ServiceName,"Error in sequence number resetting");
+      fn_errlog(c_ServiceName,"S31260",SQLMSG,c_err_msg);
+      return -1;
+  }
+
+  fn_userlog(c_ServiceName,"uploading in TMP MPU..........");
+
+  EXEC SQL
+    INSERT INTO
+        TMP_MRGN_PLG_USER
+        (
+          MPU_RECORD_NO,   
+          MPU_USER_NM,     
+          MPU_CLM_MTCH_ACCNT,  
+          MPU_EMAIL_1, 
+          MPU_STMTDT,   
+          MPU_DOC_TYP,
+          MPU_SEQ_NO,
+          MPU_FILE_NM 
+        )
+        (
+          SELECT
+          SEQ_MRG_PLG_RECNO.NEXTVAL,
+          USR_USR_NM,
+          UAC_CLM_MTCH_ACCNT,
+          USR_EMAIL_ADDRSS,
+          :c_trd_dt,
+          'UNPLGS', /** Ver 1.2 **/
+          /** 'PLGSAM', ** Ver 1.2 **/
+          1,
+          to_char(sysdate,'YYYYMMDD')||'_'||'UNPLGS'||'_'||SEQ_MRG_PLG_RECNO2.NEXTVAL
+          FROM ( SELECT DISTINCT USR_USR_NM,
+                        UAC_CLM_MTCH_ACCNT,
+                        USR_EMAIL_ADDRSS
+                 FROM   UAC_USR_ACCNTS,
+                        USR_USER_MASTER,
+                        TMP_MRGN_PLG_STK_DTLS
+                 WHERE  UAC_USR_ID    = USR_USR_ID
+                 AND    UAC_CLM_MTCH_ACCNT = MPD_CLM_MTCH_ACCNT
+                 /*****************************
+                        DBD_DP_BLCK_DTLS
+                 WHERE  DBD_PLG_MODE ='B'
+                 AND    DBD_SAM_BLCKD_QTY >0
+                 AND    UAC_USR_ID    = USR_USR_ID 
+                 AND    UAC_CLM_MTCH_ACCNT = DBD_CLM_MTCH_ACCNT
+                 *** Commented in Ver 1.2 *****/
+               )
+        );
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in TMP_MPD  Upload");
+      fn_errlog(c_ServiceName,"S31265",SQLMSG,c_err_msg );
+      return -1;
+    }
+
+  i_count_mpu = sqlca.sqlerrd[2];
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"Total NO. Of Records = [%d]",i_count_mpu);
+  }
+ return 0;
+}
+
+
+int fn_ins_MPU()
+{
+  int  i_counter;
+  int i_count ;
+  char c_ins_flg;
+  unsigned char *c_msg_cbuf;
+  struct mrgn_plg_user_dtls  mrgn_plg_user_dtls_arr[MAX_REC];
+
+
+  l_bufferlength = Fneeded32(1, sizeof(mrgn_plg_user_dtls_arr));
+  ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32",NULL,l_bufferlength);
+
+  if (ptr_fml_Sbuffer == NULL)
+  {
+    fn_userlog(c_ServiceName,"Error in Allocating buffer CWD");
+    fn_errlog(c_ServiceName, "S31270", TPMSG,c_err_msg );
+    return -1;
+  }
+
+  c_ins_flg = 'U';
+
+
+  for ( i_count=0;i_count < i_count_mpu;i_count += i_max_rec_per_fetch )
+  {
+    MEMSET(mrgn_plg_user_dtls_arr);
+
+    EXEC SQL
+     SELECT
+     MPU_RECORD_NO,   
+     MPU_USER_NM,     
+     MPU_CLM_MTCH_ACCNT,  
+     MPU_EMAIL_1, 
+     MPU_STMTDT,   
+     MPU_DOC_TYP,
+     MPU_SEQ_NO,
+     MPU_FILE_NM
+     INTO
+     :mrgn_plg_user_dtls_arr
+     FROM  TMP_MRGN_PLG_USER 
+     WHERE MPU_RECORD_NO >= :i_count + 1
+     AND   MPU_RECORD_NO <= :i_count + :i_max_rec_per_fetch;
+
+    if( SQLCODE != 0 && SQLCODE != -1405 )  /** 1405 Null data **/
+    {
+      fn_userlog(c_ServiceName,"SQLCODE :%d:",SQLCODE);
+      fn_userlog(c_ServiceName,"Count Here Is :%d:",sqlca.sqlerrd[2]);
+      if( SQLCODE == 1403)
+      {
+        if (sqlca.sqlerrd[2] == 0)
+        break;
+      }
+      else
+      {
+        fn_userlog(c_ServiceName,"Data select for FMD failed");
+        fn_errlog(c_ServiceName, "S31275", SQLMSG,c_err_msg );
+        return -1;
+      }
+    }
+
+   i_rows_fetched = (i_count + i_max_rec_per_fetch > i_count_mpu)? i_count_mpu%i_max_rec_per_fetch : i_max_rec_per_fetch;
+
+
+   if(DEBUG_MSG_LVL_0)
+   {
+     fn_userlog(c_ServiceName,": Rows fetched : |%d| |%d|", i_rows_fetched, SQLCODE );
+   }
+
+   Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+   Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+
+   MEMSET(c_msg_cbuf);
+
+   c_msg_cbuf = (unsigned char *)mrgn_plg_user_dtls_arr;
+
+   l_bufferlength =  sizeof(mrgn_plg_user_dtls_arr);
+
+   i_err[0]=Fadd32(ptr_fml_Sbuffer,FML_VLME,(char *)&l_bufferlength,0);
+   i_err[1]=Fadd32(ptr_fml_Sbuffer,FML_SBUF,(char *)c_msg_cbuf,l_bufferlength);
+   i_err[2]=Fadd32(ptr_fml_Sbuffer,FML_STTLMNT_NMBR,(char *)&i_rows_fetched,0);
+   i_err[3]=Fadd32(ptr_fml_Sbuffer,FML_DAM_TRNSCTN,(char *)&c_ins_flg,0);
+
+   for(i_counter = 0;i_counter < 4;i_counter++)
+   {
+      if(i_err[i_counter] == -1)
+      {
+        fn_userlog(c_ServiceName,"Error in Fadd i_counter :%d:",i_counter);
+        fn_errlog(c_ServiceName, "S31280", FMLMSG,c_err_msg );
+        return -1;
+      }
+   }
+
+   i_ch_val = tpcall("SFO_MRGPLG_CLK", (char *)ptr_fml_Sbuffer, 0,(char **)&ptr_fml_Rbuffer, &li_len_tobuf, 0);
+
+    if (i_ch_val == -1)
+    {
+      fn_userlog(c_ServiceName,"Error in calling service SFO_MRGPLG_CLK");
+      if(TPCODE != TPESVCFAIL)
+      {
+        fn_errlog(c_ServiceName, "S31285", TPMSG,c_err_msg );
+      }
+      else
+      {
+        Fget32(ptr_fml_Rbuffer,FML_ERR_MSG,0,c_err_msg,0);
+        fn_errlog(c_ServiceName, "S31290",c_err_msg , c_err_msg);
+      }
+      return -1; 
+    }
+  }
+
+  fn_dstry_rs( ptr_fml_Sbuffer);
+  return 0;
+
+}
+
+int fn_ins_MPD()
+{
+  int  i_counter;
+  int i_count ;
+  char c_ins_flg;
+  unsigned char *c_msg_cbuf;
+  struct mrgn_plg_stk_dtls  mrgn_plg_stk_dtls_arr[MAX_REC];
+
+
+  fn_userlog(c_ServiceName,"Insert in to MPD table...");
+
+  l_bufferlength = Fneeded32(1, sizeof(mrgn_plg_stk_dtls_arr));
+  ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32",NULL,l_bufferlength);
+
+  if (ptr_fml_Sbuffer == NULL)
+  {
+    fn_userlog(c_ServiceName,"Error in Allocating buffer CWD");
+    fn_errlog(c_ServiceName, "S31295", TPMSG,c_err_msg );
+    return -1;
+  }
+
+  c_ins_flg ='S';
+  i_cnt_total = i_count_mpd_rej + i_count_mpd + i_count_mpd_widr; /** Ver 1.2 **/
+
+  for ( i_count=0;i_count < i_cnt_total;i_count += i_max_rec_per_fetch ) /** change to i_cnt_total from i_count_mpd in Ver 1.2 **/
+  {
+    MEMSET(mrgn_plg_stk_dtls_arr);
+
+    EXEC SQL
+     SELECT
+     MPD_CLM_MTCH_ACCNT, 
+     MPD_STK_NAME, 
+     MPD_STK_CD,             
+     NVL(MPD_PLG_QTY,0), /** NVL Handeled in Ver 1.2 **/
+     NVL(MPD_HAIRCUT,0), /** NVL Handeled in Ver 1.2 **/            
+     NVL(MPD_AMOUNT,0),  /** NVL Handeled in Ver 1.2 **/
+     NVL(MPD_LIMIT,0),   /** NVL Handeled in Ver 1.2 **/ 
+     MPD_DOC_TYP,             
+     MPD_DATE, 
+     MPD_RECORD_ID,
+     MPD_SEQ_NO,         /** Ver 1.2 **/
+     NVL(MPD_REM_QTY,0)   /** Ver 1.2 **/     
+     INTO
+     :mrgn_plg_stk_dtls_arr
+     FROM  TMP_MRGN_PLG_STK_DTLS 
+     WHERE MPD_RECORD_ID >= :i_count + 1
+     AND   MPD_RECORD_ID <= :i_count + :i_max_rec_per_fetch;
+
+    if( SQLCODE != 0 && SQLCODE != -1405 )  /** 1405 Null data **/
+    {
+      fn_userlog(c_ServiceName,"SQLCODE :%d:",SQLCODE);
+      fn_userlog(c_ServiceName,"Count Here Is :%d:",sqlca.sqlerrd[2]);
+      if( SQLCODE == 1403)
+      {
+        if (sqlca.sqlerrd[2] == 0)
+        break;
+      }
+      else
+      {
+        fn_userlog(c_ServiceName,"Data select for MPD failed");
+        fn_errlog(c_ServiceName, "S31300", SQLMSG,c_err_msg );
+        return -1;
+      }
+    }
+
+   i_rows_fetched = (i_count + i_max_rec_per_fetch > i_cnt_total)? i_cnt_total%i_max_rec_per_fetch : i_max_rec_per_fetch; /** change to i_cnt_total from i_count_mpd in Ver 1.2 **/
+
+
+   if(DEBUG_MSG_LVL_0)
+   {
+     fn_userlog(c_ServiceName,": Rows fetched : |%d| |%d|", i_rows_fetched, SQLCODE );
+   }
+
+   Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+   Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+
+   MEMSET(c_msg_cbuf);
+
+   c_msg_cbuf = (unsigned char *)mrgn_plg_stk_dtls_arr;
+
+   l_bufferlength =  sizeof(mrgn_plg_stk_dtls_arr);
+
+   i_err[0]=Fadd32(ptr_fml_Sbuffer,FML_VLME,(char *)&l_bufferlength,0);
+   i_err[1]=Fadd32(ptr_fml_Sbuffer,FML_SBUF,(char *)c_msg_cbuf,l_bufferlength);
+   i_err[2]=Fadd32(ptr_fml_Sbuffer,FML_STTLMNT_NMBR,(char *)&i_rows_fetched,0);
+   i_err[3]=Fadd32(ptr_fml_Sbuffer,FML_DAM_TRNSCTN,(char *)&c_ins_flg,0);
+
+   for(i_counter = 0;i_counter < 4;i_counter++)
+   {
+      if(i_err[i_counter] == -1)
+      {
+        fn_userlog(c_ServiceName,"Error in Fadd i_counter :%d:",i_counter);
+        fn_errlog(c_ServiceName, "S31305", FMLMSG,c_err_msg );
+        return -1;
+      }
+   }
+
+   i_ch_val = tpcall("SFO_MRGPLG_CLK", (char *)ptr_fml_Sbuffer, 0,(char **)&ptr_fml_Rbuffer, &li_len_tobuf, 0);
+
+    if (i_ch_val == -1)
+    {
+      fn_userlog(c_ServiceName,"Error in calling service SFO_MRGPLG_CLK");
+      if(TPCODE != TPESVCFAIL)
+      {
+        fn_errlog(c_ServiceName, "S31310", TPMSG,c_err_msg );
+      }
+      else
+      {
+        Fget32(ptr_fml_Rbuffer,FML_ERR_MSG,0,c_err_msg,0);
+        fn_errlog(c_ServiceName, "S31315",c_err_msg , c_err_msg);
+      }
+      return -1;
+    }
+  }
+
+  fn_dstry_rs( ptr_fml_Sbuffer);
+  return 0;
+
+}
+
+int fn_ins_log_hdr()
+{
+  int  i_counter;
+  char c_ins_flg;
+  char c_xchng_cd[4] = { "FNO" };
+
+  ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+  if (ptr_fml_Sbuffer == NULL)
+  {
+    fn_userlog(c_ServiceName,"Unable to allocate send buffer ");
+    fn_errlog(c_ServiceName, "S31320", TPMSG,c_err_msg );
+    return -1;
+  }
+
+  c_ins_flg = 'E';
+  /******************************
+  i_seq_num =  1;
+  if ( c_req_id == 'P')
+  strcpy(c_doc_typ,"PLGSUC");
+  else if (c_req_id == 'D')
+  strcpy(c_doc_typ,"PLGSAM");
+  ** Commented in Ver 1.2 ********/
+
+  fn_userlog(c_ServiceName," doctyp :%s:",c_doc_typ); 
+
+  i_err[0] = Fadd32(ptr_fml_Sbuffer,FML_DAM_TRNSCTN,(char *)&c_ins_flg,0);
+  i_err[1] = Fadd32(ptr_fml_Sbuffer,FML_TRN_NO,(char *)&i_seq_num,0);
+  i_err[2] = Fadd32(ptr_fml_Sbuffer,FML_TRD_DT,(char *)c_trd_dt,0);
+  i_err[3] = Fadd32(ptr_fml_Sbuffer,FML_DOCTYPE,(char *)c_doc_typ,0);
+
+  fn_userlog(c_ServiceName,"Here Sequence NO. Is :%d:",i_seq_num);
+
+  for(i_counter =0 ;i_counter<=3;i_counter++)
+  {
+    if(i_err[i_counter] == -1)
+    {
+      fn_errlog(c_ServiceName, "S31325", FMLMSG,c_err_msg );
+      fn_userlog(c_ServiceName,"Value of i =[%d]",i_counter);
+      return -1;
+    }
+  }
+
+  i_ch_val = tpcall("SFO_MRGPLG_CLK", (char *)ptr_fml_Sbuffer, 0,(char **)&ptr_fml_Rbuffer, &li_len_tobuf,0);
+  if (i_ch_val == -1)
+  {
+    fn_userlog(c_ServiceName,"Error in calling service for INS_LOG_HDR");
+    if(TPCODE != TPESVCFAIL)
+    {
+      fn_errlog(c_ServiceName, "S31330", TPMSG,c_err_msg );
+    }
+    else
+    {
+      Fget32(ptr_fml_Rbuffer,FML_ERR_MSG,0,c_err_msg,0);
+      fn_errlog(c_ServiceName, "S31335",c_err_msg , c_err_msg);
+    }
+
+    return -1;
+  }
+
+  fn_dstry_rs( ptr_fml_Sbuffer);
+  return 0;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_MRGNPLG_MAIL_SMS;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}
+

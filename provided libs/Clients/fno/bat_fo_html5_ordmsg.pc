@@ -1,0 +1,944 @@
+/**************************************************************************************************
+*  Service Name   :  BAT_FO_HTML5_ORDMSG                                                         	*
+*                                                                                            			*
+*  Description    :  This Program picks-up the order snapshot data for FNO order and send it   		* 
+*                  	 to the specified feed server.                                             		*
+*                                                                                            			*
+* Input           :  Service Name    - bat_fo_html5_ordmsg                                       	*
+*										 Exchange Code   - NA																													*
+*										 Setup Number 	 - 04    																											*
+*                    Mode            - T/U                                                        *
+*                    Message Status  - N/F                                                        *
+*                    Message Flag    - R                                                          *
+*                                                                                            			*
+*  Output         :  Success/Failure                                                            	*
+*                                                                                            			*
+*  Log            :  07-Nov-2014  Ver 1.0 Initial Release (Bhushan Sonwane)                      	*
+*  Log            :  25-Nov-2016  Ver 1.1 FCM-FTQ Merger Changes (Anand Dhopte)                   *
+**************************************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <userlog.h>
+#include <eba.h>
+#include <env.h>
+#include <fn_signal.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+#include <Usysflds.h>
+#include <ri_brdmsg.h>
+#include <fn_read_debug_lvl.h>
+
+EXEC SQL INCLUDE "table/dfo_dl_fo_ordbk.h";
+
+int    i_sleep_tm;
+int    i_exit_stts;
+
+char  c_trg_got;
+
+char  c_BatchName[33];
+char  c_err_msg[256];
+
+int   fn_mark_failure( char * c_rowid);
+int		fn_rgstr_bat(char, char *, char *, char *);
+int   fn_init_bat(char *, char *, char *);
+int   fn_read_inifile(void);  
+int   fn_chk_trgr(void); 
+void  fn_close_bat(char *, char *, char *);
+void  fn_msg_hnd(char *ptr_c_i_trg, long int li_len, long int li_flg);
+
+/*** Signal handler for SIGUSR2 ***/
+void   fn_sigusr2_hnd(int i_signal_no);
+
+int main(int argc, char *argv[])
+{
+  char  c_sleep_flg   = 'N';
+	char	c_msg_priority;
+
+  char  c_filter[30];      
+  char  c_setup_no[3];
+  char  c_xchng_cd[3];
+  char  c_msg_data[MSG_LEN];
+  char  c_msg_seq[25];
+	char	c_channel[10];
+	char	c_mod_can_flg ='N';
+	char	c_mode;
+	char  c_msg_stts;
+  char  c_msg_flg;         
+  char  c_break_flg = 'N';
+
+  int   i_ch_val;
+  int   i_trnsctn = 0;
+	int		i_msg_type;
+  int   i_setup_no=0;
+	int 	sql_dfo_html_setup_no=0;
+	int 	i_tkn_num	=	0;
+
+  long  l_open_qty	= 0;
+  long  l_cancelled_qty = 0;
+  long  l_expired_qty= 0;
+
+	long l_exctd_rt = 0; 
+
+  long int li_stp_trg_hnd;
+
+	double d_tot_amt_blckd = 0.0 ; 
+	
+	EXEC SQL BEGIN DECLARE SECTION;
+  varchar v_row_id[19];
+	varchar v_cnt_id[5];      
+  EXEC SQL END DECLARE SECTION;
+	
+  INITBATDBGLVL(argv[0]);  
+
+  
+  /*** Validating Input Parameters ***/
+  if(argc != 6)    
+  {
+    userlog("Invalid Number Of Parameters");
+		printf("\n Usage : bat_fo_html5_ordmsg NA <Setup Number - 04 > <Mode - T/U> <Message Status - N/F> <HTML5 - R  \n"); 
+    return 0;
+  }
+
+  MEMSET(c_BatchName);
+  MEMSET(c_xchng_cd);
+  MEMSET(c_setup_no);
+  MEMSET(c_filter);
+
+  /*** Get the Input program name ***/
+  strcpy(c_BatchName, argv[0]);
+	strcpy(c_setup_no,argv[2]); /** Instance Number **/
+	c_mode = argv[3][0];  /** Message sening mode - TCP/UDP **/
+	c_msg_stts = argv[4][0];  /** Message Status - NEW/FAILED **/
+  c_msg_flg = argv[5][0]; /** Message Flag - HTML5  **/
+
+  /** Set exchange code and pipe id as "NA" **/
+  strcpy(c_xchng_cd,"NA");
+
+	i_setup_no = atoi(c_setup_no);
+
+	/** Validiate msg sending mode. **/
+	if(!(c_mode == TCP || c_mode == UDP ))
+  {
+    printf("Invalid mode entered.Valid modes - T : TCP,U : UDP.");
+    return 0;
+  }
+
+	if(!( c_msg_stts == NEW || c_msg_stts == FAILED ))
+  {
+    printf("Invalid message status entered.Valid status - N : NEW,F : FAILED.");
+    return 0;
+  }
+
+  if( c_msg_flg != 'R' )
+	{
+    printf("Invalid message flag. R : HTML5");
+    return 0;
+  }
+
+	/** Derive setup number for registering the batch program**/
+	MEMSET(c_setup_no);
+	sprintf(c_setup_no,"%c%d",c_msg_flg,i_setup_no);
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		userlog("Derived setup Number :%s:",c_setup_no);
+	}
+
+  /****** Initialise the TUXEDO Connection & Register to BAT ********/
+  if(fn_init_bat(c_BatchName, c_xchng_cd, c_setup_no) == -1)
+  {
+    printf("Error in calling fn_init_bat");
+    return 0;
+  }
+  
+  /*** Set the signal handler for signal SIGUSR2 ***/
+  if(fn_set_sgn_hnd(SIGUSR2, fn_sigusr2_hnd, c_BatchName, c_err_msg) == -1)
+  {
+    errlog(c_BatchName, "S31005", LIBMSG,(char *) DEF_USR, DEF_SSSN, c_err_msg);
+    fn_close_bat(c_BatchName, argv[1], c_setup_no);  
+    return 0;
+  }
+
+  userlog("Inputs to the batch program.... ");
+  userlog("Batch Name   		: |%s|", c_BatchName);
+  userlog("Exchange Code  	: |%s|", c_xchng_cd);
+  userlog("Pipe Id    			: |%s|", c_setup_no);
+  userlog("Batch Mode       : |%c|", c_mode);
+	userlog("Messge Status    : |%c|", c_msg_stts);
+  userlog("Messge Flag      : |%c|", c_msg_flg); 
+	userlog("i_setup_no       : |%d|", i_setup_no);
+
+  /*** Read the initialization parameters from the ini file **/
+  i_ch_val = fn_read_inifile();
+  if(i_ch_val == -1)
+  {
+    userlog("Error while reading RI Config File ");  
+    errlog(c_BatchName,"S31010","Error while reading Config File",(char *) DEF_USR, DEF_SSSN,c_err_msg);
+    fn_close_bat(c_BatchName, argv[1], c_setup_no);
+    return 0;
+  }
+
+  if(DEBUG_MSG_LVL_3){
+    userlog("Batch Process : bat_fo_html5_ordmsg - For sending FNO-Order Book's Snapshot Started ........");
+  }
+
+  tpsetunsol(fn_msg_hnd);   /*** Define the unsolicited message handler function ***/
+
+  /****** Subscribe to the STOP Trigger *********/
+
+  sprintf(c_filter, "FFO_FILTER=='%s'", c_setup_no);
+  li_stp_trg_hnd  = tpsubscribe("TRG_STOP_FO_RISND", c_filter, NULL, 0);
+  if(li_stp_trg_hnd == -1)
+  {
+    userlog("Error in subscribing to trigger...");
+    errlog(c_BatchName, "S31015", TPMSG,(char *) DEF_USR, DEF_SSSN, c_err_msg);
+    fn_close_bat(c_BatchName, argv[1], c_setup_no);
+    return 0;
+  } 
+
+	/** Create Message Header. Initialising the constant part.**/
+	i_msg_type	 			= RI_FNO_ORDER_BOOK;
+  c_msg_priority  	= RI_NORMAL_PRIORITY;
+
+  i_exit_stts = DONT_EXIT;
+
+  while(i_exit_stts == DONT_EXIT)
+  {
+		userlog(" Inside While .");
+    i_trnsctn = fn_equ_begintran(c_BatchName ,DEF_USR,DEF_SSSN,c_err_msg );
+    if(i_trnsctn == -1)
+    {
+      userlog("ERROR begining transaction");
+      errlog(c_BatchName, "S31020", TPMSG,(char *) DEF_USR, DEF_SSSN, c_err_msg);
+      break;    
+    }
+
+    MEMSET(c_msg_seq);
+  	MEMSET(c_msg_data);
+		MEMSET(sql_dfo_usr_id);
+		MEMSET(sql_dfo_clm_mtch_accnt);
+		MEMSET(sql_dfo_xchng_cd);
+		MEMSET(sql_dfo_undrlyng);
+		MEMSET(sql_dfo_expry_dt);
+		MEMSET(sql_dfo_ordr_valid_dt);
+		MEMSET(sql_dfo_ordr_rfrnc);
+		MEMSET(sql_dfo_pipe_id);
+		MEMSET(c_channel);
+		MEMSET(sql_dfo_ack_nmbr);
+		MEMSET(sql_dfo_trd_dt);
+		MEMSET(sql_dfo_ack_nmbr);
+  	MEMSET(c_err_msg);
+		MEMSET(v_row_id);
+		MEMSET(v_cnt_id); 
+		MEMSET(sql_dfo_sltp_ordr_rfrnc);
+    MEMSET(sql_dfo_sltp_ordr_rfrnc);
+    MEMSET(sql_dfo_amt_blckd);
+    MEMSET(sql_dfo_lss_amt_blckd);
+    MEMSET(sql_dfo_fc_flag);
+		MEMSET(sql_dfo_cntrctnt_nmbr);
+
+
+		/** Select order data for the new arrived message. **/
+    /** Query changed by Parul for handling DL message **/
+
+			userlog("Before Update");
+			userlog("Set Up No Is :%d:",i_setup_no);
+			userlog("Msg Status Is :%c:",c_msg_stts);
+
+      EXEC SQL
+      UPDATE    DFO_DL_FO_ORDBK
+      SET       DFO_RI_SND_STTS            = 'S'    					/*** PICKED ***/
+      WHERE     NVL(DFO_RI_SND_STTS, 'S')  = :c_msg_stts   		/*** Entered Message Status ***/
+			AND 			DFO_RIA_SETUP_NO					 = :i_setup_no    
+			AND  			DFO_PRDCT_TYP 						 in ('F','P','O','U','I') 
+      AND       DFO_SEQ                    =  
+                (
+                  SELECT  MIN(DFO_SEQ)
+                  FROM    DFO_DL_FO_ORDBK
+                  WHERE   NVL(DFO_RI_SND_STTS, 'S') = :c_msg_stts
+                	AND     DFO_RIA_SETUP_NO          = :i_setup_no 
+									AND     DFO_PRDCT_TYP             in ('F','P','O','U','I')
+								)
+      RETURNING
+				DFO_USR_ID,
+        DFO_CLM_MTCH_ACCNT,
+        DFO_XCHNG_CD,
+        TRIM(DFO_UNDRLYNG),
+        DFO_PRDCT_TYP,
+        DFO_OPT_TYP,
+        DFO_EXER_TYP,
+        DFO_STRK_PRC,
+        DFO_EXPRY_DT,
+        NVL(DFO_ORDR_VALID_DT,DFO_TRD_DT),
+        DFO_ORDR_FLW,
+        DFO_LMT_MRKT_SL_FLG,
+        DFO_ORDR_TYPE,
+        NVL(DFO_LMT_RT,0),
+        DFO_ORDR_STTS,
+        DFO_ORDR_RFRNC,
+        NVL(DFO_ORDR_TOT_QTY,0),
+        NVL(DFO_EXEC_QTY,0),
+        NVL(DFO_CNCL_QTY,0),
+        NVL(DFO_EXPRD_QTY,0),
+        NVL(DFO_STP_LSS_TGR,0),
+        DFO_SPL_FLAG,
+        DFO_PIPE_ID,
+        DFO_CHANNEL,
+        DFO_TRD_DT,
+        NVL(DFO_ACK_NMBR,'*'),
+				DFO_RIA_SETUP_NO,	
+        DFO_SEQ,
+				NVL(TO_CHAR(DFO_CNT_ID), '*'), 
+        NVL(DFO_SLTP_ORDR_RFRNC,'*'),
+        NVL(DFO_AMT_BLCKD,0),
+        NVL(DFO_LSS_AMT_BLCKD,0),
+        NVL(DFO_FC_FLAG,'N'),
+        DFO_CNT_RIA_SETUP_NO,
+				NVL(DFO_TRD_VAL,0),	
+				NVL(DFO_TRD_BRKG,0),
+				DFO_CNTRCTNT_NMBR,
+        ROWID
+		  INTO
+				:sql_dfo_usr_id,
+      	:sql_dfo_clm_mtch_accnt,
+        :sql_dfo_xchng_cd,
+        :sql_dfo_undrlyng,
+        :sql_dfo_prdct_typ,
+        :sql_dfo_opt_typ,
+        :sql_dfo_exer_typ,
+        :sql_dfo_strk_prc,
+				:sql_dfo_expry_dt,
+        :sql_dfo_ordr_valid_dt,
+        :sql_dfo_ordr_flw,
+        :sql_dfo_lmt_mrkt_sl_flg,
+        :sql_dfo_ordr_type,
+        :sql_dfo_lmt_rt,
+        :sql_dfo_ordr_stts,
+        :sql_dfo_ordr_rfrnc,
+        :sql_dfo_ordr_tot_qty,
+        :sql_dfo_exec_qty,
+        :sql_dfo_cncl_qty,
+        :sql_dfo_exprd_qty,
+        :sql_dfo_stp_lss_tgr,
+        :sql_dfo_spl_flag,
+        :sql_dfo_pipe_id,
+        :c_channel,
+				:sql_dfo_trd_dt,
+        :sql_dfo_ack_nmbr,
+				:sql_dfo_ria_setup_no,
+				:c_msg_seq,
+				:v_cnt_id,  
+        :sql_dfo_sltp_ordr_rfrnc,
+        :sql_dfo_amt_blckd,
+        :sql_dfo_lss_amt_blckd,
+        :sql_dfo_fc_flag,
+				:sql_dfo_cnt_ria_setup_no, 
+				:sql_dfo_trd_val,	
+				:sql_dfo_trd_brkg,
+				:sql_dfo_cntrctnt_nmbr,
+				:v_row_id;
+ 
+    if(SQLCODE !=0  && SQLCODE != NO_DATA_FOUND)
+    {
+      userlog("Error while Selecting the New Snapshot");
+      errlog(c_BatchName, "S31025", SQLMSG,(char *) DEF_USR, DEF_SSSN, c_err_msg);
+      fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+      break;    
+    }
+    if(SQLCODE == NO_DATA_FOUND)
+    {
+			userlog("Inside NO_DATA_FOUND.");
+      c_sleep_flg = 'Y';
+    }
+    else
+    {
+      c_sleep_flg = 'N';
+    }
+
+    if(c_sleep_flg == 'Y')
+    {
+      if(fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg) == -1)
+      {
+				userlog("Error while aborting Transaction.");
+        errlog(c_BatchName, "S31030", LIBMSG,(char *) DEF_USR, DEF_SSSN, c_err_msg);
+        break;
+      }
+      sleep(i_sleep_tm); /*** Sleep for the time returned from ini file ***/
+    }
+    else if(c_sleep_flg == 'N')
+    {
+			userlog("Inside Flag N ");
+			/** Remove the space on rigtht-side of the message sequence.**/
+			rtrim(c_msg_seq);
+
+			if(DEBUG_MSG_LVL_3){
+				userlog("Order User ID :%s:",sql_dfo_usr_id.arr);
+			}
+			SETNULL(sql_dfo_usr_id);
+      SETNULL(sql_dfo_clm_mtch_accnt);
+      SETNULL(sql_dfo_xchng_cd);
+      SETNULL(sql_dfo_undrlyng);
+			SETNULL(sql_dfo_expry_dt);
+      SETNULL(sql_dfo_ordr_valid_dt);
+      SETNULL(sql_dfo_ordr_rfrnc);
+      SETNULL(sql_dfo_pipe_id);
+      SETNULL(sql_dfo_trd_dt);
+      SETNULL(sql_dfo_ack_nmbr);
+		  SETNULL(v_cnt_id);   
+			SETNULL(sql_dfo_sltp_ordr_rfrnc); 
+			SETNULL(sql_dfo_cntrctnt_nmbr);
+
+			userlog("Exchange Code Is :%s:",sql_dfo_xchng_cd.arr);
+			userlog("Product Type Is :%c:",sql_dfo_prdct_typ);
+			userlog("Underlying Is :%s:",sql_dfo_undrlyng.arr);
+			userlog("Expiry Date Is :%s:",sql_dfo_expry_dt.arr);
+			userlog("Option Type Is :%c:",sql_dfo_opt_typ);
+			userlog("Strike Price Is :%ld:",sql_dfo_strk_prc);
+
+      /*** Commented in Ver 1.1 ***
+	
+			EXEC SQL
+				SELECT	FCM_TOKEN_NO
+				INTO    :i_tkn_num
+				FROM		FCM_FO_CNTRCT_MSTR
+				WHERE		FCM_XCHNG_CD	=	:sql_dfo_xchng_cd
+				AND			FCM_PRDCT_TYP	= decode(:sql_dfo_prdct_typ,'P','F','U','F','I','O',:sql_dfo_prdct_typ)
+				AND			trim(FCM_UNDRLYNG)	=	:sql_dfo_undrlyng
+				AND			FCM_EXPRY_DT	=	:sql_dfo_expry_dt
+				AND			FCM_OPT_TYP		=	:sql_dfo_opt_typ
+				AND			FCM_STRK_PRC	=	:sql_dfo_strk_prc;
+
+      ***/
+
+      /*** Ver 1.1 Starts ***/
+
+      EXEC SQL
+        SELECT  FTQ_TOKEN_NO
+        INTO    :i_tkn_num
+        FROM    FTQ_FO_TRD_QT 
+        WHERE   FTQ_XCHNG_CD  = :sql_dfo_xchng_cd
+        AND     FTQ_PRDCT_TYP = decode(:sql_dfo_prdct_typ,'P','F','U','F','I','O',:sql_dfo_prdct_typ)
+        AND     trim(FTQ_UNDRLYNG)  = :sql_dfo_undrlyng
+        AND     FTQ_EXPRY_DT  = :sql_dfo_expry_dt
+        AND     FTQ_OPT_TYP   = :sql_dfo_opt_typ
+        AND     FTQ_STRK_PRC  = :sql_dfo_strk_prc;
+    
+      /*** Ver 1.1 Ends ***/
+
+			if ( SQLCODE != 0 )
+			{
+				userlog("Error while Selecting the New Snapshot");
+      	errlog(c_BatchName, "S31035", SQLMSG,(char *) DEF_USR, DEF_SSSN, c_err_msg);
+      	fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+      	break;
+			}
+
+			/** Order Modification/Cancelation flag **/
+
+			if ( strncmp ( sql_dfo_ordr_rfrnc.arr,"TP",2) == 0 )
+    	{
+      	if ( sql_dfo_ordr_stts == CANCELLED )
+      	{
+        	c_mod_can_flg = 'N';
+				}
+      	else
+      	{
+        	c_mod_can_flg = 'Y';
+      	}
+			}
+			else
+			{
+				if ((( sql_dfo_ordr_stts == REQUESTED ) ||
+           	 ( sql_dfo_ordr_stts == ORDERED ) ||
+           	 ( sql_dfo_ordr_stts == PARTIALLY_EXECUTED )) && 
+						 ( strcmp(c_channel,"SYS")!=0)
+						)
+      	{
+						c_mod_can_flg = 'Y';
+				}
+				if ( ( sql_dfo_spl_flag == SYSTEM_SQUAREOFF    ) ||
+           	 ( sql_dfo_spl_flag == L2_ORDER            ) ||
+             ( sql_dfo_spl_flag == L3_ORDER            ) ||
+             ( sql_dfo_spl_flag == IMMEDIATE_OR_CANCEL )
+         	 )
+      	{
+            c_mod_can_flg = 'N';
+      	}
+			}
+
+			if( sql_dfo_prdct_typ == 'U' || sql_dfo_prdct_typ == 'I' ) 
+			{
+			 	if( sql_dfo_fc_flag == 'F' )
+			 	{
+					c_mod_can_flg = 'N';
+			 	}
+				else if( sql_dfo_fc_flag == 'C' )
+				{
+					c_mod_can_flg = 'Y';
+				}
+				
+				d_tot_amt_blckd = sql_dfo_amt_blckd + sql_dfo_lss_amt_blckd ;	
+	
+			}
+ 
+			rtrim(c_channel);	
+		
+			if(strncmp(c_channel,"WE", 2) == 0) 
+			{
+     		strcpy(c_channel,"WEB"); 
+    	}
+			else
+			if((strcmp(c_channel,"CN1") == 0) || (strcmp(c_channel,"CN2") == 0) )	
+      {
+        strcpy(c_channel,"CNT");
+      }
+			
+			if(sql_dfo_usr_id.arr[0] == BPID )
+			{
+				strcat(c_channel," DBC");
+			}
+
+			l_exctd_rt  = ((long)sql_dfo_trd_val/sql_dfo_exec_qty); 
+
+			userlog("STEP 1");
+
+      if(DEBUG_MSG_LVL_3){
+        userlog("The values for FNO ORDER BOOK Snapshot are ...");
+        userlog("Message Sequence Number- |%s|", 	c_msg_seq);
+				userlog("User id								-	|%s|",	sql_dfo_usr_id.arr);
+        userlog("Match Account        	- |%s|", 	sql_dfo_clm_mtch_accnt.arr);
+        userlog("Exchange Code        	- |%s|",	sql_dfo_xchng_cd.arr);
+        userlog("Underlying 		       	- |%s|", 	sql_dfo_undrlyng.arr);
+				userlog("Product Type						-	|%c|",	sql_dfo_prdct_typ);
+				userlog("Option Type						-	|%c|",	sql_dfo_opt_typ);
+				userlog("Exercise Type					-	|%c|",	sql_dfo_exer_typ);
+				userlog("Strike Price						-	|%ld|",	sql_dfo_strk_prc);
+				userlog("Expiry Date            - |%s|",  sql_dfo_expry_dt.arr);
+				userlog("Valid Date							-	|%s|",	sql_dfo_ordr_valid_dt.arr);
+				userlog("Order Flow							-	|%c|",	sql_dfo_ordr_flw);
+				userlog("Limit-Market Flag			-	|%c|",	sql_dfo_lmt_mrkt_sl_flg);
+				userlog("Order Type							-	|%c|",	sql_dfo_ordr_type);
+				userlog("Limit Rate							-	|%ld|",	sql_dfo_lmt_rt);
+				userlog("Order Status						-	|%c|",	sql_dfo_ordr_stts);
+				userlog("Order Reference				-	|%s|",	sql_dfo_ordr_rfrnc.arr);
+				userlog("Order total Quantity		-	|%d|",	sql_dfo_ordr_tot_qty);
+				userlog("Order Executed Quantity-	|%d|",	sql_dfo_exec_qty);
+				userlog("Order Canceled Quantity-	|%d|",	sql_dfo_cncl_qty);
+				userlog("Order Expired Quantity	-	|%d|",	sql_dfo_exprd_qty);
+				userlog("Stop-Loss Trigger			-	|%ld|",	sql_dfo_stp_lss_tgr);
+				userlog("Special Remark					-	|%c|",	sql_dfo_spl_flag);
+				userlog("Pipe Id								-	|%s|",	sql_dfo_pipe_id.arr);
+				userlog("Channel								-	|%s|",	c_channel);
+				userlog("Modify/Cancel Flag			-	|%c|",	c_mod_can_flg);
+				userlog("Trade Date							- |%s|",	sql_dfo_trd_dt.arr);
+				userlog("Ack Number							-	|%s|",	sql_dfo_ack_nmbr.arr);
+				userlog("Row Id                 - |%s|",  v_row_id.arr);
+				userlog("v_cnt_id               - |%s|",v_cnt_id.arr); 
+      	userlog("SLTP Order reference   - |%s|",	sql_dfo_sltp_ordr_rfrnc.arr);
+      	userlog("Amount Blocked         - |%lf|",	sql_dfo_amt_blckd);
+      	userlog("Loss Amount Blocked    - |%lf|",	sql_dfo_lss_amt_blckd);
+				userlog("SLTP ordr total Amnt  Blocked  - |%lf|", d_tot_amt_blckd); 
+      	userlog("Fresh/Cover Flag       - |%c|",	sql_dfo_fc_flag);
+				userlog("DL set up no.          - |%d|",sql_dfo_cnt_ria_setup_no);  
+        userlog("Total Trade Val				- |%lf|", sql_dfo_trd_val);       
+        userlog("Brokerage							-	|%ld|",	sql_dfo_trd_brkg);    
+			  userlog("Executed Rate					-	|%ld|", l_exctd_rt);		
+				userlog("Contract Note Number 	-	|%s|",sql_dfo_cntrctnt_nmbr.arr);
+				userlog("Token Number						-	|%d|",i_tkn_num);
+      }
+
+      /**Creating Packet Data **/
+
+      sprintf(c_msg_data,
+							"%s+%s+%s+%c+%c+%c+%ld+%s+%s+%c+%c+%c+%ld+%c+%s+%d+%d+%d+%d+%ld+%c+%s+%s+%c+%s+%s+%s+%lf+%lf+%ld+%ld+%s+%d",
+														sql_dfo_clm_mtch_accnt.arr,
+														sql_dfo_xchng_cd.arr,
+														sql_dfo_undrlyng.arr,
+														sql_dfo_prdct_typ,
+														sql_dfo_opt_typ,
+														sql_dfo_exer_typ,
+														sql_dfo_strk_prc,
+														sql_dfo_expry_dt.arr,
+														sql_dfo_ordr_valid_dt.arr,
+														sql_dfo_ordr_flw,
+														sql_dfo_lmt_mrkt_sl_flg,
+														sql_dfo_ordr_type,
+														sql_dfo_lmt_rt,
+														sql_dfo_ordr_stts,
+														sql_dfo_ordr_rfrnc.arr,
+														sql_dfo_ordr_tot_qty,
+														sql_dfo_exec_qty,
+														sql_dfo_cncl_qty,
+														sql_dfo_exprd_qty,
+														sql_dfo_stp_lss_tgr,
+														sql_dfo_spl_flag,
+														sql_dfo_pipe_id.arr,
+														c_channel,
+														c_mod_can_flg,
+														sql_dfo_trd_dt.arr,
+														sql_dfo_ack_nmbr.arr,
+														sql_dfo_sltp_ordr_rfrnc.arr,
+													  d_tot_amt_blckd,
+														sql_dfo_trd_val,
+														sql_dfo_trd_brkg,
+														l_exctd_rt,
+														sql_dfo_cntrctnt_nmbr.arr,
+														i_tkn_num
+                );
+			/** Call function 'fn_crt_snd_ri_brdmsg' to create and send the message packet to FEED
+          server through specified mode - TCP/UDP **/
+
+			if(c_msg_flg == 'R')
+      {
+        if(c_msg_stts == 'N')
+        {
+					userlog("Sandeep Inside c_msg_stts == N ");
+          /* Calling Function fn_crt_snd_ri_brdmsg with RIA Setup Number */
+
+          i_ch_val = fn_crt_snd_ri_brdmsg (
+																	sql_dfo_usr_id.arr,
+                                  sql_dfo_ria_setup_no,
+                                  c_msg_seq,
+                                  i_msg_type,
+                                  c_msg_priority,
+                                  c_msg_data,
+                                  c_mode,
+                                  c_BatchName,
+                                  c_msg_flg
+                           );
+          if( i_ch_val ==  -1 )
+          {
+            userlog("Not able to send the snap-shot with sequence number :%s:",c_msg_seq);
+            if( fn_mark_failure((char*)v_row_id.arr) == -1)
+            {
+              userlog("Failed while marking failure - Sequence number :%s:",c_msg_seq);
+              errlog(c_BatchName, "S31040", LIBMSG, DEF_USR, DEF_SSSN, c_err_msg);
+              fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+              break;
+            }
+          }  /**End of if( i_ch_val ==  -1 ) **/
+          else if( i_ch_val == -2 )
+          {
+            userlog("Error in function 'fn_crt_snd_ri_brdmsg' - Service not available.");
+            errlog(c_BatchName, "S31045", LIBMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+            break;
+          }
+
+					if( strcmp(v_cnt_id.arr,"*") != 0 )
+					{
+						EXEC SQL
+              DECLARE cur_get_usr_fo_ord CURSOR FOR
+              SELECT  RMD_CNT_ID,RMD_SETUP_NO
+              FROM    RMD_RVRSE_MSG_DEALER
+              WHERE   RMD_USR_ID = :sql_dfo_usr_id;
+
+            EXEC SQL
+              OPEN cur_get_usr_fo_ord;
+
+            if(SQLCODE !=0)
+            {
+              userlog("Error while opening cur_get_usr_fo_ord cursor");
+              errlog(c_BatchName, "S31050", SQLMSG, DEF_USR, DEF_SSSN, c_err_msg);
+              fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+              break;
+            }
+
+						while(1)
+            {
+              MEMSET(v_cnt_id);
+              sql_dfo_cnt_ria_setup_no = 0;
+
+              EXEC SQL
+                FETCH cur_get_usr_fo_ord
+                INTO  :v_cnt_id,
+                      :sql_dfo_cnt_ria_setup_no;
+
+              if(SQLCODE == NO_DATA_FOUND)
+              {
+                userlog("cur_get_usr_fo_ord : Inside No data found");
+                EXEC SQL CLOSE cur_get_usr_fo_ord;
+                break;
+              }
+              else if(SQLCODE !=0)
+              {
+                userlog("Error while Selecting record from cur_get_usr_fo_ord cursor");
+                errlog(c_BatchName, "S31055", SQLMSG, DEF_USR, DEF_SSSN, c_err_msg);
+                fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+                EXEC SQL CLOSE cur_get_usr_fo_ord;
+                c_break_flg = 'Y';
+                break;
+              }
+
+              SETNULL(v_cnt_id);
+					
+          		i_ch_val = fn_crt_snd_ri_brdmsg (
+																		v_cnt_id.arr,
+            	                      sql_dfo_cnt_ria_setup_no,  
+            	                      c_msg_seq,
+            	                      i_msg_type,
+            	                      c_msg_priority,
+            	                      c_msg_data,
+            	                      c_mode,
+             		                    c_BatchName,
+                	                  c_msg_flg
+                  	         );
+          		if( i_ch_val ==  -1 )
+          		{
+            		userlog("Not able to send the snap-shot with sequence number :%s:",c_msg_seq);
+            		if( fn_mark_failure((char*)v_row_id.arr) == -1)
+            		{
+              		userlog("Failed while marking failure - Sequence number :%s:",c_msg_seq);
+              		errlog(c_BatchName, "S31060", LIBMSG, DEF_USR, DEF_SSSN, c_err_msg);
+              		fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+									EXEC SQL CLOSE cur_get_usr_fo_ord; 
+                  c_break_flg = 'Y'; 
+              		break;
+            		}	
+          		}  /**End of if( i_ch_val ==  -1 ) **/
+          		else if( i_ch_val == -2 )
+          		{
+            		userlog("Error in function 'fn_crt_snd_ri_brdmsg' - Service not available.");
+            		errlog(c_BatchName, "S31065", LIBMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            		fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg );
+								EXEC SQL CLOSE cur_get_usr_fo_ord;
+                c_break_flg = 'Y'; 
+            		break;
+          		}	
+						} /* End of cur_get_usr_fo_ord while */
+					
+            if(c_break_flg == 'Y')
+            {
+              break;
+            }
+
+					}
+					/** sending message to super user - End **/
+        }
+      }
+
+			if(fn_equ_committran(c_BatchName,DEF_USR, DEF_SSSN, i_trnsctn, c_err_msg) == -1)
+      {
+        userlog("ERROR commiting transaction");
+        errlog(c_BatchName, "S31070", TPMSG,(char *) DEF_USR, DEF_SSSN, c_err_msg);
+        fn_equ_aborttran(c_BatchName, i_trnsctn, c_err_msg);
+        break;
+      }
+		
+    } /** End of c_sleep_flg = 'N' **/
+    /******* Check for STOP trigger ********/
+    if(fn_chk_trgr() == -1)
+    {
+      break;
+    }
+
+  } /** End of While Loop **/
+
+  if(DEBUG_MSG_LVL_3){
+  	userlog("End of While");
+    userlog("BAT Process Ended Successfully .........");
+  }
+
+  fn_close_bat(c_BatchName, argv[1], c_setup_no);
+
+  return 0;
+} /** End of Main **/
+
+int fn_mark_failure( char * c_row_id )
+{
+	if(DEBUG_MSG_LVL_3){
+    userlog("fn_mark_failure - Row id :%s:",c_row_id);
+  }
+  EXEC SQL
+    UPDATE  DFO_DL_FO_ORDBK
+    SET     DFO_RI_SND_STTS = 'F'
+    WHERE   ROWID           = :c_row_id;
+
+  if(SQLCODE != 0)
+  {
+    userlog("fn_mark_failure failed.");
+    return -1;
+  }
+  return 0;
+}
+
+
+/************* Initialise the TUXEDO connection ************/
+int fn_init_bat(char *c_srvc_nm, char *c_xchng_cd, char *c_setup_no)
+{
+  TPINIT *ptr_tpinfo = (TPINIT*)NULL;
+
+  if(DEBUG_MSG_LVL_3){
+    userlog("Inside fn_init_bat .........");
+    userlog("Service Name is :%s:", c_srvc_nm);
+    userlog("Exchange Code is :%s:", c_xchng_cd);
+    userlog("Pipe id is :%s:", c_setup_no);
+  }
+
+  if(c_srvc_nm == NULL)
+  {
+    return -1;
+  }
+
+  ptr_tpinfo = (TPINIT *)tpalloc("TPINIT", NULL, MIN_FML_BUF_LEN);
+  if(ptr_tpinfo == (TPINIT *)NULL)
+  {
+    errlog(c_srvc_nm, "S31075", TPMSG, (char *)DEF_USR, DEF_SSSN, c_err_msg);
+    return -1;
+  }
+
+  if(tuxgetenv("ORA_GRP")== NULL)
+  {
+    errlog(c_srvc_nm, "S31080", TPMSG, (char *)DEF_USR, DEF_SSSN, c_err_msg);
+    tpfree((char*)ptr_tpinfo);
+    return -1;
+  }
+
+  if(tuxgetenv("EBALOG_PATH")== NULL)
+  {
+    errlog(c_srvc_nm, "S31085", TPMSG, (char *)DEF_USR, DEF_SSSN, c_err_msg);
+    tpfree((char*)ptr_tpinfo);
+    return -1;
+  }
+
+	strcpy(ptr_tpinfo->grpname, tuxgetenv("ORA_GRP"));
+  strcpy(ptr_tpinfo->usrname, c_srvc_nm);
+
+  if(tpinit((TPINIT *) ptr_tpinfo) == -1)
+  {
+    errlog(c_srvc_nm, "S31090", TPMSG, (char *)DEF_USR, DEF_SSSN, c_err_msg);
+    tpfree((char*)ptr_tpinfo);
+    return -1;
+  }
+  tpfree((char*)ptr_tpinfo);
+
+  if(tpopen() == -1)
+  {
+    errlog(c_srvc_nm, "S31095", TPMSG, (char *)DEF_USR, DEF_SSSN, c_err_msg);
+    tpterm();
+    return -1;
+  }
+
+  if(fn_rgstr_bat('R', c_srvc_nm, c_xchng_cd, c_setup_no) != 1)
+  {
+    sprintf(c_err_msg, "Instance of Process |%s| is Already Running", c_srvc_nm);
+    tpclose();
+    tpterm();
+    return -1;
+  }
+
+  if(DEBUG_MSG_LVL_3){
+    userlog("INIT DONE .....");
+  }
+  return 0;
+} /** End of fn_init_bat **/
+
+
+
+void fn_close_bat(char *c_srvc_nm, char *c_xchng_cd, char *c_setup_no)
+{
+  fn_rgstr_bat('U',c_srvc_nm,c_xchng_cd,c_setup_no);
+  tpunsubscribe(-1, 0);
+  tpclose();
+  tpterm();
+  return;
+} /** End of fn_close_bat **/
+
+int fn_read_inifile(void)
+{
+  int i_ch_val;
+  char c_FileName[256];
+  char c_prcsname[256];
+  char c_ini_file[10];
+  char *tmp_ptr; 
+  char *ptr;      
+
+  MEMSET(c_FileName);
+  MEMSET(c_ini_file);
+
+  tmp_ptr =  tuxgetenv("RIINI");  
+  if(tmp_ptr == NULL)
+  {
+    userlog("Unable to get the contents of RI.ini file");
+    return (-1);
+  }
+
+  strcpy(c_ini_file, tmp_ptr);
+
+  if(DEBUG_MSG_LVL_3){
+    userlog("INI filename is :%s:",c_ini_file);
+  }
+
+  tmp_ptr = tuxgetenv("BIN");
+  if( tmp_ptr == NULL )
+  {
+    userlog("Unable to get the contents of BIN file");
+    return (-1);
+  }
+
+  sprintf(c_FileName, "%s/%s", tmp_ptr, c_ini_file);
+
+  if(DEBUG_MSG_LVL_3){
+    userlog("Final FileName |%s|", c_FileName);
+  }
+  
+  i_ch_val = fn_init_prcs_spc(c_FileName, c_BatchName);
+  if(i_ch_val == -1)
+  {
+    userlog("Error in fn_init_prcs_spc");
+    return (-1);
+  }
+
+  /** Get sleep time. **/
+  ptr  =  fn_get_prcs_spc("SLEEP_TIME"); 
+  if(ptr == NULL)
+  {
+    userlog("Unable to get SLEEP_TIME Value from Config File |%s|", c_FileName);
+    return (-1);    
+  }
+  else
+  {
+    i_sleep_tm = atoi(ptr);
+  }
+
+  if(DEBUG_MSG_LVL_3){
+    userlog("Sleep Time Got is |%d|", i_sleep_tm);
+  }
+
+  return 0;
+} /** End of fn_read_inifile **/
+
+/*** Unsolicited message handler function ***/
+void fn_msg_hnd(char *ptr_c_i_trg, long int li_len, long int li_flg)
+{
+  c_trg_got = 'Y';
+  return ;
+} /** End of fn_msg_hnd **/
+
+int fn_chk_trgr()
+{
+  if(c_trg_got == 'Y')
+    return (-1);
+  else
+  {
+    tpchkunsol();        /*** Check if any unsolicited message is pending - If so then it again
+                              invokes the unsolicited message handling function that was 
+                              specified using tpsetunsol() ***/
+    if(c_trg_got == 'Y')
+      return (-1);
+  }
+  return (0);
+} /** End of fn_chk_trgr **/
+
+/** On getting STOP signal **/
+void fn_sigusr2_hnd(int i_signal_no)
+{
+  if(DEBUG_MSG_LVL_3){
+    userlog("Bat process stopped:Caught signal |%d|", i_signal_no);
+  }
+  i_exit_stts = EXIT;
+}

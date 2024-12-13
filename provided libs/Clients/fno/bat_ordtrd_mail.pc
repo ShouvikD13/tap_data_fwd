@@ -1,0 +1,1037 @@
+/**************************************************************************************************
+* 	File 							: 	bat_ordtrd_mail.pc														  												*
+*																																																	*
+*  	Description				: 	This batch program collects order and trade data for a given date and		*
+*													calls a service 'SFO_SND_MAIL' to insert this data in CLICK database.		*
+*																																																	*
+*   Input Parameters	:		Trading Date (Optional : Takes sysdate)																	*
+*																																																	*
+*  	Output Parameters	:		None																																		*
+*																																																	*	
+*  	Called by					:	  CRON																																		*
+*																																																	*
+*  	Calling Programss :   SFO_SND_MAIL																                						*
+*																																																	*
+*  	Author 						: 	Vishnu Nair		       																										*	
+*																																																	*
+*  	Created on				:  	07-05-2012																															*
+*																																																	*
+*  	Log								:	  Initial Release																													*	
+*											:   Ver 1.1 - SLTP F+ handling (Navina D.)                                  *
+*											:   Ver 1.2 - OptionPLUS handling (Navina D.)                               *
+*                     :   Ver 1.3 - Contract Master and Trade Quote Merger Changes (Anand Dhopte) *
+*																																																	*
+**************************************************************************************************/
+
+#include <string.h>  					 	/***** C Header File *****/
+#include <sqlca.h>   					 	/***** Oracle header file *****/
+#include <atmi.h>    					 	/***** TUXEDO Header File *****/
+#include <fn_log.h> 					 	/***** TUXEDO Header File *****/
+#include <Usysflds.h>					 	/***** TUXEDO Field Definitions *****/
+#include <fo_fml_def.h>  			 	/***** FML declaration file *****/
+#include <fn_read_debug_lvl.h>	/***** Header file for Debug level *****/
+#include <stdlib.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <stdio.h>
+#include <userlog.h>
+#include <fn_ddr.h>
+#include <fn_env.h>	
+#include <eba.h>
+
+#define BATCH_SIZE 1000 
+#define TRANSACTION 'T'
+#define USERINFO 'U'
+#define MAIL_LOG_HEADER 'M'
+#define TOTAL_FML 10
+#define TRAN_TIME 1200			/** check **/
+
+void BAT_ORDTRD_MAIL(int argc, char* argv[])
+{
+	
+	/***** Structure Declaration ******/
+
+	struct st_tran_dtls
+ 	{
+		char c_match_id[30]   ;
+    char c_xchng_cd[5]    ;
+    char c_prdct_typ      ;
+    char c_undrlying[30]  ;
+    char c_expr_dt[20]    ;
+    char c_exert_typ      ;
+    char c_opt_typ        ;
+    long l_strk_prc       ;
+    char c_ordr_flw[10]   ;
+    char c_rqst_typ[30]   ;
+    long l_tot_qty        ;
+    long l_price          ;
+    char c_ordr_typ[10]   ;
+    long l_sltp           ;
+    char c_ack_no[25]     ;
+    char c_ord_ref_no[30] ;
+    char c_xchng_tm[30]   ;
+    char c_remark[100]    ;
+    long l_record_id      ;
+    char c_filename[100]  ;
+    long l_lot            ;
+    char c_stmt_dt[30]    ;
+	
+	};
+
+  struct st_tran_dtls tran_arr[BATCH_SIZE];
+
+  struct st_user_info
+  {
+		long l_record_id      ;
+    char c_usr_nm[100]    ;
+    char c_match_id[30]   ;
+    char c_email_id1[101] ;
+    char c_email_id2[101] ;
+    char c_filename[100]  ;
+    char c_stmt_dt[30]    ;
+  };
+
+  struct st_user_info usr_arr[BATCH_SIZE];
+
+	/***	Variable Declaration ***/
+
+  unsigned char *c_data;
+
+	int i_returncode;
+  int i_rows_fetched = 0;
+  int i_err[TOTAL_FML];
+  int i_ferr[TOTAL_FML];
+  int i_fml_cnt = 0;
+  int i_return_val = 0;
+  int i_tot_trn_cnt = 0;
+  int i_tot_usr_cnt = 0;
+	int i_trnsctn;
+	
+	long l_bufferlength = 0;
+  long l_rcvbuff;
+	long l_lot;
+	long l_strk_prc;
+
+  char  c_ServiceName[33];      
+  char  c_errmsg[256];
+  char  c_event[256];
+  char  c_tag[32];
+  char  c_trd_dt[22+1];
+  char  c_action_flg;
+
+	sql_cursor cur_trd_ord; 
+
+  TPINIT  *tpinfo;
+
+  FBFR32    *ptr_fml_Sbuffer;
+  FBFR32    *ptr_fml_Rbuffer;
+
+  INITBATDBGLVL(argv[0]);
+
+	/***** Variable Initalization *****/
+
+  MEMSET(c_trd_dt);
+
+  strcpy(c_ServiceName, "bat_ordtrd_mail");
+ 
+	sprintf(c_tag,"%s",c_ServiceName);
+
+	if(argc < 4)
+	{
+		fn_userlog( c_ServiceName, "Usage: bat_ordtrd_mail <ini> <Exchange_cd><NA><trade date/optional>");
+		return;
+	}
+	
+
+  if((tpinfo = (TPINIT *)tpalloc("TPINIT",NULL,MIN_FML_BUF_LEN)) == (TPINIT *)NULL)
+  {
+    printf("\n Error in tpalloc()");
+    fn_errlog(c_ServiceName, "S31005", TPMSG, c_errmsg);
+    return;
+  }
+	
+	if(tuxgetenv("ORA_GRP") == NULL)
+  {
+    fn_errlog(c_ServiceName, "S31010", TPMSG,c_errmsg);
+    return;
+  }
+
+  strcpy(tpinfo->grpname ,tuxgetenv("ORA_GRP"));
+  strcpy(tpinfo->usrname, "\0");
+  strcpy(tpinfo->passwd, "\0");
+  strcpy(tpinfo->cltname, "bat_ordtrd_mail");
+  tpinfo->flags = 0;
+
+  if(tpinit((TPINIT *) tpinfo) == -1)
+  {
+    fn_errlog(c_ServiceName, "S31015", TPMSG, c_errmsg);
+    return;
+  }
+
+  tpfree((char *)tpinfo);
+
+  if(tpopen() == -1)
+  {
+    fn_errlog(c_ServiceName, "S31020", TPMSG,c_errmsg);
+    tpterm();
+    return;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"ORA_GRP= %s:",tuxgetenv("ORA_GRP"));
+  }
+
+  /***** If trade date is not provided, sysdate is used as trade date. *****/
+ 
+	strcpy(c_trd_dt, argv[4]);
+  rtrim(c_trd_dt);
+
+  if(strlen(c_trd_dt) == 0)
+  {
+    EXEC SQL
+      SELECT  to_char(sysdate, 'dd-Mon-yyyy')
+      INTO    :c_trd_dt
+      FROM    dual;
+	
+		if(SQLCODE != 0)
+    {
+      fn_errlog(c_ServiceName, "S31025", SQLMSG, c_errmsg);
+      strcpy(c_event,"Error while  selecting system date.");
+      fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+			fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+      return;
+    }
+  }
+
+  rtrim(c_trd_dt); 
+
+  if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName,"Trade Date :%s:", c_trd_dt);
+  }
+
+  sprintf(c_event,"Trading Date - :%s:",c_trd_dt);
+  fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+  sprintf(c_event,"Starting the mail sending process.......");
+
+  if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName,"Truncating Transaction table");
+  }
+	
+	
+	/****** Truncating FNO_ORDTRD_MAIL_DTLS & FNO_USER_INFO  ******/
+
+  EXEC SQL
+    TRUNCATE TABLE FNO_ORDTRD_MAIL_DTLS;
+
+  if(SQLCODE != 0)
+  {
+    fn_userlog(c_ServiceName,"Error while Truncating FNO_ORDTRD_MAIL_DTLS  table...");
+    fn_errlog(c_ServiceName, "S31030", SQLMSG,c_errmsg);
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		return;
+  }
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Truncating User Info tables....");
+  }
+
+  EXEC SQL
+    TRUNCATE TABLE FNO_USER_INFO ;
+
+  if(SQLCODE != 0)
+  {
+    fn_userlog(c_ServiceName,"Error while Truncating FNO_USER_INFO table...");
+    fn_errlog(c_ServiceName, "S31035", SQLMSG,c_errmsg);
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		return;
+  }
+	if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName,"Reseting the Sequence.");
+  }
+
+	/***** Reset Record Id (sequence) *****/
+  
+  EXEC SQL EXECUTE
+      BEGIN
+        reset_sequence('USR_SEQ_NO');
+      END;
+  END-EXEC;
+
+  if(SQLCODE != 0)
+  {
+    fn_userlog(c_ServiceName,"Error while RESETING SEQUENCE...");
+    fn_errlog(c_ServiceName, "S31040", SQLMSG,c_errmsg);
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		return;
+  }
+
+	if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName," Populating the FNO_ORDTRD_MAIL_DTLS.");
+  }
+	
+  /*i_trnsctn = fn_begintran( c_ServiceName,c_errmsg); */
+		i_trnsctn = tpbegin(TRAN_TIME, 0 )	;		/** check **/
+  if( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31045", LIBMSG,c_errmsg);
+    fn_userlog(c_ServiceName, "Error while beginning the transaction");
+    return;
+  }
+	
+	/***** Inserting Data Into FNO_ORDTRD_MAIL_DTLS Table *****/
+
+	EXEC SQL
+		INSERT INTO FNO_ORDTRD_MAIL_DTLS
+		(
+			FMD_CLM_MTCH_ACCNT,
+			FMD_XCHNG_CD,
+			FMD_PRDCT_TYP,
+			FMD_UNDRLYNG,
+			FMD_EXPY_DT,
+			FMD_EXER_TYP,
+			FMD_OPT_TYP,
+			FMD_STRK_PRC,
+			FMD_ORDR_FLW,
+			FMD_EVENT,
+			FMD_TOTAL_QTY,
+			FMD_PRICE,
+			FMD_LMT_MRKT_SL_FLG,
+			FMD_STP_LSS_TGR,
+			FMD_ACK_NMBR,
+			FMD_ORDR_RFRNC,
+			FMD_ACK_TIME,
+			FMD_REMARKS,
+			FMD_NO_LOTS,
+			FMD_STMTDT
+		)
+		(
+			SELECT
+				FOD_CLM_MTCH_ACCNT,
+				FOD_XCHNG_CD,
+				FOD_PRDCT_TYP,
+				FOD_UNDRLYNG,
+				FOD_EXPRY_DT,
+				FOD_EXER_TYP,
+				FOD_OPT_TYP,
+				DECODE(FOD_PRDCT_TYP,'O',FOD_STRK_PRC,'I',FOD_STRK_PRC,'0') as "Strike Price",	/*** product type I added in Ver 1.2 ***/
+				DECODE(FOD_ORDR_FLW,'B', 'Buy','S','Sell')  as Action,  
+				DECODE(FXB_RQST_TYP,'N','Order Placement','M','Order Modification','C','Order Cancellation') as Event,
+				DECODE(FXB_RQST_TYP,'C',FOD_CNCL_QTY,NVL(FXB_ORDR_TOT_QTY,0)) as "Total quantity",
+				FXB_LMT_RT as Price,
+				DECODE(FXB_LMT_MRKT_SL_FLG,'L', 'Limit', 'M', 'Market') as "Order type",
+				NVL(ROUND(FXB_STP_LSS_TGR/100,2),0) as "Trigger Price",
+				FOD_ACK_NMBR as "Exchange Order No",
+				FOD_ORDR_RFRNC as "order Reference No",
+				TO_CHAR(FXB_ACK_TM,'DD-Mon-YYYY hh24:mi:ss') as "Exchange Timestamp",
+				DECODE( FXB_RQST_TYP,'T','','C','Order Cancelled','Order Accepted')  as Remark,
+				/*** Commented in Ver 1.3 ***
+				DECODE(FXB_RQST_TYP,'C',FOD_CNCL_QTY,FXB_ORDR_TOT_QTY)/FCM_LOT_SZ as "Lots",
+				***/
+        DECODE(FXB_RQST_TYP,'C',FOD_CNCL_QTY,FXB_ORDR_TOT_QTY)/FTQ_MIN_LOT_QTY as "Lots", /*** Added in Ver 1.3 ***/
+		 		:c_trd_dt	
+			FROM 
+				FXB_FO_XCHNG_BOOK,
+				FOD_FO_ORDR_DTLS,
+				/*** Commented in Ver 1.3 *** FCM_FO_CNTRCT_MSTR  **/
+        FTQ_FO_TRD_QT   /*** Ver 1.3 ***/
+			WHERE 
+				FOD_ORDR_RFRNC=FXB_ORDR_RFRNC
+			AND FOD_XCHNG_CD=FXB_XCHNG_CD
+			AND FXB_RQST_TYP != 'T'
+			AND FOD_ORDR_STTS != 'Y'
+			AND FOD_TRD_DT=:c_trd_dt
+
+    /*** Commented in Ver 1.3 ***
+	
+			AND FOD_XCHNG_CD=FCM_XCHNG_CD
+			*** AND DECODE(FOD_PRDCT_TYP,'P','F',FOD_PRDCT_TYP)=FCM_PRDCT_TYP		Commented in ver 1.1 ***
+			AND DECODE(FOD_PRDCT_TYP,'P','F','U','F','I','O',FOD_PRDCT_TYP)=FCM_PRDCT_TYP			*** Ver 1.1 *** *** Ver 1.2 product type 'I' handled ***
+			AND FOD_UNDRLYNG=FCM_UNDRLYNG
+			AND FOD_EXPRY_DT=FCM_EXPRY_DT
+			AND FOD_EXER_TYP=FCM_EXER_TYP
+			AND FOD_OPT_TYP=FCM_OPT_TYP
+			AND FOD_STRK_PRC=FCM_STRK_PRC	
+	
+      ***/
+
+      /*** Ver 1.3 Starts ***/
+
+      AND FOD_XCHNG_CD=FTQ_XCHNG_CD
+      AND DECODE(FOD_PRDCT_TYP,'P','F','U','F','I','O',FOD_PRDCT_TYP)=FTQ_PRDCT_TYP
+      AND FOD_UNDRLYNG=FTQ_UNDRLYNG
+      AND FOD_EXPRY_DT=FTQ_EXPRY_DT
+      AND FOD_EXER_TYP=FTQ_EXER_TYP
+      AND FOD_OPT_TYP=FTQ_OPT_TYP
+      AND FOD_STRK_PRC=FTQ_STRK_PRC
+
+      /*** Ver 1.3 Ends   ***/
+		
+			UNION
+
+			SELECT
+				FTD_CLM_MTCH_ACCNT,
+				FTD_XCHNG_CD,
+				FTD_PRDCT_TYP,
+				FTD_UNDRLYNG,
+				FTD_EXPRY_DT,
+				FTD_EXER_TYP,
+				FTD_OPT_TYP,
+				DECODE(FTD_PRDCT_TYP,'O',FTD_STRK_PRC,'I',FTD_STRK_PRC,'0') as "Strike Price",  /*** product type I added in Ver 1.2 ***/
+				DECODE(FTD_TRD_FLW,'B', 'Buy','S','Sell')  as Action,
+				'TRADE',
+				FTD_EXCTD_QTY,  
+				FTD_EXCTD_RT as Price,
+				'',
+				0,
+				FTD_ORD_ACK_NMBR as "Exchange Order No",
+				FTD_ORDR_RFRNC as "order Reference No",
+				TO_CHAR(FTD_TRD_DT ,'DD-Mon-YYYY hh24:mi:ss') as "Exchange Timestamp",
+				'Trade no: '||FTD_XCHNG_TRD_NO,
+				/*** Commented in Ver 1.3 ***
+				FTD_EXCTD_QTY/FCM_LOT_SZ as "Lots",
+				***/
+        FTD_EXCTD_QTY/FTQ_MIN_LOT_QTY as "Lots",       /*** Ver 1.3 ***/
+		    :c_trd_dt	
+			FROM 
+				FTD_FO_TRD_DTLS,
+				/*** Commented in Ver 1.3 ***  FCM_FO_CNTRCT_MSTR ***/
+        FTQ_FO_TRD_QT        /*** Ver 1.3 ***/
+			WHERE 
+				TO_CHAR(FTD_TRD_DT,'dd-Mon-yyyy')=:c_trd_dt
+
+     /*** Commented in Ver 1.3 ***
+
+			AND FTD_XCHNG_CD=FCM_XCHNG_CD
+			/*** AND DECODE(FTD_PRDCT_TYP,'P','F',FTD_PRDCT_TYP)=FCM_PRDCT_TYP		Commented in Ver 1.1 ***
+			AND DECODE(FTD_PRDCT_TYP,'P','F','U','F','I','O',FTD_PRDCT_TYP)=FCM_PRDCT_TYP					*** Ver 1.1 *** *** Ver 1.2 product type 'I' handled ***
+			AND FTD_UNDRLYNG=FCM_UNDRLYNG
+			AND FTD_EXPRY_DT=FCM_EXPRY_DT
+			AND FTD_EXER_TYP=FCM_EXER_TYP
+			AND FTD_OPT_TYP=FCM_OPT_TYP
+			AND FTD_STRK_PRC=FCM_STRK_PRC
+
+      ***/
+
+     /*** Ver 1.3 Starts ***/
+
+      AND FTD_XCHNG_CD=FTQ_XCHNG_CD
+      AND DECODE(FTD_PRDCT_TYP,'P','F','U','F','I','O',FTD_PRDCT_TYP)=FTQ_PRDCT_TYP
+      AND FTD_UNDRLYNG=FTQ_UNDRLYNG
+      AND FTD_EXPRY_DT=FTQ_EXPRY_DT
+      AND FTD_EXER_TYP=FTQ_EXER_TYP
+      AND FTD_OPT_TYP=FTQ_OPT_TYP
+      AND FTD_STRK_PRC=FTQ_STRK_PRC
+
+     /*** Ver 1.3 Ends   ***/
+	
+			);
+	
+	if(SQLCODE != 0)
+  {
+  	fn_errlog(c_ServiceName, "S31050", SQLMSG,c_errmsg);
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+  	fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		tpabort(0);	/** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg);   */
+    return;
+  }
+
+	if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName," FNO_ORDTRD_MAIL_DTLS  Table Populated sucessfully.");
+    fn_userlog(c_ServiceName," Populating FNO_USER_INFO table.");
+  }	
+	
+	/***** Inserting Data Into FNO_USER_INFO Table *****/
+	
+	EXEC SQL
+		INSERT INTO FNO_USER_INFO
+		(
+			FUI_RECORD_NO,
+			FUI_USER_NM,
+			FUI_CLM_MTCH_ACCNT,	
+			FUI_EMAIL_1,
+			FUI_EMAIL_2,
+			FUI_FILENAME,
+			FUI_STMTDT	
+		)
+  	(
+  		SELECT 
+				USR_SEQ_NO.NEXTVAL,
+	  		USR_USR_NM,
+	  		TRANS.FMD_CLM_MTCH_ACCNT,
+      	USR_EMAIL_ADDRSS,
+      	USR_EMAIL_ADDRSS2,
+	    	:c_trd_dt||'_fno_ordertrades_'||USR_SEQ_NO.NEXTVAL,
+    		:c_trd_dt	
+			FROM 
+		  	UAC_USR_ACCNTS,
+				USR_USER_MASTER,
+				(SELECT DISTINCT(FMD_CLM_MTCH_ACCNT) FROM FNO_ORDTRD_MAIL_DTLS) TRANS
+			WHERE  UAC_USR_ID          = USR_USR_ID
+    	AND    UAC_CLM_MTCH_ACCNT  = TRANS.FMD_CLM_MTCH_ACCNT
+  	);
+	
+	if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31055", SQLMSG, c_errmsg);
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+ 		fn_rgstr_bat('U',c_ServiceName,"NFO","NA");	
+		tpabort(0);	/** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg);	 */
+		return;
+  }
+  if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName," FNO_USER_INFO  table Populated sucessfully.");
+    fn_userlog(c_ServiceName," Updating FNO_ORDTRD_MAIL_DTLS .");
+  }
+	
+	/***** Updating Record_Id & FileName Of FNO_ORDTRD_MAIL_DTLS Table *****/ 
+
+	EXEC SQL
+    UPDATE FNO_ORDTRD_MAIL_DTLS 
+    SET (FMD_RECORD_NO,FMD_FILENAME) =
+    (
+      SELECT 
+				 FUI_RECORD_NO,
+         FUI_FILENAME
+      FROM 
+			   FNO_USER_INFO 
+      WHERE 
+			   FMD_CLM_MTCH_ACCNT = FUI_CLM_MTCH_ACCNT  
+    );
+
+	if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31060", SQLMSG, c_errmsg);
+    strcpy(c_event,"Error while updating the FNO_ORDTRD_MAIL_DTLS table");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+		fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		tpabort(0); /** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg);  */
+    return;
+  }
+
+
+	/***** Allocating memory to SEND and RECEIVE buffer *****/
+	
+	ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN*BATCH_SIZE);
+
+	if (ptr_fml_Sbuffer == NULL)
+  {
+    fn_errlog(c_ServiceName, "S31065",TPMSG,c_errmsg);
+    strcpy(c_event,"Error while allocating memory :");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+		tpabort(0); /** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); **/
+    return;
+  }
+
+  ptr_fml_Rbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+	if (ptr_fml_Rbuffer == NULL)
+  {
+    fn_errlog(c_ServiceName, "S31070",TPMSG, c_errmsg);
+    strcpy(c_event,"Error while allocating memory.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    tpfree ( ( char * ) ptr_fml_Sbuffer );
+		tpabort(0); /** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); **/
+    return;
+  }
+	
+	/***** Allocate & Open  the cursor.*****/
+  
+	EXEC SQL ALLOCATE :cur_trd_ord;
+
+	EXEC ORACLE OPTION (CHAR_MAP=STRING);
+
+	EXEC SQL 
+		EXECUTE BEGIN OPEN :cur_trd_ord
+    	FOR
+      SELECT  *
+      FROM FNO_ORDTRD_MAIL_DTLS;
+    END;
+  END-EXEC;
+	
+	if(SQLCODE != 0)
+  {
+  	fn_errlog(c_ServiceName, "S31075",TPMSG,c_errmsg);
+    strcpy(c_event,"Error while opening the cursor.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    EXEC SQL CLOSE :cur_trd_ord;
+		EXEC SQL FREE :cur_trd_ord;
+    tpfree ( ( char * ) ptr_fml_Sbuffer );
+    tpfree ( ( char * ) ptr_fml_Rbuffer );
+  	fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		tpabort(0); /** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg);	 **/
+		return;
+	}
+		
+	c_data=(unsigned char *)tran_arr;
+
+	if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName,"Fetching data from FNO_ORDTRD_MAIL_DTLS  table.");
+  }
+	
+	/***** Fetching Data from the cursor *****/
+
+	while(1)
+	{
+		l_bufferlength=0;
+		MEMSET(tran_arr);
+		c_action_flg=TRANSACTION;
+
+  	EXEC SQL
+    	FETCH :cur_trd_ord
+      INTO  :tran_arr;
+
+		fn_userlog(c_ServiceName,"row count %d:",sqlca.sqlerrd[2]);
+
+		if( SQLCODE != 0 && SQLCODE != -1405  )
+    {
+      if ( SQLCODE == NO_DATA_FOUND && ( sqlca.sqlerrd[2]%BATCH_SIZE )==0 )
+      {
+        fn_userlog(c_ServiceName,"All TRANSACTION data transfered to CLICK.");
+        fn_userlog(c_ServiceName,"Total records transfered :%d:",sqlca.sqlerrd[2]);
+        i_return_val = 1;
+        break;
+      }
+      else if( SQLCODE != NO_DATA_FOUND )
+      {
+        fn_userlog(c_ServiceName,"Error while fetching the data.");
+        fn_errlog(c_ServiceName, "S31080", SQLMSG,c_errmsg);
+				tpabort(0); /** check **/
+        /*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+				i_return_val = -1;
+    		break;
+			} 
+    }
+
+		i_rows_fetched=((sqlca.sqlerrd[2]%BATCH_SIZE==0)?BATCH_SIZE:(sqlca.sqlerrd[2]%BATCH_SIZE));
+
+   	fn_userlog(c_ServiceName,"Number of records sent till now :%d:",sqlca.sqlerrd[2]);
+	
+		if(DEBUG_MSG_LVL_3)
+		{
+      fn_userlog(c_ServiceName,"Rows fetched :%d:",i_rows_fetched);
+      fn_userlog(c_ServiceName,"Sizeof Transaction array :%ld:",sizeof(tran_arr));
+    }
+
+    l_bufferlength = i_rows_fetched * sizeof(struct st_tran_dtls);
+		
+		/***** Initializing Send & receive Buffer *****/
+	
+		Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+    Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+		
+		/***** Adding Data in Send Buffer *****/    
+
+    i_err[0]=Fadd32(ptr_fml_Sbuffer,FFO_AVL_QTY,(char *)&l_bufferlength,0);
+    i_ferr[0]=Ferror32;
+    i_err[1]=Fadd32(ptr_fml_Sbuffer,FFO_CBUF,(char *)c_data,l_bufferlength);
+    i_ferr[1]=Ferror32;
+    i_err[2]=Fadd32(ptr_fml_Sbuffer,FFO_ORD_TOT_QTY,(char *)&i_rows_fetched,0);
+    i_ferr[2]=Ferror32;
+		i_err[3]=Fadd32(ptr_fml_Sbuffer,FFO_PRDCT_TYP,(char *)&c_action_flg,0);
+    i_ferr[3]=Ferror32;
+
+    for(i_fml_cnt = 0;i_fml_cnt <=3; i_fml_cnt++)
+		{
+    	if(i_err[i_fml_cnt] == -1 )
+      {
+      	fn_userlog(c_ServiceName,"Error while adding the data.FML COUNT = :%d:",i_fml_cnt);
+        fn_errlog(c_ServiceName, "S31085", Fstrerror32(i_ferr[i_fml_cnt]), c_errmsg);
+        i_return_val = -1;
+				tpabort(0); /** check **/
+     		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+				break; 
+			}
+    }
+    
+		if( i_return_val == -1 )
+    {
+    	break;
+    }
+		
+		/***** Calling the Service SFO_SND_MAIL *****/
+		
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"Calling the SFO_SND_MAIL service For TRANSACTION UPDATE.");
+    	fn_userlog(c_ServiceName,"%c flag",c_action_flg);
+		}
+
+    i_returncode = tpcall	(	"SFO_SND_MAIL",
+														(char *)ptr_fml_Sbuffer,
+														0,
+														(char **)&ptr_fml_Rbuffer,
+														&l_rcvbuff,
+														0
+													);
+
+    if( i_returncode == -1 )
+    {
+				tpabort(0); /** check **/
+			/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+
+      if (TPCODE != TPESVCFAIL)
+      {
+      	fn_errlog(c_ServiceName, "S31090", TPMSG,c_errmsg);
+      }
+      else
+      {
+      	if( Fget32(ptr_fml_Rbuffer,FFO_ERR_MSG, 0,c_errmsg,0)== -1)
+        {
+        	fn_errlog(c_ServiceName, "S31095",FMLMSG,c_errmsg);
+        }
+        else
+        {
+        	fn_errlog(c_ServiceName, "S31100",c_errmsg,c_errmsg);
+        }
+      }/*** End of else***/
+
+      i_return_val = -1;
+
+      break;
+		}/** End of if **/
+   	
+		/** Check for the last batch processing. **/
+		if (sqlca.sqlerrd[2]%BATCH_SIZE!=0)
+    {
+    	fn_userlog(c_ServiceName,"LAST RECORD HENCE BREAKING...");
+      break;
+    }
+
+	}/* While loop ends here */     
+
+	if( i_return_val == -1 ) /** if error occurs **/
+  {
+  	fn_userlog(c_ServiceName,"Error in transaction while loop....");
+  	strcpy(c_event,"Error:Contact System Support.");
+  	fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+  	fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		EXEC SQL CLOSE :cur_trd_ord;
+	  tpabort(0); /** check **/	
+		EXEC SQL FREE :cur_trd_ord;
+  	/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+		tpfree ( ( char * ) ptr_fml_Sbuffer );
+  	tpfree ( ( char * ) ptr_fml_Rbuffer );
+  	return;
+  }
+	
+	EXEC SQL CLOSE :cur_trd_ord;
+	EXEC SQL FREE :cur_trd_ord;			
+
+	/***** Total transaction record count. *****/
+      
+	i_tot_trn_cnt = sqlca.sqlerrd[2];
+	
+	c_data = (unsigned char *)usr_arr;
+
+  c_action_flg = USERINFO;
+
+ 	/***** Open the cursor cur_trd_ord *****/ 
+
+	EXEC SQL ALLOCATE :cur_trd_ord;
+
+	EXEC SQL 
+		EXECUTE BEGIN OPEN :cur_trd_ord
+        FOR
+        SELECT  *
+        FROM   FNO_USER_INFO;
+     END;
+  END-EXEC;
+  
+	if(SQLCODE != 0)
+  {
+  	fn_errlog(c_ServiceName, "S31105", SQLMSG,c_errmsg);
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		EXEC SQL CLOSE :cur_trd_ord;
+		EXEC SQL FREE :cur_trd_ord;
+    tpfree ( ( char * ) ptr_fml_Sbuffer );
+	  tpabort(0); /** check **/	
+    tpfree ( ( char * ) ptr_fml_Rbuffer );
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    return;
+	}
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Fetching data from USERINFO table.");
+	}
+
+	/***** Fetching Data from the cursor cur_trd_ord *****/
+	
+	while(1)	
+	{
+		l_bufferlength=0;
+		i_rows_fetched=0;
+		MEMSET(usr_arr);
+
+  	EXEC SQL
+   		FETCH :cur_trd_ord 
+      INTO  :usr_arr;
+
+    if( SQLCODE != 0 && SQLCODE != -1405  )
+    {
+    	if ( SQLCODE == NO_DATA_FOUND && ( sqlca.sqlerrd[2]%BATCH_SIZE )==0 )
+      {
+      	fn_userlog(c_ServiceName,"All UESRINFO data transfered to CLICK.");
+        fn_userlog(c_ServiceName,"Total records transfered :%d:",sqlca.sqlerrd[2]);
+        i_return_val = 1;
+        break;
+      }
+      else if( SQLCODE != NO_DATA_FOUND )
+      {
+      	fn_userlog(c_ServiceName,"Error while fetching the data.");
+        fn_errlog(c_ServiceName, "S31110", SQLMSG,c_errmsg);
+        i_return_val = -1;
+				tpabort(0); /** check **/
+        /*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+				break;
+      }
+		}/** End of SQLCODE != 0 **/
+
+    i_rows_fetched=((sqlca.sqlerrd[2]%BATCH_SIZE==0)?BATCH_SIZE:(sqlca.sqlerrd[2]%BATCH_SIZE));
+
+  	fn_userlog(c_ServiceName,"Number of records uptill now sent :%d:",sqlca.sqlerrd[2]);
+    
+		if(DEBUG_MSG_LVL_3)
+		{
+      fn_userlog(c_ServiceName,"Rows fetched in current loop :%d:",i_rows_fetched);
+      fn_userlog(c_ServiceName,"Sizeof Transaction array :%ld:",sizeof(usr_arr));
+    }
+
+    /***** Initializing the buffers *****/
+
+		l_bufferlength = i_rows_fetched * sizeof(struct st_user_info);
+
+    Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+    Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+    
+		i_err[0]=Fadd32(ptr_fml_Sbuffer,FFO_AVL_QTY,(char *)&l_bufferlength,0);
+    i_ferr[0]=Ferror32;
+    i_err[1]=Fadd32(ptr_fml_Sbuffer,FFO_CBUF,(char *)c_data,l_bufferlength);
+    i_ferr[1]=Ferror32;
+    i_err[2]=Fadd32(ptr_fml_Sbuffer,FFO_ORD_TOT_QTY,(char *)&i_rows_fetched,0);
+    i_ferr[2]=Ferror32;
+    i_err[3]=Fadd32(ptr_fml_Sbuffer,FFO_PRDCT_TYP,(char *)&c_action_flg,0);
+    i_ferr[3]=Ferror32;
+
+		for(i_fml_cnt = 0;i_fml_cnt <=3; i_fml_cnt++)
+    {
+    	if(i_err[i_fml_cnt] == -1 )
+      {
+      	fn_userlog(c_ServiceName,"Error while adding the data.FML COUNT = :%d:",i_fml_cnt);
+        fn_errlog(c_ServiceName, "S31115", Fstrerror32(i_ferr[i_fml_cnt]),c_errmsg);
+				tpabort(0); /** check **/
+        i_return_val = -1;
+        /*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg);	 */ 
+				break;
+      }
+    }
+   	/** if error in inner FOR loop.This check should be just after above FOR loop **/
+    if( i_return_val == -1 )
+    {
+    	break;
+    }
+	
+   /******** Calling the Service SFO_SND_MAIL .           **************************/
+	
+		if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Calling the SFO_SND_MAIL service For USER.");
+      fn_userlog(c_ServiceName,"%c flag",c_action_flg);
+    }
+		i_returncode = tpcall("SFO_SND_MAIL",(char *)ptr_fml_Sbuffer,0,(char **)&ptr_fml_Rbuffer,&l_rcvbuff,0);
+    if( i_returncode == -1 )
+    {
+				tpabort(0); /** check **/
+			 /*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+
+      if (TPCODE != TPESVCFAIL)
+      {
+     		fn_errlog(c_ServiceName, "S31120",TPMSG,c_errmsg);
+      }
+      else
+      {
+      	if( Fget32(ptr_fml_Rbuffer,FFO_ERR_MSG, 0,c_errmsg,0)== -1)
+        {
+        	fn_errlog(c_ServiceName, "S31125",FMLMSG,c_errmsg);
+        }
+        else
+        {
+        	fn_errlog(c_ServiceName, "S31130",c_errmsg,c_errmsg);
+        }
+      }
+      i_return_val = -1;
+      break;
+		
+		}
+   	/** Check for the last batch processing. **/
+    if (sqlca.sqlerrd[2]%BATCH_SIZE!=0)
+    {
+			fn_userlog(c_ServiceName,"LAST RECORD HENCE BREAKING...");
+    	break;
+    }
+	}/** End of while loop **/
+	
+	if( i_return_val == -1 ) /** if error occurs **/
+  {
+  	fn_userlog(c_ServiceName,"Error in userinfo while loop....");
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		EXEC SQL CLOSE :cur_trd_ord;
+		EXEC SQL FREE :cur_trd_ord;
+		tpabort(0); /** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+    tpfree ( ( char * ) ptr_fml_Sbuffer );
+    tpfree ( ( char * ) ptr_fml_Rbuffer );
+    return;
+	}
+	i_tot_usr_cnt = sqlca.sqlerrd[2];
+
+	/***** Inserting a record in Mail Log Header Table *****/ 
+
+  c_action_flg = MAIL_LOG_HEADER;
+
+	/***** Initializing Send and Receive Buffer *****/ 
+
+  Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+  Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+  
+	/***** Adding Flag & Date to Send Buffer *****/
+
+
+  i_err[0]=Fadd32(ptr_fml_Sbuffer,FFO_PRDCT_TYP,(char *)&c_action_flg,0);
+  i_ferr[0]=Ferror32;
+  i_err[1]=Fadd32(ptr_fml_Sbuffer,FFO_TRD_DT,(char*)c_trd_dt,0);
+  i_ferr[1]=Ferror32;
+
+  for(i_fml_cnt = 0;i_fml_cnt <2; i_fml_cnt++)
+  {
+    if(i_err[i_fml_cnt] == -1 )
+    {
+      fn_userlog(c_ServiceName,"Error while adding the data.FML COUNT = :%d:",i_fml_cnt);
+      fn_errlog(c_ServiceName, "S31135", Fstrerror32(i_ferr[i_fml_cnt]),c_errmsg);
+      strcpy(c_event,"Error:Contact System Support.");
+      fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+      fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+			EXEC SQL CLOSE :cur_trd_ord;
+		 	EXEC SQL FREE :cur_trd_ord;
+				tpabort(0); /** check **/
+		/*	fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg) ; */
+      tpfree ( ( char * ) ptr_fml_Sbuffer );
+      tpfree ( ( char * ) ptr_fml_Rbuffer );
+      return;
+    }
+  }
+
+
+	if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Calling the SFO_SND_MAIL service For MAIL UPDATE.");
+      fn_userlog(c_ServiceName," Action Flag IS %c ",c_action_flg);
+		}
+
+	i_returncode = tpcall("SFO_SND_MAIL",(char *)ptr_fml_Sbuffer,0,(char **)&ptr_fml_Rbuffer,&l_rcvbuff,0);
+  
+	if( i_returncode == -1 )
+  {
+				tpabort(0); /** check **/
+		/*fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+
+    if (TPCODE != TPESVCFAIL)
+    {
+      fn_errlog(c_ServiceName, "S31140",TPMSG,c_errmsg);
+    }
+    else
+    {
+      if( Fget32(ptr_fml_Rbuffer,FFO_ERR_MSG, 0,c_errmsg,0)== -1)
+      {
+        fn_errlog(c_ServiceName, "S31145",FMLMSG,c_errmsg);
+      }
+      else
+      {
+        fn_errlog(c_ServiceName, "S31150",c_errmsg, c_errmsg);
+      }
+    }
+    strcpy(c_event,"Error:Contact System Support.");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		EXEC SQL CLOSE :cur_trd_ord;
+		EXEC SQL FREE :cur_trd_ord;
+    tpfree ( ( char * ) ptr_fml_Sbuffer );
+    tpfree ( ( char * ) ptr_fml_Rbuffer );
+    return;
+  }
+
+	
+	EXEC SQL CLOSE :cur_trd_ord;
+	EXEC SQL FREE :cur_trd_ord;
+  tpfree ( ( char * ) ptr_fml_Sbuffer );
+  tpfree ( ( char * ) ptr_fml_Rbuffer );
+
+
+	 /*if( fn_committran( c_ServiceName, i_trnsctn,c_errmsg) == -1 ) ***/
+	 if( tpcommit(0) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31155", SQLMSG,c_errmsg);
+    fn_userlog(c_ServiceName, "Error in commit [%s] exiting..",c_errmsg);
+		tpabort(0); /** check **/
+   /* fn_aborttran( c_ServiceName, i_trnsctn,c_errmsg); */
+    return;
+  }
+
+	fn_userlog(c_ServiceName,"Total TRANSACTION Records :%d: Total USERINFO Records :%d:",i_tot_trn_cnt,i_tot_usr_cnt);
+
+ 	strcpy(c_event,"Order and Trade data uploaded successfully.");
+  fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+
+	return ;
+}
+
+void fn_exit( char *c_ServiceName, char* c_errmsg , char c_mem_flg )
+{
+  fn_bat_pst_msg ( c_ServiceName, c_errmsg, c_tag );
+  if( c_mem_flg == 'Y' )
+  {
+    tpabort(0);
+  }
+  return;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_ORDTRD_MAIL;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}

@@ -1,0 +1,262 @@
+/******************************************************************************/
+/*  Program           : CLN_SHM_TOKNSMBL                                      */
+/*                                                                            */
+/*  Input             :																												*/ 
+/*                                                                            */
+/*  Description       : This process is used to populate the shared memory 		*/
+/*											with token id. 																			  */	
+/*                     																												*/
+/******************************************************************************/
+/*Ver 1.0             : New Release (Vishnu N)																*/
+/******************************************************************************/
+
+/**** C header ****/
+#include <stdio.h>
+#include <sys/socket.h>
+
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <Usysflds.h>
+
+#include <fo_view_def.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_scklib_tap.h>
+
+/* Process specific header  */
+#include <fn_env.h>
+#include <fn_log.h>
+#include <brd_cln_srvr.h>
+#include <fn_fil_log.h>
+#include <fn_ddr.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fo_shm.h>
+
+
+char c_pipe_id [ 5+1 ];
+
+int i_exit_stts;
+struct st_tkn_smbl *st_tkn;
+
+int fn_clear_data(void);
+
+void CLN_SHM_TOKNSMBL( int argc, char *argv[] )
+{
+  int shmID,i;
+	int i_return_code;  
+  long int li_buf_len ;
+	long l_tot_cnt;
+  long l_size;
+
+	char c_ServiceName [33];
+	char c_errmsg [256];
+  size_t shm_size;	
+char *ptr_c_tmp;
+	
+	
+	struct st_tkn_smbl st_tkn_temp;
+
+	strcpy(c_ServiceName, argv[0]);
+
+	INITBATDBGLVL(argv[0]);
+
+	i_return_code = fn_clear_data();
+	if(i_return_code == -1)
+	{
+		fn_errlog( c_ServiceName, "S31005", "Error while clearing shm", c_errmsg );
+    return;	
+	}	
+
+	EXEC SQL
+	 		 SELECT count(1)
+			 INTO   :l_tot_cnt
+			 FROM   FCM_FO_CNTRCT_MSTR
+      where   FCM_TOKEN_NO is not null
+        AND   FCM_XCHNG_CD = 'NFO';
+
+			 	
+	if( SQLCODE != 0 )
+  {
+   fn_errlog( c_ServiceName, "S31010", SQLMSG, c_errmsg );
+	 return;
+  }
+	
+  l_size = (sizeof(st_tkn_temp) * (l_tot_cnt+1)); 
+	fn_userlog(c_ServiceName," before get shmid for l_size :%ld:",l_size);
+
+	i_return_code = fn_get_shm_id(OWNER,c_ServiceName,l_size,c_errmsg);
+
+	if( i_return_code == -1)
+	{
+		fn_errlog( c_ServiceName, "S31015","", c_errmsg );
+		return;
+	}
+
+	fn_userlog(c_ServiceName," before attach");
+
+	i_return_code = fn_attach_shm((void *)&st_tkn,c_ServiceName,c_errmsg);
+	if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31020","", c_errmsg );
+		return;
+  }
+
+  st_tkn_temp.l_tkn_id = l_tot_cnt;
+
+	memcpy(&st_tkn[0],&st_tkn_temp,sizeof(struct st_tkn_smbl));
+
+	fn_userlog(c_ServiceName,"l_tot_cnt :%ld:",l_tot_cnt);
+	fn_userlog(c_ServiceName,"st_tkn[0].l_tkn_id :%ld:",st_tkn[0].l_tkn_id);	
+
+	EXEC SQL
+		DECLARE cur_tkn_val CURSOR FOR
+		SELECT TRIM(sem_map_vl), 
+					 FCM_TOKEN_NO,
+           FCM_LOT_SZ
+		FROM   FCM_FO_CNTRCT_MSTR,sem_stck_map
+		where  FCM_UNDRLYNG = sem_stck_cd
+    AND    sem_entty = '3' 
+    AND   FCM_TOKEN_NO is not null
+		AND   FCM_XCHNG_CD = 'NFO'
+		ORDER  BY FCM_TOKEN_NO;
+	
+	EXEC SQL OPEN cur_tkn_val;
+
+	if( SQLCODE != 0 )
+  {
+   fn_errlog( c_ServiceName, "S31025", SQLMSG, c_errmsg );
+	 return;
+  }
+
+	i = 1;	
+	while(1)
+	{
+		MEMSET(st_tkn_temp);
+
+		EXEC SQL
+				FETCH cur_tkn_val
+				INTO  :st_tkn_temp.c_symbol,
+							:st_tkn_temp.l_tkn_id,
+							:st_tkn_temp.l_min_lot;
+		
+		if (SQLCODE != 0)
+    {
+      if(SQLCODE == NO_DATA_FOUND)
+      {
+        break;
+      }
+      fn_errlog( c_ServiceName, "S31030", SQLMSG, c_errmsg  );
+      EXEC SQL CLOSE cur_tkn_val;
+			return;
+    }
+		fn_userlog( c_ServiceName, "count :%d:",i);
+		
+    rtrim(st_tkn_temp.c_symbol);
+	
+ 		memcpy(&st_tkn[i],&st_tkn_temp,sizeof(struct st_tkn_smbl)); 
+		fn_userlog( c_ServiceName, "Token No :%ld:",st_tkn[i].l_tkn_id);
+		fn_userlog( c_ServiceName, "Product Type :%s:",st_tkn[i].c_symbol);
+		fn_userlog( c_ServiceName, "Min Lot Size :%ld:",st_tkn[i].l_min_lot);
+	
+		i++; 
+	}	 	
+	fn_userlog(c_ServiceName," before Detach");
+	
+	i_return_code = fn_detach_shm((void *)&st_tkn,c_ServiceName,c_errmsg);
+  if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31035","", c_errmsg );
+    return;
+  }	
+
+	fn_userlog(c_ServiceName,"Process completed");
+} 
+int fn_bat_init(int argc, char *argv[])
+{
+  int  i_ch_val ;
+  int  i_loop;
+  int  i_msgq_typ;
+
+  char c_ServiceName [ 33 ];
+  char c_pipe_id [ 5+1 ];
+  char c_err_msg[256];
+  char *ptr_c_tmp;
+  char c_fileName[256];
+
+  strcpy( c_ServiceName, "cln_shm_toknsmbl" );
+
+  if( argc != 4)
+  {
+    fn_userlog(c_ServiceName,
+    "Usage - cln_shm_tokn <Exchange qualifier> <Exchange code> <pipe_id>");
+    return ( -1 );
+  }
+
+  fn_var = CLN_SHM_TOKNSMBL;
+  return ( 0 );
+}
+void fn_bat_term(int argc,
+                 char *argv[] )
+{
+  return;
+}
+
+
+int fn_prcs_trg(char *c_ServiceName,
+                 int i_trg_typ)
+{
+  return ( 0 );
+}
+int fn_clear_data()
+{
+  int shmID,i;
+  int i_return_code;
+	long l_tot_cnt;
+
+  char c_ServiceName [33];
+  char c_errmsg [256];
+  size_t shm_size;
+
+	l_tot_cnt = 0;
+	strcpy(c_ServiceName,"cln_shm_tokn");
+
+	i_return_code = fn_get_shm_id(CLIENT,c_ServiceName,l_tot_cnt,c_errmsg);
+
+  if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31040","", c_errmsg );
+    return -1;
+  }
+	if( i_return_code == 1)
+	{
+	 fn_userlog(c_ServiceName,"Shared memory doesn't exist");
+	 return 0;		
+	}
+
+  fn_userlog(c_ServiceName," before attach");
+
+  i_return_code = fn_attach_shm((void *)&st_tkn,c_ServiceName,c_errmsg);
+  if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31045","", c_errmsg );
+    return -1;
+  }
+	i_return_code = fn_dstry_shm(c_ServiceName,c_errmsg);
+	if(i_return_code == -1)	
+	{
+	 fn_errlog( c_ServiceName, "S31050","", c_errmsg );
+    return -1;
+	}
+
+	return 0;	
+}
+	

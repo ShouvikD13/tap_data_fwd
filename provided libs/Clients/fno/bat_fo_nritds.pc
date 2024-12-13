@@ -1,0 +1,1747 @@
+/****************************************************************************/
+/*																																					*/
+/*	Program						:	bat_fo_nritds 																			*/
+/*																																					*/
+/*	Input							:	None																								*/
+/*																																					*/
+/*	Output						:	Success/Failure																			*/
+/*																																					*/
+/*	Description				:	This code will do the following based on input flag */
+/*											'I' - Insert data into FBD and MDC tables from 			*/
+/*														MTS table for NRI TDS                         */
+/*											'U' - Update the amount recovered from payin payout */
+/*													  into MTS and MDC															*/	
+/*																																					*/
+/*	Log								:         19/10/2006		New Release	Smitha Nuti				*/
+/*							      : Ver 1.1 26/04/2008    IBM Changes Sandeep Patil		  */
+/*                    : Ver 1.2 30/07/2008    CRCON19672 - Sol id (diwakar) */
+/*										:	Ver	1.3	22/12/2008		CRCSN24619 - NRI payin date		*/
+/*																						(Shamili Dalvi)								*/
+/*                    : Ver 1.4 07/12/2009    CRCSN38251 - Decimal Issue    */
+/*                                            ( Vidyayini Krish )           */
+/*                    : Ver 1.5 03/09/2013    Column Specific insertion in  */
+/*                                            MDC table ( Sachin Birje )    */
+/*                    : Ver 1.6 25/02/2015    Column Specific insertion in  */
+/*                                            FBD table ( Samip M)					*/
+/*                    : Ver 1.7 25/09/2018    RI NRI conversion changes for */
+/*                                            settlement CR-ISEC03-111748   */ 
+/*                    : Ver TOL 13/09/2023    Tux on Linux (Agam)           */
+/****************************************************************************/
+
+#include "fn_collateral.h"
+#include <fn_pos.h>
+#include <fn_read_debug_lvl.h>      /*** Ver 1.1 ***/
+#define MAX_CLIENTS 10	/*** Ver 1.7 ***/
+
+EXEC SQL INCLUDE "table/mdc_misc_dr_cr.h";
+EXEC SQL INCLUDE "table/mts_mon_tds_smry.h" ;
+EXEC SQL INCLUDE "table/fcb_fo_clnt_blncs.h" ; /* Ver 1.4 */
+
+char 		c_err_mssg[256]; /* renamed c_err_msg to c_err_mssg in Ver TOL */
+char 		c_ServiceName[256+1];
+
+int fn_insert_log(char *c_ServiceName,char *c_mtch_accnt_temp, char *c_date, char c_status); /*** Ver 1.7 ***/
+int fn_update_log(char *c_ServiceName,char *c_mtch_accnt, char *c_date, char c_status,char *c_billno, char c_bnk_stts, double d_fbd_pipo_amt); /*** Ver 1.7 ***/
+int fn_chk_pos_limit(char *c_ServiceName,char *c_date, char *c_xchng_cd); /*** Ver 1.7 ***/
+
+int main( int argc, char *argv[] )
+{
+	char    c_tag[32];
+	char    c_msg[256];
+	char 		c_flag;
+	char 		c_sett_off;
+	char    c_rowid[19];
+	char    c_exchng_cd[4];
+	char    c_prev_mtch_accnt[10+1];
+	char 		c_brnch[5];
+	char 		c_year[5];
+	char 		c_mon[9];
+	int 		i_val;
+	int 		i_flg =0;
+
+	int 		i_trnsctn;
+	int 		i_returncode;
+	int     flag = 0;
+	double 	tds_amt=0.0;
+	double 	d_tds_amt =0.0;
+	double 	tot_loss_amt=0.0;
+	double 	d_month_tds=0.0;
+	double 	d_month_liab=0.0;
+	double 	max_val=0.0;
+	int			loss_amt=0.0;
+	double  d_fcb_amt;
+	char 		c_flg;
+
+	double 	d_fbd_dc_amt;
+	double	d_fbd_pipo_amt = 0; /*** Initialized in Ver 1.7 ***/
+	double	d_fbd_intadj_amt;
+	double	d_ia_amt;
+	char		c_fbd_flg ;
+	char		c_bnk_stts='\0' ; /*** initialized in Ver 1.7 ***/
+
+  char c_settlement_flg = '\0';			/*** Ver 1.7 ***/
+  char c_mtch_accnt_str[MAX_CLIENTS * 11] = {"NA"}; /*** Ver 1.7 ***/
+  char c_mtch_accnt_temp[MAX_CLIENTS * 11] = {"NA"}; /*** Ver 1.7 ***/
+	int i_return_cd = 0; /*** Ver 1.7 ***/
+	int i_dategreater = 0; /*** Ver 1.7 ***/
+
+ 	EXEC SQL BEGIN DECLARE SECTION;
+		varchar c_date[LEN_DATE];
+		varchar c_mdc_crdt_nmbr[21];
+		varchar c_payin_date [ LEN_DATE ];
+		varchar c_payout_date [ LEN_DATE ];
+		varchar	c_last_day [ LEN_DATE ];						/** Ver 1.3 **/
+		varchar	c_last_trd_day [ LEN_DATE ];				/** Ver 1.3 **/
+		varchar c_billno [50];
+		varchar c_month[15];
+		varchar c_exg_nxt_trd_dt[LEN_DATE]; /*** Ver 1.7 ***/
+	EXEC SQL END DECLARE SECTION;
+
+	MEMSET(c_billno);  /*** Ver 1.7 ***/
+
+	strcpy ( c_ServiceName, argv[0] );
+
+	INITBATDBGLVL(argv[0]);     /*** Ver 1.1 ***/
+
+	if(argc != 6 && argc != 7 ) /*** Ver 1.7 argc != 7 added ***/
+	{
+		fn_userlog(c_ServiceName,"Usage: bat_fo_nritds <Config File> <Exchange CD> <Pipe Id> <Date> <Flag> <comma separated Match Ids (max 10)>"); /*** Ver 1.7 <Match Id> added ***/
+		exit(-1);
+	}
+
+	strcpy( c_msg, "STAGE 1.0 Starting bat_fo_nritds...");
+	strcpy( (char *)c_date.arr,argv[4]);
+	SETLEN(c_date);
+	SETLEN(c_exg_nxt_trd_dt); /*** Ver 1.7 ***/
+
+	strcpy( c_exchng_cd,argv[2]);
+	c_flag = argv[5][0];
+
+	sprintf(c_tag,"%s_%s",c_ServiceName,argv[1]);
+	init_bat(c_ServiceName,argv[2],argv[3]);
+	fn_bat_pst_msg_fno(c_ServiceName,c_msg,c_tag); /* Renamed fn_bat_pst_msg to fn_bat_pst_msg_fno in Ver TOL */
+
+	if (argc == 7) /*** Ver 1.7 ***/
+	{
+		strcpy(c_mtch_accnt_str, argv[6]);
+	  c_settlement_flg = 'S'; /*** Settlement of single/multiple match account for NRI to RI conversion ***/
+	}
+
+	fn_userlog( c_ServiceName,c_msg);
+	fn_userlog( c_ServiceName,"Config File :%s:"   ,argv[1]);
+	fn_userlog( c_ServiceName,"Exchange Code :%s:" ,argv[2]);
+	fn_userlog( c_ServiceName,"Exchange Code :%s:" ,c_exchng_cd);
+	fn_userlog( c_ServiceName,"Pipe Id :%s:"       ,argv[3]);
+	fn_userlog( c_ServiceName,"Arg Date :%s:"       ,argv[4]);
+	fn_userlog( c_ServiceName,"Date :%s:"       ,c_date.arr);
+	fn_userlog( c_ServiceName,"Flag :%c:"       ,c_flag);
+	fn_userlog( c_ServiceName,"Settlement Flag :%c:"   ,c_settlement_flg); /*** Ver 1.7 ***/
+	fn_userlog( c_ServiceName,"Match Account :%s:"     ,c_mtch_accnt_str);		 /*** Ver 1.7 ***/
+
+
+	if (c_flag == 'I')
+	{
+		EXEC SQL
+				 SELECT exg_sett_off_flg , exg_nxt_trd_dt  /*** exg_nxt_trd_dt added in Ver 1.7 ***/
+				 INTO   :c_sett_off,
+								:c_exg_nxt_trd_dt	 /*** Ver 1.7 ***/
+				 FROM   exg_xchng_mstr
+				 WHERE  exg_xchng_cd = :c_exchng_cd;
+
+	  if( SQLCODE != 0 )
+		{
+			fn_errlog(c_ServiceName, "S31005", SQLMSG, c_err_mssg);
+			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+			destroy_bat();
+		}
+
+		if (c_sett_off == 'N')
+		{
+			fn_userlog(c_ServiceName,"SN2");
+
+			EXEC SQL 
+					 SELECT distinct fbc_cln_pyin_dt, 
+													 fbc_cln_pyout_dt
+					 INTO 					 :c_payin_date,
+													 :c_payout_date
+					 FROM   fbc_fo_brnch_cal
+					 WHERE  to_char(fbc_trd_dt,'Mon-YY') = to_char(to_date(:c_date,'dd-Mon-YYYY'),'Mon-YY')
+					 AND fbc_grp_id = 9;
+
+			if( SQLCODE != 0 )
+			{
+				fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+				destroy_bat();
+			}
+
+			SETNULL(c_payin_date);
+			SETNULL(c_payout_date);
+
+			fn_userlog( c_ServiceName,"Date IN :%s:"       ,c_payin_date.arr);
+			fn_userlog( c_ServiceName,"Date OUT :%s:"       ,c_payout_date.arr);
+			fn_userlog(c_ServiceName,"SN2.1");
+
+			/******  Ver 1.3 Starts *****/
+
+			 i_trnsctn  = fn_begintran( c_ServiceName, c_err_mssg );
+			 if ( i_trnsctn == -1 )
+			 {	
+					 fn_errlog(c_ServiceName, "S31015", LIBMSG, c_err_mssg);
+					 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					 destroy_bat();
+			 }
+
+				EXEC SQL
+						 SELECT to_char(max(fbc_trd_dt),'dd-Mon-YYYY')
+						 INTO	:c_last_trd_day
+						 FROM	fbc_fo_brnch_cal 
+						 WHERE	to_char(fbc_trd_dt,'Mon-YY') = to_char(to_date(:c_date,'dd-Mon-YYYY'),'Mon-YY')
+						 AND	fbc_grp_id = 9;
+
+				 if( SQLCODE != 0 )
+				 {
+					fn_errlog(c_ServiceName, "S31020", SQLMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+				 }
+							
+
+				EXEC SQL	
+						SELECT to_char(last_day(to_date(:c_date,'dd-Mon-YYYY'))) 
+						INTO	:c_last_day
+						FROM  dual;
+
+				if( SQLCODE != 0 )
+				{
+					fn_errlog(c_ServiceName, "S31025", SQLMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+				}
+
+				SETNULL(c_last_day);	
+				SETNULL(c_last_trd_day);	
+
+				userlog("c_date :%s:",c_date.arr);
+				userlog("c_last_day :%s:",c_last_day.arr);
+				userlog("c_last_trd_day :%s:",c_last_trd_day.arr);
+
+			if (c_settlement_flg == 'S') /*** if loop added in Ver 1.7 ***/
+			{
+				if ((strcmp( (char *)c_exg_nxt_trd_dt.arr, (char *) c_date.arr) ) != 0)
+				{
+					fn_userlog(c_ServiceName,"Pls run NRI TDS process for Trade date:%s:",c_exg_nxt_trd_dt.arr);
+					fn_errlog(c_ServiceName, "S31030", LIBMSG, c_err_mssg);
+					sprintf(c_err_mssg,"Pls run NRI TDS process for Trade date:%s:",c_exg_nxt_trd_dt.arr);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+				}
+				
+				strcpy(c_mtch_accnt_temp,c_mtch_accnt_str);
+				i_return_cd = fn_insert_log(c_ServiceName,c_mtch_accnt_temp, c_date.arr, 'R');
+				if (i_return_cd != 0 )
+				{
+					 fn_errlog(c_ServiceName, "S31035", LIBMSG, c_err_mssg);
+					 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					 destroy_bat();
+				}
+			  
+				fn_userlog( c_ServiceName,"BEF MTS update Match Account :%s:",c_mtch_accnt_str);
+
+				i_return_cd = fn_chk_pos_limit(c_ServiceName,c_date.arr,c_exchng_cd);
+				if (i_return_cd != 0 )
+				{
+					 fn_errlog(c_ServiceName, "S31040", LIBMSG, c_err_mssg);
+					 strcpy(c_err_mssg,"Pls check for pending Order/Position/Limit/Todays trades");
+					 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					 destroy_bat();
+				}
+				
+				EXEC SQL
+					UPDATE mts_mon_tds_smry
+					SET    mts_payin_date = to_date(:c_date,'dd-Mon-yyyy')
+					WHERE  mts_trd_date = to_date(:c_last_day,'dd-Mon-yyyy')
+					AND    mts_sett_off_flg =  'N'
+					AND    mts_upld_flg =  'N'
+					AND    mts_cum_pl != 0
+					AND    MTS_CLM_MTCH_ACCNT in (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'R');
+
+					if( SQLCODE != 0 )
+					{
+						 fn_errlog(c_ServiceName, "S31045", SQLMSG, c_err_mssg);
+						 strcpy(c_err_mssg,"No TDS found for input match ids");
+						 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						 destroy_bat();
+					}
+					fn_userlog(c_ServiceName,"MTS Updated for :%d: records",sqlca.sqlerrd[2]);
+
+					i_return_cd = fn_update_log(c_ServiceName,sql_mts_clm_mtch_accnt, c_date.arr, 'X',c_billno.arr, c_bnk_stts,d_fbd_pipo_amt);
+
+					if (i_return_cd != 0 )
+					{
+						 fn_errlog(c_ServiceName, "S31050", LIBMSG, c_err_mssg);
+						 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						 destroy_bat();
+					}
+				
+					EXEC SQL
+							UPDATE FCB_FO_CLNT_BLNCS
+							SET		 FCB_DC_AMT=0 
+							WHERE	 FCB_CLM_MTCH_ACCNT IN (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'C' )
+							AND		 FCB_GRP_ID = 9 
+							AND		 FCB_DC_AMT > 0 
+							AND		 FCB_TRD_DT = to_date(:c_date,'dd-Mon-yyyy');
+
+					if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+					{
+						 fn_errlog(c_ServiceName, "S31055", SQLMSG, c_err_mssg);
+						 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						 destroy_bat();
+					}
+			}
+			else
+			{ 
+				EXEC SQL
+					SELECT  1
+					INTO    :i_dategreater
+					FROM    dual
+					WHERE   trunc(SYSDATE) <= to_date( :c_date, 'DD-Mon-YYYY' );
+
+				if ( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+				{
+					 fn_errlog(c_ServiceName, "S31060", SQLMSG, c_err_mssg);
+					 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					 destroy_bat();
+				}
+
+				if ( i_dategreater == 1 )
+				{
+					 fn_userlog(c_ServiceName,"Input trade date cannot be greater than system date");
+					 fn_errlog(c_ServiceName, "S31065", LIBMSG, c_err_mssg);
+					 sprintf(c_err_mssg,"Input trade date cannot be greater than system date");
+					 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					 destroy_bat();
+				}
+
+				/*** Ver 1.7 ends ***/
+				if ((strcmp( (char *)c_last_trd_day.arr, (char *) c_last_day.arr) ) != 0)
+				{	
+
+					fn_userlog(c_ServiceName," month Last day diff than payin date "); 
+					fn_userlog(c_ServiceName,"c_payin_date :%s:",c_payin_date.arr);
+					fn_userlog(c_ServiceName,"c_date :%s:",c_date.arr);
+					fn_userlog(c_ServiceName,"c_last_trd_day :%s:",c_last_trd_day.arr);
+					fn_userlog(c_ServiceName,"c_last_day :%s:",c_last_day.arr);
+					fn_userlog(c_ServiceName,"new...........");
+		
+
+					EXEC SQL
+							UPDATE mts_mon_tds_smry
+							SET    mts_payin_date = to_date(:c_last_trd_day,'dd-Mon-yyyy')
+							WHERE  mts_trd_date = to_date(:c_last_day,'dd-Mon-yyyy')
+							AND    mts_sett_off_flg =  'N'
+							AND    mts_upld_flg =  'N'
+							AND    mts_cum_pl > 0;
+
+					if( SQLCODE != 0 )
+					{
+						fn_errlog(c_ServiceName, "S31070", SQLMSG, c_err_mssg);
+						fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						destroy_bat();
+					}
+
+				}
+				else
+				{
+
+					fn_userlog(c_ServiceName," month Last day same as  payin date ");
+					fn_userlog(c_ServiceName," c_last_day :%s:",c_last_day.arr);
+					fn_userlog(c_ServiceName," c_last_trd_day :%s:",c_last_trd_day.arr);
+					fn_userlog(c_ServiceName,"c_date :%s:",c_date.arr);
+					
+
+					EXEC SQL
+							UPDATE mts_mon_tds_smry
+							SET   mts_payin_date = to_date(:c_last_day,'dd-Mon-yyyy')
+							WHERE  mts_trd_date = to_date(:c_last_day,'dd-Mon-yyyy')
+							AND    mts_sett_off_flg =  'N'
+							AND    mts_upld_flg =  'N'
+		 /**      AND    mts_cum_pl > 0 ; Commented In Ver 1.4	***/
+							AND    mts_cum_pl != 0 ;				/***	Ver	1.4	***/
+
+						if( SQLCODE != 0 )
+						{
+							 fn_errlog(c_ServiceName, "S31075", SQLMSG, c_err_mssg);
+							 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+							 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+							 destroy_bat();
+						}
+				}	
+			} /*** Ver 1.7 ***/
+
+			if ( fn_committran( c_ServiceName, i_trnsctn, c_err_mssg ) == -1 )
+			{
+					fn_errlog(c_ServiceName, "S31080", LIBMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+			}	
+		 
+			/******  Ver 1.3 Ends *******/
+
+			while (1)
+ 			{
+   			fn_userlog(c_ServiceName,"=====SET OFF - N ====== ");
+
+   			i_trnsctn  = fn_begintran( c_ServiceName, c_err_mssg );
+   			if ( i_trnsctn == -1 )
+   			{
+     			fn_errlog(c_ServiceName, "S31085", LIBMSG, c_err_mssg);
+     			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+     			destroy_bat();
+   			}
+
+				if (c_settlement_flg == 'S') /*** if loop added in Ver 1.7 ***/
+				{
+					EXEC SQL 
+						SELECT mts_clm_mtch_accnt,
+									 mts_trd_date,
+									 mts_cum_tds_liab,
+									 mts_cum_pl,
+									 mts_tds_rate,
+									 mts_payin_date,				
+									 rowid
+						INTO   :sql_mts_clm_mtch_accnt,
+									 :sql_mts_trd_date,
+									 :sql_mts_cum_tds_liab,
+									 :sql_mts_cum_pl,
+									 :sql_mts_tds_rate,
+									 :sql_mts_payin_date,	
+									 :c_rowid
+						FROM   (SELECT mts_clm_mtch_accnt,mts_trd_date,mts_cum_tds_liab,mts_cum_pl,mts_tds_rate,mts_payin_date,rowid
+										FROM   mts_mon_tds_smry
+										WHERE  mts_trd_date <= to_date(:c_last_day,'dd-Mon-yyyy')
+										AND    mts_sett_off_flg =  'N'
+										AND    mts_upld_flg =  'N'
+										AND    mts_clm_mtch_accnt in ( SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'R' )
+										AND		 mts_cum_pl > 0 
+										ORDER BY mts_clm_mtch_accnt,mts_trd_date)
+						WHERE   rownum <2;
+				}
+				else
+				{
+					EXEC SQL 
+							SELECT mts_clm_mtch_accnt,
+										 mts_trd_date,
+										 mts_cum_tds_liab,
+										 mts_cum_pl,
+										 mts_tds_rate,
+										 mts_payin_date,				/** Ver 1.3 **/
+										 rowid
+							INTO   :sql_mts_clm_mtch_accnt,
+										 :sql_mts_trd_date,
+										 :sql_mts_cum_tds_liab,
+										 :sql_mts_cum_pl,
+										 :sql_mts_tds_rate,
+										 :sql_mts_payin_date,		/** Ver 1.3 **/
+										 :c_rowid
+							FROM   (SELECT mts_clm_mtch_accnt,mts_trd_date,mts_cum_tds_liab,mts_cum_pl,mts_tds_rate,mts_payin_date,rowid
+											FROM   mts_mon_tds_smry
+											WHERE  mts_trd_date <= to_date(:c_date,'dd-Mon-yyyy')
+											AND    mts_sett_off_flg =  'N'
+											AND    mts_upld_flg =  'N'
+											AND		 mts_cum_pl > 0 
+											ORDER BY mts_clm_mtch_accnt,mts_trd_date)
+							WHERE   rownum <2;
+				}
+				
+				if(SQLCODE  ==  NO_DATA_FOUND)
+				{
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );     /* Added in Ver 1.4 */
+  				break;
+				}
+				else if(SQLCODE)
+				{
+  				fn_errlog(c_ServiceName, "S31090", LIBMSG, c_err_mssg);
+  				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+  				destroy_bat();
+				}
+
+				SETNULL(sql_mts_trd_date);
+
+				/* Ver 1.4 Begins */
+
+				EXEC SQL
+  					 SELECT fcb_dc_amt
+  					 INTO   :sql_fcb_dc_amt
+  					 FROM   fcb_fo_clnt_blncs
+  					 WHERE  fcb_trd_dt = :sql_mts_payin_date /*** Ver 1.4 ***/
+  					 AND    fcb_grp_id   = 9
+  					 AND    fcb_clm_mtch_accnt = :sql_mts_clm_mtch_accnt;
+
+				if( SQLCODE != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31095", SQLMSG, c_err_mssg);
+          fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+          destroy_bat();
+        }
+
+        if ( sql_mts_cum_tds_liab != (-1)*sql_fcb_dc_amt )
+        {
+            sql_mts_cum_tds_liab = (-1)*sql_fcb_dc_amt;
+        }
+
+				/* Ver 1.4 Ends */
+
+				fn_userlog(c_ServiceName,"Output values:  ");
+				fn_userlog(c_ServiceName,"sql_mts_clm_mtch_accnt :%s:",sql_mts_clm_mtch_accnt);
+				fn_userlog(c_ServiceName,"sql_mts_trd_date :%s:",sql_mts_trd_date.arr);
+				fn_userlog(c_ServiceName,"sql_mts_cum_pl:%lf:",sql_mts_cum_pl);
+				fn_userlog(c_ServiceName,"sql_mts_cum_tds_liab :%lf:",sql_mts_cum_tds_liab);
+				fn_userlog(c_ServiceName,"sql_mts_tds_rate :%lf:",sql_mts_tds_rate);
+		
+				EXEC SQL 
+							SELECT 	'01'||to_char(sysdate, 'yyddmm')||next_doc_no.NEXTVAL
+							INTO  	:c_billno
+							FROM dual;
+
+				if( SQLCODE != 0 )
+				{
+  				fn_errlog(c_ServiceName, "S31100", SQLMSG, c_err_mssg);
+  				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+  				fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+  				destroy_bat();
+				}
+				fn_userlog(c_ServiceName,"c_billno  :%s:",c_billno);
+
+				fn_userlog(c_ServiceName," 111...sql_mts_payin_date :%s:",sql_mts_payin_date.arr);	/** Ver 1.3 **/
+				fn_userlog(c_ServiceName," 111...c_payin_date :%s:",c_payin_date.arr);	/** Ver 1.3 **/
+
+				/**** Column added for Ver 1.6 ***/
+				EXEC SQL 
+				 			INSERT INTO fbd_fo_bnk_drcr 
+										(FBD_XCHNG_CD,
+										FBD_TRD_DT,
+										FBD_GRP_ID,
+										FBD_BILL_NO,
+										FBD_CLM_MTCH_ACCNT,
+										FBD_PAYIN_DT,
+										FBD_PAYOUT_DT,
+										FBD_DC_FLG,
+										FBD_DC_AMT,
+										FBD_PI_PO_AMT,
+										FBD_INT_ADJ_AMT)
+							VALUES('NFO',
+								 		 /*:c_payin_date,*/										/** Ver 1.3 **/
+										 :sql_mts_payin_date,									/** Ver 1.3 **/
+								 		 '9',
+								 			:c_billno,
+								 			:sql_mts_clm_mtch_accnt,
+								 			decode(:c_settlement_flg,'S',:sql_mts_payin_date,:c_payin_date),	/** Ver 1.3 **/ /*** decode added in Ver 1.7 ***/
+								 			:c_payout_date,
+								 			'D',
+								 			:sql_mts_cum_tds_liab * (-1),
+								 			 0,0 );
+	
+				if( SQLCODE != 0 )
+				{
+					fn_errlog(c_ServiceName, "S31105", SQLMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+				}
+        /**** Ver 1.5 **** Starts Here ****
+				EXEC SQL 
+				 		 INSERT INTO mdc_misc_dr_cr
+				 		 VALUES( :sql_mts_clm_mtch_accnt,
+								 		 'TDS',
+								 		 :c_billno,
+								 		 :sql_mts_cum_tds_liab/100,
+								 		 0,
+								 		 :sql_mts_cum_tds_liab/100,
+								 		 :c_payin_date,
+								 		 :c_payout_date,
+								 		 'D',0,0,'N','N',
+								 		 null,null,0,0,to_char(to_date(:sql_mts_trd_date,'dd-Mon-YYYY'),'Mon-YY'));
+        ***** Ver 1.5 Ends Here *******/
+
+        /**** Ver 1.5 Starts Here *****/
+
+        EXEC SQL
+             INSERT INTO MDC_MISC_DR_CR 
+                         (MDC_CLM_MTCH_ACCNT,
+                          MDC_PRDCT_TYP,
+                          MDC_CRDT_NMBR,
+                          MDC_AMT1,
+                          MDC_AMT2,
+                          MDC_TOT_AMT,
+                          MDC_FROM_DT,
+                          MDC_TO_DT,
+                          MDC_DR_CR_FLG,
+                          MDC_PRCNTG,
+                          MDC_TURNOVER,
+                          MDC_MTCH_STTS,
+                          MDC_BNK_STTS,
+                          MDC_BNK_DT,
+                          MDC_BNK_TRC_NMBR,
+                          MDC_MTCH_UPD_AMT,
+                          MDC_BNK_UPD_AMT,
+                          MDC_STCK_CD,
+                          MDC_MTCH_UPD_DT
+                         )
+                   VALUES(:sql_mts_clm_mtch_accnt,
+                          'TDS',
+                          :c_billno,
+                          :sql_mts_cum_tds_liab/100,
+                          0,
+                          :sql_mts_cum_tds_liab/100,
+                          :c_payin_date,
+                          :c_payout_date,
+                          'D',
+                          0,
+                          0,
+                          'N',
+                          'N',
+                          null,
+                          null,
+                          0,
+                          0,
+                          to_char(to_date(:sql_mts_trd_date,'dd-Mon-YYYY'),'Mon-YY'),
+                          null
+                         );
+        /**** Ver 1.5 Ends Here ******/ 
+
+				if( SQLCODE != 0 )
+				{
+					fn_errlog(c_ServiceName, "S31110", SQLMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+				}
+
+				fn_userlog(c_ServiceName," 1111_sql_mts_trd_date :%s:",sql_mts_trd_date.arr);  /** Ver 1.3 **/
+				fn_userlog(c_ServiceName,"1111_sql_mts_payin_date :%s:",sql_mts_payin_date.arr);  /** Ver 1.3 **/
+
+  			EXEC SQL
+       			 INSERT INTO mtp_mon_tds_payin
+       			 VALUES (:sql_mts_clm_mtch_accnt,
+                		 to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),
+                	   :sql_mts_cum_pl,
+                		 :sql_mts_cum_tds_liab,
+                	   :sql_mts_cum_tds_liab,
+                		 0,:sql_mts_tds_rate,
+                	   :c_billno,
+                			'N','N');
+
+  			if( SQLCODE != 0 )
+  			{
+    			fn_errlog(c_ServiceName, "S31115", SQLMSG, c_err_mssg);
+    			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+    			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+    			destroy_bat();
+  			}	
+
+			  EXEC SQL
+          UPDATE mts_mon_tds_smry mts
+          SET    mts_bill_no = :c_billno,
+                 mts_cum_tds_paid = :sql_mts_cum_tds_liab,
+                 mts_upld_flg = 'Y'
+          WHERE  rowid = :c_rowid;
+
+  			if( SQLCODE != 0 )
+  			{
+    			fn_errlog(c_ServiceName, "S31120", SQLMSG, c_err_mssg);
+    			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+    			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+    			destroy_bat();
+  			}
+
+				if (c_settlement_flg == 'S') /*** if loop added in Ver 1.7 ***/
+				{
+					i_return_cd = fn_update_log(c_ServiceName,sql_mts_clm_mtch_accnt, c_date.arr, 'P',c_billno.arr, c_bnk_stts,d_fbd_pipo_amt);
+
+					if (i_return_cd != 0 )
+					{
+						 fn_errlog(c_ServiceName, "S31125", LIBMSG, c_err_mssg);
+						 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						 destroy_bat();
+					}
+				}
+			
+				if ( fn_committran( c_ServiceName, i_trnsctn, c_err_mssg ) == -1 )
+				{
+					fn_errlog(c_ServiceName, "S31130", LIBMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+				}
+			} /* End of while for sett off N */
+
+			i_trnsctn  = fn_begintran( c_ServiceName, c_err_mssg );
+			if ( i_trnsctn == -1 )
+			{
+				fn_errlog(c_ServiceName, "S31135", LIBMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				destroy_bat();
+			}
+
+			if (c_settlement_flg == 'S') /*** if loop added in Ver 1.7 ***/
+			{
+					EXEC SQL
+						 UPDATE mts_mon_tds_smry
+						 SET    mts_cum_tds_paid = mts_cum_tds_liab,
+										mts_upld_flg = 'Y'
+						 WHERE  mts_cum_tds_liab < 0
+						 AND    mts_sett_off_flg = 'N'
+						 AND    mts_upld_flg = 'N'
+						 AND    mts_clm_mtch_accnt in ( SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'C' ) /*** FCV added on 08Jan2018***/
+						 AND    mts_trd_date <= to_date(:c_last_day,'dd-Mon-yyyy' ); 
+
+				   	 if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+						 {
+							fn_errlog(c_ServiceName, "S31140", SQLMSG, c_err_mssg);
+							fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+							fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+							destroy_bat();
+						 }
+			}
+			else
+			{
+				EXEC SQL
+						 UPDATE mts_mon_tds_smry
+						 SET    mts_cum_tds_paid = mts_cum_tds_liab,
+										mts_upld_flg = 'Y'
+						 WHERE  mts_cum_tds_liab < 0
+						 AND    mts_sett_off_flg = 'N'
+						 AND    mts_upld_flg = 'N'
+						 AND    mts_trd_date <= to_date(:c_date,'dd-Mon-yyyy' ); 
+		 
+			 if( SQLCODE != 0 )
+			 {
+				fn_errlog(c_ServiceName, "S31145", SQLMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+				destroy_bat();
+			 }
+			}
+ 			if ( fn_committran( c_ServiceName, i_trnsctn, c_err_mssg ) == -1 )
+ 			{
+   			fn_errlog(c_ServiceName, "S31150", LIBMSG, c_err_mssg);
+   			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+   			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+   			destroy_bat();
+ 			}
+		}
+		else if (c_sett_off == 'Y')
+		{
+			strcpy(c_prev_mtch_accnt,"");
+			tds_amt = 0.0;
+
+			while (1)
+			{
+				fn_userlog(c_ServiceName,"=====While c_prev_mtch_accnt :%s:",c_prev_mtch_accnt);
+
+				i_trnsctn  = fn_begintran( c_ServiceName, c_err_mssg );
+				if ( i_trnsctn == -1 )
+				{
+					fn_errlog(c_ServiceName, "S31155", LIBMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					destroy_bat();
+				}
+
+				fn_userlog(c_ServiceName," 222...sql_mts_payin_date :%s:",sql_mts_payin_date.arr); /** Ver 1.3 **/
+
+				EXEC SQL
+						 SELECT mts_clm_mtch_accnt,
+										mts_trd_date,
+										mts_cum_tds_liab,
+										mts_cum_pl,
+										mts_tds_rate,
+										mts_payin_date,												/** Ver 1.3 **/
+										rowid
+						 INTO   :sql_mts_clm_mtch_accnt,
+										:sql_mts_trd_date,
+										:sql_mts_cum_tds_liab,
+										:sql_mts_cum_pl,
+										:sql_mts_tds_rate,
+										:sql_mts_payin_date,								/** Ver 1.3 **/
+										:c_rowid
+						 FROM   (SELECT mts_clm_mtch_accnt,mts_trd_date,mts_cum_tds_liab,mts_cum_pl,mts_tds_rate,mts_payin_date,rowid 
+										 FROM 	mts_mon_tds_smry
+										 WHERE  mts_trd_date <= to_date(:c_date,'dd-Mon-yyyy') 
+										 AND  	mts_cum_tds_paid = 0
+										 AND    mts_sett_off_flg =	'Y'
+										 AND    mts_upld_flg =	'N'
+										 ORDER BY mts_clm_mtch_accnt,mts_trd_date)
+						 WHERE   rownum <2;
+
+				if(SQLCODE	==	NO_DATA_FOUND)
+				{
+					break;
+				}
+				else if(SQLCODE)
+				{
+					fn_errlog(c_ServiceName, "S31160", LIBMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					destroy_bat();
+				}
+
+				SETNULL(sql_mts_trd_date);
+
+				fn_userlog(c_ServiceName,"Output values:  ");
+				fn_userlog(c_ServiceName,"sql_mts_clm_mtch_accnt :%s:",sql_mts_clm_mtch_accnt);
+				fn_userlog(c_ServiceName,"c_prev_mtch_accnt :%s:",c_prev_mtch_accnt);
+				fn_userlog(c_ServiceName,"sql_mts_cum_pl:%lf:",sql_mts_cum_pl);
+				fn_userlog(c_ServiceName,"sql_mts_cum_tds_liab :%lf:",sql_mts_cum_tds_liab);
+				fn_userlog(c_ServiceName,"sql_mts_tds_rate :%lf:",sql_mts_tds_rate);
+				fn_userlog(c_ServiceName,"sql_mts_trd_date :%s:",sql_mts_trd_date.arr);
+				fn_userlog(c_ServiceName,"sql_mts_payin_date :%s:",sql_mts_payin_date.arr);							/** Ver 1.3 **/
+
+				/* Get the max of the Cum TDS Liab till date for the match account */
+
+				i_val = 0;
+
+				/** Get the start year for the financial year in consideration **/
+				EXEC SQL 
+						 SELECT  to_char(to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),'YYYY') - 1
+						 INTO   :c_year
+						 FROM  DUAL
+						 WHERE to_number(to_char(to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),'MM')) < 4 ;
+
+				if(SQLCODE == NO_DATA_FOUND)
+				{
+					EXEC SQL 
+							 SELECT to_char(to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),'YYYY')
+							 INTO :c_year
+							 FROM  DUAL;
+				
+					if(SQLCODE)
+					{
+						fn_errlog(c_ServiceName, "S31165", LIBMSG, c_err_mssg);
+						fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						destroy_bat();
+					}
+				}
+				else if(SQLCODE)
+				{
+					fn_errlog(c_ServiceName, "S31170", SQLMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					destroy_bat();
+				}
+
+				fn_userlog(c_ServiceName,"c_year :%s:",c_year);
+				fn_userlog(c_ServiceName,"c_year :%s:",c_year);
+				strcpy(c_mon,"");
+				strcat(c_mon,"Apr-");
+				strcat(c_mon,c_year);
+				fn_userlog(c_ServiceName,"c_mon :%s:",c_mon);
+				fn_userlog(c_ServiceName,"sql_mts_trd_date :%s:",sql_mts_trd_date.arr);
+				fn_userlog(c_ServiceName,"max_val :%lf:",max_val);
+
+
+				/** Get the max cum pl for the financial year in consideration **/
+
+				EXEC SQL 
+						 SELECT nvl(max(mts_cum_pl),0)
+						 INTO   :max_val
+						 FROM  mts_mon_tds_smry
+						 WHERE mts_clm_mtch_accnt =:sql_mts_clm_mtch_accnt
+						 AND   mts_sett_off_flg ='Y' 
+						 AND   to_char(mts_trd_date,'Mon-YYYY') >= to_char(to_date(:c_mon,'Mon-YYYY'),'Mon-YYYY')
+						 AND   mts_trd_date < to_char(to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),'DD-Mon-YYYY');
+
+				if(SQLCODE)
+				{
+					fn_errlog(c_ServiceName, "S31175", LIBMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					destroy_bat();
+				}
+
+				i_flg = 0;
+				fn_userlog(c_ServiceName,"max_val :%lf:",max_val);
+				fn_userlog(c_ServiceName,"i_flg :%d:",i_flg);
+
+				/** Check for the start of the financial year **/
+
+				EXEC SQL 
+						 SELECT 1
+						 INTO  :i_flg
+						 FROM  DUAL 
+						 WHERE to_char(to_date(:c_mon,'Mon-YYYY'),'Mon-YYYY') = to_char(to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),'Mon-YYYY'); 
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog(c_ServiceName, "S31180", LIBMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					destroy_bat();
+				}
+
+				fn_userlog(c_ServiceName,"i_flg aft :%d:",i_flg);
+
+				/* Calculate the monthly amount */
+
+				if (sql_mts_cum_pl  <= 0.0)
+				{
+					/** Loss hence no TDS **/
+					max_val = 0;	
+					d_month_liab = sql_mts_cum_pl;
+					d_month_tds = sql_mts_cum_tds_liab;
+				}
+				else
+				{
+					if (max_val > 0 )
+					{
+						if( i_flg == 0)
+						{
+							/** Profit and hence calculate the TDS payin **/ 
+							d_month_liab =  sql_mts_cum_pl - max_val;
+							d_month_tds =  (d_month_liab * sql_mts_tds_rate) / 100;
+						}
+						else
+						{
+							/** Start of new financial year hence profit as TDS payin **/ 
+							d_month_liab = sql_mts_cum_pl;
+							d_month_tds = sql_mts_cum_tds_liab;
+						}
+					}
+					else
+					{
+						/** max val till date is negative or 0 and cum pl is > 0 and hence TDS payin **/
+						max_val = 0;	
+						d_month_liab = sql_mts_cum_pl;
+						d_month_tds = sql_mts_cum_tds_liab;
+					}
+				}
+
+				fn_userlog(c_ServiceName,"d_month_liab :%lf:",d_month_liab);
+				fn_userlog(c_ServiceName,"d_month_tds :%lf:",d_month_tds);
+
+
+				if (d_month_tds > 0.0 )  /* If profit then TDS payin*/
+				{
+				/******** Commented in Ver 1.2 ***********************
+					EXEC SQL
+							SELECT SUBSTR(clb_bnk_acct_nmbr,1,4)
+							INTO 	 :c_brnch
+							FROM 	 clb_bnk_accts
+							WHERE  clb_clm_mtch_accnt  = :sql_mts_clm_mtch_accnt;
+
+					if( SQLCODE != 0 )
+					{
+						fn_errlog(c_ServiceName, "S31185", SQLMSG, c_err_mssg);
+						fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						destroy_bat();
+					}
+			
+				 	fn_userlog( c_ServiceName,"c_brnch :%s:",c_brnch);
+					*****************************************************/
+
+					EXEC SQL 
+							 SELECT distinct fbc_cln_pyin_dt,
+											fbc_cln_pyout_dt
+							 INTO   :c_payin_date,
+											:c_payout_date
+							 FROM   fbc_fo_brnch_cal
+							 WHERE  fbc_xchng_cd ='NFO'
+							 AND    fbc_trd_dt = to_date(:sql_mts_trd_date,'dd-Mon-yyyy')
+							 AND    fbc_grp_id = 9
+					/*** AND    fbc_branch = :c_brnch; **Ver 1.2 ****/
+               AND    fbc_branch = '0004';
+
+					if( SQLCODE != 0 )
+					{
+						fn_errlog(c_ServiceName, "S31190", SQLMSG, c_err_mssg);
+						fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						destroy_bat();
+					}
+
+					SETNULL(c_payin_date);
+					SETNULL(c_payout_date);
+
+					fn_userlog(c_ServiceName,"c_payin_date :%s:",(char *)c_payin_date.arr);
+					fn_userlog(c_ServiceName,"c_payout_date :%s:",(char *)c_payout_date.arr);
+					fn_userlog(c_ServiceName,"c_brnch :%s:",c_brnch);
+
+					 /******  Ver 1.3 Starts *****/
+
+					EXEC SQL
+           SELECT to_char(max(fbc_trd_dt),'dd-Mon-YYYY')
+           INTO :c_last_trd_day
+           FROM fbc_fo_brnch_cal
+           WHERE  to_char(fbc_trd_dt,'Mon-YY') = to_char(to_date(:c_date,'dd-Mon-YYYY'),'Mon-YY')
+           AND  fbc_grp_id = 9;
+					
+						if( SQLCODE != 0 )
+            {
+              fn_errlog(c_ServiceName, "S31195", SQLMSG, c_err_mssg);
+              fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+              fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+              destroy_bat();
+            }
+
+
+      		EXEC SQL
+          	SELECT to_char(last_day(to_date(:c_date,'dd-Mon-YYYY')))
+          	INTO  :c_last_day
+          	FROM  dual;
+
+      			if( SQLCODE != 0 )
+      			{
+        			fn_errlog(c_ServiceName, "S31200", SQLMSG, c_err_mssg);
+        			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+        			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+        			destroy_bat();
+      			}
+
+      			SETNULL(c_last_day);
+      			SETNULL(c_last_trd_day);
+
+						if ((strcmp( (char *)c_last_trd_day.arr, (char *) c_last_day.arr) ) != 0)
+      			{
+
+							fn_userlog(c_ServiceName," Payin and last day of month is diff");
+							fn_userlog(c_ServiceName," Payin day :%s:",c_payin_date.arr);
+							fn_userlog(c_ServiceName," c_date :%s:",c_date.arr);
+
+        			EXEC SQL
+            		UPDATE mts_mon_tds_smry
+            		SET    mts_payin_date = to_date(:c_last_trd_day,'dd-Mon-yyyy')
+            		WHERE  mts_trd_date = to_date(:c_last_day,'dd-Mon-yyyy')
+            		AND    mts_sett_off_flg =  'Y'
+            		AND    mts_upld_flg =  'N'
+            		AND    mts_cum_pl > 0;
+
+        				if( SQLCODE != 0 )
+        				{
+									fn_errlog(c_ServiceName, "S31205", SQLMSG, c_err_mssg);
+									fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+									fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+									destroy_bat();
+        				}
+
+      			}
+					  else
+      			{
+
+						 fn_userlog(c_ServiceName," Payin and last day of month is same");
+						 fn_userlog(c_ServiceName," c_last_day :%s:",c_last_day.arr);
+             fn_userlog(c_ServiceName," c_date :%s:",c_date.arr);
+
+          	EXEC SQL
+            	UPDATE mts_mon_tds_smry
+            	SET   mts_payin_date = to_date(:c_last_day,'dd-Mon-yyyy')
+            	WHERE  mts_trd_date = to_date(:c_last_day,'dd-Mon-yyyy')					
+            	AND    mts_sett_off_flg =  'Y'
+            	AND    mts_upld_flg =  'N'
+            	AND    mts_cum_pl > 0 ;
+
+          		if( SQLCODE != 0 )
+          		{
+             		fn_errlog(c_ServiceName, "S31210", SQLMSG, c_err_mssg);
+             		fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+             		fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+             		destroy_bat();
+          		}
+
+      			}
+
+					/******  Ver 1.3 Ends *****/
+
+					EXEC SQL 
+							 SELECT fbd_bill_no 
+							 INTO  	:c_billno
+							 FROM   fbd_fo_bnk_drcr
+							 WHERE  fbd_clm_mtch_accnt =	:sql_mts_clm_mtch_accnt
+							 AND    fbd_grp_id =	9
+							 AND    fbd_trd_dt =	to_date(:sql_mts_trd_date,'DD-Mon-YYYY')
+							 AND    fbd_pi_po_amt = 0;
+
+					if(SQLCODE == NO_DATA_FOUND)
+					{
+						EXEC SQL
+								 SELECT '01'||to_char(sysdate, 'yyddmm')||next_doc_no.NEXTVAL,
+								 				to_char(to_date(:sql_mts_trd_date,'dd-Mon-YYYY'),'Mon-YY')
+								 INTO 	:c_billno,
+												:c_month
+								 FROM 	dual;
+
+						if (SQLCODE)	
+						{
+							fn_errlog(c_ServiceName, "S31215", SQLMSG, c_err_mssg);
+							fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+							fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+							destroy_bat();
+						}
+						SETNULL(c_billno);
+						SETNULL(c_month);
+
+										/*to_date(:c_payin_date,'DD-Mon-YYYY'),*/
+
+						fn_userlog(c_ServiceName," 333...sql_mts_payin_date :%s:",sql_mts_payin_date.arr);   /** Ver 1.3 **/
+
+						/**** Column added for Ver 1.6 ***/
+						EXEC SQL
+								INSERT INTO fbd_fo_bnk_drcr
+										(FBD_XCHNG_CD,
+										FBD_TRD_DT,
+										FBD_GRP_ID,
+										FBD_BILL_NO,
+										FBD_CLM_MTCH_ACCNT,
+										FBD_PAYIN_DT,
+										FBD_PAYOUT_DT,
+										FBD_DC_FLG,
+										FBD_DC_AMT,
+										FBD_PI_PO_AMT,
+										FBD_INT_ADJ_AMT)
+								VALUES ( 'NFO',
+										to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),
+										9,
+										:c_billno,
+										:sql_mts_clm_mtch_accnt,
+										/*to_date(:c_payin_date,'DD-Mon-YYYY'), */			/** Ver 1.3 **/
+										to_date(:sql_mts_payin_date,'DD-Mon-YYYY'),			/** Ver 1.3 **/
+										to_date(:c_payout_date,'DD-Mon-YYYY'),
+										'D',
+										:d_month_tds * -1 ,0,0);
+	
+						if( SQLCODE != 0 )
+						{
+							fn_errlog(c_ServiceName, "S31220", SQLMSG, c_err_mssg);
+							fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+							fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+							destroy_bat();
+						}
+					}
+					else if (SQLCODE)
+					{
+						fn_errlog(c_ServiceName, "S31225", SQLMSG, c_err_mssg);
+						fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+						destroy_bat();
+					}
+					else
+					{
+						SETNULL(c_billno);
+
+						fn_userlog(c_ServiceName,"sql_mts_trd_date <%s>",sql_mts_trd_date.arr);
+						
+						EXEC SQL 
+								 UPDATE fbd_fo_bnk_drcr
+								 set  	fbd_trd_dt =  to_date(:sql_mts_trd_date,'DD-Mon-YYYY'),
+												fbd_dc_amt = :d_month_tds * -1
+								 WHERE  fbd_clm_mtch_accnt =  :sql_mts_clm_mtch_accnt
+								 AND    fbd_grp_id =  9
+								 and    FBD_BILL_NO = :c_billno ;
+
+					}
+					fn_userlog(c_ServiceName,"c_billno <%s>",c_billno.arr);
+					fn_userlog(c_ServiceName,"c_month <%s>",c_month.arr);
+
+					EXEC SQL 
+							 UPDATE mdc_misc_dr_cr
+							 SET    mdc_amt1= (:d_month_tds)/100  ,mdc_tot_amt = (:d_month_tds)/100 ,
+											mdc_stck_cd =:c_month
+							 WHERE  mdc_clm_mtch_accnt =:sql_mts_clm_mtch_accnt
+							 AND    mdc_prdct_typ ='TDS' 
+							 AND    trim(mdc_crdt_nmbr) = :c_billno;
+
+					if( SQLCODE == NO_DATA_FOUND )
+					{
+            /****** Ver 1.5 Starts Here ****
+						EXEC SQL 
+    						INSERT INTO mdc_misc_dr_cr
+								VALUES (:sql_mts_clm_mtch_accnt,
+            					  'TDS',
+												:c_billno ,
+            						(:d_month_tds)/100 ,
+            						0,
+            						(:d_month_tds)/100 ,
+            						to_date(:c_payin_date,'DD-Mon-YYYY'),
+            						to_date(:c_payout_date,'DD-Mon-YYYY'),
+            						'D',
+            						0,
+            						0,
+            						'N',
+            						'N',
+            						null,null,0,0,:c_month);
+            ******* Ver 1.5 Ends Here *******/
+            
+            /***** Ver 1.5 Starts Here *****/
+            EXEC SQL
+            INSERT INTO MDC_MISC_DR_CR
+                         (MDC_CLM_MTCH_ACCNT,
+                          MDC_PRDCT_TYP,
+                          MDC_CRDT_NMBR,
+                          MDC_AMT1,
+                          MDC_AMT2,
+                          MDC_TOT_AMT,
+                          MDC_FROM_DT,
+                          MDC_TO_DT,
+                          MDC_DR_CR_FLG,
+                          MDC_PRCNTG,
+                          MDC_TURNOVER,
+                          MDC_MTCH_STTS,
+                          MDC_BNK_STTS,
+                          MDC_BNK_DT,
+                          MDC_BNK_TRC_NMBR,
+                          MDC_MTCH_UPD_AMT,
+                          MDC_BNK_UPD_AMT,
+                          MDC_STCK_CD,
+                          MDC_MTCH_UPD_DT
+                         )
+                   VALUES (:sql_mts_clm_mtch_accnt,
+                           'TDS',
+                           :c_billno ,
+                           (:d_month_tds)/100 ,
+                           0,
+                           (:d_month_tds)/100 ,
+                           to_date(:c_payin_date,'DD-Mon-YYYY'),
+                           to_date(:c_payout_date,'DD-Mon-YYYY'),
+                           'D',
+                           0,
+                           0,
+                           'N',
+                           'N',
+                           null,
+                           null,
+                           0,
+                           0,
+                           :c_month,
+                           null);
+            /***** Ver 1.5 Ends Here *******/
+
+				 	  if( SQLCODE != 0 )
+ 				 	  {
+   					 fn_errlog(c_ServiceName, "S31230", SQLMSG, c_err_mssg);
+   				 	 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+   				   fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+   				   destroy_bat();
+ 				 	 }
+			 	   fn_userlog(c_ServiceName,"INSERT SUCC.............");
+			 	}
+			  else if(SQLCODE)
+			  {
+					fn_errlog(c_ServiceName, "S31235", SQLMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+			  }
+
+				fn_userlog(c_ServiceName,"2222_sql_mts_trd_date :%s:",sql_mts_trd_date.arr);  /** Ver 1.3 **/
+        fn_userlog(c_ServiceName,"2222_sql_mts_payin_date :%s:",sql_mts_payin_date.arr);  /** Ver 1.3 **/
+
+				EXEC SQL 
+					 INSERT INTO mtp_mon_tds_payin
+					 VALUES ( :sql_mts_clm_mtch_accnt,
+										:sql_mts_trd_date,
+										:sql_mts_cum_pl,
+										:sql_mts_cum_tds_liab,
+										:d_month_tds,	
+										0,:sql_mts_tds_rate,
+										:c_billno,
+										'Y','N'
+									);
+
+				if( SQLCODE != 0 )
+				{
+					fn_errlog(c_ServiceName, "S31240", SQLMSG, c_err_mssg);
+					fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					destroy_bat();
+				}
+			}
+			fn_userlog(c_ServiceName,"FLAG UPDATE.............");
+
+			EXEC SQL
+					UPDATE mts_mon_tds_smry
+					SET    mts_upld_flg ='Y',
+								 mts_bill_no =:c_billno,
+								 mts_cum_tds_paid = :d_month_tds
+					WHERE  rowid = :c_rowid;
+
+			if( SQLCODE != 0 )
+			{
+				fn_errlog(c_ServiceName, "S31245", SQLMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+				destroy_bat();
+			}
+
+			if ( fn_committran( c_ServiceName, i_trnsctn, c_err_mssg ) == -1 )
+			{
+  			fn_errlog(c_ServiceName, "S31250", LIBMSG, c_err_mssg);
+  			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+  			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+  			destroy_bat();
+			}
+			strcpy(c_prev_mtch_accnt,sql_mts_clm_mtch_accnt);
+			fn_userlog(c_ServiceName,"++++++++++++EOD While c_prev_mtch_accnt :%s:",c_prev_mtch_accnt);
+
+		} /*end of while */
+	 } /*Sett off Y*/
+	} /* I */
+	else if(c_flag == 'U')
+	{
+		i_trnsctn  = fn_begintran( c_ServiceName, c_err_mssg );
+		if ( i_trnsctn == -1 )
+		{
+			fn_errlog(c_ServiceName, "S31255", LIBMSG, c_err_mssg);
+			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+			destroy_bat();
+		}
+
+		EXEC SQL
+				 DELETE temp_mdc_misc_dr_cr;
+
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+		{
+			fn_errlog(c_ServiceName, "S31260", SQLMSG, c_err_mssg);
+			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+			destroy_bat();
+		}
+
+
+
+		userlog("c_date :%s:",c_date.arr);
+
+		/*** Ver 1.7 starts ***/
+		EXEC SQL	
+				SELECT to_char(last_day(to_date(:c_date,'dd-Mon-YYYY'))) 
+				INTO	:c_last_day
+				FROM  dual;
+
+		if( SQLCODE != 0 )
+		{
+			fn_errlog(c_ServiceName, "S31265", SQLMSG, c_err_mssg);
+			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+			destroy_bat();
+		}
+
+		SETNULL(c_last_day);	
+		
+		if ((strcmp( (char *)c_date.arr, (char *) c_last_day.arr) ) != 0)
+		{
+			c_settlement_flg = 'S';
+		}
+		/*** Ver 1.7 ends ***/
+
+		if (c_settlement_flg == 'S') /*** if loop added in Ver 1.7 ***/
+		{
+			EXEC SQL
+				 INSERT INTO temp_mdc_misc_dr_cr (tmp_clm_mtch,tmp_date,tmp_bill_no)
+					  (SELECT mdc.mdc_clm_mtch_accnt,
+										mtp.mtp_trd_date,
+										trim(mdc.mdc_crdt_nmbr)
+						  FROM   mtp_mon_tds_payin mtp,mdc_misc_dr_cr mdc
+						  WHERE  mtp.mtp_clm_mtch_accnt = mdc.mdc_clm_mtch_accnt
+							AND    mtp.mtp_clm_mtch_accnt in (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'P' )
+						  AND    mdc.mdc_prdct_typ = 'TDS'
+						  AND    trim(mtp.mtp_bill_no) = trim(mdc.mdc_crdt_nmbr)
+						  AND    mtp.mtp_trd_date <= to_date(:c_last_day,'dd-Mon-yyyy')
+						  AND    mdc.mdc_bnk_stts <> 'Y') ;
+		}
+		else
+		{
+			EXEC SQL
+					 INSERT INTO temp_mdc_misc_dr_cr (tmp_clm_mtch,tmp_date,tmp_bill_no)
+							(SELECT mdc.mdc_clm_mtch_accnt,
+											mtp.mtp_trd_date,
+											trim(mdc.mdc_crdt_nmbr)
+								FROM   mtp_mon_tds_payin mtp,mdc_misc_dr_cr mdc
+								WHERE  mtp.mtp_clm_mtch_accnt = mdc.mdc_clm_mtch_accnt
+								AND    mdc.mdc_prdct_typ = 'TDS'
+								AND    trim(mtp.mtp_bill_no) = trim(mdc.mdc_crdt_nmbr)
+								AND    mtp.mtp_trd_date <= to_date(:c_date,'dd-Mon-yyyy')
+								AND    mdc.mdc_bnk_stts <> 'Y') ;
+		}
+		if( SQLCODE != 0 )
+		{
+			fn_errlog(c_ServiceName, "S31270", SQLMSG, c_err_mssg);
+			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+			destroy_bat();
+		}
+
+		if ( fn_committran( c_ServiceName, i_trnsctn, c_err_mssg ) == -1 )
+		{
+			fn_errlog(c_ServiceName, "S31275", LIBMSG, c_err_mssg);
+			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+			destroy_bat();
+		}
+
+		while (1)
+		{
+	 		EXEC SQL 
+				SELECT tmp_clm_mtch,
+						 	 tmp_date,
+							 trim(tmp_bill_no),
+							 rowid
+				INTO  :sql_mdc_clm_mtch_accnt,
+							:sql_mdc_to_dt,
+							:c_mdc_crdt_nmbr,
+							:c_rowid
+				FROM  temp_mdc_misc_dr_cr
+				WHERE rownum <2;
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				break;
+			}
+			else if(SQLCODE !=0 ) 
+			{
+				fn_errlog(c_ServiceName, "S31280", SQLMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				destroy_bat();
+			}
+
+			SETNULL(c_mdc_crdt_nmbr);
+			SETNULL(sql_mdc_to_dt);
+
+			fn_userlog(c_ServiceName,"sql_mdc_to_dt  <%s>",sql_mdc_to_dt.arr);
+			fn_userlog(c_ServiceName,"sql_mdc_clm_mtch_accnt  <%s>",sql_mdc_clm_mtch_accnt);
+			fn_userlog(c_ServiceName,"c_mdc_crdt_nmbr  <%s>",c_mdc_crdt_nmbr.arr);
+
+			i_trnsctn  = fn_begintran( c_ServiceName, c_err_mssg );
+			if ( i_trnsctn == -1 )
+			{
+				fn_errlog(c_ServiceName, "S31285", LIBMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				destroy_bat();
+			}
+
+			EXEC SQL 
+					 SELECT fbd_dc_flg,
+									fbd_dc_amt,
+									fbd_pi_po_amt,
+									fbd_int_adj_amt,
+									fbd_payin_dt
+						INTO  :c_fbd_flg,
+									:d_fbd_dc_amt,
+									:d_fbd_pipo_amt,
+									:d_fbd_intadj_amt,
+									:sql_mdc_bnk_dt
+						FROM 	fbd_fo_bnk_drcr
+						WHERE fbd_clm_mtch_accnt =	:sql_mdc_clm_mtch_accnt
+						AND   fbd_bill_no =	:c_mdc_crdt_nmbr;
+
+			if( SQLCODE != 0 )
+			{
+				fn_errlog(c_ServiceName, "S31290", SQLMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+				destroy_bat();
+			}
+
+			fn_userlog(c_ServiceName,"d_fbd_dc_amt <%lf>",d_fbd_dc_amt);
+			fn_userlog(c_ServiceName,"d_fbd_pipo_amt <%lf>",d_fbd_pipo_amt);
+			fn_userlog(c_ServiceName,"d_fbd_intadj_amt <%lf>",d_fbd_intadj_amt);
+			fn_userlog(c_ServiceName,"c_fbd_flg <%c>",c_fbd_flg);
+
+			/* Check whether Payin full amt success */		
+			if (d_fbd_dc_amt == d_fbd_pipo_amt)
+			{
+				c_bnk_stts ='Y';
+				fn_userlog(c_ServiceName,"==== SUCCESS =====");
+			}
+			else
+			{
+				c_bnk_stts ='F';
+				fn_userlog(c_ServiceName,"==== PARTIAL =====");
+			}
+
+			EXEC SQL
+     			 UPDATE mdc_misc_dr_cr
+     			 SET    mdc_bnk_stts =  :c_bnk_stts,
+           				mdc_bnk_dt   = to_date(:sql_mdc_bnk_dt,'DD-Mon-YYYY'),
+           				mdc_bnk_upd_amt  = :d_fbd_pipo_amt/100 * -1
+     			 WHERE  mdc_clm_mtch_accnt =	:sql_mdc_clm_mtch_accnt
+     			 AND    trim(mdc_crdt_nmbr) =	:c_mdc_crdt_nmbr
+     			 AND    mdc_prdct_typ ='TDS';
+
+			if( SQLCODE != 0 )
+			{
+  			fn_errlog(c_ServiceName, "S31295", SQLMSG, c_err_mssg);
+  			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+  			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+  			destroy_bat();
+			}
+
+		  fn_userlog(c_ServiceName,"c_mdc_crdt_nmbr <%s>",c_mdc_crdt_nmbr.arr);
+
+			EXEC SQL 
+				UPDATE mtp_mon_tds_payin
+				SET 	 mtp_tds_paid = :d_fbd_pipo_amt * -1,
+						   mtp_pyin_flg = :c_bnk_stts
+				WHERE  mtp_clm_mtch_accnt = :sql_mdc_clm_mtch_accnt
+				AND    trim(mtp_bill_no) = :c_mdc_crdt_nmbr;
+
+			if( SQLCODE != 0 )
+			{
+				fn_errlog(c_ServiceName, "S31300", SQLMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+				destroy_bat();
+			}
+
+			EXEC SQL
+    			DELETE FROM  temp_mdc_misc_dr_cr
+    			WHERE  rowid = :c_rowid;
+
+ 			if( SQLCODE != 0 )
+ 			{
+   			fn_errlog(c_ServiceName, "S31305", SQLMSG, c_err_mssg);
+   			fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+   			fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+   			destroy_bat();
+ 			}
+
+			if (c_settlement_flg == 'S') /*** if loop added in Ver 1.7 ***/
+			{
+				i_return_cd = fn_update_log(c_ServiceName,sql_mdc_clm_mtch_accnt, c_date.arr, 'C',c_mdc_crdt_nmbr.arr, c_bnk_stts, d_fbd_pipo_amt);
+
+				if (i_return_cd != 0 )
+				{
+					 fn_errlog(c_ServiceName, "S31310", LIBMSG, c_err_mssg);
+					 fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+					 fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+					 destroy_bat();
+				}
+			}
+
+			if ( fn_committran( c_ServiceName, i_trnsctn, c_err_mssg ) == -1 )
+			{
+				fn_errlog(c_ServiceName, "S31315", LIBMSG, c_err_mssg);
+				fn_bat_pst_msg_fno(c_ServiceName,c_err_mssg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_mssg );
+				destroy_bat();
+			}
+		}	/* end of while */
+	}
+
+	fn_userlog(c_ServiceName,"ALL Done");
+  fn_bat_pst_msg_fno(c_ServiceName,"ALL DONE ",c_tag);
+  destroy_bat();
+}
+
+/*** Ver 1.7 starts ***/
+/*** int fn_insert_log(char *c_ServiceName,char c_mtch_accnt_arr[MAX_CLIENTS][10+1], char *c_date, char c_status) ***/
+int fn_insert_log(char *c_ServiceName,char *c_mtch_accnt_temp, char *c_date, char c_status)
+{
+  int  i_cnt = 0;
+  int i_exist =0;
+	char *c_temp; 
+	char c_mtch_accnt_arr[MAX_CLIENTS][10+1];
+	MEMSET(c_mtch_accnt_arr);
+
+	if(strcmp(c_mtch_accnt_temp, "NA") != 0)  
+  {
+    for(i_cnt = 0, c_temp = (char *)strtok(c_mtch_accnt_temp, ","); c_temp != NULL;i_cnt ++, c_temp = (char *)strtok(NULL, ","))
+    {
+      strcpy(c_mtch_accnt_arr[i_cnt], c_temp);
+      fn_userlog(c_ServiceName,"Match account is - |%d| :: |%s|", i_cnt, c_mtch_accnt_arr[i_cnt]);
+
+			EXEC SQL
+			SELECT 1 INTO :i_exist from  FCV_RI_NRI_CONV_LOG 
+			WHERE FCV_CLM_MTCH_ACCNT = :c_mtch_accnt_arr[i_cnt]
+			AND FCV_PIPO_DT = :c_date
+			AND FCV_STATUS in ('R','P','C');
+
+		 if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+		 {
+				fn_errlog(c_ServiceName,"S31320",SQLMSG,c_err_mssg);
+				return -1;
+		 }
+		 if (i_exist == 1)
+		 {
+				fn_userlog(c_ServiceName,"NRI Tds process already run for the client:%s:",c_mtch_accnt_arr[i_cnt]);
+				fn_errlog(c_ServiceName,"S31325",LIBMSG,c_err_mssg);
+				return -1;
+		 }
+
+			EXEC SQL
+			INSERT INTO FCV_RI_NRI_CONV_LOG ( FCV_CLM_MTCH_ACCNT, FCV_PIPO_DT, FCV_STATUS, FCV_PRCS_TIME)
+			VALUES (:c_mtch_accnt_arr[i_cnt], :c_date, :c_status, sysdate) ; 
+
+		 if( SQLCODE != 0 )
+		 {
+				fn_errlog(c_ServiceName,"S31330",SQLMSG,c_err_mssg);
+				return -1;
+		 }
+
+    }
+  }
+
+	/*** for (i=0; (char *)c_mtch_accnt_arr[i]!= NULL ; i++ )
+	{
+		fn_userlog(c_ServiceName,"c_mtch_accnt_arr[:%d]=:%s:",i,c_mtch_accnt_arr[i]);
+		EXEC SQL
+			INSERT INTO FCV_RI_NRI_CONV_LOG ( FCV_CLM_MTCH_ACCNT, FCV_PIPO_DT, FCV_STATUS, FCV_PRCS_TIME)
+			VALUES (:c_mtch_accnt_arr[i], :c_date, :c_status, sysdate) ; 
+
+		 if( SQLCODE != 0 )
+		 {
+				fn_errlog(c_ServiceName,"S31335",SQLMSG,c_err_mssg);
+				return -1;
+		 }
+	} ***/
+	 return 0;
+}
+
+int fn_update_log(char *c_ServiceName,char *c_mtch_accnt, char *c_date, char c_status,char *c_billno, char c_bnk_stts,double d_fbd_pipo_amt)
+{
+	fn_userlog(c_ServiceName,"Update Log for Match account|%s|", c_mtch_accnt);
+	
+	if (c_status == 'P')
+	{
+		EXEC SQL
+			UPDATE FCV_RI_NRI_CONV_LOG 
+			SET    FCV_STATUS = :c_status,
+						 FCV_BILL_NO = :c_billno   ,            
+						 FCV_CUM_PL = :sql_mts_cum_pl   ,       
+						 FCV_TDS_RATE =:sql_mts_tds_rate ,      
+						 FCV_DC_AMT = :sql_mts_cum_tds_liab    
+			WHERE  FCV_CLM_MTCH_ACCNT = :c_mtch_accnt      
+			AND    FCV_PIPO_DT				= :c_date 
+			AND    FCV_STATUS ='R';
+	}
+	else if (c_status == 'C')
+	{
+		EXEC SQL
+			UPDATE FCV_RI_NRI_CONV_LOG 
+			SET    FCV_STATUS = :c_status,
+						 FCV_BANK_STTS = :c_bnk_stts,
+						 FCV_BANK_DT = to_date(:sql_mdc_bnk_dt,'DD-Mon-YYYY'),
+						 FCV_BANK_UPD_AMT  = :d_fbd_pipo_amt
+			WHERE  FCV_CLM_MTCH_ACCNT = :c_mtch_accnt      
+			AND    FCV_PIPO_DT				= :c_date 
+			AND    FCV_STATUS ='P';
+	}
+	else if (c_status == 'X')
+	{
+		EXEC SQL
+			UPDATE FCV_RI_NRI_CONV_LOG 
+			SET    FCV_STATUS =		'C', 
+						 FCV_CUM_PL =		(SELECT mts_cum_pl FROM mts_mon_tds_smry   
+														WHERE	 mts_sett_off_flg =  'N'
+														AND    mts_upld_flg =  'N'
+														AND    mts_cum_pl < 0
+														AND    MTS_CLM_MTCH_ACCNT	= FCV_CLM_MTCH_ACCNT and mts_payin_date = :c_date),
+						 FCV_TDS_RATE = (SELECT  mts_tds_rate FROM mts_mon_tds_smry 
+														WHERE  mts_sett_off_flg =  'N' 
+														AND    mts_upld_flg =  'N'
+														AND    mts_cum_pl < 0
+														AND    MTS_CLM_MTCH_ACCNT	=FCV_CLM_MTCH_ACCNT  and mts_payin_date = :c_date ),
+						 FCV_DC_AMT = 	(SELECT fcb_dc_amt	FROM   fcb_fo_clnt_blncs
+														WHERE  fcb_trd_dt = :c_date
+														AND    fcb_grp_id   = 9
+														AND    FCB_DC_AMT > 0
+														AND    fcb_clm_mtch_accnt = FCV_CLM_MTCH_ACCNT)
+			WHERE  (FCV_CLM_MTCH_ACCNT,FCV_STATUS,FCV_PIPO_DT) in 
+			(SELECT FCV_CLM_MTCH_ACCNT,FCV_STATUS,FCV_PIPO_DT
+			FROM   FCV_RI_NRI_CONV_LOG , FCB_FO_CLNT_BLNCS
+			WHERE  FCV_CLM_MTCH_ACCNT = FCB_CLM_MTCH_ACCNT
+			AND    FCV_PIPO_DT = :c_date
+			AND    FCV_STATUS ='R'
+			AND    FCB_DC_AMT > 0
+			AND		 FCB_GRP_ID = 9
+			AND		 FCB_TRD_DT = FCV_PIPO_DT);
+	}
+
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+	{
+			fn_errlog(c_ServiceName,"S31340",SQLMSG,c_err_mssg);
+			return -1;
+	}
+}
+
+int fn_chk_pos_limit(char *c_ServiceName,char *c_date, char *c_xchng_cd)
+{
+	int i_opn_qty_chk = 0;
+	int i_pen_qty_chk = 0;
+	int i_trd_cnt = 0;
+	/*** double d_db_bal = 0.0;***/
+	double d_alloc_amt = 0.0;
+	double d_blkd_amt = 0.0;
+
+	EXEC SQL
+		SELECT 1
+		INTO  :i_opn_qty_chk
+		FROM  DUAL
+		WHERE EXISTS (  SELECT 1 FROM   FFP_FO_FUTURES_PSTN
+										WHERE FFP_CLM_MTCH_ACCNT   in (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'R')
+										AND    FFP_XCHNG_CD        = :c_xchng_cd
+										AND    FFP_OPNPSTN_QTY     !=0
+										UNION
+										SELECT 1 FROM   FOP_FO_OPTIONS_PSTN
+										WHERE  FOP_CLM_MTCH_ACCNT  in (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND  FCV_STATUS = 'R')
+										AND    FOP_XCHNG_CD        = :c_xchng_cd
+										AND   FOP_OPNPSTN_QTY !=0
+										UNION
+										SELECT 1 FROM   FCP_FO_SPN_CNTRCT_PSTN
+                    WHERE FCP_CLM_MTCH_ACCNT   in (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'R')
+                    AND    FCP_XCHNG_CD        = :c_xchng_cd
+                    AND    FCP_OPNPSTN_QTY     !=0
+										UNION
+										SELECT 1 FROM FOD_FO_ORDR_DTLS
+										WHERE  FOD_CLM_MTCH_ACCNT   in (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'R')
+                    AND    FOD_XCHNG_CD        = :c_xchng_cd
+									  AND     FOD_PRDCT_TYP in ( 'U','I')
+										GROUP BY  DECODE(FOD_FC_FLAG, 'F', FOD_ORDR_RFRNC, FOD_SLTP_ORDR_RFRNC )
+										HAVING    SUM( DECODE( FOD_FC_FLAG, 'C', -1 * FOD_EXEC_QTY, FOD_EXEC_QTY ) ) != 0
+                 );
+		
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+		{
+			fn_errlog(c_ServiceName,"S31345",SQLMSG,c_err_mssg);
+			return -1;
+		}
+
+		if ( i_opn_qty_chk != 0 )
+		{
+			fn_userlog(c_ServiceName,"Open Position Exists.");
+			fn_errlog(c_ServiceName,"S31350",LIBMSG,c_err_mssg);
+			return -1;
+		}
+	
+		EXEC SQL
+			SELECT 1 
+			INTO  :i_pen_qty_chk
+			FROM	 FOD_FO_ORDR_DTLS 
+			WHERE  FOD_XCHNG_CD = :c_xchng_cd 
+			AND    FOD_CLM_MTCH_ACCNT  in (SELECT FCV_CLM_MTCH_ACCNT from FCV_RI_NRI_CONV_LOG where FCV_PIPO_DT = :c_date AND FCV_STATUS = 'R')
+			AND    FOD_ORDR_STTS IN ('R','O','P','Q');
+
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+		{
+			fn_errlog(c_ServiceName,"S31355",SQLMSG,c_err_mssg);
+			return -1;
+		}
+
+		if ( i_pen_qty_chk != 0 )
+		{
+			fn_userlog(c_ServiceName,"Pending order Exists.");
+			fn_errlog(c_ServiceName,"S31360",LIBMSG,c_err_mssg);
+			return -1;
+		}
+}
+/*** Ver 1.7 ends ***/

@@ -1,0 +1,633 @@
+/************************************************************************************************************
+*																																				 																		*
+*	Prog.Name 		:cln_fobse_brdprcs.pc																		 																		*
+*																																			 	 																		*
+*	Input					:pipe id																								 																		*
+*																																			 	 																		*
+* Output				:																												 																		*
+*																																			 	 																		*
+* Description 	:BSE-IML Receive Client to receive broadcast						 																		*
+*							 	 messages and enqueue the messages in message 					 																		*
+*							 	 queue.																									 																		*
+*************************************************************************************************************
+* Ver 1.0			 :New Release																							 																		*		
+* Ver 1.1			 :18-Jul-2012 Sandip Tambe																 																		*
+* 						 :[handling of session change broadcast]									 																		*		
+*	Ver	1.2			 : Market Picture Message Handling Introduced ( MSG Typ 2020 )	15-May-2013	Sandeep Patil			*
+************************************************************************************************************/	
+/**** Standard Header file ***/
+				
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+/*********Tuxedo specific Header Files********/
+#include <atmi.h>
+#include <fml32.h>
+#include <fml_def.h>
+#include <fml_rout.h>
+#include <sqlca.h>
+/*******LIBRARY Files*********/
+#include <fn_log.h>
+#include <fo_fml_def.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_fobse_bcast.h> 
+#include <fn_nw_to_host_format.h>
+#include <fn_fobse_socket.h>
+#include <ud_fobse_socket.h>
+#include <fn_battmpt.h>
+#include <fo.h>
+#include <fn_env.h>
+#include <fn_fil_log.h>
+#include <fn_ddr.h>
+#include <fn_tuxlib.h>
+#include <fn_signal.h>
+#include <fn_imlmsgs_fno.h>
+#include <fo_exch_msgs.h>												/*** Ver 1.1 ***/
+/********Global Variables*********/
+char c_xchng_cd[3 + 1];
+char c_ServiceName [33];
+char c_errmsg [ 256 ];
+FILE *ptr_rcv_msgs_file;
+int  i_brdprcs_exit_stts;
+char c_qspace_name[10];
+char c_q_name[10];
+int i_iml_sck_id;
+int i_msg_dump_flg;
+/*-------------------------------*/
+  char c_xchng_cd[3+1];
+  char c_pipe_id [ 2+1 ];
+/*-------------------------------*/
+int fn_crt_iml_sck ( int *ptr_i_sck_id,
+                      char *ptr_c_iml_addr_nm,
+                      char *ptr_c_iml_port_nm,
+                      char *c_ServiceName,
+                      char *c_errmsg);
+
+int fn_write_msgq_file(int *ptr_i_qid,
+                       char *c_ServiceName,
+                       char *c_errmsg);
+
+void fn_sgnl_usr2(int i_sig_no);
+
+void CLN_FOBSE_BRDPRCS( int argc, char *argv[] )
+{
+   char  *ptr_c_temp ;
+   char  c_filename[256];
+   char  c_brd_udp_port[PORT_MAX_SZ] ;
+	/* unsigned char c_bcast_data[MAX_LEN]; ******* Ver 1.1 Comment ***/
+   unsigned char c_bcast_data[MAX_BCAST_PACKET_LEN]; /** Ver 1.1 **/ 
+   int 	i_ch_val;
+   FBFR32 *Ibuffer;
+	 FBFR32  *ptr_fml_temp_buffer; /** for reallocation **/
+	 int   i_counter_bfr=1;
+   int     i_buf_len;
+   int     i_family;
+   char    c_serv_addr[IP_MAX_SZ];
+   int     i_port_no;
+   int     i_err;
+   int     i_ferr;
+	 int 		i_tran_id;
+	/*------------------------------------------------*/
+   struct st_bcast_packet   st_var_bcast_buffer;				/** broadcast Packet with message header**/
+   struct st_bcast_actual_packet  st_var_data_buffer;		/**Packet without Message header **/
+  /* char    c_bcast_data_without_hdr[MAX_BCAST_DATA_LEN]; ** Ver 1.1 Comment **/
+   double  d_buf_cnt;
+   long    l_bcast_data_without_hdr_len;
+   long    l_bcast_data_actual_len;
+	 long    l_msg_typ;
+ 	
+	/** variables for SKIP LOGIC ***/
+ 
+	 struct st_mkt_picture_dtls ptr_st_mkt_pic_dtls_msg;
+	 struct st_mrkt_pctr_dtls ptr_st_mrkt_pctr_dtls;			/***	Ver	1.2	***/
+	 struct st_open_price_brd st_var_opn_prc;
+	 struct st_cls_price_brd st_var_cls_prc;
+	 struct st_opn_intrst_brd st_opn_intrst_dtls;
+	 struct st_sssn_chng_brd   st_var_sssn_continuous_brd;				/*** Ver 1.1 **/
+	 struct st_sssn_chng_brd   *ptr_var_sssn;											/*** Ver 1.1 **/
+	 int i_count ;
+	 int i_rec_exists;
+ 	 char c_stock[21];
+	 struct st_all_indx_dtl_brd st_all_indices;
+   
+	 strcpy(c_ServiceName,"cln_fobse_brdprcs");
+   strcpy (c_xchng_cd, "BFO");
+   sprintf(c_filename, "%s/%s.ini", getenv("BIN"), c_xchng_cd);
+
+	 memset(c_qspace_name,'\0',sizeof(c_qspace_name));
+
+	 /** Getting Qspace and Queue Name from BFO.ini ***/
+
+   ptr_c_temp = (char *)fn_get_prcs_spc ( c_ServiceName ,"BRDQSPACE_NAME");
+  
+	 if ( ptr_c_temp == NULL )
+   {
+   	 fn_userlog ( c_ServiceName , "Error : Unable to get QSPACE_NAME from the config file :%s:", c_filename );
+     fn_errlog(c_ServiceName, "S31005", LIBMSG,   c_errmsg );
+     return ; 
+   }
+   else
+   {
+       strcpy( c_qspace_name , ptr_c_temp );
+   }
+
+   fn_userlog(c_ServiceName,"Qspace Name is :%s:", c_qspace_name);
+	
+	 memset(c_q_name,'\0',sizeof(c_q_name));
+  
+	 ptr_c_temp = (char *)fn_get_prcs_spc (c_ServiceName , "BRDQ_NAME");
+
+   if ( ptr_c_temp == NULL )
+   {
+     fn_userlog (c_ServiceName,"Error :Unable to get Q_NAME from the config file :%s:",c_filename );
+     fn_errlog(c_ServiceName, "S31010", LIBMSG,c_errmsg );
+   }
+   else
+ 	 {
+     strcpy( c_q_name , ptr_c_temp );
+   }
+
+   fn_userlog(c_ServiceName ,"Queue Name is :%s:", c_q_name);
+ 
+	 Ibuffer = ( FBFR32 * ) tpalloc ( "FML32", NULL,MAX_BCAST_PACKET_LEN + 1024);
+
+   if(Ibuffer == NULL)
+ 	 {
+   	 fn_userlog(c_ServiceName,"Error in Tpalloc ");
+     fn_errlog ( c_ServiceName, "S31015", TPMSG, c_errmsg );
+		 return;
+   }
+
+   if ( Fadd32(Ibuffer, FFO_QUEUE_NAME, (char *)c_q_name, 0) == -1)
+   {
+     fn_errlog(c_ServiceName,"S31020",FMLMSG,c_errmsg);
+     fn_userlog(c_ServiceName , " Addition of queue name failed. " );
+		 return ;
+   }
+   if ( Fadd32(Ibuffer, FFO_QSPACE_NAME, (char *)c_qspace_name, 0) == -1)
+   {
+   	 fn_errlog(c_ServiceName,"S31025",FMLMSG,c_errmsg);
+   	 fn_userlog(c_ServiceName , " Addition of queue name failed. " );
+		 return;
+   }
+
+
+	 i_brdprcs_exit_stts = DONT_EXIT;
+
+
+   while(i_brdprcs_exit_stts == DONT_EXIT)
+ 	 {
+     i_buf_len = MAX_BCAST_PACKET_LEN;
+     memset(c_bcast_data,'\0', sizeof ( c_bcast_data ) );
+
+
+   	 i_ch_val = fn_recvfrom (  i_iml_sck_id, c_bcast_data, &i_buf_len,0, &i_family, c_serv_addr, &i_port_no, 0 );
+
+     if ( i_ch_val == RCVERROR ) /* Receivefrom function failed */
+     {
+       fn_errlog ( c_ServiceName, "S31030", UNXMSG, c_errmsg );
+     	 fn_userlog (c_ServiceName, "ETIMEDOUT is :%d: errno is :%d:", ETIMEDOUT, errno );
+
+     	 if ( errno != ETIMEDOUT )
+     	 { 
+         fn_errlog(c_ServiceName, "S31035", LIBMSG,c_errmsg );
+				 tpfree((char *)Ibuffer);
+       	 i_brdprcs_exit_stts = EXIT;
+     	 }
+     	 continue;
+     }
+
+
+     memset ( &st_var_bcast_buffer, '\0', sizeof ( struct st_bcast_packet ) );
+     memcpy ( &st_var_bcast_buffer, c_bcast_data, i_buf_len );
+     st_var_bcast_buffer.li_data_msg_len = fn_swap_long ( st_var_bcast_buffer.li_data_msg_len );
+     l_bcast_data_without_hdr_len = ntohl ( st_var_bcast_buffer.li_data_msg_len );
+     l_bcast_data_actual_len = i_buf_len-LEN_SLOT_NO-LEN_BCAST_MSG;
+
+		/**** Ver 1.1 Comment Starts  *****
+ 
+     MEMSET(c_bcast_data_without_hdr);
+     memcpy ( c_bcast_data_without_hdr , st_var_bcast_buffer.c_msg_data, l_bcast_data_actual_len );
+
+		***** Ver 1.1 comment Ends ********/
+
+		 memset(&st_var_data_buffer ,'\0',sizeof(struct st_bcast_actual_packet)); 
+     memcpy ( &st_var_data_buffer, st_var_bcast_buffer.c_msg_data, l_bcast_data_actual_len );
+
+     st_var_data_buffer.li_msg_type = fn_swap_long ( st_var_data_buffer.li_msg_type );
+     l_msg_typ = ntohl ( st_var_data_buffer.li_msg_type );
+
+		 if(DEBUG_MSG_LVL_3)
+		 {
+       fn_userlog(c_ServiceName , "Message type after conversion:%d:",l_msg_typ);
+		 }
+
+
+		 /************************************************************************************/
+		 /* SKIPPING LOGIC : for discarding those packet which contains scrip details for 		*/
+		 /*									equity scrip codes under message type [2007,2013,2014]			  	*/
+		 /*								  Primarily it is observed that each distinct packet for 					*/
+		 /*									particualr message type contains scrip details either for 			*/
+		 /*									Equity or for FNO.Hence if any of the record contains BFO 			*/
+		 /*									specific scrip details the whole packet is Enqued into the 			*/
+		 /*									Message Queue. Otherwise the packet is discarded to reduce the	*/
+		 /*									unnecessary Overhead  on Broadcast client to process the Equity */
+		 /*									scrip details.																								 	*/
+		 /*									same can be improved if distinction is made by the exchange 		*/
+		 /*									about the equity or FNO specific broadcast packet 							*/
+		 /************************************************************************************/	
+											
+     switch (l_msg_typ)
+     {
+			 case BCAST_MRKT_MSG:
+					i_rec_exists = 0;
+          memset(&ptr_st_mkt_pic_dtls_msg ,'\0' ,sizeof(struct st_mkt_picture_dtls));
+          memcpy((char*)&ptr_st_mkt_pic_dtls_msg,(char *)&st_var_data_buffer,sizeof(struct st_mkt_picture_dtls));
+          fn_cnvt_to_hfmt_swap_upd_mkt_info_dtls(&ptr_st_mkt_pic_dtls_msg);
+
+					if(DEBUG_MSG_LVL_3)
+					{
+          	fn_userlog(c_ServiceName , " No of Records :%d:",ptr_st_mkt_pic_dtls_msg.si_no_recs);
+					}
+
+					for(i_count=0 ; i_count <ptr_st_mkt_pic_dtls_msg.si_no_recs ; i_count++)
+					{
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName ,"scrip code INSIDE SKIP LOGIC :%ld:",ptr_st_mkt_pic_dtls_msg.st_mkt_pic[i_count].li_scrp_cd);
+						}
+
+						sprintf(c_stock,"%ld",ptr_st_mkt_pic_dtls_msg.st_mkt_pic[i_count].li_scrp_cd);
+
+				  	if((strncmp(c_stock,"5",1 ) == 0))
+        		{
+							if(DEBUG_MSG_LVL_3)
+							{
+          			fn_userlog(c_ServiceName,"Equity Scrip code");
+							}
+        		}
+          	else if ((strncmp(c_stock,"8",1 ) == 0))
+          	{
+          		fn_userlog(c_ServiceName ,"BSE Derivative MRKT MSG For Scrip Code :%ld:",ptr_st_mkt_pic_dtls_msg.st_mkt_pic[i_count].li_scrp_cd);
+          		i_rec_exists = i_rec_exists + 1 ;						
+          	}
+					}
+	
+					if(DEBUG_MSG_LVL_3)
+					{
+						fn_userlog(c_ServiceName,"Counter of BFO scrips in [2007]=%d:",i_rec_exists);
+					}
+
+					break;
+
+			 case	BCAST_MRKT_PCTR_MSG	:			/***	Ver	1.2	***/	
+
+				i_rec_exists = 0;
+
+        memset(&ptr_st_mrkt_pctr_dtls,'\0' ,sizeof(struct st_mrkt_pctr_dtls));
+        memcpy((char*)&ptr_st_mrkt_pctr_dtls,(char *)&st_var_data_buffer,sizeof(struct st_mrkt_pctr_dtls));
+        fn_cnvt_to_hfmt_swap_mrkt_pctr(&ptr_st_mrkt_pctr_dtls);
+
+				if(DEBUG_MSG_LVL_3)
+				{
+         	fn_userlog(c_ServiceName , " No of Records :%d:",ptr_st_mrkt_pctr_dtls.si_no_of_rcrds);
+				}
+
+				for(i_count=0 ; i_count <	ptr_st_mrkt_pctr_dtls.si_no_of_rcrds ; i_count++)
+				{
+					if(DEBUG_MSG_LVL_3)
+					{
+						fn_userlog(c_ServiceName ,"scrip code INSIDE SKIP LOGIC :%ld:",ptr_st_mrkt_pctr_dtls.st_mrkt_pctr[i_count].li_scrp_cd);
+					}
+
+					sprintf(c_stock,"%ld",ptr_st_mrkt_pctr_dtls.st_mrkt_pctr[i_count].li_scrp_cd);
+
+				 	if((strncmp(c_stock,"5",1 ) == 0))
+        	{
+						if(DEBUG_MSG_LVL_3)
+						{
+         			fn_userlog(c_ServiceName,"Equity Scrip code");
+						}
+        	}
+         	else if ((strncmp(c_stock,"8",1 ) == 0))
+         	{
+         		fn_userlog(c_ServiceName ,"BSE Derivative MRKT MSG For Scrip Code :%ld:",ptr_st_mrkt_pctr_dtls.st_mrkt_pctr[i_count].li_scrp_cd);
+
+         		i_rec_exists = i_rec_exists + 1 ;						
+         	}
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"Counter of BSE Derivatice scrips in [2020]=%d:",i_rec_exists);
+				}
+
+			 break; 
+
+			 case BCAST_OPN_PRC_MSG:
+
+					i_rec_exists =0;
+					memset(&st_var_opn_prc,'\0',sizeof(struct st_open_price_brd));
+          memcpy((char *)&st_var_opn_prc ,(char *)&st_var_data_buffer,sizeof(struct st_open_price_brd));
+          fn_cnvt_to_hfmt_swap_opn_prc_brd (&st_var_opn_prc);
+			
+					if(DEBUG_MSG_LVL_3)
+					{
+						fn_userlog(c_ServiceName,"NO of records :%d:",st_var_opn_prc.st_opn_prc.si_no_recs);
+					}
+
+				  for(i_count =0 ; i_count < st_var_opn_prc.st_opn_prc.si_no_recs ; i_count++)
+  				{
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName ,"scrip code INSIDE SKIP LOGIC :%ld:",st_var_opn_prc.st_opn_prc.st_prc[i_count].li_scrip_cd);
+						}
+
+						sprintf(c_stock,"%ld",st_var_opn_prc.st_opn_prc.st_prc[i_count].li_scrip_cd);
+
+				  	if((strncmp(c_stock,"5",1 ) == 0))
+        		{
+							if(DEBUG_MSG_LVL_3)
+							{
+          			fn_userlog(c_ServiceName,"Equity Scrip code");
+							}
+        		}
+          	else if ((strncmp(c_stock,"8",1 ) == 0))
+          	{
+          		fn_userlog(c_ServiceName ,"BSE Derivatives Open Price For Scrip Code :%ld:",st_var_opn_prc.st_opn_prc.st_prc[i_count].li_scrip_cd);
+          		i_rec_exists = i_rec_exists + 1 ;
+          	}
+					}
+
+					fn_userlog(c_ServiceName,"Counter of BFO scrips [2013] =%d:",i_rec_exists);
+					break;
+
+/******************************************************************************************/
+/*	Senesex related Broadcasts 2011 [BSESENSEX] and 2012 [All Indices Broadcast]          */
+/*	handling is skipped becouase decided to take spot price from LTQ table which					*/
+/*	gets updated during Equity Broadcast																									*/
+/*	These Messages gives the current price of the various Indices 												*/
+/******************************************************************************************/
+
+			 case BCAST_ALL_DTLS :
+				
+						break;
+
+				case BCAST_CLS_PRC_MSG :
+
+					i_rec_exists =0;
+
+					memset(&st_var_cls_prc,'\0',sizeof(struct st_cls_price_brd));
+          memcpy((char *)&st_var_cls_prc ,(char *)&st_var_data_buffer,sizeof(struct st_cls_price_brd));
+          fn_cnvt_to_hfmt_swap_cls_prc_brd (&st_var_cls_prc);
+	
+					if(DEBUG_MSG_LVL_3)
+					{
+						fn_userlog(c_ServiceName,"NO of records :%d:",st_var_cls_prc.st_cls_prc.si_no_recs);
+					}
+
+				  for(i_count =0 ; i_count < st_var_cls_prc.st_cls_prc.si_no_recs ; i_count++)
+  				{
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName ,"scrip code INSIDE SKIP LOGIC :%ld:",st_var_cls_prc.st_cls_prc.st_prc[i_count].li_scrip_cd);
+						}
+
+						sprintf(c_stock,"%ld",st_var_cls_prc.st_cls_prc.st_prc[i_count].li_scrip_cd);
+
+				  	if((strncmp(c_stock,"5",1 ) == 0))
+        		{
+							if(DEBUG_MSG_LVL_3)
+							{
+          			fn_userlog(c_ServiceName,"Equity Scrip code");
+							}
+        		}
+          	else if ((strncmp(c_stock,"8",1 ) == 0))
+          	{
+							fn_userlog(c_ServiceName ,"BSE Derivative Closing Price For Scrip Code :%ld:",st_var_cls_prc.st_cls_prc.st_prc[i_count].li_scrip_cd);
+          		i_rec_exists = i_rec_exists + 1 ;
+          	}
+					}
+			
+					if(DEBUG_MSG_LVL_3)
+					{
+						fn_userlog(c_ServiceName,"Counter of BFO scrips [2014] =%d:",i_rec_exists);
+					}
+
+					break;
+
+			 case BCAST_OPN_INTRST_MSG :
+
+					fn_userlog(c_ServiceName,"Inside open interest in broadcast process");
+					break;
+
+			 default :
+					fn_userlog(c_ServiceName," message type :%ld: Not Handled in SKIP LOGIC",l_msg_typ);
+					break;
+		}
+		/***************************************************************************/
+
+		/****************************************************************************/
+
+		 /*** Ver 1.1 Starts for OPENING AND CLOSING Session Handling ***/
+
+		if( l_msg_typ == BCAST_MRKT_CHNG )
+		{	
+			  fn_userlog(c_ServiceName ,"Inside Session Change[2002] broadcast ");
+
+        memset ( &st_var_sssn_continuous_brd, '\0', sizeof ( struct st_sssn_chng_brd ) );
+        memcpy((char*)&st_var_sssn_continuous_brd,(char *)&st_var_data_buffer,sizeof(struct st_sssn_chng_brd) );
+        fn_cnvt_to_hfmt_swap_sssn_chng_brd(&st_var_sssn_continuous_brd);
+        ptr_var_sssn = &st_var_sssn_continuous_brd;
+
+        i_ch_val = fn_brdmkt_stts_chng ( ptr_var_sssn ,
+                                         c_xchng_cd,
+                                         c_ServiceName,
+                                         c_errmsg
+                                        );
+        if ( i_ch_val == -1 )
+        {
+				 	fn_userlog(c_ServiceName,"Failed in Updating Exchange Master"); 
+        }
+		}
+			 /*** Ver 1.1 OPENING AND CLOSING Session  Handling Ends ***/
+
+ 		if(((l_msg_typ == BCAST_MRKT_MSG) 			&& (i_rec_exists > 0 )) ||
+			 ((l_msg_typ == BCAST_OPN_PRC_MSG) 		&& (i_rec_exists > 0 )) ||
+			 ((l_msg_typ == BCAST_CLS_PRC_MSG ) 	&& (i_rec_exists > 0 )) ||
+			 ((l_msg_typ == BCAST_MRKT_PCTR_MSG ) 	&& (i_rec_exists > 0 )) ||			/***	Ver	1.2	***/
+			/* ( l_msg_typ == BCAST_MRKT_CHNG ) ||												  *** Ver 1.1 Comment **/
+			 ( l_msg_typ == BCAST_TIME_MSG  ) ||
+			 ( l_msg_typ == BCAST_NEWS_MSG  ) ||
+			 ( l_msg_typ == BCAST_OPN_INTRST_MSG ) ||
+			 ( l_msg_typ == BCAST_TRDR_LIMIT_EXCEED )
+			) 
+ 		{
+				if(DEBUG_MSG_LVL_3)
+        {
+					fn_userlog(c_ServiceName ," Enqueuing FNO Spesific [%ld]Packet ",l_msg_typ);
+				}
+
+    		if ( Fneeded32(1,i_buf_len ) > Funused32( Ibuffer ) )
+    		{
+      		i_counter_bfr++;
+      		ptr_fml_temp_buffer=(FBFR32 *)tprealloc((char *)Ibuffer,(Fsizeof32(Ibuffer)+(i_counter_bfr*i_buf_len)));
+     			if (ptr_fml_temp_buffer == NULL)
+     			{
+      			fn_errlog( c_ServiceName,"S31040",FMLMSG,c_errmsg ) ;
+      			tpfree((char *) Ibuffer);
+						return ;
+     			}
+     			else
+     			{
+      			Ibuffer = ptr_fml_temp_buffer;
+      			ptr_fml_temp_buffer  = (FBFR32 *) NULL  ;
+     			}
+    		}
+
+    		i_err = Fchg32(Ibuffer,FML_SBUF,0,(char *)c_bcast_data,i_buf_len);
+    		i_ferr = Ferror32;
+
+    		if( i_err == -1 )
+    		{
+					fn_userlog(c_ServiceName," Error in Fch32 ...........");
+      		fn_errlog(c_ServiceName,  "S31045",Fstrerror32(i_err), c_errmsg);
+					fn_userlog(c_ServiceName,"Error :%s:",c_errmsg);
+      		tpfree ( ( char * ) Ibuffer );
+					return ;
+    		}
+
+				fn_userlog(c_ServiceName , " Enquing the Broadcast Data ");
+
+	  		if ( tpacall("SFO_ENQ_MSG", (char *)Ibuffer,  0, TPNOTRAN|TPNOREPLY) == -1)
+    		{
+      		fn_errlog ( c_ServiceName, "S31050", TPMSG,c_errmsg);
+    		}
+
+				fn_userlog(c_ServiceName, "After Call to SFO_ENQ_MSG");	
+ 		}
+ 		else
+ 		{
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName," Not A BFO Specific packet hence skipping ");
+				}
+
+				continue;
+ 		}
+	}/** while Ends */
+	fn_userlog(c_ServiceName,"Terminating the Broadcast Process ");
+	tpfree((char *)Ibuffer);
+	return ;
+}
+
+/*-----------------------------------------------------*/
+void fn_bat_term (  int argc, char *argv[] )
+{
+  char c_errmsg [ 256 ];
+  char c_filter [ 256 ];
+	char c_ServiceName[256];
+
+  strcpy(c_ServiceName, argv[0]);
+  fn_userlog(c_ServiceName," in BAT TERM OF batch %s:",c_ServiceName);
+  fn_close( i_iml_sck_id);
+  fn_userlog(c_ServiceName,"After fn_close_sck -Val of i_iml_sck_id <%d> and i_msg_dump_flg <%d>", i_iml_sck_id, i_msg_dump_flg);
+  if ( i_msg_dump_flg == 1)
+  {
+    fn_destroy_file(ptr_rcv_msgs_file);
+    fn_userlog(c_ServiceName,"Destroy file When i_msg_dump_flg is LOG_DUMP");
+  }
+  return;
+}
+/*--------------------------------------------------------*/
+int fn_bat_init(int argc , char *argv[])
+{
+	char c_ServiceName [ 33];
+	char c_filename [200];
+	char c_errmsg [256];
+	char c_dump_msg_flg_nm[30];
+	int i_ch_val;
+	char *ptr_c_tmp;
+	INITBATDBGLVL(argv[0]);
+
+	strcpy(c_ServiceName ,argv[0]);
+
+  i_ch_val = fn_crt_iml_sck(&i_iml_sck_id,"IML_IP_ADDRESS","IML_BRDPORT",c_ServiceName,c_errmsg);
+
+  if ( i_ch_val == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31055", LIBMSG, c_errmsg);
+    fn_userlog ( c_ServiceName, "Error in fn_crt_iml_sck in fn_bat_init " );
+    return ( -1 );
+  }
+
+  fn_userlog ( c_ServiceName, "Val of i_iml_sck_id -in fn_bat_init <%d>", i_iml_sck_id );
+
+	/**** Set signal handler for SIGUSR2  ****/
+  if ( fn_set_sgn_hnd ( SIGUSR2,fn_sgnl_usr2, c_ServiceName, c_errmsg ) == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31060", LIBMSG, c_errmsg);
+    return ( -1 );
+ 	}
+
+  fn_userlog(c_ServiceName,"After fn_set_sgn_hnd for sign-2 in bat_init");
+
+  fn_var = CLN_FOBSE_BRDPRCS;
+  return(0);
+}
+
+int fn_crt_iml_sck ( int *ptr_i_sck_id,
+                      char *ptr_c_iml_addr_nm,
+                      char *ptr_c_iml_port_nm,
+                      char *c_ServiceName,
+                      char *c_errmsg)
+{
+  char *ptr_c_tmp;
+  char c_iml_ip_addr[30];
+  char  c_iml_port_no[10];
+  int  i_ch_val;
+  ptr_c_tmp = (char *)fn_get_prcs_spc ( c_ServiceName, ptr_c_iml_addr_nm );
+  if (ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"S31065", LIBMSG, c_errmsg);
+    return ( -1 );
+  }
+  strcpy(c_iml_ip_addr,ptr_c_tmp);
+
+  ptr_c_tmp = (char *)fn_get_prcs_spc ( c_ServiceName, ptr_c_iml_port_nm );
+
+  if (ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"S31070", LIBMSG, c_errmsg);
+    return ( -1 );
+  }
+
+  strcpy(c_iml_port_no,ptr_c_tmp);
+
+  /**** Connect to IML Machine****/
+	i_ch_val =  fn_crt_clnt_sck ( c_ServiceName, ptr_i_sck_id , c_iml_port_no, c_errmsg );
+
+  if ( i_ch_val == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31075", LIBMSG, c_errmsg);
+    return -1;
+  }
+  fn_userlog(c_ServiceName,"socket connected in fn_crt_iml_sck with c_iml_port_no <%s>", c_iml_port_no);
+  return 0;
+}
+
+int fn_prcs_trg(char *c_ServiceName,
+                 int i_trg_typ)
+{
+  return ( 0 );
+}
+void fn_sgnl_usr2(int i_sig_no)
+{
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog("cln_fobse_brdprcs","CLN_FOBSE_BRDPRCS SIGUSER2 exit");
+  }
+  i_brdprcs_exit_stts = EXIT;
+  return;
+}

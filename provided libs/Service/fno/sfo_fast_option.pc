@@ -1,0 +1,1207 @@
+/*  Program           : SFO_FAST_OPTION                                       */
+/*                                                                            */
+/* Input              : FFO_USR_ID                                            */
+/*                      FFO_SSSN_ID                                           */
+/*                      FFO_REQ_TYP                                           */
+/*                                                                            */
+/*  Output            : FFO_UNDRLYNG                                          */
+/*                    : FFO_SUB_BUF_CNT																				*/
+/*                    : FFO_BK_UBK_FLG																				*/
+/*                    : FFO_OI_INDCTR																					*/
+/*                    : FFO_STLMNT_PRC																				*/
+/*                    : FFO_AVM_PRCNT																					*/
+/*                    : FFO_INTADJ_RFRNC																			*/
+/******************************************************************************/
+/*  Initial release:  Naveena R. 16-May-2022		              								*/
+/*  Ver 1.1				 :  Ravi/Shailesh . 06-Jul-2022		           								*/
+/*  Ver 1.2				 :  Naveena R. 12-Aug-2022    		           								*/
+/*																																						*/
+/******************************************************************************/
+/*  This service is called from the Fast Options in 3 modes 									*/
+/*		1: To return the default Indices and details                						*/
+/*		1.1: Change in strikes selection via minor change            						*/
+/*    1.2: Breakeven calc changes for Option Put                              */
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fml_def.h>
+#include <fo.h>
+#include <fo_view_def.h>
+#include <fo_fml_def.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>			
+#include <fml_rout.h>	
+#include <fn_read_debug_lvl.h>		
+#include <fo_get_records.h>			
+#include <fn_session.h>
+#include <math.h>
+
+#define LANDING_SCREEN	'L'
+#define CONTRACT_SELECTION 'C'
+#define TRADING_SCREEN 'T'
+
+void SFO_FAST_OPTION( TPSVCINFO *rqst )
+{
+	FBFR32 *ptr_fml_Ibuf;
+  FBFR32 *ptr_fml_Obuf;
+
+	ptr_fml_Obuf = NULL;
+
+	char  c_ServiceName[33];
+  char  c_err_msg[256]; 
+
+	int i_returncode  = 0;  
+
+	struct vw_usr_prfl st_usr_prfl;
+  struct vw_err_msg st_err_msg;
+
+  MEMSET(st_usr_prfl);
+  MEMSET(st_err_msg);
+
+	char c_user_id[9] = "\0";
+	long l_sssn_id = 0;
+	int i =0;
+	char c_undrlyng[10] = "\0";        
+  char c_most_trd_flg = '\0';  
+  char c_vol_ind[30] = "\0";        
+  long l_strt_investm = 0;
+  double d_avg_vol_per = 0.0; 
+  char c_pnts_move[20] = "\0";     
+	long l_buy_trdrs = 0;
+	long l_slider_upper = 0;
+	long l_slider_lower = 0;
+	long l_spot_prc = 0;
+	double d_mkt_sntm_pstv = 0.0;
+	double d_mkt_sntm_negv = 0.0;
+	char c_this_wexpry_dt[12] = "\0";
+	char c_next_wexpry_dt[12] = "\0";
+	char c_curr_mexpry_dt[12] = "\0";
+	char c_mexpiry_text[11] = "\0";
+
+	long l_no_of_puts = 0;
+	long l_no_of_calls = 0; 
+	long l_prev_cls = 0;
+	double d_prcntg_chg = 0;
+	char c_xchng_cd[4] ="\0";
+	double d_upper_strike = 0.0;
+  double d_lower_strike = 0.0;
+  double d_ATM_strike = 0.0;
+  double d_NOTM_strike = 0.0;
+  double d_FOTM_strike = 0.0;
+	char c_expry_dt[12]= "\0";
+	char c_opt_typ = '\0';
+
+  long l_min_lot_qty = 0;
+  long l_ltp = 0;
+  long l_prev_cls_ltp = 0;
+  double d_perc_chng_ltp = 0.0;
+  double d_mrgn_req = 0.0;
+  double d_max_loss = 0.0;
+  char c_max_prft[10] = "\0";
+  double d_break_even = 0.0;
+
+	int i_cntrct[11];
+  int i_cntrcterr[11];
+	int strike_diff=0;	/* 1.1 minor changes */
+
+	char c_mode = '\0';
+
+  EXEC SQL BEGIN DECLARE SECTION;
+		    sql_cursor     sys_cursor;
+	EXEC SQL END DECLARE SECTION;
+
+	ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+
+	INITDBGLVL(c_ServiceName);	
+
+	MEMSET(c_err_msg);      
+	MEMSET(i_cntrct);      
+	MEMSET(i_cntrcterr);      
+
+	i_cntrct    [ 0 ]   = Fget32( ptr_fml_Ibuf ,FFO_USR_ID,0,(char *) c_user_id,0);
+  i_cntrcterr [ 0 ]   = Ferror32;
+	i_cntrct    [ 1 ]   = Fget32( ptr_fml_Ibuf ,FFO_SSSN_ID,0,(char *) &l_sssn_id,0);
+  i_cntrcterr [ 1 ]   = Ferror32;
+	i_cntrct    [ 2 ]   = Fget32( ptr_fml_Ibuf ,FFO_REQ_TYP,0,(char *) &c_mode,0);
+  i_cntrcterr [ 2 ]   = Ferror32;
+  i_cntrct    [ 3 ]   = Fget32( ptr_fml_Ibuf ,FFO_XCHNG_CD,0,(char *) &c_xchng_cd,0);
+  i_cntrcterr [ 3 ]   = Ferror32;
+
+	for ( i=0 ; i < 4 ;  i++ )
+	{
+		if ( (i_cntrct[ i ] == -1 ) && (i_cntrcterr[ i ]  != FNOTPRES ) )
+		{
+			fn_userlog( c_ServiceName, "Error in :%d:",i );
+			fn_errlog( c_ServiceName, "S31005", Fstrerror32( i_cntrcterr[i]),c_err_msg );
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		 }
+	}
+
+  i_returncode = Fvftos32( ptr_fml_Ibuf,
+                           (char *) &st_usr_prfl,
+                           "vw_usr_prfl" );
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31010", FMLMSG, c_err_msg);
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  i_returncode = fn_chk_sssn( c_ServiceName, &st_usr_prfl,
+                                             &st_err_msg ) ;
+  if ( i_returncode == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31015",LIBMSG, c_err_msg);
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	fn_userlog( c_ServiceName, "Mode passed is :%c:",c_mode );
+
+	if (c_mode == LANDING_SCREEN )
+	{
+		strcpy (c_undrlyng,"NIFTY");
+		c_most_trd_flg = 'Y';
+		strcpy(c_vol_ind, "Medium Volatility");
+		l_strt_investm = 100000;
+		d_avg_vol_per = 200;
+		strcpy(c_pnts_move	, "+-330");
+
+		EXEC SQL
+			SELECT SUM(A) 
+			INTO	:l_buy_trdrs
+			FROM
+			(
+			SELECT COUNT(0) A  FROM FOP_FO_OPTIONS_PSTN WHERE FOP_OPNPSTN_FLW = 'B' AND FOP_UNDRLYNG='NIFTY'
+			UNION ALL
+			SELECT COUNT(0) A FROM FCP_FO_SPN_CNTRCT_PSTN WHERE FCP_OPNPSTN_FLW = 'B' AND FCP_PRDCT_TYP='O' AND FCP_UNDRLYNG ='NIFTY'
+			);
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog ( c_ServiceName, "S31020", SQLMSG, c_err_msg );
+      tpfree((char *)ptr_fml_Obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+		if (DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"before packing NIFTY");
+		}
+				i_returncode = fn_pack_vartofml( c_ServiceName,
+																				 c_err_msg,
+																				 &ptr_fml_Obuf,
+																				 8,
+																				 FFO_XCHNG_CD, (char *) c_xchng_cd,
+																				 FFO_UNDRLYNG, ( char * )c_undrlyng,
+																				 FFO_SUB_BUF_CNT, (char * ) &l_buy_trdrs,
+																				 FFO_BK_UBK_FLG, (char *) &c_most_trd_flg,
+																				 FFO_OI_INDCTR , (char *) c_vol_ind,
+																				 FFO_STLMNT_PRC , (long *) &l_strt_investm,
+																				 FFO_AVM_PRCNT , (double *) &d_avg_vol_per,
+																				 FFO_INTADJ_RFRNC ,(char *) c_pnts_move
+																				 );
+				if( i_returncode == -1 )
+				{
+					fn_errlog( c_ServiceName, "S31025", LIBMSG, c_err_msg );
+					tpfree ( ( char * ) ptr_fml_Obuf );
+					Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+					tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+				}
+
+	
+		strcpy (c_undrlyng,"CNXBAN");
+		c_most_trd_flg = 'N';
+		strcpy(c_vol_ind, "High Volatility");
+		l_strt_investm = 100000;
+		d_avg_vol_per = 200;
+		strcpy(c_pnts_move	, "+-600");
+
+		EXEC SQL
+			SELECT SUM(A) 
+			INTO	:l_buy_trdrs
+			FROM
+			(
+			SELECT COUNT(0) A  FROM FOP_FO_OPTIONS_PSTN WHERE FOP_OPNPSTN_FLW = 'B' AND FOP_UNDRLYNG='CNXBAN'
+			UNION ALL
+			SELECT COUNT(0) A FROM FCP_FO_SPN_CNTRCT_PSTN WHERE FCP_OPNPSTN_FLW = 'B' AND FCP_PRDCT_TYP='O' AND FCP_UNDRLYNG ='CNXBAN'
+			);
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog ( c_ServiceName, "S31030", SQLMSG, c_err_msg );
+      tpfree((char *)ptr_fml_Obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+		if (DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"before packing CNXBAN");
+		}
+
+		i_returncode = fn_pack_vartofml( c_ServiceName,
+																			 c_err_msg,
+																			 &ptr_fml_Obuf,
+																			 8,
+																			 FFO_XCHNG_CD, (char *) c_xchng_cd,
+																			 FFO_UNDRLYNG, ( char * )c_undrlyng,
+																			 FFO_SUB_BUF_CNT, (char * ) &l_buy_trdrs,
+																			 FFO_BK_UBK_FLG, (char *) &c_most_trd_flg,
+																			 FFO_OI_INDCTR , (char *) c_vol_ind,
+																			 FFO_STLMNT_PRC , (long *) &l_strt_investm,
+																			 FFO_AVM_PRCNT , (double *) &d_avg_vol_per,
+																			 FFO_INTADJ_RFRNC ,(char *) c_pnts_move
+																			 );
+			if( i_returncode == -1 )
+			{
+				fn_errlog( c_ServiceName, "S31035", LIBMSG, c_err_msg );
+				tpfree ( ( char * ) ptr_fml_Obuf );
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+
+  }	
+	else if( c_mode == CONTRACT_SELECTION )
+	{
+		i_cntrct    [ 0 ]   = Fget32( ptr_fml_Ibuf ,FFO_UNDRLYNG,0,(char *) c_undrlyng,0);
+    i_cntrcterr [ 0 ]   = Ferror32;	
+		
+	  if ( i_cntrct[ 0 ] == -1  )
+    {
+        fn_errlog( c_ServiceName, "S31040", Fstrerror32( i_cntrcterr[0]),c_err_msg );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+	  EXEC SQL
+        SELECT nvl(ltq_rt*100,0),
+							 nvl((ltq_rt+500)*100,0),
+							 nvl((ltq_rt-500)*100,0)
+        INTO   :l_spot_prc,
+							 :l_slider_upper,
+							 :l_slider_lower
+        FROM   ltq_trd_qt
+        WHERE  ltq_xchng_cd = 'NSE'
+        AND    ltq_stck_cd  = :c_undrlyng;
+
+    if(SQLCODE != 0)
+    {
+          fn_errlog( c_ServiceName, "S31045", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+		
+		/*EXEC SQL
+		 SELECT SUM(FTQ_CRNT_OI) 
+			INTO :l_no_of_puts
+			FROM FTQ_FO_TRD_QT 
+			WHERE FTQ_XCHNG_CD = 'NFO'
+			AND FTQ_UNDRLYNG = :c_undrlyng 
+			AND FTQ_OPT_TYP = 'P';
+
+		if(SQLCODE != 0)
+    {
+          fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+
+		EXEC SQL
+		 SELECT SUM(FTQ_CRNT_OI) 
+			INTO :l_no_of_calls
+			FROM FTQ_FO_TRD_QT 
+			WHERE FTQ_XCHNG_CD = 'NFO'
+			AND FTQ_UNDRLYNG = :c_undrlyng 
+			AND FTQ_OPT_TYP = 'C';*/		/** Ver 1.1 --made single query instead of multiple **/
+
+		EXEC SQL 
+			SELECT SUM(DECODE(FTQ_OPT_TYP,'P',FTQ_CRNT_OI,0)) ,SUM(DECODE(FTQ_OPT_TYP,'C',FTQ_CRNT_OI,0)) 
+				INTO :l_no_of_puts,:l_no_of_calls
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_XCHNG_CD = 'NFO'
+				AND FTQ_UNDRLYNG = :c_undrlyng; 
+
+		if(SQLCODE != 0)
+    {
+          fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+
+		if ( l_no_of_puts > l_no_of_calls )
+		{
+			d_mkt_sntm_pstv = (double) l_no_of_puts/ (double)(l_no_of_puts + l_no_of_calls) ;
+			d_mkt_sntm_negv = 1- (double)d_mkt_sntm_pstv;
+		}
+		else
+		{
+			d_mkt_sntm_negv = (double)l_no_of_calls/  (double)(l_no_of_puts + l_no_of_calls);
+			d_mkt_sntm_pstv = 1- (double)d_mkt_sntm_negv;
+		}
+
+		if (DEBUG_MSG_LVL_3)
+		{
+		fn_userlog(c_ServiceName,"l_no_of_puts:%ld: l_no_of_calls:%ld: d_mkt_sntm_pstv:%lf: d_mkt_sntm_negv:%lf:",l_no_of_puts,l_no_of_calls,d_mkt_sntm_pstv,d_mkt_sntm_negv);
+		}
+
+		d_mkt_sntm_pstv = d_mkt_sntm_pstv * 100;
+		d_mkt_sntm_negv = d_mkt_sntm_negv * 100; 
+
+		/*** d_mkt_sntm_pstv = 75;
+		d_mkt_sntm_negv = 25; ***/
+
+	  EXEC SQL
+		SELECT min(ftq_expry_dt)
+		INTO :c_this_wexpry_dt
+		from ftq_fo_trd_qt 
+		where ftq_expry_dt >= (select min(ftq_expry_dt) from ftq_fo_trd_qt 
+													where ftq_expry_dt >= trunc(sysdate))
+		and FTQ_undrlyng= :c_undrlyng 
+		and ftq_prdct_typ = 'O'
+		and ftq_xchng_cd ='NFO';
+
+		if(SQLCODE != 0 && SQLCODE != NULL_RETURN)
+    {
+          fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+
+	  EXEC SQL
+    SELECT min(ftq_expry_dt)
+    INTO :c_next_wexpry_dt
+    from ftq_fo_trd_qt
+    where ftq_expry_dt > :c_this_wexpry_dt
+    and FTQ_undrlyng= :c_undrlyng
+    and ftq_prdct_typ = 'O'
+    and ftq_xchng_cd ='NFO';
+
+    if(SQLCODE != 0 && SQLCODE != NULL_RETURN)
+    {
+          fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+
+		EXEC SQL
+    SELECT min(ftq_expry_dt)
+    INTO :c_curr_mexpry_dt
+    from ftq_fo_trd_qt
+    where ftq_expry_dt >=  trunc(sysdate)
+		and ftq_expry_dt > :c_next_wexpry_dt
+    and FTQ_undrlyng= :c_undrlyng
+    and ftq_prdct_typ = 'F'
+    and ftq_xchng_cd ='NFO';
+
+    if(SQLCODE != 0 && SQLCODE != NULL_RETURN)
+    {
+          fn_errlog( c_ServiceName, "S31070", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+		
+					
+			//strcpy(c_mexpiry_text,"This Month");
+
+		if ( strcmp(c_curr_mexpry_dt,c_this_wexpry_dt) == 0 || strcmp(c_curr_mexpry_dt,c_next_wexpry_dt) == 0 ) /*** Get next monthly expiry ***/
+		{
+		 EXEC SQL
+    	SELECT min(ftq_expry_dt)
+    	INTO :c_curr_mexpry_dt
+    	from ftq_fo_trd_qt
+    	where ftq_expry_dt > :c_curr_mexpry_dt 
+    	and FTQ_undrlyng= :c_undrlyng
+    	and ftq_prdct_typ = 'F'
+    	and ftq_xchng_cd ='NFO';
+
+    	if(SQLCODE != 0 &&  SQLCODE != NULL_RETURN)
+    	{
+          fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    	}
+			//strcpy(c_mexpiry_text,"Next Month");
+		}
+
+		EXEC SQL 
+			SELECT (case when TO_DATE(:c_curr_mexpry_dt,'DD-MON-YYYY')<=LAST_DAY(TRUNC(SYSDATE)) then 'This Month' else 'Next Month' end)
+			into :c_mexpiry_text
+			from dual;
+		
+
+		if (DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"before packing CONTRACT_SELECTION");
+		}
+
+    i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       11,
+																			 FFO_XCHNG_CD, (char *) c_xchng_cd,
+                                       FFO_UNDRLYNG, ( char * )c_undrlyng,
+                                       FFO_STRK_PRC, (char * ) &l_spot_prc,
+                                       FFO_HGH_PRC_RNG, (char *) &l_slider_upper,
+                                       FFO_LOW_PRC_RNG, (char *) &l_slider_lower,
+                                       FFO_INDOPT_ASGN, (long *) &d_mkt_sntm_pstv,
+                                       FFO_STKOPT_ASGN, (double *) &d_mkt_sntm_negv,
+                                       FFO_ND_STRT_DT,(char *) c_this_wexpry_dt,
+                                       FFO_NXT_TRD_DT,(char *) c_next_wexpry_dt,
+                                       FFO_ND_END_DT,(char *) c_curr_mexpry_dt,
+																			 FFO_SYS_MSG, (char *) c_mexpiry_text
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31080", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+	}
+	else if (c_mode == TRADING_SCREEN )
+	{
+		i_cntrct    [ 0 ]   = Fget32( ptr_fml_Ibuf ,FFO_UNDRLYNG,0,(char *) c_undrlyng,0);
+    i_cntrcterr [ 0 ]   = Ferror32;	
+		i_cntrct    [ 1 ]   = Fget32( ptr_fml_Ibuf ,FFO_EXPRY_DT,0,(char *) c_expry_dt,0);
+    i_cntrcterr [ 1 ]   = Ferror32;	
+		i_cntrct    [ 2 ]   = Fget32( ptr_fml_Ibuf ,FFO_OPT_TYP,0,(char *) &c_opt_typ,0);
+    i_cntrcterr [ 2 ]   = Ferror32;	
+		
+		for ( i=0 ; i < 3 ;  i++ )
+		{
+			if ( i_cntrct[ i ] == -1  )
+			{
+        fn_errlog( c_ServiceName, "S31085", Fstrerror32( i_cntrcterr[i]),c_err_msg );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+			}
+		}
+	
+	  EXEC SQL
+       SELECT nvl(ltq_rt*100,0),
+							 nvl(LTQ_PREV_CLS_PRC*100,0),
+							 ( (nvl(ltq_rt*100,0) - nvl(LTQ_PREV_CLS_PRC*100,0) ) /  nvl(LTQ_PREV_CLS_PRC*100,0)) * 100
+        INTO   :l_spot_prc,
+							 :l_prev_cls,
+							 :d_prcntg_chg
+        FROM   ltq_trd_qt
+        WHERE  ltq_xchng_cd = 'NSE'
+        AND    ltq_stck_cd  = :c_undrlyng;
+
+    if(SQLCODE != 0)
+    {
+          fn_errlog( c_ServiceName, "S31090", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+    }
+
+		if (DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"before packing TRADING_SCREEN_1");
+		}
+
+    i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       3,
+                                       FFO_STRK_PRC, (char * ) &l_spot_prc,
+                                       FFO_UND_CLS_PRC, (char *) &l_prev_cls,
+                                       FFO_INIT_MRGN_PRCNT, (char *) &d_prcntg_chg
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31095", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }		
+		if (c_opt_typ == 'C')
+		{
+			EXEC SQL
+				SELECT A.FTQ_STRK_PRC
+				INTO :d_upper_strike
+				FROM
+				(
+				SELECT FTQ_STRK_PRC
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_STRK_PRC >= :l_spot_prc
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'C'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+				AND   FTQ_PRDCT_TYP = 'O'
+				ORDER BY FTQ_STRK_PRC
+			  ) A
+				WHERE  ROWNUM =1;
+    
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31100", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+
+			EXEC SQL
+				SELECT A.FTQ_STRK_PRC
+				INTO :d_lower_strike
+				FROM 
+				(
+				SELECT FTQ_STRK_PRC 
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_STRK_PRC <= :l_spot_prc
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'C'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+				AND   FTQ_PRDCT_TYP = 'O'
+				ORDER BY FTQ_STRK_PRC DESC
+				) A
+				WHERE ROWNUM =1;
+    
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31105", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+	
+			if (DEBUG_MSG_LVL_3)
+			{	
+				fn_userlog(c_ServiceName,"d_upper_strike:%lf: d_lower_strike=:%lf:",d_upper_strike,d_lower_strike);	
+			}
+
+			if (abs( l_spot_prc - d_upper_strike) > abs(l_spot_prc - d_lower_strike)) 
+			{
+					d_ATM_strike = d_upper_strike;
+			}
+			else 
+			{
+				 d_ATM_strike = d_lower_strike;
+			}
+
+			if (DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName,"d_ATM_strike=:%lf:",d_ATM_strike);
+			}
+
+      EXEC SQL
+        SELECT NVL(FTQ_MIN_LOT_QTY,0),
+							 NVL(FTQ_LST_TRD_PRC,0),
+							 NVL(FTQ_PRVS_CLS_PRC,0),
+						   NVL(FTQ_CHNG_PRVS_CLS,0),
+							 NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+							 NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+							 NVL(FTQ_STRK_PRC + FTQ_LST_TRD_PRC,0)
+        INTO  :l_min_lot_qty,
+							:l_ltp,
+						  :l_prev_cls_ltp,
+						  :d_perc_chng_ltp,
+							:d_mrgn_req,
+					    :d_max_loss,	
+							:d_break_even
+        FROM FTQ_FO_TRD_QT
+        WHERE FTQ_STRK_PRC = :d_ATM_strike 
+        AND   FTQ_UNDRLYNG = :c_undrlyng
+        AND   FTQ_XCHNG_CD = 'NFO'
+        AND   FTQ_OPT_TYP = 'C'
+        AND   FTQ_EXPRY_DT = :c_expry_dt
+        AND   FTQ_PRDCT_TYP = 'O';
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+          fn_errlog( c_ServiceName, "S31110", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+    
+		if (DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"before packing TRADING_SCREEN_2");
+		}
+
+		strcpy(c_max_prft,"Unlimited");
+
+    i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       13,
+                                       FFO_XCHNG_CD, (char *) c_xchng_cd,
+                                       FFO_UNDRLYNG, ( char * )c_undrlyng,
+																			 FFO_STRIKE_PRC, (char *)&d_ATM_strike, 
+																			 FFO_EXPRY_DT, (char *) c_expry_dt,
+																			 FFO_OPT_TYP, (char *) &c_opt_typ,
+																			 FFO_MIN_LOT_QTY, (char *) &l_min_lot_qty,
+																			 FFO_LST_TRD_PRC, (char *) &l_ltp,
+																			 FFO_PRVS_CLS_PRC, (char *) &l_prev_cls_ltp,
+																			 FFO_MIN_MRGN_PRCNT, (char *) &d_perc_chng_ltp,
+																			 FFO_C_ORDR_MRGN, (char *) &d_mrgn_req,
+																			 FFO_AMOUNT, (char *) &d_max_loss,
+																			 FFO_MAX_PROFIT, (char *) c_max_prft,
+																			 FFO_MKT_CPTLTN, (char *) &d_break_even
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31115", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+			/*** dATM contract = 			select contract desc from FTQ where strike= ATM_strike and undr=input_undr and opt_typ=CALL and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO; 
+			Near OTM Contract: select contract from FTQ where ftq_strk > ATM_strike and undr=input_undr and opt_typ=CALL and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO and rownum =1;
+			Far OTM Contract:select contract from FTQ where ftq_strk > Near OTM strike and undr=input_undr and opt_typ=CALL and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO and rownum =1;
+			***/
+
+			if(strcmp(c_undrlyng,"NIFTY") == 0)	
+				strike_diff=10000;
+			else if (strcmp(c_undrlyng,"CNXBAN") == 0)
+				strike_diff=20000;
+			else
+				strike_diff=0;
+
+			EXEC SQL
+				SELECT FTQ_STRK_PRC
+				INTO :d_NOTM_strike 
+				FROM
+				(
+				SELECT FTQ_STRK_PRC
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_XCHNG_CD = 'NFO' 
+				AND   FTQ_PRDCT_TYP = 'O'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+				/**Commented in Ver 1.1
+				AND   FTQ_STRK_PRC > :d_ATM_strike 
+				**/
+				AND   FTQ_STRK_PRC >= :d_ATM_strike + :strike_diff   /** Ver 1.1**/
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'C'
+				ORDER BY FTQ_STRK_PRC
+				)
+				WHERE  ROWNUM =1;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31120", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+
+			if (DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName,"d_NOTM_strike=:%lf:",d_NOTM_strike);
+			}
+
+      EXEC SQL
+       SELECT NVL(FTQ_MIN_LOT_QTY,0),
+               NVL(FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_PRVS_CLS_PRC,0),
+               NVL(FTQ_CHNG_PRVS_CLS,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_STRK_PRC + FTQ_LST_TRD_PRC,0)
+        INTO  :l_min_lot_qty,
+              :l_ltp,
+              :l_prev_cls_ltp,
+              :d_perc_chng_ltp,
+              :d_mrgn_req,
+              :d_max_loss,
+              :d_break_even
+        FROM FTQ_FO_TRD_QT
+        WHERE FTQ_STRK_PRC = :d_NOTM_strike
+        AND   FTQ_UNDRLYNG = :c_undrlyng
+        AND   FTQ_XCHNG_CD = 'NFO'
+        AND   FTQ_OPT_TYP = 'C'
+        AND   FTQ_EXPRY_DT = :c_expry_dt
+        AND   FTQ_PRDCT_TYP = 'O';
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+          fn_errlog( c_ServiceName, "S31125", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+      i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       13,
+                                       FFO_XCHNG_CD, (char *) c_xchng_cd,
+                                       FFO_UNDRLYNG, ( char * )c_undrlyng,
+                                       FFO_STRIKE_PRC, (char *)&d_NOTM_strike,
+                                       FFO_EXPRY_DT, (char *) c_expry_dt,
+                                       FFO_OPT_TYP, (char *) &c_opt_typ,
+                                       FFO_MIN_LOT_QTY, (char *) &l_min_lot_qty,
+                                       FFO_LST_TRD_PRC, (char *) &l_ltp,
+                                       FFO_PRVS_CLS_PRC, (char *) &l_prev_cls_ltp,
+                                       FFO_MIN_MRGN_PRCNT, (char *) &d_perc_chng_ltp,
+                                       FFO_C_ORDR_MRGN, (char *) &d_mrgn_req,
+                                       FFO_AMOUNT, (char *) &d_max_loss,
+                                       FFO_MAX_PROFIT, (char *) c_max_prft,
+                                       FFO_MKT_CPTLTN, (char *) &d_break_even
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31130", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+
+			if(strcmp(c_undrlyng,"NIFTY") == 0)
+      	strike_diff=20000;
+      else if (strcmp(c_undrlyng,"CNXBAN") == 0)
+      	strike_diff=50000;
+      else
+        strike_diff=0;
+
+			EXEC SQL
+				SELECT FTQ_STRK_PRC
+				INTO :d_FOTM_strike 
+				FROM
+				(
+				SELECT FTQ_STRK_PRC
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_XCHNG_CD = 'NFO' 
+				AND   FTQ_PRDCT_TYP = 'O'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+			/* Commeted in ver 1.1	
+				AND   FTQ_STRK_PRC > :d_NOTM_strike  */
+				AND   FTQ_STRK_PRC >= :d_ATM_strike + :strike_diff  /*Ver 1.1*/
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'C'
+				ORDER BY FTQ_STRK_PRC
+				)
+				WHERE   ROWNUM =1;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31135", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+
+			if (DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName,"d_FOTM_strike=:%lf:",d_FOTM_strike);
+			}
+
+			/***if( d_ATM_strike == d_FOTM_strike)
+			{
+			 FAR OTM contract = select contract from ftq where ftq_exp = (select min(ftq_expry) from ftq where ftq_exp > ATM contract expry and undr=input_undr and opt_typ=PUT and prdct_typ=O and exg_code=NFO) and undr=input_undr and opt_typ=PUT and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO;
+			}***/
+
+      EXEC SQL
+       SELECT NVL(FTQ_MIN_LOT_QTY,0),
+               NVL(FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_PRVS_CLS_PRC,0),
+               NVL(FTQ_CHNG_PRVS_CLS,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_STRK_PRC + FTQ_LST_TRD_PRC,0)
+        INTO  :l_min_lot_qty,
+              :l_ltp,
+              :l_prev_cls_ltp,
+              :d_perc_chng_ltp,
+              :d_mrgn_req,
+              :d_max_loss,
+              :d_break_even
+        FROM FTQ_FO_TRD_QT
+        WHERE FTQ_STRK_PRC = :d_FOTM_strike
+        AND   FTQ_UNDRLYNG = :c_undrlyng
+        AND   FTQ_XCHNG_CD = 'NFO'
+        AND   FTQ_OPT_TYP = 'C'
+        AND   FTQ_EXPRY_DT = :c_expry_dt
+        AND   FTQ_PRDCT_TYP = 'O';
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+          fn_errlog( c_ServiceName, "S31140", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+      i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       13,
+                                       FFO_XCHNG_CD, (char *) c_xchng_cd,
+                                       FFO_UNDRLYNG, ( char * )c_undrlyng,
+                                       FFO_STRIKE_PRC, (char *)&d_FOTM_strike,
+                                       FFO_EXPRY_DT, (char *) c_expry_dt,
+                                       FFO_OPT_TYP, (char *) &c_opt_typ,
+                                       FFO_MIN_LOT_QTY, (char *) &l_min_lot_qty,
+                                       FFO_LST_TRD_PRC, (char *) &l_ltp,
+                                       FFO_PRVS_CLS_PRC, (char *) &l_prev_cls_ltp,
+                                       FFO_MIN_MRGN_PRCNT, (char *) &d_perc_chng_ltp,
+                                       FFO_C_ORDR_MRGN, (char *) &d_mrgn_req,
+                                       FFO_AMOUNT, (char *) &d_max_loss,
+                                       FFO_MAX_PROFIT, (char *) c_max_prft,
+                                       FFO_MKT_CPTLTN, (char *) &d_break_even
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31145", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+		}
+		else if (c_opt_typ == 'P')
+		{
+
+			EXEC SQL
+				SELECT FTQ_STRK_PRC
+				INTO :d_upper_strike 
+				FROM
+				(
+				SELECT FTQ_STRK_PRC
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_STRK_PRC >= :l_spot_prc
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'P'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+				AND   FTQ_PRDCT_TYP = 'O'
+				ORDER BY FTQ_STRK_PRC
+				)
+				WHERE ROWNUM =1;
+    
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31150", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+
+			EXEC SQL
+				SELECT FTQ_STRK_PRC
+				INTO :d_lower_strike 
+				FROM (
+				SELECT FTQ_STRK_PRC
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_STRK_PRC <= :l_spot_prc
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'P'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+				AND   FTQ_PRDCT_TYP = 'O'
+				ORDER BY FTQ_STRK_PRC DESC
+				)
+				WHERE  ROWNUM =1;
+    
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31155", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+	
+			if (DEBUG_MSG_LVL_3)
+			{	
+      	fn_userlog(c_ServiceName,"d_upper_strike:%lf: d_lower_strike=:%lf:",d_upper_strike,d_lower_strike);
+			}
+
+			if (abs( l_spot_prc - d_upper_strike) > abs(l_spot_prc - d_lower_strike)) 
+			{
+					d_ATM_strike = d_upper_strike;
+			}
+			else 
+			{
+				 d_ATM_strike = d_lower_strike;
+			}
+
+    EXEC SQL
+       SELECT NVL(FTQ_MIN_LOT_QTY,0),
+               NVL(FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_PRVS_CLS_PRC,0),
+               NVL(FTQ_CHNG_PRVS_CLS,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_STRK_PRC - FTQ_LST_TRD_PRC,0) /*** Changed from + to - in Ver 1.2 ***/
+        INTO  :l_min_lot_qty,
+              :l_ltp,
+              :l_prev_cls_ltp,
+              :d_perc_chng_ltp,
+              :d_mrgn_req,
+              :d_max_loss,
+              :d_break_even
+        FROM FTQ_FO_TRD_QT
+        WHERE FTQ_STRK_PRC = :d_ATM_strike
+        AND   FTQ_UNDRLYNG = :c_undrlyng
+        AND   FTQ_XCHNG_CD = 'NFO'
+        AND   FTQ_OPT_TYP = 'P'
+        AND   FTQ_EXPRY_DT = :c_expry_dt
+        AND   FTQ_PRDCT_TYP = 'O';
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+          fn_errlog( c_ServiceName, "S31160", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+    if (DEBUG_MSG_LVL_3)
+	  {
+			fn_userlog(c_ServiceName,"before packing TRADING_SCREEN_2");
+		}
+    strcpy(c_max_prft,"Unlimited");
+
+    i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       13,
+                                       FFO_XCHNG_CD, (char *) c_xchng_cd,
+                                       FFO_UNDRLYNG, ( char * )c_undrlyng,
+                                       FFO_STRIKE_PRC, (char *)&d_ATM_strike,
+                                       FFO_EXPRY_DT, (char *) c_expry_dt,
+                                       FFO_OPT_TYP, (char *) &c_opt_typ,
+                                       FFO_MIN_LOT_QTY, (char *) &l_min_lot_qty,
+                                       FFO_LST_TRD_PRC, (char *) &l_ltp,
+                                       FFO_PRVS_CLS_PRC, (char *) &l_prev_cls_ltp,
+                                       FFO_MIN_MRGN_PRCNT, (char *) &d_perc_chng_ltp,
+                                       FFO_C_ORDR_MRGN, (char *) &d_mrgn_req,
+                                       FFO_AMOUNT, (char *) &d_max_loss,
+                                       FFO_MAX_PROFIT, (char *) c_max_prft,
+                                       FFO_MKT_CPTLTN, (char *) &d_break_even
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31165", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+			/***ATM contract = select contract desc from FTQ where strike= ATM_strike and undr=input_undr and opt_typ=PUT and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO;
+			Near OTM Contract: select contract from FTQ where ftq_strk < ATM_strike and undr=input_undr and opt_typ=PUT and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO and rownum =1;
+			Far OTM Contract:select contract from FTQ where ftq_strk > Near OTM strike and undr=input_undr and opt_typ=PUT and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO and rownum =1;
+			***/
+
+
+			if(strcmp(c_undrlyng,"NIFTY") == 0)
+        strike_diff=10000;
+      else if (strcmp(c_undrlyng,"CNXBAN") == 0)
+        strike_diff=20000;
+      else
+        strike_diff=0;
+
+			EXEC SQL
+				SELECT FTQ_STRK_PRC
+				INTO :d_NOTM_strike 
+				FROM (
+				SELECT FTQ_STRK_PRC
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_XCHNG_CD = 'NFO' 
+				AND   FTQ_PRDCT_TYP = 'O'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+				/**Commented in ver 1.1
+				AND   FTQ_STRK_PRC < :d_ATM_strike		**/
+				AND   FTQ_STRK_PRC <= :d_ATM_strike - :strike_diff /**Ver 1.1 **/
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'P'
+				ORDER BY FTQ_STRK_PRC DESC
+				)
+				WHERE   ROWNUM =1;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31170", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+
+     EXEC SQL
+       SELECT NVL(FTQ_MIN_LOT_QTY,0),
+               NVL(FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_PRVS_CLS_PRC,0),
+               NVL(FTQ_CHNG_PRVS_CLS,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_STRK_PRC - FTQ_LST_TRD_PRC,0)  /*** Changed from + to - in Ver 1.2 ***/
+        INTO  :l_min_lot_qty,
+              :l_ltp,
+              :l_prev_cls_ltp,
+              :d_perc_chng_ltp,
+              :d_mrgn_req,
+              :d_max_loss,
+              :d_break_even
+        FROM FTQ_FO_TRD_QT
+        WHERE FTQ_STRK_PRC = :d_NOTM_strike
+        AND   FTQ_UNDRLYNG = :c_undrlyng
+        AND   FTQ_XCHNG_CD = 'NFO'
+        AND   FTQ_OPT_TYP = 'P'  /*** Changed from 'C' to 'P'  in Ver 1.2 ***/
+        AND   FTQ_EXPRY_DT = :c_expry_dt
+        AND   FTQ_PRDCT_TYP = 'O';
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+          fn_errlog( c_ServiceName, "S31175", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+      i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       13,
+                                       FFO_XCHNG_CD, (char *) c_xchng_cd,
+                                       FFO_UNDRLYNG, ( char * )c_undrlyng,
+                                       FFO_STRIKE_PRC, (char *)&d_NOTM_strike,
+                                       FFO_EXPRY_DT, (char *) c_expry_dt,
+                                       FFO_OPT_TYP, (char *) &c_opt_typ,
+                                       FFO_MIN_LOT_QTY, (char *) &l_min_lot_qty,
+                                       FFO_LST_TRD_PRC, (char *) &l_ltp,
+                                       FFO_PRVS_CLS_PRC, (char *) &l_prev_cls_ltp,
+                                       FFO_MIN_MRGN_PRCNT, (char *) &d_perc_chng_ltp,
+                                       FFO_C_ORDR_MRGN, (char *) &d_mrgn_req,
+                                       FFO_AMOUNT, (char *) &d_max_loss,
+                                       FFO_MAX_PROFIT, (char *) c_max_prft,
+                                       FFO_MKT_CPTLTN, (char *) &d_break_even
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31180", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+
+			if(strcmp(c_undrlyng,"NIFTY") == 0)
+        strike_diff=20000;
+      else if (strcmp(c_undrlyng,"CNXBAN") == 0)
+        strike_diff=50000;
+      else
+        strike_diff=0;
+
+			EXEC SQL
+				SELECT FTQ_STRK_PRC
+				INTO :d_FOTM_strike 
+				FROM (
+				SELECT FTQ_STRK_PRC
+				FROM FTQ_FO_TRD_QT
+				WHERE FTQ_XCHNG_CD = 'NFO' 
+				AND   FTQ_PRDCT_TYP = 'O'
+				AND   FTQ_EXPRY_DT = :c_expry_dt
+				/**Commented in ver 1.1
+				AND   FTQ_STRK_PRC < :d_NOTM_strike
+				**/
+				AND   FTQ_STRK_PRC <= :d_ATM_strike - :strike_diff /*Ver 1.1*/
+				AND   FTQ_UNDRLYNG = :c_undrlyng
+				AND   FTQ_XCHNG_CD = 'NFO'
+				AND   FTQ_OPT_TYP = 'P'
+				ORDER BY FTQ_STRK_PRC DESC
+				)
+				WHERE   ROWNUM =1;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+          fn_errlog( c_ServiceName, "S31185", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+			}
+
+			/***if( d_ATM_strike == d_FOTM_strike)
+			{
+			FAR OTM contract = select contract from ftq where ftq_exp = (select min(ftq_expry) from ftq where ftq_exp > ATM contract expry and undr=input_undr and opt_typ=PUT and prdct_typ=O and exg_code=NFO) and undr=input_undr and opt_typ=PUT and expry_dt=inp_expry_dt and prdct_typ=O and exg_code=NFO;
+			}***/
+
+      EXEC SQL
+       SELECT NVL(FTQ_MIN_LOT_QTY,0),
+               NVL(FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_PRVS_CLS_PRC,0),
+               NVL(FTQ_CHNG_PRVS_CLS,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_MIN_LOT_QTY * FTQ_LST_TRD_PRC,0),
+               NVL(FTQ_STRK_PRC - FTQ_LST_TRD_PRC,0) /*** Changed from + to - in Ver 1.2 ***/
+        INTO  :l_min_lot_qty,
+              :l_ltp,
+              :l_prev_cls_ltp,
+              :d_perc_chng_ltp,
+              :d_mrgn_req,
+              :d_max_loss,
+              :d_break_even
+        FROM FTQ_FO_TRD_QT
+        WHERE FTQ_STRK_PRC = :d_FOTM_strike
+        AND   FTQ_UNDRLYNG = :c_undrlyng
+        AND   FTQ_XCHNG_CD = 'NFO'
+        AND   FTQ_OPT_TYP = 'P'  /*** Changed from 'C' to 'P'  in Ver 1.2 ***/
+        AND   FTQ_EXPRY_DT = :c_expry_dt
+        AND   FTQ_PRDCT_TYP = 'O';
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+          fn_errlog( c_ServiceName, "S31190", SQLMSG, c_err_msg );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+      i_returncode = fn_pack_vartofml( c_ServiceName,
+                                       c_err_msg,
+                                       &ptr_fml_Obuf,
+                                       13,
+                                       FFO_XCHNG_CD, (char *) c_xchng_cd,
+                                       FFO_UNDRLYNG, ( char * )c_undrlyng,
+                                       FFO_STRIKE_PRC, (char *)&d_FOTM_strike,
+                                       FFO_EXPRY_DT, (char *) c_expry_dt,
+                                       FFO_OPT_TYP, (char *) &c_opt_typ,
+                                       FFO_MIN_LOT_QTY, (char *) &l_min_lot_qty,
+                                       FFO_LST_TRD_PRC, (char *) &l_ltp,
+                                       FFO_PRVS_CLS_PRC, (char *) &l_prev_cls_ltp,
+                                       FFO_MIN_MRGN_PRCNT, (char *) &d_perc_chng_ltp,
+                                       FFO_C_ORDR_MRGN, (char *) &d_mrgn_req,
+                                       FFO_AMOUNT, (char *) &d_max_loss,
+                                       FFO_MAX_PROFIT, (char *) c_max_prft,
+                                       FFO_MKT_CPTLTN, (char *) &d_break_even
+                                       );
+      if( i_returncode == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31195", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+		}
+
+	}
+
+	
+  tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_fml_Obuf, 0, 0 );
+}
+

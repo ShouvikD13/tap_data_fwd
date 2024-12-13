@@ -1,0 +1,699 @@
+/******************************************************************************/
+/*  Program           : SFO_INS_CNT                                           */
+/*                                                                            */
+/*  Input             : vw_cntrct_qt    			                                */
+/*                                                                            */
+/*  Output            : vw_err_msg(if any error)                              */
+/*                      					                                            */
+/*                                                                            */
+/*  Description       :	Inserts the data from broadcast                       */
+/*										  into Content database(tick by tick broadcast)			    */
+/*                                                                            */
+/*  Initial Version   : 26-Jun-2012(Vishnu)								                    */
+/*																																						*/
+/*  Log								: 1.1 26-Jun-2012 Inserting records from long quote			*/	
+/*																			 instead of short quote(Vishnu)				*/ 
+/*    								: 1.2 29-Jun-2012 Inserting current date feeds only     */ 
+/*                                      (Vishnu)     													*/
+/*										: 1.3	28-Feb-2013	Updating quotes in FTQ(Vishnu)				*/					
+/*										: 1.4	25-Apr-2013	Updating quotes in FTQ(high,low price)*/
+/*										: 1.5	30-Dec-2013 Updating Previous change % value (Sachin )*/
+/*                    : 1.6 24-Feb-2014 Replacing fn_begintran & fn_committran*/ 
+/*                                      with new functions fn_nolog_begintran */
+/*                                      & fn_nolog_committran (Sachin Birje)  */
+/*											1.7 30-Mar-2015 Token No Changes (Ritesh D.)					*/
+/*											1.8 23-Jul-2015 Contract Descriptor Changes (Sachin B)*/
+/*											1.9 29-Oct-2015 Only LTP ticks inserted in FTQ content (Sachin B)*/
+/*											2.1 20-Nov-2015 FNO Price Chart changes    (Vishal B.) */								
+/*                      2.2 21-Jul-2020 FNO charts Changes for 5d,3mnths ( Anuj Pancholi ) */
+/*                      2.3 01-sep-2020 FNO charts changes for 5 minutes & 30 minutes Data */
+/*                      2.4 28-oct-2020 Correction for 5Min and 30Min insert   ( Anuj Pancholi ) */
+/*                      2.5 13-Nov-2020 CR-ISEC10-138272 Hourly High/Low Price ( Anuj Pancholi ) */
+/*                      2.6 25-Nov-2020 Debug level Added ( Anuj Pancholi )                      */
+/*                      2.7 28-Nov-2020 Correction for 1Min,5Min and 30Min Tick insert ( Anuj Pancholi ) */
+/*                      2.8 05-Apr-2022 Minor Changes to capture Current OI aainst each tick (Sachin Birje ) */
+/*                      TOL 07-Aug-2023 Tux on Linux (Agam) */
+/*********************************************************************************************************/
+#include <stdio.h> 	/* C Header File*/
+#include <stdlib.h> /* C Header File*/
+#include <string.h>	/* C Header File*/
+#include <atmi.h>		/* TUXEDO Header File*/
+#include <fml32.h>	/* TUXEDO Header File*/
+#include <sqlca.h>	/* Oracle header file*/	
+#include <fo.h>						
+/* #include <fo_view_def.h> commented in ver TOL */
+#include <fo_view_def.h>   /* Added in Ver TOL */
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h> 
+#include <fn_read_debug_lvl.h> 
+#include <fo_fml_def.h>   /** Added in Ver 1.4 **/
+#include <fn_span_lib.h>   /** Added in Ver 1.4 **/
+#include <fml_def.h>   		/** Added in Ver 1.4 **/
+
+void SFO_INS_CNT( TPSVCINFO *rqst )
+{
+  char  c_ServiceName[33];
+  char  c_errmsg[256];
+  char c_slot;    /** ver 2.5 **/
+
+  int   i_trnsctn;
+  int   i_flg = 0 ;     /*** Ver 1.2 ***/
+  int   i_ret_val = 0 ; /*** Ver 1.4 ***/
+  double d_pcnt_chg_prev_cls=0 ; /*** Ver 1.5 ***/
+
+  char  *ptr_car_sbuf;  /*** Ver 1.4 ***/
+  char  *ptr_car_sbuf2; /*** Ver 1.4 ***/
+	FBFR32 *ptr_fml_ibuf; /*** Ver 1.4 ***/
+	FLDLEN32  ud_len;			/*** Ver 1.4 ***/
+	FLDLEN32  ud_len2;		/*** Ver 1.4 ***/
+
+  EXEC SQL BEGIN DECLARE SECTION;
+	
+/*  struct vw_cntrct_qt *ptr_st_cntrct_lng_qt; */							/** Commented in ver 1.1 **/
+/*	struct  vw_cntrctlong_qt *ptr_st_cntrct_lng_qt;	commented in ver 1.4 view replace with structure ** Added in Ver 1.1 **/
+	struct  st_cntrctlong_qt st_cntrct_lng_qt;							 /** Added in Ver 1.4 **/
+	struct  st_cntrct_qt st_cntrct_qoute;							 			 /** Added in Ver 1.4 **/
+ 
+  varchar c_expiry_dt [ LEN_DATE ];
+  varchar c_lst_trd_tm [ LEN_DATE ];
+  varchar  c_prv_trded_tm[LEN_DATE];  /** Ver 1.9 **/
+
+  EXEC SQL END DECLARE SECTION;
+
+  struct vw_err_msg *ptr_st_err_msg;
+
+/*  ptr_st_cntrct_lng_qt = ( struct vw_cntrct_qt * )rqst->data; */			/** Commented in ver 1.1 **/
+/*** Commented in Ver 1.4	ptr_st_cntrct_lng_qt = ( struct vw_cntrctlong_qt * )rqst->data;  ** Added in Ver 1.1 **/
+	
+  strcpy( c_ServiceName, rqst->name );
+  INITDBGLVL(c_ServiceName);
+	
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Service SFO_INS_CNT starts.....");
+	} 
+
+  ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32",
+                                                     "vw_err_msg",
+                                                sizeof ( struct vw_err_msg ) );
+  if ( ptr_st_err_msg ==  NULL )
+  {
+    fn_errlog ( c_ServiceName, "S31005", TPMSG, c_errmsg );
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+  }
+
+  memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) );
+	
+	/*** Added in Ver 1.4 ***/
+
+	MEMSET(st_cntrct_lng_qt);
+	MEMSET(st_cntrct_qoute);
+	
+	ptr_fml_ibuf = (FBFR32 *)rqst->data;
+
+	ptr_car_sbuf =(char *)tpalloc("CARRAY", NULL, MIN_FML_BUF_LEN );
+
+	if (ptr_car_sbuf == NULL)
+  {
+		fn_errlog ( c_ServiceName, "S31010", TPMSG, c_errmsg );
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+	}
+	
+	ud_len = (FLDLEN32)sizeof( struct st_cntrctlong_qt );
+	
+	i_ret_val = Fget32(ptr_fml_ibuf, FFO_CBUF, 0,(char *)ptr_car_sbuf, &ud_len);
+
+  if (i_ret_val == -1)
+  {
+		fn_errlog ( c_ServiceName, "S31015", FMLMSG, c_errmsg );
+		tpfree ( ( char * )ptr_car_sbuf );                      /*** Ver 1.4 ***/
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+	}
+	
+	memcpy (&st_cntrct_lng_qt,ptr_car_sbuf,sizeof (struct st_cntrctlong_qt));
+	
+	ptr_car_sbuf2 =(char *)tpalloc("CARRAY", NULL, MIN_FML_BUF_LEN );
+
+  if (ptr_car_sbuf2 == NULL)
+  {
+    fn_errlog ( c_ServiceName, "S31020", TPMSG, c_errmsg );
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+  }
+
+  ud_len2 = (FLDLEN32)sizeof( struct st_cntrct_qt );
+	
+	i_ret_val = Fget32(ptr_fml_ibuf, FML_SBUF, 0,(char *)ptr_car_sbuf2, &ud_len2);
+
+  if (i_ret_val == -1)
+  {
+    fn_errlog ( c_ServiceName, "S31025", FMLMSG, c_errmsg );
+		tpfree ( ( char * )ptr_car_sbuf );                      /*** Ver 1.4 ***/
+    tpfree ( ( char * )ptr_car_sbuf2 );                     /*** Ver 1.4 ***/
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+  }
+
+	memcpy (&st_cntrct_qoute,ptr_car_sbuf2 ,sizeof (struct st_cntrct_qt));
+	
+	/*** End ver 1.4 ***/
+
+	if(DEBUG_MSG_LVL_3)
+  {
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_close_prc :%ld:",st_cntrct_qoute.l_close_prc);/* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_open_prc  :%ld:",st_cntrct_qoute.l_open_prc); /* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_high_prc  :%ld:",st_cntrct_qoute.l_high_prc); /* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_low_prc   :%ld:",st_cntrct_qoute.l_low_prc);  /* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "c_xchng_cd :%s:", st_cntrct_lng_qt.c_xchng_cd );
+     fn_userlog ( c_ServiceName, "c_prd_typ  :%c:", st_cntrct_lng_qt.c_prd_typ );
+     fn_userlog ( c_ServiceName, "c_undrlyng :%s:", st_cntrct_lng_qt.c_undrlyng );
+     fn_userlog ( c_ServiceName, "c_expiry_dt:%s:", st_cntrct_lng_qt.c_expry_dt );
+     fn_userlog ( c_ServiceName, "c_exrc_typ :%c:", st_cntrct_lng_qt.c_exrc_typ );
+     fn_userlog ( c_ServiceName, "c_opt_typ  :%c:", st_cntrct_lng_qt.c_opt_typ );
+     fn_userlog ( c_ServiceName, "l_strike_prc:%ld:", st_cntrct_lng_qt.l_strike_prc );
+     fn_userlog ( c_ServiceName, "c_ctgry_indstk :%c:", st_cntrct_lng_qt.c_ctgry_indstk );
+     fn_userlog ( c_ServiceName, "ftq_lst_trd_prc :%ld:", st_cntrct_lng_qt.l_lst_trdd_prc );
+     fn_userlog ( c_ServiceName, "c_lst_trd_tm :%s:", st_cntrct_lng_qt.c_lst_trdd_time );
+     fn_userlog( c_ServiceName,"l_bst_bid_prc:%ld:", st_cntrct_lng_qt.l_bst_bid_prc[0]);
+     fn_userlog( c_ServiceName,"l_bst_bid_qty:%ld:",st_cntrct_lng_qt.l_bst_bid_qty[0]);
+     fn_userlog( c_ServiceName,"l_bst_offr_prc:%ld:",st_cntrct_lng_qt.l_bst_offr_prc[0]);
+     fn_userlog( c_ServiceName,"l_bst_offr_qty:%ld:",st_cntrct_lng_qt.l_bst_offr_qty[0]);
+     fn_userlog( c_ServiceName,"l_lst_trdd_qty:%ld:",st_cntrct_lng_qt.l_lst_trdd_qty); /** ver 2.2 **/
+     fn_userlog( c_ServiceName,"l_tot_trdd_qty:%ld:",st_cntrct_lng_qt.l_tot_trdd_qty); /** ver 2.2 **/
+  }
+
+	/*** Ver 1.4 Ends ***/
+
+  strcpy ( ( char * )c_expiry_dt.arr, st_cntrct_lng_qt.c_expry_dt );
+  SETLEN ( c_expiry_dt );
+  strcpy ( ( char * )c_lst_trd_tm.arr, st_cntrct_lng_qt.c_lst_trdd_time );
+  SETLEN ( c_lst_trd_tm );
+  rtrim(st_cntrct_lng_qt.c_undrlyng);
+
+  fn_init_ddr_val ( st_cntrct_lng_qt.c_rout_crt );
+
+	/**Transaction Begins **/
+
+  /*** i_trnsctn = fn_begintran( c_ServiceName, c_errmsg ); ** Ver 1.6 ***/
+  i_trnsctn = fn_nolog_begintran( c_ServiceName, c_errmsg ); /*** Ver 1.6 ***/ 
+	 if ( i_trnsctn == -1 )
+  {
+		fn_errlog ( c_ServiceName, "S31030", TPMSG, c_errmsg );
+		tpfree ( ( char * )ptr_car_sbuf );											/*** Ver 1.4 ***/
+		tpfree ( ( char * )ptr_car_sbuf2 );											/*** Ver 1.4 ***/
+  	strcpy ( ptr_st_err_msg->c_err_msg, c_errmsg );
+  	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+ 	}
+
+  if(DEBUG_MSG_LVL_3)
+	{
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_close_prc :%ld:",st_cntrct_qoute.l_close_prc);/* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_open_prc  :%ld:",st_cntrct_qoute.l_open_prc); /* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_high_prc  :%ld:",st_cntrct_qoute.l_high_prc); /* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "st_cntrct_qoute.l_low_prc   :%ld:",st_cntrct_qoute.l_low_prc);  /* Ver 1.4 */
+     fn_userlog ( c_ServiceName, "c_xchng_cd :%s:", st_cntrct_lng_qt.c_xchng_cd );
+     fn_userlog ( c_ServiceName, "c_prd_typ  :%c:", st_cntrct_lng_qt.c_prd_typ );
+     fn_userlog ( c_ServiceName, "c_undrlyng :%s:", st_cntrct_lng_qt.c_undrlyng );
+     fn_userlog ( c_ServiceName, "c_expiry_dt:%s:", c_expiry_dt.arr );
+     fn_userlog ( c_ServiceName, "c_exrc_typ :%c:", st_cntrct_lng_qt.c_exrc_typ );
+     fn_userlog ( c_ServiceName, "c_opt_typ  :%c:", st_cntrct_lng_qt.c_opt_typ );
+     fn_userlog ( c_ServiceName, "l_strike_prc:%ld:", st_cntrct_lng_qt.l_strike_prc );
+     fn_userlog ( c_ServiceName, "c_ctgry_indstk :%c:", st_cntrct_lng_qt.c_ctgry_indstk );
+     fn_userlog ( c_ServiceName, "ftq_lst_trd_prc :%ld:", st_cntrct_lng_qt.l_lst_trdd_prc );
+     fn_userlog ( c_ServiceName, "c_lst_trd_tm :%s:", c_lst_trd_tm.arr );
+     fn_userlog( c_ServiceName,"l_bst_bid_prc:%ld:", st_cntrct_lng_qt.l_bst_bid_prc[0]);
+     fn_userlog( c_ServiceName,"l_bst_bid_qty:%ld:",st_cntrct_lng_qt.l_bst_bid_qty[0]);
+     fn_userlog( c_ServiceName,"l_bst_offr_prc:%ld:",st_cntrct_lng_qt.l_bst_offr_prc[0]);
+     fn_userlog( c_ServiceName,"l_bst_offr_qty:%ld:",st_cntrct_lng_qt.l_bst_offr_qty[0]);
+     fn_userlog( c_ServiceName,"l_lst_trdd_qty:%ld:",st_cntrct_lng_qt.l_lst_trdd_qty); /** ver 2.2 **/
+     fn_userlog( c_ServiceName,"l_tot_trdd_qty:%ld:",st_cntrct_lng_qt.l_tot_trdd_qty); /** ver 2.2 **/ 
+  }
+
+	/*** Ver 1.2  Starts ***/
+
+
+	EXEC SQL                                     /*** Comparing sysdate with the Traded date****/
+    SELECT  count(1) 
+    INTO    :i_flg
+    FROM    dual
+		WHERE   to_char(to_date(:c_lst_trd_tm,'dd-Mon-yyyy hh24:mi:ss' ),'DD-Mon-YYYY') =  TO_CHAR(sysdate,'DD-Mon-YYYY');
+
+		if ( SQLCODE != 0 )
+    {
+        fn_errlog ( c_ServiceName, "S31035", SQLMSG, ptr_st_err_msg->c_err_msg );
+				tpfree ( ( char * )ptr_car_sbuf );                      /*** Ver 1.4 ***/
+				tpfree ( ( char * )ptr_car_sbuf2 );                      /*** Ver 1.4 ***/
+        fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+        tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    }
+		
+
+		if(DEBUG_MSG_LVL_3)
+  	{
+     	 fn_userlog ( c_ServiceName, " c_lst_trd_tm :%s:", c_lst_trd_tm.arr);
+     	 fn_userlog ( c_ServiceName, " i_flg :%d:", i_flg);
+		}
+
+
+	/*** Ver 1.2 Ends   ***/
+
+	/** Inserting values into FTQ_FO_TRDQT_CNT table **/
+
+  /*** if(strcmp((char *)c_lst_trd_tm.arr,"01-Jan-1980 00:00:00")!= 0 )   commented In Ver 1.2  ***/
+  if( i_flg == 1 ) /*** Ver 1.2   -- inserting if flag is 1 ***/
+	{
+    /**** Commented in Ver 1.8 *******************
+  	EXEC SQL
+      	INSERT INTO FTQ_FO_TRDQT_CNT
+        (
+          FTQ_XCHNG_CD,
+          FTQ_PRDCT_TYP,
+          FTQ_INDSTK,
+          FTQ_UNDRLYNG,
+          FTQ_EXPRY_DT,
+          FTQ_EXER_TYP,
+          FTQ_OPT_TYP,
+          FTQ_STRK_PRC,
+          FTQ_LST_TRD_PRC,
+          FTQ_LST_TRD_TM,
+          FTQ_BST1_BID_PRC,
+          FTQ_BST1_BID_QTY,
+          FTQ_BST1_OFFR_PRC,
+          FTQ_BST1_OFFR_QTY,
+          FTQ_CRNT_OI,
+					FTQ_INS_DT,							** Added in Ver 1.1 **
+					FTQ_TOKEN_NO						*** Added in Ver 1.7 ***
+        )
+				VALUES
+        (
+          :st_cntrct_lng_qt.c_xchng_cd,
+          :st_cntrct_lng_qt.c_prd_typ,
+          :st_cntrct_lng_qt.c_ctgry_indstk,
+          :st_cntrct_lng_qt.c_undrlyng,
+          to_date ( :c_expiry_dt, 'dd-Mon-yyyy' ),
+          :st_cntrct_lng_qt.c_exrc_typ,
+          :st_cntrct_lng_qt.c_opt_typ,
+          :st_cntrct_lng_qt.l_strike_prc,
+          :st_cntrct_lng_qt.l_lst_trdd_prc,
+          to_date( :c_lst_trd_tm,'dd-Mon-yyyy hh24:mi:ss' ),
+        
+					* Commented in Ver 1.1 
+					 :st_cntrct_lng_qt.l_bst_bid_prc,
+          :st_cntrct_lng_qt.l_bst_bid_qty,
+          :st_cntrct_lng_qt.l_bst_offr_prc,
+          :st_cntrct_lng_qt.l_bst_offr_qty,
+				
+					**  Ver 1.1 Started  **
+					:st_cntrct_lng_qt.l_bst_bid_prc[0],
+					:st_cntrct_lng_qt.l_bst_bid_qty[0],
+					:st_cntrct_lng_qt.l_bst_offr_prc[0],
+					:st_cntrct_lng_qt.l_bst_offr_qty[0],
+					0,
+					to_date(sysdate,'dd-Mon-yyyy'),
+					** Ver 1.1 Ended **
+					:st_cntrct_lng_qt.l_eba_cntrct_id  *** Added in ver 1.7 ***
+				);
+	
+	  if ( SQLCODE != 0 )
+    {
+        fn_errlog ( c_ServiceName, "S31040", SQLMSG, ptr_st_err_msg->c_err_msg );
+        tpfree ( ( char * )ptr_car_sbuf );                      *** Ver 1.4 ***
+        tpfree ( ( char * )ptr_car_sbuf2 );                      *** Ver 1.4 ***
+        fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+        tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    }
+		
+		if(DEBUG_MSG_LVL_3)
+		{
+				fn_userlog ( c_ServiceName,"Records successfully inserted into FTQ_FO_TRDQT_CNT table");
+		}
+
+    ***************** Ver 1.8 ****************/
+
+    /*** Ver 1.9 Starts Here ***/
+    MEMSET(c_prv_trded_tm);
+    EXEC SQL
+      SELECT to_char(nvl(ftq_lst_trd_tm,sysdate),'dd-Mon-yyyy hh24:mi:ss')  /** Ver 2.1 NVL added **/
+        INTO :c_prv_trded_tm
+        FROM ftq_fo_trd_qt
+      WHERE FTQ_TOKEN_NO  = :st_cntrct_lng_qt.l_eba_cntrct_id;
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+        fn_errlog ( c_ServiceName, "S31045", SQLMSG, ptr_st_err_msg->c_err_msg );
+        tpfree ( ( char * )ptr_car_sbuf );      
+        tpfree ( ( char * )ptr_car_sbuf2 );    
+        fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+        tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    }
+    /*** Ver 1.9 Ends here ***/
+
+		/** ver 1.3 Starts **/
+
+    /*** Ver 1.5 Starts Here ***/
+    if ( st_cntrct_qoute.l_close_prc != 0 )
+    {
+     d_pcnt_chg_prev_cls = ( double )( st_cntrct_qoute.l_lst_trdd_prc -
+                          st_cntrct_qoute.l_close_prc   ) /
+                          ( double )st_cntrct_qoute.l_close_prc *
+                          100.0 * 100.0;
+    }
+    else
+    {
+     d_pcnt_chg_prev_cls = 0;
+    }
+   
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog ( c_ServiceName,"d_pcnt_chg_prev_cls :%lf:",d_pcnt_chg_prev_cls);
+    }
+ 
+    /**** Ver 1.8 Starts Here ***/
+    MEMSET(st_cntrct_lng_qt.c_xchng_cd);
+    st_cntrct_lng_qt.c_prd_typ='\0';
+    st_cntrct_lng_qt.c_ctgry_indstk='\0';
+    MEMSET(st_cntrct_lng_qt.c_undrlyng);
+    MEMSET(c_expiry_dt);
+    st_cntrct_lng_qt.c_exrc_typ='\0';
+    st_cntrct_lng_qt.c_opt_typ='\0';
+    st_cntrct_lng_qt.l_strike_prc=0;
+  
+    /**** Ver 1.8 Ends Here **/
+
+    /*** Ver 1.5 Ends Here ***/
+
+		EXEC SQL
+      UPDATE ftq_fo_trd_qt
+      SET ftq_lst_trd_prc   = :st_cntrct_lng_qt.l_lst_trdd_prc,
+      		ftq_lst_trd_tm    = to_date( :c_lst_trd_tm,'dd-Mon-yyyy hh24:mi:ss' ),
+      		ftq_lst_trd_qty   = :st_cntrct_lng_qt.l_lst_trdd_qty,
+      		ftq_tot_qty_trdd  = :st_cntrct_lng_qt.l_tot_trdd_qty,
+      		ftq_avrg_trd_prc  = :st_cntrct_lng_qt.l_avg_trdd_prc,
+      		ftq_bst1_bid_prc  = :st_cntrct_lng_qt.l_bst_bid_prc[0],
+      		ftq_bst2_bid_prc  = :st_cntrct_lng_qt.l_bst_bid_prc[1],
+      		ftq_bst3_bid_prc  = :st_cntrct_lng_qt.l_bst_bid_prc[2],
+      		ftq_bst4_bid_prc  = :st_cntrct_lng_qt.l_bst_bid_prc[3],
+      		ftq_bst5_bid_prc  = :st_cntrct_lng_qt.l_bst_bid_prc[4],
+      		ftq_bst1_bid_qty  = :st_cntrct_lng_qt.l_bst_bid_qty[0],
+     	  	ftq_bst2_bid_qty  = :st_cntrct_lng_qt.l_bst_bid_qty[1],
+      		ftq_bst3_bid_qty  = :st_cntrct_lng_qt.l_bst_bid_qty[2],
+      		ftq_bst4_bid_qty  = :st_cntrct_lng_qt.l_bst_bid_qty[3],
+      		ftq_bst5_bid_qty  = :st_cntrct_lng_qt.l_bst_bid_qty[4],
+      		ftq_bst1_offr_prc = :st_cntrct_lng_qt.l_bst_offr_prc[0],
+      		ftq_bst2_offr_prc = :st_cntrct_lng_qt.l_bst_offr_prc[1],
+      		ftq_bst3_offr_prc = :st_cntrct_lng_qt.l_bst_offr_prc[2],
+      		ftq_bst4_offr_prc = :st_cntrct_lng_qt.l_bst_offr_prc[3],
+      		ftq_bst5_offr_prc = :st_cntrct_lng_qt.l_bst_offr_prc[4],
+      		ftq_bst1_offr_qty = :st_cntrct_lng_qt.l_bst_offr_qty[0],
+      		ftq_bst2_offr_qty = :st_cntrct_lng_qt.l_bst_offr_qty[1],
+      		ftq_bst3_offr_qty = :st_cntrct_lng_qt.l_bst_offr_qty[2],
+      		ftq_bst4_offr_qty = :st_cntrct_lng_qt.l_bst_offr_qty[3],
+      		ftq_bst5_offr_qty = :st_cntrct_lng_qt.l_bst_offr_qty[4],
+      		ftq_tot_bid_qty   = :st_cntrct_lng_qt.d_tot_bid_qty,
+      		ftq_tot_offr_qty  = :st_cntrct_lng_qt.d_tot_offr_qty,
+					ftq_cls_prc				= :st_cntrct_qoute.l_close_prc,			/*** Ver 1.4 ***/			
+					ftq_opn_prc				= :st_cntrct_qoute.l_open_prc,				/*** Ver 1.4 ***/			
+					ftq_hgh_prc				= :st_cntrct_qoute.l_high_prc,				/*** Ver 1.4 ***/			
+					ftq_low_prc				= :st_cntrct_qoute.l_low_prc,				/*** Ver 1.4 ***/			
+					ftq_indctr        = :st_cntrct_qoute.c_indctr,          /*** Ver 1.4 ***/
+					ftq_chng_prvs_cls = :d_pcnt_chg_prev_cls /*** Ver 1.5 ***/
+    
+		 /***  Comented in Ver 1.7 
+			WHERE ftq_xchng_cd      = :st_cntrct_lng_qt.c_xchng_cd 
+      AND   ftq_prdct_typ     = :st_cntrct_lng_qt.c_prd_typ
+      AND   ftq_indstk        = :st_cntrct_lng_qt.c_ctgry_indstk
+      AND   ftq_undrlyng      = :st_cntrct_lng_qt.c_undrlyng
+      AND   ftq_expry_dt      = to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+      AND   ftq_exer_typ      = :st_cntrct_lng_qt.c_exrc_typ
+      AND   ftq_opt_typ       = :st_cntrct_lng_qt.c_opt_typ
+      AND   ftq_strk_prc      = :st_cntrct_lng_qt.l_strike_prc;
+		
+			**********/							
+	
+			WHERE FTQ_TOKEN_NO  = :st_cntrct_lng_qt.l_eba_cntrct_id /*** Added in Ver 1.7 ***/ 
+      RETURNING        /** Ver 1.8 Starts here **/
+             ftq_xchng_cd,
+             ftq_prdct_typ,
+             ftq_indstk,
+             ftq_undrlyng,
+             ftq_expry_dt,
+             ftq_exer_typ,
+             ftq_opt_typ,
+             ftq_strk_prc
+        INTO :st_cntrct_lng_qt.c_xchng_cd,
+						 :st_cntrct_lng_qt.c_prd_typ,
+						:st_cntrct_lng_qt.c_ctgry_indstk,
+						:st_cntrct_lng_qt.c_undrlyng,
+            :c_expiry_dt,
+						:st_cntrct_lng_qt.c_exrc_typ,
+						:st_cntrct_lng_qt.c_opt_typ,
+						:st_cntrct_lng_qt.l_strike_prc;  /*** Ver 1.8 Ends Here **/
+
+		if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+        fn_errlog ( c_ServiceName, "S31050", SQLMSG, ptr_st_err_msg->c_err_msg );
+        tpfree ( ( char * )ptr_car_sbuf );                      /*** Ver 1.4 ***/
+        tpfree ( ( char * )ptr_car_sbuf2 );                      /*** Ver 1.4 ***/
+        fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+        tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    }	
+
+		/** Ver 1.3 Ends **/ 
+
+    /**** Commented in Ver 1.8 ******************/
+ 
+    rtrim(st_cntrct_lng_qt.c_undrlyng);
+    SETNULL(c_expiry_dt);
+
+   SETNULL(c_prv_trded_tm);  /** Ver 1.9 */ 
+   if( strcmp((char*)c_prv_trded_tm.arr,(char*)c_lst_trd_tm.arr) != 0 )  /** Ver 1.9 ***/
+   {
+  
+    EXEC SQL
+        INSERT INTO FTQ_FO_TRDQT_CNT
+        (
+          FTQ_XCHNG_CD,
+          FTQ_PRDCT_TYP,
+          FTQ_INDSTK,
+          FTQ_UNDRLYNG,
+          FTQ_EXPRY_DT,
+          FTQ_EXER_TYP,
+          FTQ_OPT_TYP,
+          FTQ_STRK_PRC,
+          FTQ_LST_TRD_PRC,
+          FTQ_LST_TRD_TM,
+          FTQ_BST1_BID_PRC,
+          FTQ_BST1_BID_QTY,
+          FTQ_BST1_OFFR_PRC,
+          FTQ_BST1_OFFR_QTY,
+          FTQ_CRNT_OI,
+          FTQ_INS_DT,          
+          FTQ_TOKEN_NO,
+				  FTQ_TRD_5SEC,      /** Ver 2.1 **/
+				  FTQ_TRD_10SEC,     /** Ver 2.1 **/
+				  FTQ_TRD_30SEC,     /** Ver 2.1 **/
+				  FTQ_TRD_1MIN,      /** Ver 2.1 **/
+          FTQ_VLME,          /** ver 2.2 **/
+          FTQ_LST_TRD_QTY,   /** ver 2.2 **/
+          FTQ_TRD_5MIN,      /** ver 2.3 **/
+          FTQ_TRD_30MIN      /** ver 2.3 **/
+        )
+        VALUES
+        (
+          :st_cntrct_lng_qt.c_xchng_cd,
+          :st_cntrct_lng_qt.c_prd_typ,
+          :st_cntrct_lng_qt.c_ctgry_indstk,
+          :st_cntrct_lng_qt.c_undrlyng,
+          to_date ( :c_expiry_dt, 'dd-Mon-yyyy' ),
+          :st_cntrct_lng_qt.c_exrc_typ,
+          :st_cntrct_lng_qt.c_opt_typ,
+          :st_cntrct_lng_qt.l_strike_prc,
+          :st_cntrct_lng_qt.l_lst_trdd_prc,
+          to_date( :c_lst_trd_tm,'dd-Mon-yyyy hh24:mi:ss' ),
+          :st_cntrct_lng_qt.l_bst_bid_prc[0],
+          :st_cntrct_lng_qt.l_bst_bid_qty[0],
+          :st_cntrct_lng_qt.l_bst_offr_prc[0],
+          :st_cntrct_lng_qt.l_bst_offr_qty[0],
+          :st_cntrct_qoute.d_crnt_oi,  /** Ver 2.8 **/
+          to_date(sysdate,'dd-Mon-yyyy'),
+          :st_cntrct_lng_qt.l_eba_cntrct_id,
+					
+					/*** Ver 2.1 Starts ***/
+
+					to_date(to_char(decode(trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'ss')/5)*5,'00')),60,
+                             to_date(to_char(round(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'MI'),
+														 'DD-MON-YYYY HH24:MI:SS'),'DD-MON-YYYY HH24:MI:SS'), 
+                             to_date(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-Mon-yyyy hh24:mi')||':'||
+                             trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'ss')/5)*5,
+                             '00')),'DD-Mon-YYYY HH24:mi:ss')),'DD-Mon-YYYY HH24:mi:ss'),'DD-Mon-YYYY HH24:mi:ss'),  
+					
+					to_date(to_char(decode(trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'ss')/10)*10,'00')),60,
+                             to_date(to_char(round(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'MI'),
+														 'DD-MON-YYYY HH24:MI:SS'),'DD-MON-YYYY HH24:MI:SS'), 
+                             to_date(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-Mon-yyyy hh24:mi')||':'||
+                             trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'ss')/10)*10,
+                             '00')),'DD-Mon-YYYY HH24:mi:ss')),'DD-Mon-YYYY HH24:mi:ss'),'DD-Mon-YYYY HH24:mi:ss'),  
+					
+					to_date(to_char(decode(trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'ss')/30)*30,'00')),60,
+                             to_date(to_char(round(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'MI'),
+							 							 'DD-MON-YYYY HH24:MI:SS'),'DD-MON-YYYY HH24:MI:SS'), 
+                             to_date(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-Mon-yyyy hh24:mi')||':'||
+                             trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'ss')/30)*30,
+                             '00')),'DD-Mon-YYYY HH24:mi:ss')),'DD-Mon-YYYY HH24:mi:ss'),'DD-Mon-YYYY HH24:mi:ss'),  
+			    /****************************** commented in ver 2.7 *****************************************    
+					to_date(to_char(round(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'MI'),
+														'DD-MON-YYYY HH24:MI:SS'),'DD-MON-YYYY HH24:MI:SS'),
+          **********************************************************************************************/
+
+          to_date(to_char(TO_DATE(:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-mon-yyyy hh24:mi:')|| '00','DD-MON-YYYY HH24:MI:SS'), /** ver 2.7 **/ 
+
+					/*** Ver 2.1 Ends ***/ 
+          :st_cntrct_lng_qt.l_tot_trdd_qty,   /** ver 2.2 **/
+          :st_cntrct_lng_qt.l_lst_trdd_qty,   /** ver 2.2 **/
+          /** ver 2.3 Starts *** commented in ver 2.4 ****
+          to_date(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-Mon-yyyy hh24')||':'||
+          decode(trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'mi')/5)*5,'00')),
+          60,00, trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'mi')/5)*5,'00')))||':00'
+          ,'DD-Mon-YYYY HH24:mi:ss'),   
+          to_date(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-Mon-yyyy hh24')||':'||
+          decode(trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'mi')/30)*30,'00')),
+          60,00, trim(to_char(ceil(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'mi')/30)*30,'00')))||':00'
+          ,'DD-Mon-YYYY HH24:mi:ss')
+          *** ver 2.3 Ends ***/
+          /***** ver 2.4 started ******** commented in ver 2.7 *************************************
+          to_date(to_char(decode( trim(to_char(ceil(to_char(TO_DATE (to_char(round(TO_DATE(:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),             'mi'),'DD-MON-YYYY HH24:MI:SS'),'dd-mon-yyyy hh24:mi:ss'),'mi')/5)*5,'00')), 60, to_date(to_char(round(TO_DATE(to_char(               round(TO_DATE (:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),'mi'),'DD-MON-YYYY HH24:MI:SS'),'dd-mon-yyyy hh24:mi:ss'),'hh24')              ,'DD-MON-YYYY HH24:MI:SS'),'DD-MON-YYYY HH24:MI:SS'), to_date(to_char(TO_DATE (to_char(round(TO_DATE (:c_lst_trd_tm,                  'dd-mon-yyyy hh24:mi:ss'),'mi'),'DD-MON-YYYY HH24:MI:SS'),'dd-mon-yyyy hh24:mi:ss'),'dd-Mon-yyyy hh24')||':'|| trim(                  to_char(ceil(to_char(TO_DATE(to_char(round(TO_DATE (:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),'mi'),'DD-MON-YYYY HH24:MI:SS'),          'dd-mon-yyyy hh24:mi:ss'),'mi')/5)*5,'00'))||':00','DD-Mon-YYYY HH24:mi:ss') ),'DD-Mon-YYYY HH24:mi:ss'),                             'DD-Mon-YYYY HH24:mi:ss'),
+           
+          to_date(to_char(decode( trim(to_char(ceil(to_char(TO_DATE (to_char(round(TO_DATE(:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),             'mi'),'DD-MON-YYYY HH24:MI:SS'),'dd-mon-yyyy hh24:mi:ss'),'mi')/30)*30,'00')), 60, to_date(to_char(round(TO_DATE(to_char(             round(TO_DATE (:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),'mi'),'DD-MON-YYYY HH24:MI:SS'),'dd-mon-yyyy hh24:mi:ss'),'hh24')              ,'DD-MON-YYYY HH24:MI:SS'),'DD-MON-YYYY HH24:MI:SS'), to_date(to_char(TO_DATE (to_char(round(TO_DATE (:c_lst_trd_tm,                  'dd-mon-yyyy hh24:mi:ss'),'mi'),'DD-MON-YYYY HH24:MI:SS'),'dd-mon-yyyy hh24:mi:ss'),'dd-Mon-yyyy hh24')||':'|| trim(                  to_char(ceil(to_char(TO_DATE(to_char(round(TO_DATE (:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),'mi'),'DD-MON-YYYY HH24:MI:SS'),          'dd-mon-yyyy hh24:mi:ss'),'mi')/30)*30,'00'))||':00','DD-Mon-YYYY HH24:mi:ss') ),'DD-Mon-YYYY HH24:mi:ss'),                            'DD-Mon-YYYY HH24:mi:ss')
+
+          *************************************** ver 2.4 ends  **************************************/
+          /**************************************** ver 2.7  Starts **********************************/
+
+          to_date(to_char(TO_DATE(:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),'dd-mon-yyyy hh24')||':'||to_char(floor(to_char(TO_DATE (to_char(TO_DATE(:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),'DD-MON-YYYY HH24:MI:SS'),'dd-mon-yyyy hh24:mi:ss'),'mi')/5)*5)||':'||'00','DD-Mon-YYYY HH24:mi:ss'), 
+
+         decode(sign(15 - to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'mi')),1,  to_date(to_char(TO_DATE (:c_lst_trd_tm,'dd-mon-yyyy hh24:mi:ss'),'dd-mon-yyyy ')|| to_char(to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'hh24')-1,'00') ||':45:00','DD-Mon-YYYY HH24:mi:ss')   ,decode( sign(45 - to_char(TO_DATE(:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'mi')), 1, to_date( to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-mon-yyyy hh24')||':15:00','dd-Mon-yyyy hh24:mi:ss'), to_date( to_char(TO_DATE (:c_lst_trd_tm, 'dd-mon-yyyy hh24:mi:ss'),'dd-mon-yyyy hh24')||':45:00','DD-Mon-YYYY HH24:mi:ss') ))
+
+          /**************************************** ver 2.7  Ends ************************************/
+
+        );
+
+    if ( SQLCODE != 0 )
+    {
+        fn_errlog ( c_ServiceName, "S31055", SQLMSG, ptr_st_err_msg->c_err_msg );
+        tpfree ( ( char * )ptr_car_sbuf ); 
+        tpfree ( ( char * )ptr_car_sbuf2 );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+        tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+        fn_userlog ( c_ServiceName,"Records successfully inserted into FTQ_FO_TRDQT_CNT table");
+    }
+    
+    /********************* Ver 2.5 starts  **********************/
+    EXEC SQL
+     SELECT NVL(MIN(FHS_TIME_SLOT),'*')
+     INTO   :c_slot
+     FROM   FHS_FO_HRLY_TIMESLOT
+     WHERE to_date(:c_lst_trd_tm, 'dd-Mon-yyyy hh24:mi:ss') between to_date(TO_CHAR(SYSDATE, 'dd:Mon:yyyy') ||' '||FHS_FROM_TIME, 'dd-Mon-yyyy hh24:mi:ss') and to_date(TO_CHAR(SYSDATE, 'dd:Mon:yyyy') ||' '||FHS_TO_TIME, 'dd-Mon-YYYY hh24:mi:ss');
+
+     if(SQLCODE != 0)
+     {
+      fn_userlog ( c_ServiceName,"Error while finding slot from FHS_FO_HRLY_TIMESLOT ");
+      fn_errlog ( c_ServiceName, "S31060", SQLMSG, ptr_st_err_msg->c_err_msg );
+     }
+    
+   EXEC SQL
+    UPDATE FHH_FO_HRLY_HIGHLOW
+    SET    FHH_DT_1MIN   =  to_date( :c_lst_trd_tm,'dd-Mon-yyyy hh24:mi:ss' ),
+    FHH_HIGHPRICE =  DECODE(sign(FHH_HIGHPRICE - :st_cntrct_lng_qt.l_lst_trdd_prc),-1, :st_cntrct_lng_qt.l_lst_trdd_prc,FHH_HIGHPRICE),
+    FHH_LOWPRICE  = DECODE(sign(FHH_LOWPRICE - :st_cntrct_lng_qt.l_lst_trdd_prc), 1,  :st_cntrct_lng_qt.l_lst_trdd_prc, FHH_LOWPRICE)
+    WHERE  FHH_TIMESLOT        = :c_slot
+    AND    FHH_UNDRLYNG        = :st_cntrct_lng_qt.c_undrlyng
+    AND    FHH_XCHNG_CD        = :st_cntrct_lng_qt.c_xchng_cd
+    AND    FHH_PRDCT_TYP       = :st_cntrct_lng_qt.c_prd_typ
+    AND    trunc(FHH_EXPRY_DT) = to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+    AND    FHH_OPT_TYP         = :st_cntrct_lng_qt.c_opt_typ
+    AND    FHH_STRK_PRC        = :st_cntrct_lng_qt.l_strike_prc;
+
+   if(SQLCODE == NO_DATA_FOUND)
+   {
+
+    if(DEBUG_MSG_LVL_3)   /** ver 2.6 **/
+    {
+     fn_userlog ( c_ServiceName,"No data found :%s:%s:%c:%s:%c:%ld:%c:",st_cntrct_lng_qt.c_undrlyng,st_cntrct_lng_qt.c_xchng_cd,st_cntrct_lng_qt.c_prd_typ,c_expiry_dt.arr,st_cntrct_lng_qt.c_opt_typ,st_cntrct_lng_qt.l_strike_prc,c_slot);
+    }
+
+     EXEC SQL
+      INSERT INTO FHH_FO_HRLY_HIGHLOW
+      (
+        FHH_UNDRLYNG,
+        FHH_XCHNG_CD,
+        FHH_PRDCT_TYP,
+        FHH_EXPRY_DT,
+        FHH_OPT_TYP,
+        FHH_STRK_PRC,
+        FHH_DT_1MIN,
+        FHH_HIGHPRICE,
+        FHH_LOWPRICE,
+        FHH_TIMESLOT
+      )
+      values
+      (
+        :st_cntrct_lng_qt.c_undrlyng,
+        :st_cntrct_lng_qt.c_xchng_cd,
+        :st_cntrct_lng_qt.c_prd_typ,
+        to_date ( :c_expiry_dt, 'dd-Mon-yyyy' ),
+        :st_cntrct_lng_qt.c_opt_typ,
+        :st_cntrct_lng_qt.l_strike_prc,
+        to_date ( :c_lst_trd_tm, 'dd-Mon-yyyy hh24:mi:ss') ,
+        :st_cntrct_lng_qt.l_lst_trdd_prc,
+        :st_cntrct_lng_qt.l_lst_trdd_prc,
+        :c_slot
+      );
+
+     if(SQLCODE != 0)
+     {
+       fn_userlog ( c_ServiceName,"Error while inserting into FHH_FO_HRLY_HIGHLOW");
+       fn_errlog ( c_ServiceName, "S31065", SQLMSG, ptr_st_err_msg->c_err_msg );
+     }
+    }
+    else if(SQLCODE != 0)
+    {
+      fn_userlog ( c_ServiceName,"Error while updating  FHH_FO_HRLY_HIGHLOW");
+      fn_errlog ( c_ServiceName, "S31070", SQLMSG, ptr_st_err_msg->c_err_msg );
+    }  
+    /********************* Ver 2.5 Ends  **********************/
+
+   }
+   else
+   {
+     if(DEBUG_MSG_LVL_4)
+     { 
+       fn_userlog ( c_ServiceName,"same time c_lst_trd_tm :%s:, c_prv_trded_tm :%s:", c_lst_trd_tm.arr,c_prv_trded_tm.arr);
+     }
+   }
+
+    /***************** Ver 1.8 ****************/
+
+	}
+
+	/**  Commiting Transaction **/
+	
+	/*** if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 ) *** Ver 1.6 ***/
+  if ( fn_nolog_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )  /*** Ver 1.6 ***/
+  {
+     strcpy ( ptr_st_err_msg->c_err_msg, c_errmsg );
+     tpfree ( ( char * )ptr_car_sbuf );                      /*** Ver 1.4 ***/
+     tpfree ( ( char * )ptr_car_sbuf2 );                      /*** Ver 1.4 ***/
+     tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+
+
+ 	tpfree ( ( char * ) ptr_st_err_msg );
+  tpfree ( ( char * ) ptr_car_sbuf );                      /*** Ver 1.4 ***/
+  tpfree ( ( char * ) ptr_car_sbuf2 );                      /*** Ver 1.4 ***/
+ 	/** tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )&st_cntrct_lng_qt, 0, 0 ); ** commented in ver 1.4 ***/
+ 	tpreturn ( TPSUCCESS, SUCC_BFR, NULL, 0, 0 ); /*** Added in ver 1.4 ***/
+
+
+} //End of the service 
+

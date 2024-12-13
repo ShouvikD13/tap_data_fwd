@@ -1,0 +1,692 @@
+/*********************************************************************************************
+*  Program           : bat_cdx_enable_sebi.pc                                  						 	 *
+*                                                                                            *
+*  Description       : Check and process for accounts older than 6 months                    *
+*                      as per SEBI requirement for Currency                                  *
+*                                                                                            *
+*  Input Parameters  :NFO NFO NA <Run mode D/O><Mode-Real/Simulation><Seq_Start><Seq_End>		 *
+*                                                                                            *
+*  Change Log        : 1.0   12-Jul-2011  Sandip Tambe|Infotech                              *
+*										 : 1.1	 10-Nov-2011	Sandip Tambe|Infotech															 *
+*										 : 1.2	 08-Feb-2012	Nitin Save|Infotech															 	 *
+*										 : 1.3	 03-Feb-2014	Sandip Tambe|Infotech															 *
+*										 : 1.4	 21-May-2014	Sachin Birje|Infotech															 *
+*										 : 1.5	 07-Sep-2014  Sachin Birje|Infotech															 *
+*										 : 1.6	 25-Nov-2014  Sandip Tambe|Infotech															 *
+*										 : 1.7	 21-Sep-2016  Sandip Tambe|Infotech															 *
+**********************************************************************************************
+*  1.0    -  New Release 																																		 *
+*	 1.1		-  Calling Parameter Chage[caller : null to "BAT_ACTV_ACCT_E"											 *
+*																		 and to_be_enable : null to 'Y']									       *
+*						 Daily Insert Selection criteria - User caategory condition added								 *	
+*  1.2    - Daily run -Used seq no  and ADH act-deact flag updated same as exists in UAC		 *
+*  1.3    -  ADH Insert statement changes due to extra column in ADH           							 *
+*  1.4    -  Changes For error returned by store procedure ( Sachin Birje )    							 *
+*  1.5    -  VIew to FML Changes                           ( Sachin Birje )    							 *
+*  1.6    -  Demat based Derivative Enabling               ( Sandip Tambe )    							 *
+*  1.7    -  Serve sfr_prcs_prtfl changed to sfr_plg_revln1( Sandip Tambe )    							 *
+*  1.8    -  CR-ISEC03-156532 (Sanjeet Pawar)                                                *  
+*********************************************************************************************/
+#include <atmi.h>
+#include <string.h>
+#include <stdlib.h>
+#include <fo.h>
+#include <fml32.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fml_def.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+/** #include <fo_view_def.h> ** Ver 1.5 **/
+#include <fn_read_debug_lvl.h>
+#include <sqlca.h>
+
+#define SQL_ROW_COUNT sqlca.sqlerrd[2]
+#define STR_TRIM(x) x[strlen(x)]='\0'
+#define MASTER_COMMIT_INTERVAL 1000
+#define STR_TRIM(x) x[strlen(x)]='\0'
+#define TRAN_TIME 1200  /** ver 1.6 **/
+
+EXEC SQL BEGIN DECLARE SECTION;
+
+char c_ServiceName[256]={0};
+char c_msg[256]={0};
+char c_err_msg[256]={0};
+char c_xchng_cd[4]={'\0'};
+char c_master_mode;
+char c_run_mode;
+char c_run_for;					/** Ver 1.6 **/
+char c_rout_str[4];			/** Ver 1.6 **/
+long  l_row_count=0;		/** Ver 1.6 **/
+
+int  i_trnsctn=0;
+long l_master_counter=0;
+long l_master_loop_counter=0;
+
+long l_start_seq_nbr=0;
+long l_end_seq_nbr=0;
+EXEC SQL  END  DECLARE SECTION;
+
+void fn_print_date_time(void);
+char *trim(char *str);
+/*int fn_process_client(char * i_mtch_acnt_id ,double l_seq_nbr,char * i_usr_id, char c_cdx_validation_flag, char c_cdt_uac_act_flg); ** Ver 1.6 comment**/ /** Added c_cdt_uac_act_flg in Ver 1.2 **/
+
+void BAT_CDX_ENABLE_SEBI ( int argc, char *argv[])
+{
+	int i_returncode = 0;
+	char c_rec_over;
+	long l_count=1;					/** Ver 1.6 changed i_count to long  l_count **/
+
+  EXEC SQL  BEGIN  DECLARE SECTION;
+  long l_l_seq_nbr=0;
+  varchar c_usr_id[11];
+  varchar c_mtch_acnt_id[11]={0};
+  char c_cdt_uac_act_flg;
+  char c_cdx_validation_flag;
+  char c_uac_cdx_allwd='N';				/*** Ver 1.6 ***/
+  char c_success_flg;
+  char c_error_msg[200];
+
+  EXEC SQL  END  DECLARE SECTION;
+
+  strcpy(c_ServiceName,argv[0]);
+
+  INITBATDBGLVL(argv[0]);
+	
+  fn_userlog (c_ServiceName,"====================================================");
+  sprintf(c_msg,"Batch process %s is started",argv[0]);
+  fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+  fn_userlog (c_ServiceName,"Batch process %s is started",argv[0]);
+
+  if ( argc < 6 )
+  {
+    fn_userlog (c_ServiceName,"Invalid Arguments passed %d",argc);
+    fn_userlog (c_ServiceName,"Usage:%s NFO NFO NA <Run_Mode D/O><Master_Mode-R/S><Seq_Start><Seq_End>",argv[0]);
+   /* here Run-D/O  => D: Daily Run and O:One time run for Bulk Update ***/
+   /*here Mode-R/S => R: Real Mode and S:Simulation mode-In simulation mode no updates on UAC/ADH*/
+    fn_userlog (c_ServiceName,"==================End of %s =================",argv[0]);
+    return;
+  }
+
+  c_run_mode=argv[4][0];
+  c_master_mode=argv[5][0];
+  l_start_seq_nbr=atol(argv[6]);
+  l_end_seq_nbr  =atol(argv[7]);
+
+  fn_userlog (c_ServiceName,"Arguments passed:<%c><%c><%d><%d>",c_run_mode,c_master_mode,l_start_seq_nbr,l_end_seq_nbr);
+  fn_userlog (c_ServiceName,"Master mode:%c: ",c_master_mode);
+  fn_userlog (c_ServiceName,"SEQ START-<%ld> and END-<%ld>",l_start_seq_nbr,l_end_seq_nbr );
+
+  MEMSET(c_usr_id);
+  MEMSET(c_mtch_acnt_id);
+
+  /*********************************************************************************/
+  if (c_run_mode == 'D')
+  {
+    /*i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );  *** ver 1.6 comment **/
+		i_trnsctn = tpbegin(TRAN_TIME,0);  
+    if ( i_trnsctn == -1 )
+    {
+      fn_userlog (c_ServiceName,"Failed in initial begin transaction for daily loop");
+      fn_errlog ( c_ServiceName, "S31005", TPMSG, c_err_msg  );
+      return ;
+    }
+		EXEC SQL																		/** Ver 1.8 Oracle ACS suggestion**/
+			ALTER SESSION ENABLE PARALLEL DML;
+
+    EXEC SQL
+        UPDATE /*+ parallel(20) */ CDT_CDX_DISABLE_TRACK_SEBI
+              SET  CDT_PRCS_FLG = 'F'
+        WHERE  CDT_PRCS_FLG ='N';
+
+    if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+    {
+      fn_errlog ( c_ServiceName, "S31010", SQLMSG, c_err_msg  );
+      fn_userlog (c_ServiceName,"Failed in initial daily update");
+      /**fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );  ** ver 1.6 comment **/
+			tpabort ( 0 ); /** ver 1.6 **/
+      return ;
+    }
+    EXEC SQL
+			INSERT /*+ parallel(20) */ INTO CDT_CDX_DISABLE_TRACK_SEBI
+			SELECT /*+ parallel(20) */ SEQ_DISBL_CDX_NMBR.NEXTVAL,UAC_USR_ID USR_ID ,UAC_CLM_MTCH_ACCNT MTCH_ACCNT,'',UAC_CDX_ALLWD,
+             case when months_between(SYSDATE,IAI_BNK_ACCOUNT_OPEN_DT) < 6 then 'D' 
+									when months_between(SYSDATE,IAI_BNK_ACCOUNT_OPEN_DT) >= 6 then 'Z' end,0.00,0.00,0.00,0.00,0.00,
+             'Manual Updation -6 month/Demat SEBI check -Daily Updation to Z/D', SYSDATE,'','','N',UAC_ACT_DEACT_FLG
+					FROM UAC_USR_ACCNTS,IAI_INFO_ACCOUNT_INFO
+					WHERE IAI_MATCH_ACCOUNT_NO = UAC_CLM_MTCH_ACCNT
+					AND   UAC_ACT_DEACT_FLG != 'S'
+          AND   UAC_ACT_DEACT_FLG != 'C'
+          AND   UAC_CDX_ALLWD in ('N' , 'X','D')
+					AND  	UAC_USR_CTGRY in ( 46,47,48,55)
+          AND   UAC_CLM_MTCH_ACCNT NOT LIKE '65%'
+          AND   UAC_CLM_MTCH_ACCNT NOT LIKE '75%'
+					AND   IAI_BNK_ACCOUNT_OPEN_DT is not null;			/** Ver 1.6 Query reformatting done **/ /** Ver 1.8 Parallel- Oracle ACS suggestion**/
+
+        /*FROM UAC_USR_ACCNTS  where UAC_CLM_MTCH_ACCNT in
+        (
+            (  SELECT UAC_CLM_MTCH_ACCNT mtch_act
+               FROM  UAC_USR_ACCNTS
+               WHERE UAC_ACT_DEACT_FLG != 'S'
+               AND   UAC_ACT_DEACT_FLG != 'C'
+               AND   UAC_CDX_ALLWD in ('N' , 'X')
+							 AND  UAC_USR_CTGRY in ( 46,47,48,55)		***  ver 1.1 ***
+               AND   UAC_CLM_MTCH_ACCNT NOT LIKE '65%'
+               AND   UAC_CLM_MTCH_ACCNT NOT LIKE '75%'
+            )
+            MINUS
+              SELECT DISTINCT IAI_MATCH_ACCOUNT_NO MTCH_ACT
+              FROM IAI_INFO_ACCOUNT_INFO
+              WHERE months_between(SYSDATE,IAI_BNK_ACCOUNT_OPEN_DT) < 6
+        ); * ver 1.6 comment **/
+
+    if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+    {
+      fn_errlog ( c_ServiceName, "S31015", SQLMSG, c_err_msg  );
+      fn_userlog (c_ServiceName,"Failed in daily insert");
+      /*fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); *** ver 1.6 comment **/
+			tpabort ( 0 ); /** ver 1.6 **/
+      return ;
+    }
+		l_row_count=sqlca.sqlerrd[2];
+     fn_userlog(c_ServiceName," Records Inserted into CDT_SEBI table for Daily process<%ld>",sqlca.sqlerrd[2]);
+      /**** ver 1.8  starts ****/
+      EXEC SQL
+      UPDATE CDT_CDX_DISABLE_TRACK_SEBI
+      SET    CDT_PRCS_FLG = 'F'
+      WHERE  CDT_PRCS_FLG='N'
+			AND    trunc(CDT_PRCS_DATE)=trunc(sysdate)
+			AND    CDT_MATCH_ACNT in (
+             select /*+ parallel(20) */ CLM_MTCH_ACCNT from CLM_CLNT_MSTR clm,BP_BRKR_MSTR bpm
+             where  clm.CLM_BP_ID = bpm.BBM_BP_ID
+						 and    clm.CLM_MTCH_ACCNT = CDT_MATCH_ACNT
+             and    bpm.BBM_CDX_ALLWD = 'N' );
+ 
+      if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+    {
+      fn_errlog ( c_ServiceName, "S31020", SQLMSG, c_err_msg  );
+      fn_userlog (c_ServiceName,"Failed in initial daily update");
+      tpabort ( 0 ); 
+      return ;
+    } 
+    l_row_count=sqlca.sqlerrd[2];
+     fn_userlog(c_ServiceName," Records cdt_SEBI table updated <%ld>",sqlca.sqlerrd[2]);
+      /** Ver 1.8  Ends ***/
+   /*if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )		** Ver 1.6 comment **/
+    if( tpcommit(0) == -1 ) /*** Ver 1.6 ***/
+    {
+      fn_userlog (c_ServiceName,"Failed in  commit transaction at Daily insert ") ;
+      fn_errlog ( c_ServiceName, "S31025", SQLMSG, c_err_msg);
+      return ;
+    }
+
+		/** Ver 1.2 start ***/
+		EXEC SQL
+  			SELECT /*+ parallel(20) */ min(CDT_SEQ_ID), max(CDT_SEQ_ID)			/** Ver 1.8 Oracle ACS suggestion : parallel added**/
+  			INTO  :l_start_seq_nbr, :l_end_seq_nbr
+  			FROM  CDT_CDX_DISABLE_TRACK_SEBI
+  			WHERE   CDT_PRCS_FLG ='N';
+
+		if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+		{
+  		fn_errlog ( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+  		fn_userlog (c_ServiceName,"Failed in daily-seq no selection -CDt");
+  		/**fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );	***Ver 1.6 comment **/
+  		return ;
+		}
+		
+		fn_userlog (c_ServiceName,"Val of l_start_seq_nbr<%ld> & l_end_seq_nbr<%ld>-Daily-Run", l_start_seq_nbr, l_end_seq_nbr);
+
+		/** Ver 1.2 end ***/
+
+
+  }
+  /*********************************************************************************/
+	while (1)  /* Outermost while loop while-1*/
+  {
+    l_master_loop_counter++;
+
+    while (1) /* Start of MAIN while -- while-2*/
+    {
+      l_master_counter ++ ;
+
+      /************************************************************************************/
+      if (c_run_mode == 'D')
+      {
+					c_uac_cdx_allwd='N';				/*** ver 1.6 **/
+
+					EXEC SQL
+						SELECT /*+ parallel(20) */ CDT_SEQ_ID,CDT_USR_ID,CDT_MATCH_ACNT,CDT_UAC_ACTDEACT_FLG,CDT_UAC_CDX_ALLWD /** Ver 1.8 Oracle ACS suggest**/
+						INTO 	:l_l_seq_nbr,
+								  :c_usr_id,
+									:c_mtch_acnt_id, 
+									:c_cdt_uac_act_flg,
+									:c_uac_cdx_allwd
+						FROM CDT_CDX_DISABLE_TRACK_SEBI
+						WHERE CDT_PRCS_FLG = 'N'
+						AND       CDT_SEQ_ID between :l_start_seq_nbr and :l_end_seq_nbr  /** Adedd in Ver 1.2 **/
+						AND       ROWNUM = 1
+						ORDER BY CDT_SEQ_ID;				/*** ver 1.6 Existing CDX flag fetched ***/
+
+        	if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+        	{
+          	fn_errlog ( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+          	/**fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );  ** Ver 1.6 **/
+						/*tpabort ( 0 ); ** ver 1.6 **/
+          	return ;
+        	}
+      }
+    	/************************************************************************************/
+      if (c_run_mode == 'O')
+      {
+					EXEC SQL
+						SELECT CDT_SEQ_ID,CDT_USR_ID,CDT_MATCH_ACNT,CDT_UAC_ACTDEACT_FLG,CDT_UAC_CDX_ALLWD
+						INTO 	:l_l_seq_nbr,
+								  :c_usr_id,
+									:c_mtch_acnt_id, 
+									:c_cdt_uac_act_flg,
+									:c_uac_cdx_allwd
+						FROM CDT_CDX_DISABLE_TRACK_SEBI
+						WHERE CDT_PRCS_FLG = 'N'
+						AND CDT_SEQ_ID between :l_start_seq_nbr and :l_end_seq_nbr
+						AND       ROWNUM = 1
+						ORDER BY CDT_SEQ_ID;
+
+        	if ( ( SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+        	{
+          	fn_errlog ( c_ServiceName, "S31040", SQLMSG, c_err_msg  );
+          	/*fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); **Ver 1.6 comment **/
+						/*tpabort ( 0 ); ** ver 1.6 **/
+          	return ;
+        	}
+      }
+
+			/*****************************************************************************************/
+      SETNULL(c_usr_id);
+      SETNULL(c_mtch_acnt_id);
+					
+			if(SQLCODE == NO_DATA_FOUND )
+			{
+				if(l_count > 1 ) /** ver 1.6 count checked from 1 **/
+				{
+					fn_userlog(c_ServiceName,"All<%ld> records of CDT_SEBI Table processed",l_master_counter -1);
+					c_rec_over='Y';
+					break;
+				}
+				else
+				{
+					fn_userlog(c_ServiceName,"No Records Found During Fteching CDT_SEBI Table");
+         	fn_errlog ( c_ServiceName, "S31045", SQLMSG, c_err_msg  );
+         	/**fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );  ** ver 1.6 comment **/
+					/*tpabort ( 0 ); ** ver 1.6 **/
+         	return ;
+       	}
+			}
+			/*** ver 1.6 SFO_PRCS_PRPD call added ****/
+		i_trnsctn = tpbegin(TRAN_TIME,0);
+    if ( i_trnsctn == -1 )
+    {
+      fn_userlog (c_ServiceName,"Failed in initial begin transaction ");
+      fn_errlog ( c_ServiceName, "S31050", TPMSG, c_err_msg  );
+      return ;
+    } 
+
+    EXEC SQL
+         UPDATE CDT_CDX_DISABLE_TRACK_SEBI
+         SET CDT_PRCS_FLG = 'P'
+         WHERE CDT_MATCH_ACNT=:c_mtch_acnt_id
+         AND CDT_SEQ_ID = :l_l_seq_nbr;
+
+      if ( SQLCODE != 0 )
+      {
+        fn_errlog ( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+        tpabort ( 0 ); 
+        return ;
+      }
+
+		if ( tpcommit(0) == -1 )
+    {
+      fn_userlog (c_ServiceName,"Failed in loop commit transaction at LOOP-<%ld> ", l_master_loop_counter);
+      fn_errlog ( c_ServiceName, "S31060", SQLMSG, c_err_msg);
+      return ;
+    }
+			c_run_for='S';
+			sprintf(c_msg,"Processing record %ld of %ld for match :%s:", l_count, l_row_count,c_mtch_acnt_id.arr);
+   		i_returncode = fn_pre_prcs_rcrd ( c_ServiceName,
+                                  c_err_msg,
+                                  /*"sfr_prcs_prtfl",			** ver 1.7 comment **/
+                                  "sfr_plg_revln1",				/** ver 1.7 **/
+                                  l_count,
+                                  l_row_count );
+    	if ( i_returncode == -1 )
+    	{
+      	fn_errlog( c_ServiceName, "S31065", LIBMSG, c_err_msg );
+      	return;
+    	}
+    	fn_cpy_ddr(c_rout_str);
+			strcpy(c_xchng_cd,"CDX");
+
+    	i_returncode = fn_acall_svc_fml ( c_ServiceName,
+                                      c_err_msg,
+                                      "SFO_PRCS_PRPD",
+                                      0,
+                                      8,
+                                      FFO_ORD_TYP,(char *)&c_run_for,
+																			FFO_XCHNG_CD,(char *)c_xchng_cd,
+                                      FFO_SEQ_NUM,(char *)&l_l_seq_nbr,
+                                      FFO_EBA_MTCH_ACT_NO ,(char *)c_mtch_acnt_id.arr,
+                                      FFO_USR_ID, (char *) c_usr_id.arr,
+                                      FFO_STATUS_FLG , (char *) &c_cdt_uac_act_flg,
+                                      FFO_CNTRCT_TAG, ( char *)&c_uac_cdx_allwd,
+                                      FFO_OPT_TYP,(char *)&c_master_mode);
+    	if ( i_returncode == -1 )
+    	{
+      	fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg );
+      	return;
+    	}
+		 /** Ver  1.6 SFO_PRCS_PRPD call ends ***/
+		/**** Ver 1.6 comment starts ****
+			EXEC SQL
+					UPDATE CDT_CDX_DISABLE_TRACK_SEBI
+					SET CDT_PRCS_FLG = 'P'
+					WHERE CDT_MATCH_ACNT=:c_mtch_acnt_id
+					AND CDT_SEQ_ID = :l_l_seq_nbr;
+
+      if ( SQLCODE != 0 )
+      {
+        fn_errlog ( c_ServiceName, "S31075", SQLMSG, c_err_msg  );
+        **fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** ver 1.6 comment **
+				tpabort ( 0 ); ** ver 1.6 **
+        return ;
+      }
+
+      fn_userlog(c_ServiceName,"Calling SP_FNO_CDX_VALIDATIONS procedure for userid:<%s> match id:<%s>  Act-Deact Flag<%c>  l_l_seq_nbr<%ld>", c_usr_id.arr ,c_mtch_acnt_id.arr, c_cdt_uac_act_flg, l_l_seq_nbr);
+			c_cdx_validation_flag='N' ;			** ver 1.7 **
+       EXEC SQL
+              EXECUTE
+              BEGIN
+              SP_FNO_CDX_VALIDATIONS
+              (
+                :c_mtch_acnt_id,
+								'BAT_ACTV_ACCT_E',** Ver 1.1 **
+								'Y', 							** Ver 1.1 **
+								'CDX',
+                :c_cdx_validation_flag,
+                :c_success_flg,
+                :c_error_msg,
+                :c_ServiceName,      ** Ver 1.4 **
+                :c_ServiceName       ** Ver 1.4 ** 
+               );
+               END;
+               END-EXEC;
+        if (DEBUG_MSG_LVL_3)
+        {
+					fn_userlog(c_ServiceName,"After Procrdure exec- c_mtch_acnt_id<%s>  cdx_valid_flag<%c> c_success_flg<%c>",c_mtch_acnt_id.arr, c_cdx_validation_flag, c_success_flg);
+					fn_userlog(c_ServiceName,"Error Return from procedure=<%s>",c_error_msg);
+
+        }
+        if ( c_success_flg =='N' || c_success_flg =='F')   ** Ver 1.4 , c_success_flg =='F' added ***
+        {
+          ** fn_userlog(c_ServiceName,"Procedure returned Error flag as N for <%s>", c_mtch_acnt_id.arr); *** Ver 1.4 **
+          fn_userlog(c_ServiceName,"Procedure returned Error flag as %c for <%s>",c_success_flg,c_mtch_acnt_id.arr); *** Ver 1.4 **
+        }
+
+
+ 			   if((c_cdx_validation_flag =='Y' || c_cdx_validation_flag =='Z' || c_cdx_validation_flag =='D' ) && (c_master_mode  == 'R'))  *** ver 1.6 D flag check added **
+ 				{
+					if(c_uac_cdx_allwd != c_cdx_validation_flag )
+					{
+				
+ 					 	fn_userlog(c_ServiceName,"Before Update- CDX_ALLOWED_flag<%c> for <%s><%s>",c_cdx_validation_flag,c_usr_id.arr,c_mtch_acnt_id.arr);
+
+		 				** Added c_cdt_uac_act_flg in function call -in Ver 1.2 **
+					  * i_returncode = fn_process_client(c_mtch_acnt_id.arr,l_l_seq_nbr, c_usr_id.arr, c_cdx_validation_flag); *
+		 				i_returncode = fn_process_client(c_mtch_acnt_id.arr,l_l_seq_nbr, c_usr_id.arr, c_cdx_validation_flag, c_cdt_uac_act_flg); 
+
+       		  if (i_returncode != 0)
+       		  {
+       			 	fn_userlog(c_ServiceName,"Error in fn_process_client for match id:<%s> ",c_mtch_acnt_id.arr);
+             	strcpy ( c_err_msg, "System error. Contact system support - Error in Calling fn_process_client" );
+             	fn_errlog ( c_ServiceName, "S31080", c_err_msg, c_err_msg  );
+						 	****************  Added below part to continue next rec processing  *****************
+
+						 	EXEC SQL
+								UPDATE 		CDT_CDX_DISABLE_TRACK_SEBI
+								SET 			CDT_PRCS_FLG='F'
+								WHERE			CDT_MATCH_ACNT = :c_mtch_acnt_id
+								AND 		  CDT_SEQ_ID = :l_l_seq_nbr;
+		
+			  		  if ( SQLCODE != 0 )
+			 			  {
+			    	  	fn_errlog ( c_ServiceName, "S31085", SQLMSG, c_err_msg  );
+			    		  ** 	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); ** ver 1.6 comment **
+								tpabort ( 0 );** ver 1.6 **
+			    	  	return ;
+			 		 	 	}
+			  
+						 if (DEBUG_MSG_LVL_3)
+						 {
+						  fn_userlog (c_ServiceName,"After updating cdt_prcs_flg to F to continue process");
+						 }
+
+						 continue;
+
+						*********  End of part to continue next rec processing **********************
+	   			 }
+				 }
+				 else
+				 {
+						fn_userlog(c_ServiceName,"Old and new CDX flag are same for :%s: hence continue",c_mtch_acnt_id.arr);
+				 }	*** Ver 1.6 else end **
+        }
+        if ( c_cdx_validation_flag =='N')
+        {
+          fn_userlog (c_ServiceName,"Procedure returned CDX_ALLOWED_flag as N for <%s>", c_mtch_acnt_id.arr);
+        }
+			  ****** Version 1.6 comment end***/
+        l_count++;
+      	if(l_count == l_row_count ) /** ver 1.6 **/
+      	{
+        	break;
+      	}
+        /* Ver 1.6 comment if ( (l_master_counter % MASTER_COMMIT_INTERVAL) == 0 )  
+				break; **/
+		}
+
+
+    /**if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 ) *** ver 1.6 comment **
+    if ( tpcommit(0) == -1 ) 
+    {
+     	fn_userlog (c_ServiceName,"Failed in loop commit transaction at LOOP-<%ld> ", l_master_loop_counter);
+     	fn_errlog ( c_ServiceName, "S31090", SQLMSG, c_err_msg);
+     	return ;
+    } ***/
+
+    if (c_rec_over == 'Y')
+    {
+     	fn_userlog (c_ServiceName," Breaking out of final loop");
+     	break;
+    }
+	}/**outer WHILE Ends**/
+
+ 	sprintf(c_msg,"Batch process %s completed",argv[0]);
+  fn_userlog (c_ServiceName,"Batch process %s completed",argv[0]);
+  fn_userlog (c_ServiceName,"==================End of %s =================",argv[0]);
+  fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+
+  return ;
+
+ }
+
+/*********************/
+ int fn_bat_init ( int argc, char *argv[] )
+  {
+    fn_var = BAT_CDX_ENABLE_SEBI;
+    return 0;
+  }
+  void fn_bat_term ( int argc, char *argv[] )
+  {
+   return;
+  }
+
+  int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+  {
+   return 0;
+  }
+/*******************************************/
+
+  /* int fn_process_client(i_mtch_acnt_id , l_seq_nbr, i_usr_id, c_cdx_validation_flag) */
+  /** Added c_cdt_uac_act_flg in Ver 1.2 **/
+/* Ver 1.6 Function commented ***
+  int fn_process_client(i_mtch_acnt_id , l_seq_nbr, i_usr_id, c_cdx_validation_flag, c_cdt_uac_act_flg)
+
+  EXEC SQL BEGIN DECLARE SECTION;
+  char *i_mtch_acnt_id;
+  double  l_seq_nbr;
+  char *i_usr_id;
+  char	c_cdx_validation_flag;
+  char    c_cdt_uac_act_flg; ** Added in Ver 1.2 ** 
+  EXEC SQL END   DECLARE SECTION;
+  {
+        long val=0;
+        if (DEBUG_MSG_LVL_3)
+        {
+          fn_userlog (c_ServiceName,"Check n update |%s||%s||%c| ", i_usr_id,i_mtch_acnt_id,c_cdx_validation_flag );
+        }
+
+
+        EXEC SQL
+             INSERT INTO CDT_CDX_DISABLE_TRACK
+             SELECT CDT_SEQ_ID,
+                    CDT_USR_ID,
+                    CDT_MATCH_ACNT,
+                    '',
+                    CDT_UAC_CDX_ALLWD,
+                    :c_cdx_validation_flag, ** Changed from 'Z' to variable - Ver 1.2 **
+                    CDT_PLG_AMT,
+                    CDT_EQ_AMT,
+                    CDT_FO_AMT,
+                    CDT_MF_AMT,
+                    CDT_CR_AMT,
+                    CDT_COMMENT,
+                    CDT_PRCS_DATE,
+                    '',
+                    '',
+                    'Y'
+             FROM CDT_CDX_DISABLE_TRACK_SEBI
+             WHERE CDT_MATCH_ACNT = :i_mtch_acnt_id
+             AND CDT_SEQ_ID = :l_seq_nbr
+	    			 AND CDT_USR_ID = :i_usr_id
+             AND CDT_PRCS_FLG='P';
+
+        if ( SQLCODE != 0 )
+        {
+          fn_userlog (c_ServiceName," Failed in Inserting into CDT from Temp");
+          fn_errlog  (c_ServiceName, "S31095", SQLMSG, c_err_msg  );
+          return (-1);
+        }
+
+        if (DEBUG_MSG_LVL_3)
+        {
+          fn_userlog (c_ServiceName,"Record inserted from temp to CDT: <%ld> <%s> <%ld>",
+                        sqlca.sqlerrd[2], i_usr_id, l_seq_nbr);
+        }
+
+        EXEC SQL
+             UPDATE   CDT_CDX_DISABLE_TRACK_SEBI
+             SET      CDT_PRCS_FLG='Y'
+             WHERE    CDT_MATCH_ACNT = :i_mtch_acnt_id
+             AND      CDT_SEQ_ID = :l_seq_nbr
+	     			 AND      CDT_USR_ID = :i_usr_id
+             AND      CDT_PRCS_FLG='P';
+
+        if ( SQLCODE != 0 )
+        {
+          fn_errlog  (c_ServiceName, "S31100", SQLMSG, c_err_msg  );
+          return (-1);
+        }
+
+        EXEC SQL
+              UPDATE UAC_USR_ACCNTS
+              SET    UAC_CDX_ALLWD = :c_cdx_validation_flag,
+                     UAC_LST_UPDT_DATE=sysdate
+              WHERE  UAC_CLM_MTCH_ACCNT = :i_mtch_acnt_id;
+
+        if ( SQLCODE != 0 )
+        {
+         fn_errlog ( c_ServiceName, "S31105", SQLMSG, c_err_msg  );
+         return (-1);
+        }
+				
+				** 23-Sep-2011 USR_ACCEPT flag update is removed for SEBI Declaration POST-UAT **
+    
+			  EXEC SQL
+              UPDATE  CLM_CLNT_MSTR
+              SET     CLM_CDX_CLNT_LVL = '1'
+              WHERE   CLM_MTCH_ACCNT = :i_mtch_acnt_id;
+
+        if ( SQLCODE != 0 )
+        {
+         fn_errlog ( c_ServiceName, "S31110", SQLMSG, c_err_msg  );
+         return (-1);
+        }
+				** Ver 1.6 Remark changed **
+        EXEC SQL
+             INSERT INTO ADH_ACT_DEACT_HSTRY
+            (
+              ADH_USR_ID,
+              ADH_CLM_MTCH_ACCNT,
+              ADH_ACT_DEACT_FLG,
+              ADH_ACT_DEACT_DT,
+              ADH_ACT_DEACT_SRC,
+              ADH_RMRKS,
+              ADH_UPGRD_FLG
+             )                    ** Ver 1.3 columns used in insert **
+
+             VALUES
+             (:i_usr_id ,:i_mtch_acnt_id , :c_cdt_uac_act_flg , SYSDATE, 'CDX_SEBI_TIME',
+              decode(:c_cdx_validation_flag,'Z','FNO/CDX enabled linked Bank account more than 6 months old','D','FNO/CDX enabled linked Bank account less than 6 months old','Y','SEBI CDX Allowd'), 'N' );
+	      ** Changed act_flag while inserting ADH from 'A' to variable c_cdt_uac_act_flg - Ver 1.2 **
+
+        if ( SQLCODE != 0 )
+        {
+          fn_errlog ( c_ServiceName, "S31115", SQLMSG, c_err_msg  );
+          return (-1);
+        }
+
+        return (0);
+  }
+ Ver 1.6 comment ends ********/
+/******************************************************************************/
+  char *trim(char *str)
+  {
+
+    int i;
+    for (i=0;i<strlen(str);i++)
+    if (str[i]==' ') str[i]='\0';
+
+    return(str);
+  }
+
+  void fn_print_date_time()
+  {
+    EXEC SQL BEGIN DECLARE SECTION;
+    char c_date_time[30];
+    EXEC SQL END   DECLARE SECTION;
+
+    EXEC SQL
+    SELECT
+    to_char(SYSDATE , 'dd-Mon-yyyy--hh24:mi:ss')
+    INTO :c_date_time
+    from dual;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog ( c_ServiceName, "S31120", SQLMSG, c_err_msg  );
+      return ;
+    }
+
+    trim(c_date_time);
+    fn_userlog (c_ServiceName," ----  Time : %s  ---- ",c_date_time);
+  }

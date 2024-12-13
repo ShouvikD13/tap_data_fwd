@@ -1,0 +1,785 @@
+/******************************************************************************/
+/*  Program           : BAT_DSBL_OPTBUYSELL                                   */
+/*                                                                            */
+/*  Output            : Success / Failure                                     */
+/*                                                                            */
+/*  Description       :                                                       */
+/*  Log               :                                                       */
+/*                                                                            */
+/******************************************************************************/
+/*  09-Feb-2022     Ver 1.0  Suchita D.                                       */
+/******************************************************************************/
+#include <stdio.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h> 
+#include <eba_to_ors.h>
+#include <fn_ddr.h>
+#include <errno.h>
+#include <string.h>
+#include <time.h>
+#include <stdlib.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_env.h>       
+
+#define BHAVCOPY_UPLOAD 'B'
+#define ONLINE_BROADCAST 'O'
+#define BAT_TRAN_LOCAL 2000 
+#define MAX_LENGTH  1000   
+#define EQ_CONTRACT "EQ_CONTRACT.ini" 
+
+char    c_ServiceName[33];
+
+int fn_cntrct_enbl_dsbl(char *c_ServiceName,
+                        struct vw_contract *ptr_cntrct_details,
+                        char *c_buysell_disble_flag,
+                        char c_old_buy_allwd,
+                        char c_old_sell_allwd,
+                        char *c_time, 
+                        struct vw_err_msg *ptr_st_err_msg);
+
+typedef struct contracts {
+  char  c_xchng_cd[4];    /* null="*" */
+  char  c_prd_typ;    /* null='*' */
+  char  c_ctgry_indstk;
+  char  c_undrlyng[7];    /* null="*" */
+  char  c_expry_dt[23];   /* null="*" */
+  char  c_exrc_typ;   /* null='*' */
+  char  c_opt_typ;    /* null='\0' */
+  long  l_strike_prc;   /* null=-1 */
+  char  c_buysell_disbl_flg[5];
+  char  c_buy_allwd;
+  char  c_sell_allwd;
+}st_contract ;
+
+st_contract *var_st_cntrct=NULL;
+
+void BAT_DSBL_OPTBUYSELL( int argc, char *argv[] )
+{
+	char c_msg[256];
+  char c_err_msg[256];
+
+  char	c_run_mode;				
+  char c_command1[100];  
+
+  char c_cmd[100];        
+  char c_ts_command[100]; 
+  char c_tmp_mail_date[22];
+  char c_old_buy_allwd='\0';
+  char c_old_sell_allwd='\0';
+
+  char c_ts[21];          
+  long l_c_ts = 0;
+  long l_counter = 0; 
+  FILE *pf;              
+
+
+EXEC SQL BEGIN DECLARE SECTION;
+	char c_xchng_cd[3+1];
+  char c_instrument[6+1];
+  char c_symbol[20+1];
+  char c_expry_dt[11+1];
+  long l_strike_prc;
+  char c_time_stamp[20+1];
+
+  char c_dsbl_all_flg='\0'; 
+  char c_itm_dsbl_flg='\0'; 
+  int l_error_code=0;
+  char c_buysell_disble_flag[5];
+
+  int i_no_of_otm_cntrs=0;
+  int i_normal_eos_days_left=0;
+
+  char  c_BUYSELL_dsbl[5];
+  int i_rowcnt=0;
+  int i=0;
+  int i_und_cnt=0;
+ 
+  char c_time[20+1];
+
+	struct vw_contract st_cntrct_details;	
+	struct vw_err_msg st_err_msg;				
+
+	int i_date_check; 		
+  long l_run_no;       
+
+  varchar c_valid_dt [12];  
+ 
+ EXEC SQL END DECLARE SECTION;
+
+  int i_ch_val;
+  int i_len;
+  int i_trnsctn;
+
+	strcpy(c_ServiceName, argv[0]);
+  strcpy(c_xchng_cd, argv[2]);
+  c_run_mode= argv[4][0];
+
+  fn_userlog( c_ServiceName, "c_run_mode. :%c:", c_run_mode);
+  fn_userlog( c_ServiceName, "Run NO. :%ld:", l_run_no );
+  INITBATDBGLVL(argv[0]);
+
+
+  EXEC SQL
+   SELECT
+        FOM_ITM_DSBLFLG,
+        FOM_NO_OTM_CNTRCTS,
+        FOM_DSBL_BUYSELL_FLG,
+        FOM_DSBL_ALL_FLG
+    INTO :c_itm_dsbl_flg,
+         :i_no_of_otm_cntrs,
+         :c_BUYSELL_dsbl,
+         :c_dsbl_all_flg
+    FROM FOM_FO_OPTCNTRCTDISBL_MSTR;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31005", SQLMSG, c_err_msg );
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    return ;
+  }
+
+  i_normal_eos_days_left = 0;
+  i_und_cnt=0;
+  if( c_run_mode == 'N' )
+  {
+    EXEC SQL
+    SELECT  cnt 
+      INTO  :i_normal_eos_days_left
+      FROM  
+      (  
+        SELECT count(1) cnt, FLM_LODM_TYP
+         FROM  FBC_FO_BRNCH_CAL,
+					     FLM_FO_LODM_MSTR,
+               exg_xchng_mstr
+				WHERE FBC_TRD_DT <= FLM_EOS_DT
+					AND FBC_TRD_DT <= FLM_EXP_DT
+					AND TRUNC(FBC_TRD_DT,'MM') = TRUNC(TO_DATE(FLM_EOS_DT,'DD-Mon-YYYY'),'MM')
+					AND FBC_XCHNG_CD =:c_xchng_cd
+					AND FLM_LODM_TYP ='N'
+					AND FBC_GRP_ID = '1'
+          AND FBC_XCHNG_CD = EXG_XCHNG_CD
+					AND FLM_EXP_DT >= exg_nxt_trd_dt 
+					AND FBC_TRD_DT >= exg_nxt_trd_dt
+          group by FLM_LODM_TYP
+       ) A,FLM_FO_LODM_MSTR B,exg_xchng_mstr C
+       WHERE B.FLM_LODM_TYP ='N'
+         AND C.EXG_XCHNG_CD = :c_xchng_cd  
+         AND B.FLM_EOS_DT >= C.exg_nxt_trd_dt 
+         AND B.FLM_EXP_DT >= C.exg_nxt_trd_dt 
+         AND cnt < B.FLM_NDAYSBFR_OPTCNTRDISBL+1;
+     if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+     {
+       fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_msg);
+       fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+       return;
+     }         
+
+     if( SQLCODE == NO_DATA_FOUND )
+     {
+       fn_userlog(c_ServiceName,"Skip the Process running today ");
+       return;
+     } 
+
+  }
+  else if( c_run_mode == 'A' )  /** Adhoc **/
+  {
+       EXEC SQL   
+       TRUNCATE TABLE FAD_FO_ADHOCUND_DSBL;
+       if (SQLCODE != 0)
+       {
+         fn_errlog(c_ServiceName, "S31015", SQLMSG, c_err_msg);
+         fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+         return;
+       } 
+
+       i_trnsctn = tpbegin(BAT_TRAN_LOCAL,0);
+       if ( i_trnsctn == -1 )
+       {
+         fn_errlog(c_ServiceName,"S31035",LIBMSG,c_err_msg);
+         return;
+       }
+
+        EXEC SQL
+           INSERT INTO FAD_FO_ADHOCUND_DSBL
+           ( FAD_UNDRLYNG 
+           )
+           SELECT UND     
+          FROM  (
+            SELECT count(1) days_left_eos,
+            FLM_UNDRLYNG UND,
+            FLM_EOS_DT,
+            FLM_EXP_DT Exp_Dt
+            FROM  FBC_FO_BRNCH_CAL,
+            FLM_FO_LODM_MSTR,
+               exg_xchng_mstr
+            WHERE FBC_TRD_DT <= FLM_EOS_DT
+            AND FBC_TRD_DT <= FLM_EXP_DT
+            AND TRUNC(FBC_TRD_DT,'MM') = TRUNC(TO_DATE(FLM_EOS_DT,'DD-Mon-YYYY'),'MM')
+            AND FBC_XCHNG_CD = 'NFO'
+            AND FBC_XCHNG_CD  = EXG_XCHNG_CD
+            AND FLM_LODM_TYP = 'A'
+            AND FBC_GRP_ID = '1'
+            AND FBC_TRD_DT >= exg_nxt_trd_dt
+            group by FLM_UNDRLYNG,
+            FLM_EOS_DT,
+            FLM_EXP_DT), FLM_FO_LODM_MSTR
+          WHERE FLM_UNDRLYNG = UND
+          AND FLM_LODM_TYP='A'
+          AND FLM_EXP_DT = Exp_Dt
+          AND days_left_eos <= FLM_NDAYSBFR_OPTCNTRDISBL+1;
+     if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+     {
+       fn_errlog(c_ServiceName, "S31020", SQLMSG, c_err_msg);
+       fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+       tpabort(0); 
+       return;
+     }
+
+     if( SQLCODE == NO_DATA_FOUND )
+     {
+       fn_userlog(c_ServiceName,"Skip the Process running today ");
+       tpabort(0);
+       return;
+     }
+
+     if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+     {
+       tpabort(0);
+       fn_errlog ( c_ServiceName,"S31060",LIBMSG,c_err_msg);
+       return ;
+     } 
+
+     
+     EXEC SQL
+       SELECT COUNT(1)
+         INTO :i_und_cnt
+         FROM FAD_FO_ADHOCUND_DSBL;
+     if (SQLCODE != 0)
+     {
+       fn_errlog(c_ServiceName, "S31025", SQLMSG, c_err_msg);
+       fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+       return;
+     }
+  
+     if( i_und_cnt == 0 )
+     {
+       fn_userlog(c_ServiceName,"Skip the ADHOC rocess running today ");
+       return;
+     }
+ 
+  }
+
+	MEMSET(c_time);
+
+	EXEC SQL
+	SELECT to_char(SYSDATE,'DD-MON-YYYY HH24:MI:SS')
+	INTO :c_time
+	FROM DUAL;
+	if (SQLCODE != 0)
+	{
+		fn_errlog(c_ServiceName, "S31030", SQLMSG, c_err_msg);
+		fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+		return;
+	}
+
+  EXEC SQL
+    TRUNCATE table FOB_FO_OPTCNTRCT_BUYSELLDSBL;
+  if (SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31015", SQLMSG, c_err_msg);
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    return;
+  }
+
+
+  i_trnsctn = tpbegin(BAT_TRAN_LOCAL,0);
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31035",LIBMSG,c_err_msg);
+    return;
+  }
+
+
+	if (c_dsbl_all_flg == 'N')
+  {
+   l_error_code=0; 
+    EXEC SQL EXECUTE
+        BEGIN
+          SP_FO_DSBL_OPTBUYSELL( :c_run_mode,:l_error_code);
+    END;
+    END-EXEC;
+    
+   fn_userlog(c_ServiceName,"SQL-ERROR<%ld>",SQLCODE);
+   if ( SQLCODE != 0 )
+   {
+    tpabort(0);
+    fn_errlog ( c_ServiceName, "S31040", SQLMSG, c_err_msg );
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    return ;       
+   }
+   fn_userlog(c_ServiceName,"l_error_code :%ld:",l_error_code);
+
+   if( l_error_code == -1 )
+   {
+      tpabort(0);
+      fn_errlog ( c_ServiceName, "S31045", SQLMSG, c_err_msg );
+      fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+      return ;
+   }
+
+  }
+  else if (c_dsbl_all_flg == 'Y')
+  {
+
+   if( c_run_mode == 'N' )
+   {
+    EXEC SQL
+      INSERT INTO FOB_FO_OPTCNTRCT_BUYSELLDSBL
+       (
+        FOB_XCHNG_CD,
+        FOB_PRDCT_TYP,
+        FOB_INDSTK,
+        FOB_UNDRLYNG,
+        FOB_EXPRY_DT,
+        FOB_EXER_TYP,
+        FOB_OPT_TYP,
+        FOB_STRK_PRC,
+        FOB_BS_DSBLFLG,
+        FOB_BUY_ALLWD,
+        FOB_SELL_ALLWD
+       )
+       SELECT FTQ_XCHNG_CD,
+       FTQ_PRDCT_TYP,
+       FTQ_INDSTK,
+       FTQ_UNDRLYNG,
+       FTQ_EXPRY_DT,
+       FTQ_EXER_TYP,
+       FTQ_OPT_TYP,
+       FTQ_STRK_PRC,
+       FOM_DSBL_BUYSELL_FLG,
+       FTQ_BUY_ALLWD,
+       FTQ_SELL_ALLWD
+       from
+        (
+          select FTQ_XCHNG_CD,FTQ_PRDCT_TYP,FTQ_INDSTK,FTQ_UNDRLYNG,FTQ_EXPRY_DT,FTQ_EXER_TYP,FTQ_OPT_TYP,FTQ_STRK_PRC,FTQ_BUY_ALLWD,FTQ_SELL_ALLWD
+          from FTQ_FO_TRD_QT,FLM_FO_LODM_MSTR
+          WHERE  FTQ_PRDCT_TYP='O'
+          AND FTQ_XCHNG_CD='NFO'
+          AND FTQ_SETLMNT_FLG  = 'P'
+          AND FTQ_EXPRY_DT=FLM_EXP_DT
+          AND FLM_LODM_TYP='N'
+          AND FLM_UNDRLYNG='ALL'
+          order by FTQ_UNDRLYNG,FTQ_STRK_PRC DESC
+        ), FOM_FO_OPTCNTRCTDISBL_MSTR
+        WHERE FOM_DSBL_ALL_FLG='Y';
+
+   if ( SQLCODE != 0 )
+   {
+    tpabort(0);
+    fn_errlog ( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    return ;
+   }
+  }
+  else if (c_run_mode == 'A' )
+  {
+    EXEC SQL
+      INSERT INTO FOB_FO_OPTCNTRCT_BUYSELLDSBL
+       (
+        FOB_XCHNG_CD,
+        FOB_PRDCT_TYP,
+        FOB_INDSTK,
+        FOB_UNDRLYNG,
+        FOB_EXPRY_DT,
+        FOB_EXER_TYP,
+        FOB_OPT_TYP,
+        FOB_STRK_PRC,
+        FOB_BS_DSBLFLG,
+        FOB_BUY_ALLWD,
+        FOB_SELL_ALLWD
+       )
+       SELECT FTQ_XCHNG_CD,
+       FTQ_PRDCT_TYP,
+       FTQ_INDSTK,
+       FTQ_UNDRLYNG,
+       FTQ_EXPRY_DT,
+       FTQ_EXER_TYP,
+       FTQ_OPT_TYP,
+       FTQ_STRK_PRC,
+       FOM_DSBL_BUYSELL_FLG,
+       FTQ_BUY_ALLWD,
+       FTQ_SELL_ALLWD
+       from
+        (
+         select FTQ_XCHNG_CD,FTQ_PRDCT_TYP,FTQ_INDSTK,FTQ_UNDRLYNG,FTQ_EXPRY_DT,FTQ_EXER_TYP,FTQ_OPT_TYP,FTQ_STRK_PRC,FTQ_BUY_ALLWD,FTQ_SELL_ALLWD
+          from FTQ_FO_TRD_QT,FLM_FO_LODM_MSTR,FAD_FO_ADHOCUND_DSBL
+          WHERE  FTQ_PRDCT_TYP='O'
+          AND FTQ_XCHNG_CD='NFO'
+          AND FTQ_SETLMNT_FLG  = 'P'
+          AND FLM_LODM_TYP='A'
+          AND FLM_UNDRLYNG=FAD_UNDRLYNG 
+          AND FTQ_UNDRLYNG = FAD_UNDRLYNG   
+          order by FTQ_UNDRLYNG,FTQ_STRK_PRC DESC
+        ), FOM_FO_OPTCNTRCTDISBL_MSTR
+        WHERE FOM_DSBL_ALL_FLG='Y';
+
+   if ( SQLCODE != 0 )
+   {
+    tpabort(0);
+    fn_errlog ( c_ServiceName, "S31055", SQLMSG, c_err_msg );
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    return ;
+   }
+  }
+ 
+  }
+  else
+  {
+    tpabort(0);
+    fn_userlog(c_ServiceName,"Invalid DIsbale All Flag");
+    return ;
+  }
+     
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    tpabort(0);
+    fn_errlog ( c_ServiceName,"S31060",LIBMSG,c_err_msg);
+    return ;
+  }
+
+  i_rowcnt=0;
+
+   EXEC SQL
+     SELECT COUNT(1)
+       INTO :i_rowcnt
+      FROM FOB_FO_OPTCNTRCT_BUYSELLDSBL
+     WHERE ( NVL(FOB_BUY_ALLWD,'Y')!='N'
+       OR NVL(FOB_SELL_ALLWD,'Y')!='N' );
+   if ( SQLCODE != 0 )
+   {
+    fn_errlog ( c_ServiceName, "S31065", SQLMSG, c_err_msg );
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    return ;
+   }
+
+   if( i_rowcnt == 0 )
+   {
+    fn_userlog(c_ServiceName,"No records to process"); 
+    return ;
+   
+   }
+
+
+   var_st_cntrct = calloc(sizeof(st_contract),i_rowcnt);
+
+   if(var_st_cntrct == NULL)
+   {
+     fn_errlog ( c_ServiceName, "S31070", UNXMSG, c_err_msg );
+     return ;
+   }
+  
+   EXEC SQL
+    DECLARE cur_online_brd CURSOR FOR 
+    SELECT FOB_XCHNG_CD,
+           FOB_PRDCT_TYP,
+           FOB_INDSTK,
+           FOB_UNDRLYNG,
+           FOB_EXPRY_DT,
+           FOB_EXER_TYP,
+           FOB_OPT_TYP,
+           NVL(FOB_STRK_PRC,-1),
+           FOB_BS_DSBLFLG,
+           NVL(FOB_BUY_ALLWD,'Y'),
+           NVL(FOB_SELL_ALLWD,'Y')
+      FROM FOB_FO_OPTCNTRCT_BUYSELLDSBL
+     WHERE ( NVL(FOB_BUY_ALLWD,'Y')!='N'
+       OR NVL(FOB_SELL_ALLWD,'Y')!='N' );
+
+   EXEC SQL
+      OPEN cur_online_brd;
+       
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31075", SQLMSG, c_err_msg );
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    free((char*)var_st_cntrct);
+    return ;
+  }
+
+  EXEC SQL for :i_rowcnt
+  FETCH  cur_online_brd 
+  INTO :var_st_cntrct;
+  
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31080", SQLMSG, c_err_msg );
+    fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    free((char*)var_st_cntrct);
+    return ;
+  }
+
+  EXEC SQL CLOSE cur_online_brd; 
+	
+	
+  for(i = 0 ; i < i_rowcnt ; i++)
+  {
+		MEMSET(st_cntrct_details);
+		MEMSET(c_expry_dt);
+    MEMSET(c_buysell_disble_flag);
+
+   strcpy(st_cntrct_details.c_xchng_cd,var_st_cntrct[i].c_xchng_cd);     
+   st_cntrct_details.c_prd_typ=var_st_cntrct[i].c_prd_typ;     
+   st_cntrct_details.c_ctgry_indstk = var_st_cntrct[i].c_ctgry_indstk;     
+   strcpy(st_cntrct_details.c_undrlyng,var_st_cntrct[i].c_undrlyng);     
+   strcpy(st_cntrct_details.c_expry_dt,var_st_cntrct[i].c_expry_dt);     
+   st_cntrct_details.c_exrc_typ=var_st_cntrct[i].c_exrc_typ;     
+   st_cntrct_details.c_opt_typ=var_st_cntrct[i].c_opt_typ;     
+   st_cntrct_details.l_strike_prc=var_st_cntrct[i].l_strike_prc;     
+   c_old_buy_allwd = var_st_cntrct[i].c_buy_allwd;
+   c_old_sell_allwd = var_st_cntrct[i].c_sell_allwd;
+   strcpy(c_buysell_disble_flag,var_st_cntrct[i].c_buysell_disbl_flg);
+   rtrim(st_cntrct_details.c_xchng_cd);
+   rtrim(st_cntrct_details.c_undrlyng);
+   rtrim(st_cntrct_details.c_expry_dt);
+  
+   rtrim(c_buysell_disble_flag);
+
+   if( (strcmp(c_buysell_disble_flag, "BUY")== 0) && (c_old_buy_allwd == 'N') )  
+   {
+     fn_userlog(c_ServiceName,"Buy Allowed flag is already disabled, skiping update");
+     continue;
+   }
+  
+   if( (strcmp(c_buysell_disble_flag, "SELL")== 0 ) && (c_old_sell_allwd == 'N') )
+   {
+     fn_userlog(c_ServiceName,"Sell Allowed flag is already disabled, skiping update");
+     continue;
+   }
+ 
+	 /**Call function for enabling or disabling of contract **/
+   i_trnsctn = tpbegin(BAT_TRAN_LOCAL,0);
+   if ( i_trnsctn == -1 )
+   {
+     fn_errlog(c_ServiceName,"S31085",LIBMSG,c_err_msg);
+     free((char*)var_st_cntrct);
+     return;
+   }
+
+	 i_ch_val =	fn_cntrct_enbl_dsbl(c_ServiceName,
+                                        &st_cntrct_details,
+                                        c_buysell_disble_flag,
+                                        c_old_buy_allwd,
+                                        c_old_sell_allwd,  
+                                        c_time,
+																				&st_err_msg);
+	 if(i_ch_val == -1)
+	 {
+			tpabort(0);
+			EXEC SQL CLOSE cur_online_brd;
+			fn_errlog(c_ServiceName, "S31090", LIBMSG, st_err_msg.c_err_msg);
+			fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+      free((char*)var_st_cntrct);
+			return;
+	 }
+
+   if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+   {
+      tpabort(0);
+      fn_errlog ( c_ServiceName,"S31095",LIBMSG,c_err_msg);
+      free((char*)var_st_cntrct);
+      return ;
+    }
+	}
+
+
+  EXEC SQL
+    SELECT to_char(sysdate,'dd-Mon-yyyy')
+      INTO :c_tmp_mail_date
+      from dual;
+ 
+      if ( SQLCODE != 0 ) 
+      {
+       fn_errlog(c_ServiceName, "S31100", SQLMSG, c_err_msg);
+       free((char*)var_st_cntrct);
+       return;
+      }
+
+     free((char*)var_st_cntrct);
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+
+  fn_var = BAT_DSBL_OPTBUYSELL;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  char c_msg[256];
+
+  sprintf ( c_msg, "Batch process %s ended", argv[0] ); fn_bat_pst_msg (  argv[0], c_msg, c_tag );
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}
+
+int fn_cntrct_enbl_dsbl(char *c_ServiceName,
+												struct vw_contract *ptr_cntrct_details,
+                        char *c_buysell_disble_flag,
+                        char c_old_buy_allwd,
+                        char c_old_sell_allwd,
+                        char *c_time,     
+												struct vw_err_msg *ptr_st_err_msg)
+{
+int i_trnsctn;
+char c_msg[256];
+
+EXEC SQL BEGIN DECLARE SECTION;
+int i_rec_exists;
+int i_date_check;
+char c_mnth_year[9];
+char *null_ptr  = 0;
+double d_lot_sz = 0; 
+char c_cur_buy_allwd='\0';
+char c_cur_sell_allwd='\0';
+
+
+EXEC SQL END DECLARE SECTION;
+
+rtrim(c_buysell_disble_flag);
+
+if( DEBUG_MSG_LVL_3 ) {
+fn_userlog(c_ServiceName,"Request Type:%c:",ptr_cntrct_details->c_rqst_typ);
+fn_userlog(c_ServiceName,"The inputed contract is:%s:%c:%s:%s:%c:%c:%ld: c_buysell_disble_flag :%s:",ptr_cntrct_details->c_xchng_cd,
+													ptr_cntrct_details->c_prd_typ,ptr_cntrct_details->c_undrlyng,ptr_cntrct_details->c_expry_dt,
+													ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ,ptr_cntrct_details->l_strike_prc,c_buysell_disble_flag);
+}
+
+   if( strcmp(c_buysell_disble_flag, "BUY")== 0 )
+   { 
+		EXEC SQL
+		UPDATE FTQ_FO_TRD_QT 
+		SET FTQ_BUY_ALLWD = 'N' 
+		WHERE FTQ_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+		AND FTQ_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+		AND FTQ_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+		AND FTQ_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+		AND FTQ_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+		AND FTQ_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+		AND FTQ_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+		AND FTQ_STRK_PRC   = :ptr_cntrct_details->l_strike_prc
+    RETURNING NVL(FTQ_BUY_ALLWD,'Y'),
+              NVL(FTQ_SELL_ALLWD,'Y')
+         INTO :c_cur_buy_allwd,
+              :c_cur_sell_allwd;
+ 
+		if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+		{
+			fn_errlog ( c_ServiceName,"S31105",SQLMSG,ptr_st_err_msg->c_err_msg);
+			return FAILURE;
+		}
+   }
+   else if( strcmp(c_buysell_disble_flag,"SELL") == 0 )
+   {
+    EXEC SQL
+    UPDATE FTQ_FO_TRD_QT
+      SET  FTQ_SELL_ALLWD ='N' 
+    WHERE FTQ_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+    AND FTQ_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+    AND FTQ_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+    AND FTQ_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+    AND FTQ_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+    AND FTQ_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+    AND FTQ_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+    AND FTQ_STRK_PRC   = :ptr_cntrct_details->l_strike_prc
+    RETURNING NVL(FTQ_BUY_ALLWD,'Y'),
+              NVL(FTQ_SELL_ALLWD,'Y')
+         INTO :c_cur_buy_allwd,
+              :c_cur_sell_allwd;
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+    {
+      fn_errlog ( c_ServiceName,"S31110",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+   }
+   else if( strcmp(c_buysell_disble_flag,"BOTH") == 0 ) 
+   {
+    EXEC SQL
+    UPDATE FTQ_FO_TRD_QT
+    SET FTQ_BUY_ALLWD  = 'N',
+        FTQ_SELL_ALLWD = 'N'
+    WHERE FTQ_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+    AND FTQ_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+    AND FTQ_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+    AND FTQ_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+    AND FTQ_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+    AND FTQ_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+    AND FTQ_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+    AND FTQ_STRK_PRC   = :ptr_cntrct_details->l_strike_prc
+    RETURNING NVL(FTQ_BUY_ALLWD,'Y'),
+              NVL(FTQ_SELL_ALLWD,'Y')
+         INTO :c_cur_buy_allwd,
+              :c_cur_sell_allwd;
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+    {
+      fn_errlog ( c_ServiceName,"S31115",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+   }
+   
+    EXEC SQL 
+    INSERT INTO  FBL_FOOPTCNTRCT_BSDSBL_LOG 
+    (
+      FBL_XCHNG_CD,
+      FBL_PRDCT_TYP,
+      FBL_INDSTK,
+      FBL_UNDRLYNG,
+      FBL_EXPRY_DT,
+      FBL_EXER_TYP,
+      FBL_OPT_TYP,
+      FBL_STRK_PRC,
+      FBL_OLD_BUY_ALLWD,
+      FBL_OLD_SELL_ALLWD,
+      FBL_CUR_BUY_ALLWD,
+      FBL_CUR_SELL_ALLWD,
+      FBL_UPDATE_TIME,
+      FBL_INSERT_TM
+    )
+    VALUES
+    (:ptr_cntrct_details->c_xchng_cd,
+     :ptr_cntrct_details->c_prd_typ,
+     :ptr_cntrct_details->c_ctgry_indstk,
+     :ptr_cntrct_details->c_undrlyng,
+     :ptr_cntrct_details->c_expry_dt,
+     :ptr_cntrct_details->c_exrc_typ,
+     :ptr_cntrct_details->c_opt_typ,
+     :ptr_cntrct_details->l_strike_prc,
+     :c_cur_buy_allwd,
+     :c_cur_sell_allwd,
+     :c_cur_buy_allwd,
+     :c_cur_sell_allwd, 
+     to_date(:c_time,'DD-MON-YYYY HH24:MI:SS'),
+     sysdate
+    );
+    if(SQLCODE != 0 )
+    {
+      fn_errlog ( c_ServiceName,"S31120",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+
+ return SUCCESS;
+
+}
+

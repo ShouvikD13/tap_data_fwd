@@ -1,0 +1,1423 @@
+/******************************************************************************/
+/*  Program           : BAT_COMP_SAM_CHRG                                     */
+/*                                                                            */
+/*  Input             :                                                       */
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       :                                                       */
+/*                                                                            */
+/*                                                                            */
+/*                                                                            */
+/*  Log               : 1.0   18-Jan-2021   Infotech|Tanmay/Saurabh Patil     */
+/*																					Rajvi															*/
+/*                    : 1.1   12-May-2021   Infotech|Saurabh Patil            */  
+/*                    : 1.2   20-Apr-2022   Infotech|Rajvi 										*/  
+/*                    : 1.3   21-Jun-2022   Infotech|Renuka 									*/  
+/******************************************************************************/
+/*   1.0  -  New release CR-ISEC03-145681 - Pledge charges for SAM and				*/ 
+/*					 MTF pledge creation, closure and invocation                      */
+/*   1.1  -  Minor Changes                                                    */   
+/*   1.2  -  CR-ISEC03-167475 DP Charges Failure Phase II											*/ 
+/*   1.3  -  CR-ISEC03-172454-Changes in layout for Depository Charges Page 	*/ 
+/*	 1.4	-	 Minor charges for optimization in MTF pledge charges (Renuka)    */
+/******************************************************************************/
+#include<sqlca.h>
+#include<string.h>
+#include<stdlib.h>
+#include<atmi.h>
+#include<fml32.h>
+/*#include<fo.h>*/
+#include<fn_log.h>
+#include<fn_tuxlib.h>
+#include<fn_battmpt.h>
+#include<fo_fml_def.h>
+#include<fml_def.h>
+#include<fml_mf.h>
+#include<fn_ddr.h>
+#include<fml_rout.h>
+#include<fn_read_debug_lvl.h>
+#include<userlog.h>
+#include<fn_get_gst_dtls.h>
+#include<eba.h>
+#include <fn_prd_insert.h>      /** Ver. 1.3 **/
+
+EXEC SQL INCLUDE "table/uac_usr_accnts.h";
+EXEC SQL INCLUDE "table/mdc_misc_dr_cr.h";
+
+#define LOCAL_TRAN_TIMEOUT 600
+
+int   fn_get_mi_stts(char*  ,char*  ,long   ,char*,char*, char* ,char*);
+
+/*int   fn_upd_segment_lmt(char* ,char* ,double ,char* ,char ,char* ,long* ,char*);*/
+int  fn_gst_failed_mark (void );
+int  fn_mdc_failed_mark (void );
+
+char     c_rowid[26] = {'\0'};
+char     c_clm_mtch_accnt[11];
+char     c_ServiceName [33];
+char     c_trd_dt[12];
+int      i_trnsctn = 0;
+
+void BAT_COMP_SAM_CHRG( int argc, char *argv[] )
+{
+
+			FBFR32 *ptr_fml_Sbuffer=NULL;
+  		FBFR32 *ptr_fml_Rbuffer=NULL;
+
+  		int      i = 0;
+  		int      i_tot_chrg = 0;
+			int      i_returncode = 0;
+      int      i_ret_cd = 0;
+			int      i_chrg_amt = 0;
+      int      i_err[20];
+      int      i_ferr[20];
+      int      i_count_exist;
+      int      i_count_ext;
+			int			 i_mpc_count;
+
+      long     l_recvbuff = 0;
+			long		 l_tot_mdc_count = 0;
+ 			long		 l_tot_inm_count = 0;
+			long		 l_mdc_lim_count;
+
+      char     c_err_msg[256];
+      char     c_prd_typ_flg;
+      char     c_stck_cd[11];
+      char     c_prd_stck_cd[6];  /* Ver 1.3 */
+			char     c_msg[256];
+			char     c_mdc_rowid[25];
+
+      varchar  c_prdct_cd[6+1];
+      varchar  c_sub_prdct_cd[6+1];
+
+      varchar  c_gst_state_cd[2+1];       /* Ver 1.1 */
+      varchar  c_gst_isec_state_cd[2+1];  /* Ver 1.1 */
+			varchar  v_start_time[25];       		/* Ver.1.3 */
+
+			double   d_chrg_amt = 0;
+      double   d_t1_contri_gst = 0.0;
+      double 	 d_cgst_amt = 0.0;
+      double   d_sgst_amt = 0.0;
+      double   d_igst_amt = 0.0;
+      double   d_ugst_amt = 0.0;
+			double   d_chrg_sum; 
+      double   d_cgst_sum;
+      double   d_sgst_sum;
+      double   d_igst_sum;
+      double   d_ugst_sum;
+      double   d_cgst_per = 0.0;
+      double   d_sgst_per = 0.0;
+      double   d_ugst_per = 0.0;
+      double   d_igst_per = 0.0;
+      double   d_tot_gst_sum;
+      double   d_tot_chrg_gst_sum;
+ 
+      struct   vw_gst_amt st_gst;
+	
+      MEMSET(st_gst);
+      MEMSET(sql_uac_usr_id.arr);
+      MEMSET(v_start_time);  /* Ver 1.3 */
+
+      INITBATDBGLVL(argv[0]);
+
+      strcpy(c_ServiceName, "bat_comp_sam_chrg");
+
+      fn_userlog(c_ServiceName," Batch process %s started...........",c_ServiceName );
+
+      if(argc != 6)
+      {
+        sprintf(c_msg,"Usage: %s <NFO> <NA> <BO> <TRD_DT> <product_type[P-Pledge M-MTF]>",argv[0]);
+        fn_userlog (c_ServiceName,"Usage : <bat_comp_chrg> <NFO> <NA> <BO> <TRD_DT> <product_type[P-Pledge M-MTF]>");
+        return;
+      }
+
+      strcpy(c_trd_dt,argv[4]);
+      
+      c_prd_typ_flg = argv[5][0];
+
+			/**** Ver 1.3 starts *****/
+			EXEC SQL
+    	SELECT  to_char(SYSDATE, 'DD-Mon-YY HH24.MI.SS')
+    	INTO    :v_start_time
+    	FROM    DUAL;
+
+			if( SQLCODE != 0 )
+      {
+      	fn_errlog(c_ServiceName,"S31005",SQLMSG,c_err_msg );
+        return;
+      }
+
+			SETNULL(v_start_time);
+			/**** End of Ver 1.3 */
+
+			if ( c_prd_typ_flg == 'P' )
+      {
+        i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+                
+        if ( i_trnsctn == -1 )
+        {
+          fn_errlog(c_ServiceName,"S31010",LIBMSG,c_err_msg);
+          return;
+        }    
+
+      	fn_userlog (c_ServiceName,"IN Product type P Condition");
+ 
+        EXEC SQL
+        UPDATE PTD_TIFP_DTLS
+        SET    PTD_MDC_CONF_STTS ='I'
+        WHERE  NVL(PTD_MDC_CONF_STTS,'N') ='N'
+        AND    PTD_LEG_NO = decode(PTD_PLG_REV_TYP,'P','L5','W','W3','I','I3')
+        AND    PTD_TIFP_STTS ='P' ;         
+
+        if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+        {
+          fn_errlog(c_ServiceName,"S31015",SQLMSG,c_err_msg );
+          tpabort(0);
+          return;
+        }
+        else if ( SQLCODE == NO_DATA_FOUND )
+        {
+          fn_userlog (c_ServiceName,"NO records found");
+          tpabort(0);  
+          return;
+        }
+     
+        fn_userlog (c_ServiceName,"Insertion into PDC_PLG_DP_CHRG.......");       
+
+        EXEC SQL
+        INSERT INTO PDC_PLG_DP_CHRG
+        (
+         PDC_XCHNG_CD,
+         PDC_ORDR_NO,
+         PDC_STCK_CD,
+         PDC_DP_NM,
+         PDC_ISIN_NMBR,
+         PDC_DP_ID,
+         PDC_DP_CLNT_ID,
+         PDC_ORDR_DT,
+         PDC_CLNT_MTCH_ACCNT,
+         PDC_PLG_REV_TYP,
+         PDC_CONF_STTS,
+         PDC_TRDE_DT,
+         PDC_CHRG,
+         PDC_MDC_CONF_STTS,
+         PDC_GST_CONF_STTS
+        )
+        SELECT
+        PTD_XCHNG_CD,
+        PTD_POD_REF_NO,
+        PTD_STCK_CD,
+        DCM_DEPOSTRY_NM,
+        PTD_ISIN_NMBR,
+        PTD_DP_ID,
+        PTD_DP_CLNT_ID,
+        PTD_TIFP_RUN_DT,
+        PTD_CLM_MTCH_ACCNT,
+        PTD_PLG_REV_TYP,
+        PTD_TIFP_STTS,
+        :c_trd_dt,
+        DCM_CHRG,
+        'N',
+        'N'
+        FROM   PTD_TIFP_DTLS,DCM_DEPOSITRY_CHRG_MSTR
+        WHERE  PTD_PLG_REV_TYP = DECODE(DCM_TRNS_TYP,'Creation','P','Withdrawal','W','Invocation','I')
+        AND    PTD_MDC_CONF_STTS ='I'
+        AND    DCM_DEPOSTRY_NM = DECODE(substr(PTD_DP_ID,1,1),'1','CDSL','NSDL') 
+        AND    DCM_PRODUCT_CD = 'DCS'; 
+ 
+      	if( SQLCODE != 0 )
+      	{
+        	fn_errlog(c_ServiceName,"S31020",SQLMSG,c_err_msg );
+        	tpabort(0);
+        	return;
+      	}
+ 
+        fn_userlog (c_ServiceName,"Insertion of PDC_PLG_DP_CHRG Sucessfull.....");     
+ 
+        if ( tpcommit(0) == -1 )
+        {
+          fn_errlog(c_ServiceName, "S31025", TPMSG, c_err_msg );
+          tpabort(0);
+          return;
+        } 	
+    
+
+		 		while(1)
+				{
+          fn_userlog (c_ServiceName,"inside while loop for GST Calculation....");
+         
+          i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+ 
+          if ( i_trnsctn == -1 )
+          {
+            fn_errlog(c_ServiceName,"S31030",LIBMSG,c_err_msg);
+            return;
+          }
+    
+          MEMSET(c_clm_mtch_accnt);     
+          d_chrg_amt = 0;              
+ 
+          EXEC SQL
+            SELECT  PDC_CLNT_MTCH_ACCNT,
+                    PDC_CHRG,
+                    PDC_PLG_DP_CHRG.ROWID
+            INTO    :c_clm_mtch_accnt,
+                    :d_chrg_amt,
+                    :c_rowid
+            FROM    PDC_PLG_DP_CHRG
+            WHERE   PDC_TRDE_DT = :c_trd_dt
+            AND     PDC_GST_CONF_STTS ='N'
+            AND     ROWNUM < 2;
+            
+         	if ( SQLCODE != 0 )
+         	{
+          	if ( SQLCODE == NO_DATA_FOUND )
+           	{
+              fn_userlog(c_ServiceName,"No Records Found");
+              tpabort(0);
+              break;
+           	}
+            else
+            {
+              fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+              tpabort(0);
+              if(fn_gst_failed_mark()  == 0)
+              continue;   
+              return;
+            }
+          }
+					rtrim(c_rowid);      
+         	fn_userlog(c_ServiceName,"c_clm_mtch_accnt:%s:",c_clm_mtch_accnt);
+         	fn_userlog(c_ServiceName,"d_chrg_amt:%lf:",d_chrg_amt); 
+         	fn_userlog(c_ServiceName,"c_rowid:%s:",c_rowid);
+
+         	fn_userlog(c_ServiceName," Fetching USER ID....");         
+         
+         	EXEC SQL
+           SELECT  UAC_USR_ID
+           INTO    :sql_uac_usr_id
+           FROM    UAC_USR_ACCNTS
+           WHERE   UAC_CLM_MTCH_ACCNT = :c_clm_mtch_accnt;
+          
+         	if( SQLCODE != 0)
+         	{
+          	fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg );
+            tpabort(0); 
+            if(fn_gst_failed_mark()  == 0)
+            continue; 
+           	return;	
+         	}
+ 
+         	MEMSET(st_gst.c_gst_state_cd);
+         	MEMSET(st_gst.c_gst_isec_state_cd);
+         	st_gst.d_cgst_amt = 0.0;
+         	st_gst.d_sgst_amt = 0.0;
+         	st_gst.d_igst_amt = 0.0;
+         	st_gst.d_ugst_amt = 0.0;
+         	st_gst.d_gst_amt = 0.0;
+         	MEMSET(st_gst);
+         	st_gst.d_srvc_chrg_amt = d_chrg_amt;
+
+         	if( st_gst.d_srvc_chrg_amt > 0 )
+         	{
+          	fn_userlog(c_ServiceName,"Calling fn_get_gst_dtls Function.....");
+           	i_returncode = fn_get_gst_dtls ( c_ServiceName,
+            	                                sql_uac_usr_id.arr,
+              	                              &st_gst
+                	                           );
+
+           	if( SQLCODE != 0)
+           	{
+             	fn_errlog( c_ServiceName, "S31045", SQLMSG, c_err_msg );
+              tpabort(0);  
+              if(fn_gst_failed_mark()  == 0)
+              continue;
+             	return;
+           	}
+           	rtrim(st_gst.c_gst_state_cd);
+           	rtrim(st_gst.c_gst_isec_state_cd);
+         	}
+
+         	if(DEBUG_MSG_LVL_4)
+         	{
+           	userlog("d_gst_amt     :%lf:",st_gst.d_gst_amt);
+           	userlog("st_gst.d_srvc_chrg_amt :%lf:",st_gst.d_srvc_chrg_amt);
+           	userlog("st_gst.c_gst_state_cd  :%s:",st_gst.c_gst_state_cd);
+           	userlog("st_gst.c_gst_isec_state_cd :%s:",st_gst.c_gst_isec_state_cd);
+           	userlog("d_cgst_amt :%lf:",st_gst.d_cgst_amt);
+           	userlog("d_sgst_amt :%lf:",st_gst.d_sgst_amt);
+           	userlog("d_igst_amt :%lf:",st_gst.d_igst_amt);
+           	userlog("d_ugst_amt :%lf:",st_gst.d_ugst_amt);
+         	}
+				
+         	fn_userlog(c_ServiceName," Updating PDC_PLG_DP_CHRG....");
+				 	EXEC SQL
+            UPDATE  PDC_PLG_DP_CHRG
+            SET     PDC_CGST_AMT = :st_gst.d_cgst_amt,
+                    PDC_SGST_AMT = :st_gst.d_sgst_amt,
+                    PDC_IGST_AMT = :st_gst.d_igst_amt,
+                    PDC_UGST_AMT = :st_gst.d_ugst_amt,
+                    PDC_TOT_GST_AMT = :st_gst.d_gst_amt,        
+                    PDC_TOT_CHRG_AMT = ( :st_gst.d_srvc_chrg_amt + :st_gst.d_gst_amt ),
+                    PDC_GST_CONF_STTS ='Y',
+                    PDC_GST_STATE_CD = :st_gst.c_gst_state_cd,           /* Ver 1.1 */
+                    PDC_GST_ISEC_STATE_CD = :st_gst.c_gst_isec_state_cd  /* Ver 1.1 */
+            WHERE   PDC_CLNT_MTCH_ACCNT = :c_clm_mtch_accnt
+            AND     PDC_TRDE_DT = :c_trd_dt
+            AND     PDC_GST_CONF_STTS ='N'
+            AND     PDC_PLG_DP_CHRG.ROWID  = :c_rowid;
+					
+					if(SQLCODE != 0)
+        	{
+        		fn_errlog(c_ServiceName, "S31050", SQLMSG, c_err_msg);
+            tpabort(0);
+            if(fn_gst_failed_mark()  == 0)
+            continue;
+          	return;
+        	}
+          
+          if ( tpcommit(0) == -1 )
+          {
+            fn_errlog(c_ServiceName, "S31055", TPMSG, c_err_msg );
+            tpabort(0);
+            return;
+          }
+  
+				} /** While loop end for GST Insertion**/
+	 
+  
+      	while(1)
+      	{
+          i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+         
+          if ( i_trnsctn == -1 )
+          {
+            fn_errlog(c_ServiceName,"S31060",LIBMSG,c_err_msg);
+            return;
+          }
+ 
+          MEMSET(c_clm_mtch_accnt);
+
+          EXEC SQL
+          SELECT distinct PDC_CLNT_MTCH_ACCNT 
+          INTO   :c_clm_mtch_accnt
+          FROM   PDC_PLG_DP_CHRG
+          WHERE  PDC_MDC_CONF_STTS ='N'
+          AND    PDC_GST_CONF_STTS ='Y'
+          AND    PDC_TRDE_DT = :c_trd_dt
+          AND    rownum < 2;
+
+          if ( SQLCODE != 0 )
+          {
+            if ( SQLCODE == NO_DATA_FOUND )
+            {
+              fn_userlog (c_ServiceName,"NO records found");
+              break;
+            }
+            else
+            {
+              fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg  );
+              tpabort(0); 
+              if(fn_mdc_failed_mark()  == 0)
+              continue;
+              return;
+            }
+          }
+           
+          fn_userlog (c_ServiceName,"inside while loop for MDC Insertion....");
+ 
+          d_chrg_sum = 0;
+          d_cgst_sum = 0;
+          d_sgst_sum = 0;
+          d_tot_gst_sum = 0;
+          d_tot_chrg_gst_sum = 0;
+          MEMSET(c_gst_state_cd); /** Ver 1.1 **/
+          MEMSET(c_gst_isec_state_cd); /** Ver 1.1 **/
+
+          EXEC SQL    
+            SELECT  SUM(PDC_CHRG),
+                    SUM(PDC_CGST_AMT),
+                    SUM(PDC_SGST_AMT),
+                    SUM(PDC_TOT_GST_AMT),
+                    SUM(PDC_TOT_CHRG_AMT),
+                    SUM(PDC_IGST_AMT),
+                    SUM(PDC_UGST_AMT),
+                    PDC_GST_STATE_CD,      /* Ver 1.1 */
+                    PDC_GST_ISEC_STATE_CD  /* Ver 1.1 */ 
+            INTO    :d_chrg_sum,
+                    :d_cgst_sum,
+                    :d_sgst_sum,
+                    :d_tot_gst_sum,
+                    :d_tot_chrg_gst_sum,
+                    :d_igst_sum,
+                    :d_ugst_sum,
+                    :c_gst_state_cd,      /* Ver 1.1 */
+                    :c_gst_isec_state_cd  /* Ver 1.1 */
+            FROM    PDC_PLG_DP_CHRG
+            WHERE   PDC_TRDE_DT = :c_trd_dt
+            AND     PDC_CLNT_MTCH_ACCNT = :c_clm_mtch_accnt
+            AND     PDC_GST_CONF_STTS ='Y'
+            AND     PDC_MDC_CONF_STTS ='N'
+            Group By  PDC_GST_STATE_CD,PDC_GST_ISEC_STATE_CD;  /* Ver 1.1 */  
+                      
+ 
+          if ( SQLCODE != 0 )
+        	{
+            	fn_errlog( c_ServiceName, "S31070", SQLMSG, c_err_msg  );
+              tpabort(0);
+              if(fn_mdc_failed_mark()  == 0)
+              continue;      
+            	return;
+        	}
+
+          SETLEN(c_gst_state_cd);        /** Ver 1.1 **/
+          SETLEN(c_gst_isec_state_cd);   /** Ver 1.1 **/
+          SETNULL(c_gst_state_cd);       /** Ver 1.1 **/
+          SETNULL(c_gst_isec_state_cd);  /** Ver 1.1 **/
+
+        	MEMSET(c_prdct_cd);
+        	MEMSET(c_sub_prdct_cd);
+
+        	sql_mdc_sttlmnt_nmbr = 0;
+
+        	EXEC SQL
+        	SELECT 'OTHRDB',
+          	     'DCS',
+            	   TO_CHAR(EXG_NXT_TRD_DT,'DD-Mon-YYYY'),
+              	 fn_gst_seq_OTHR_DBIT(:c_gst_isec_state_cd,to_char(trunc(sysdate))),   /* Ver 1.1 */
+                 TO_CHAR(SYSDATE, 'DD-Mon-YYYY')
+        	INTO   :c_prdct_cd,
+          	     :c_sub_prdct_cd,
+            	   :sql_mdc_sttlmnt_trd_dt,
+              	 :sql_mdc_invoice_nmbr,
+                 :sql_mdc_invoice_date
+        	FROM   EXG_XCHNG_MSTR
+        	WHERE  EXG_XCHNG_CD = 'NFO';
+
+        	if(SQLCODE != 0)
+        	{
+          	fn_errlog(c_ServiceName, "S31075", SQLMSG, c_err_msg);
+            tpabort(0);
+            if(fn_mdc_failed_mark()  == 0)
+            continue;
+          	return;  
+        	}
+
+        	SETLEN(c_prdct_cd);
+        	SETLEN(c_sub_prdct_cd);
+        	SETNULL(c_prdct_cd);
+        	SETNULL(c_sub_prdct_cd);
+
+        	EXEC SQL
+        	select GSTM_CGST_PRCNT,
+          	     GSTM_SGST_PRCNT,
+                 nvl(GSTM_UGST_PRCNT,0),
+                 nvl(GSTM_IGST_PRCNT,0) 
+        	into   :d_cgst_per,
+          	     :d_sgst_per,
+                 :d_ugst_per,
+                 :d_igst_per  
+        	from   GSTM_GST_STATE_MSTR
+        	where  GSTM_STATE_CD= :c_gst_state_cd;  /* Ver 1.1 */
+  
+        	if(SQLCODE != 0)
+        	{
+          	fn_errlog(c_ServiceName, "S31080", SQLMSG, c_err_msg);
+            tpabort(0);
+            if(fn_mdc_failed_mark()  == 0)
+            continue;  
+          	return;
+        	}
+
+        	EXEC SQL
+        	SELECT '01'||to_char(sysdate, 'yyddmm')||Next_doc_no.NEXTVAL
+        	INTO   :sql_mdc_crdt_nmbr
+        	FROM   DUAL;
+
+        	if(SQLCODE != 0)
+        	{
+          	fn_errlog(c_ServiceName, "S31085", SQLMSG, c_err_msg);
+            tpabort(0);
+            if(fn_mdc_failed_mark()  == 0)
+            continue;   
+          	return;
+        	}
+
+			  	fn_userlog(c_ServiceName,"MDC Insertion start..");
+
+        	EXEC SQL
+        	INSERT INTO mdc_misc_dr_cr
+        	(
+          	MDC_CLM_MTCH_ACCNT,
+          	MDC_PRDCT_TYP,
+          	MDC_CRDT_NMBR,
+          	MDC_AMT1,
+          	MDC_AMT2,
+          	MDC_TOT_AMT,
+          	MDC_FROM_DT,
+          	MDC_TO_DT,
+          	MDC_DR_CR_FLG,
+          	MDC_MTCH_STTS,
+          	MDC_BNK_STTS,
+            MDC_ENTRY_DT,
+          	MDC_MTCH_UPD_AMT,
+          	MDC_BNK_UPD_AMT,
+          	MDC_CGST_AMT,
+          	MDC_SGST_AMT,
+            MDC_IGST_AMT,
+            MDC_UGST_AMT,
+          	MDC_GST_STATE_CD,
+          	MDC_GST_ISEC_STATE_CD,
+          	MDC_STCK_CD,
+          	MDC_LMT_UPD_STTS,
+          	MDC_STTLMNT_TRD_DT,
+          	MDC_STTLMNT_NMBR, 
+          	MDC_INVOICE_NMBR,
+          	MDC_INVOICE_GEN_FLG
+        	) VALUES
+        	(
+         	  :c_clm_mtch_accnt,
+         	  'DCS',
+          	:sql_mdc_crdt_nmbr,
+            :d_chrg_sum,
+            0, 
+          	:d_tot_chrg_gst_sum, 
+          	trunc(sysdate),
+          	trunc(sysdate),
+          	'D',
+          	'N',
+          	'N',
+            trunc(sysdate),
+          	0.00,
+          	0.00,
+            :d_cgst_sum,
+           	:d_sgst_sum,
+            :d_igst_sum,
+            :d_ugst_sum, 
+          	:c_gst_state_cd,      /* Ver 1.1 */ 
+          	:c_gst_isec_state_cd, /* Ver 1.1 */
+          	NULL,
+          	'N',
+          	:sql_mdc_sttlmnt_trd_dt,
+          	:sql_mdc_sttlmnt_nmbr,
+          	:sql_mdc_invoice_nmbr,
+          	'Y'
+        	);
+
+        	if( SQLCODE != 0)
+        	{
+          	fn_errlog( c_ServiceName, "S31090", SQLMSG, c_err_msg );
+            tpabort(0); 
+            if(fn_mdc_failed_mark()  == 0)
+            continue;
+          	return;
+        	}
+        
+        	fn_userlog(c_ServiceName,"MDC Insert successfull..");      
+
+        	ptr_fml_Sbuffer= (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+        	if(ptr_fml_Sbuffer == NULL)
+       	 	{
+          	fn_errlog( c_ServiceName, "S31095", TPMSG, c_err_msg );
+            tpabort(0);
+            if(fn_mdc_failed_mark()  == 0)
+            continue;     
+          	return;
+        	}
+
+        	ptr_fml_Rbuffer= (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+        	if(ptr_fml_Rbuffer == NULL)
+        	{
+          	fn_errlog( c_ServiceName, "S31100", TPMSG, c_err_msg );
+            tpabort(0); 
+            if(fn_mdc_failed_mark()  == 0)
+            continue; 
+          	return;
+        	}
+ 
+        	fn_userlog(c_ServiceName,"INVOICE Insert started....");
+
+        	i_err[0]=Fadd32(ptr_fml_Sbuffer,FML_MATCH_ACCNT,(char *)c_clm_mtch_accnt, 0);
+        	i_ferr[0]=Ferror32;
+        	i_err[1]=Fadd32(ptr_fml_Sbuffer,FML_OPTION_DESC,(char *)c_prdct_cd.arr, 0);
+        	i_ferr[1]=Ferror32;
+        	i_err[2]=Fadd32(ptr_fml_Sbuffer,FML_TRANS_STATUS_DESC,(char *)sql_mdc_invoice_nmbr.arr, 0);
+        	i_ferr[2]=Ferror32;
+        	i_err[3]=Fadd32(ptr_fml_Sbuffer,FML_TRD_DT,(char *)sql_mdc_invoice_date.arr, 0);
+        	i_ferr[3]=Ferror32;
+        	i_err[4]=Fadd32(ptr_fml_Sbuffer,FML_MF_AIP_ORIG_AMT,(char *)&d_chrg_sum, 0);
+        	i_ferr[4]=Ferror32;
+        	i_err[5]=Fadd32(ptr_fml_Sbuffer,FML_MF_LD_PERCENTAGE,(char *)&d_cgst_sum, 0);
+        	i_ferr[5]=Ferror32;
+        	i_err[6]=Fadd32(ptr_fml_Sbuffer,FML_MF_LD_MIN_LOAD,(char *)&d_sgst_sum, 0);
+        	i_ferr[6]=Ferror32;
+        	i_err[7]=Fadd32(ptr_fml_Sbuffer,FML_MF_LD_MAX_LOAD,(char *)&d_ugst_sum, 0);  /* Ver 1.1 */
+        	i_ferr[7]=Ferror32;
+        	i_err[8]=Fadd32(ptr_fml_Sbuffer,FML_MF_VAL_AT_COST,(char *)&d_igst_sum, 0);  /* Ver 1.1 */
+        	i_ferr[8]=Ferror32;
+        	i_err[9]=Fadd32(ptr_fml_Sbuffer,FML_PARAM_DESC,(char *)c_gst_isec_state_cd.arr, 0);  /* Ver 1.1 */
+        	i_ferr[9]=Ferror32;
+          i_err[10]=Fadd32(ptr_fml_Sbuffer,FML_FUTURE_ID,(char *)c_sub_prdct_cd.arr,0);
+          i_ferr[10]=Ferror32;
+        	i_err[11]=Fadd32(ptr_fml_Sbuffer,FML_MF_LD_START_RANGE,(char *)&d_cgst_per, 0);
+        	i_ferr[11]=Ferror32;
+        	i_err[12]=Fadd32(ptr_fml_Sbuffer,FML_MF_LD_END_RANGE,(char *)&d_sgst_per, 0);
+        	i_ferr[12]=Ferror32;
+        	i_err[13]=Fadd32(ptr_fml_Sbuffer,FML_INT_RATE,(char *)&d_ugst_per, 0);
+        	i_ferr[13]=Ferror32;
+        	i_err[14]=Fadd32(ptr_fml_Sbuffer,FML_MF_TRANS_QTY,(char *)&d_igst_per, 0);
+        	i_ferr[14]=Ferror32;
+        	i_err[15]=Fadd32(ptr_fml_Sbuffer,FML_MDC_MAINCODE,(char *)c_gst_state_cd.arr, 0);  /* Ver 1.1 */
+        	i_ferr[15]=Ferror32;
+
+        	for(i=0; i< 16; i++)
+       	 	{
+          	if(i_err[i] == -1)
+          	{
+            	fn_errlog( c_ServiceName, "S31105", TPMSG, c_err_msg );
+              tpabort(0); 
+              if(fn_mdc_failed_mark()  == 0)
+              continue;
+            	return;
+          	}
+        	}
+
+        	if(tpcall("SVC_GST_INVINS",(char *)ptr_fml_Sbuffer,0,(char **)&ptr_fml_Rbuffer,&l_recvbuff,0L) == -1)
+        	{
+          	fn_errlog(c_ServiceName,"S31110",TPMSG,c_err_msg);
+
+          	if(TPCODE == TPESVCFAIL)
+          	{
+            	Fget32(ptr_fml_Rbuffer,FML_ERR_MSG,0,(char *)c_err_msg,0);
+            	fn_userlog(c_ServiceName,"c_errmsg :%s:",c_err_msg);
+          	}
+
+          	fn_errlog( c_ServiceName, "S31115", TPMSG, c_err_msg );
+            tpabort(0); 
+            if(fn_mdc_failed_mark()  == 0)
+            continue;      
+ 				  	tpfree( (char *) ptr_fml_Sbuffer);
+          	tpfree( (char *) ptr_fml_Rbuffer);
+          	return;
+        	}
+
+        	tpfree((char *)ptr_fml_Sbuffer);
+        	tpfree((char *)ptr_fml_Rbuffer);
+    
+          fn_userlog(c_ServiceName,"INVOICE Insert successfull..");
+
+          fn_userlog(c_ServiceName,"Calling Function fn_upd_segment_lmt..");
+          fn_userlog(c_ServiceName,"sql_mdc_clm_mtch_accnt :%s:",c_clm_mtch_accnt);
+          fn_userlog(c_ServiceName,"sql_mdc_tot_amt :%d:",d_tot_chrg_gst_sum); 
+           
+          i_ret_cd=fn_upd_segment_lmt(c_ServiceName,
+                                c_clm_mtch_accnt,
+                                d_tot_chrg_gst_sum,
+                                "DCS",
+                                'D',
+                                sql_mdc_sttlmnt_trd_dt.arr,
+                                &sql_mdc_sttlmnt_nmbr,
+                                c_err_msg);
+           
+          if(i_ret_cd != 0)
+          {
+            fn_errlog( c_ServiceName, "S31120", SQLMSG, c_err_msg );
+            tpabort(0);
+            if(fn_mdc_failed_mark()  == 0)
+            continue;  
+            return;
+          }          
+          
+          SETLEN(sql_mdc_sttlmnt_trd_dt);
+   
+          EXEC SQL
+            UPDATE  MDC_MISC_DR_CR
+            SET     MDC_LMT_UPD_STTS = 'Y',
+                    MDC_STTLMNT_TRD_DT=:sql_mdc_sttlmnt_trd_dt,
+                    MDC_STTLMNT_NMBR = :sql_mdc_sttlmnt_nmbr
+            WHERE   MDC_LMT_UPD_STTS = 'N'
+            AND     MDC_CLM_MTCH_ACCNT = :c_clm_mtch_accnt; 
+           
+          if(SQLCODE != 0)
+          {
+            fn_errlog( c_ServiceName, "S31125", SQLMSG, c_err_msg );
+            tpabort(0);
+            if(fn_mdc_failed_mark()  == 0)
+            continue;           
+            return;
+          }         
+          
+          fn_userlog(c_ServiceName,"Function Calling Successfull...."); 
+                        
+          EXEC SQL
+              UPDATE PDC_PLG_DP_CHRG
+              SET    PDC_MDC_CONF_STTS ='Y'
+              WHERE  PDC_MDC_CONF_STTS ='N'
+              AND    PDC_GST_CONF_STTS ='Y'
+              AND    PDC_TRDE_DT = :c_trd_dt
+              AND    PDC_CLNT_MTCH_ACCNT = :c_clm_mtch_accnt;        
+    
+          if(SQLCODE != 0)
+          {
+            fn_errlog(c_ServiceName, "S31130", SQLMSG, c_err_msg);
+            tpabort(0); 
+            if(fn_mdc_failed_mark()  == 0)
+            continue;
+            return;
+          }
+           
+          EXEC SQL
+           UPDATE PTD_TIFP_DTLS
+           SET    PTD_MDC_CONF_STTS = 'Y'
+           WHERE  PTD_MDC_CONF_STTS = 'I'
+           AND    PTD_CLM_MTCH_ACCNT = :c_clm_mtch_accnt
+           AND    PTD_TIFP_STTS = 'P'
+           AND    PTD_POD_REF_NO in (select PDC_ORDR_NO from PDC_PLG_DP_CHRG where PDC_CLNT_MTCH_ACCNT = :c_clm_mtch_accnt and PDC_MDC_CONF_STTS ='Y' AND     PDC_TRDE_DT = :c_trd_dt)  ;    
+            
+          if(SQLCODE != 0)
+          {
+            fn_errlog(c_ServiceName, "S31135", SQLMSG, c_err_msg);
+            tpabort(0);
+            if(fn_mdc_failed_mark()  == 0)
+            continue;      
+            return;
+          }
+          
+          if ( tpcommit(0) == -1 )
+          {
+            fn_errlog(c_ServiceName, "S31140", TPMSG, c_err_msg );
+            tpabort(0);
+            return;
+          }
+	    	}  /** while loop End **/
+               
+        fn_userlog(c_ServiceName,"SAM Batch Process successfull..");
+		}	/** End of SAM Pledge Charges **/
+		else if(c_prd_typ_flg == 'M')
+    {
+      userlog("Call for MTF product");
+
+			i_mpc_count = 0;
+
+			EXEC SQL
+				SELECT 	COUNT(1) 
+				INTO		:i_mpc_count
+				FROM		MPC_MTF_PLG_DP_CHRG
+				WHERE		MPC_TRD_DT = TO_DATE(:c_trd_dt, 'dd-Mon-yyyy');
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName,"S31145",SQLMSG,c_err_msg);
+        return;
+			}
+
+      i_trnsctn = tpbegin(0, 0); /* 1.4 LOCAL_TRAN_TIMEOUT to 0 */
+
+      if ( i_trnsctn == -1 )
+      {
+        fn_errlog(c_ServiceName,"S31150",LIBMSG,c_err_msg);
+        return;
+      }
+
+			if(i_mpc_count == 0)
+			{
+      	EXEC SQL
+          UPDATE /*+ parallel(20) */  MPD_MTF_PLG_DTLS  /* parallel added in Ver 1.4 */
+          SET    MPD_DPM_CHRG_STTS = 'I'
+          WHERE  NVL(MPD_DPM_CHRG_STTS,'N') = 'N'
+          AND    MPD_TRD_DT <= :c_trd_dt  /** Added only for index ***/
+          AND    MPD_STTS = DECODE(MPD_PLG_TXN_TYP,'W','R','I','R','P','P');  /** For Transaction typ W (Withdrawal) and I(Invocation) Status should be R (Requested). For Transaction typ P (Pledge Creation) status should be P (Pledge Created) **/
+
+      	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      	{
+        	fn_errlog(c_ServiceName,"S31155",SQLMSG,c_err_msg );
+       		tpabort(0); 
+        	return;
+      	}
+
+      	EXEC SQL
+        INSERT /*+ parallel(20)  */ INTO MPC_MTF_PLG_DP_CHRG /* parallel added in Ver 1.4 */
+        (
+          MPC_CLM_MTCH_ACCNT,
+          MPC_XCHNG_CD,
+          MPC_STCK_CD,
+          MPC_STTLMNT_NMBR,
+          MPC_TXN_DT,
+          MPC_TRD_DT,
+          MPC_DEPOSITORY_TYPE,
+          MPC_DP_ID,
+          MPC_DP_CLNT_ID,
+          MPC_PLG_TXN_TYP,
+          MPC_INSERT_DT,
+          MPC_STTS,
+          MPC_DCM_CHRG,
+          MPC_CGST_AMT,
+          MPC_SGST_AMT,
+          MPC_IGST_AMT,
+          MPC_UGST_AMT,
+          MPC_TOT_CHRG,
+          MPC_GST_STATE_CD,
+          MPC_GST_ISEC_STATE_CD
+        )
+        (
+          SELECT  /*+ parallel(20) */ MATCH_ID, /* parallel added in Ver 1.4 */ 
+                  EXG_CD,
+                  STK_CD,
+                  STTLMNT,
+                  TRD_DT,
+                  :c_trd_dt,
+                  DEPO_TYP,
+                  DPID,
+                  DPCLNT_ID,
+                  PLG_TYP,
+                  SYSDATE,
+                  'N',
+                  DCM_CHRG,
+                  decode(GSTM_INDICATOR,'I',0,ROUND((DCM_CHRG*(GSTM_CGST_PRCNT/100)),2)),
+                  decode(GSTM_INDICATOR,'S',ROUND((DCM_CHRG*(GSTM_SGST_PRCNT/100)),2),0),
+                  decode(GSTM_INDICATOR,'I',ROUND((DCM_CHRG*(GSTM_IGST_PRCNT/100)),2),0),
+                  decode(GSTM_INDICATOR,'U',ROUND((DCM_CHRG*(GSTM_UGST_PRCNT/100)),2),0),
+                  (DCM_CHRG +
+                  decode(GSTM_INDICATOR,'I',0,ROUND((DCM_CHRG*(GSTM_CGST_PRCNT/100)),2)) +
+                  decode(GSTM_INDICATOR,'S',ROUND((DCM_CHRG*(GSTM_SGST_PRCNT/100)),2),0) +
+                  decode(GSTM_INDICATOR,'I',ROUND((DCM_CHRG*(GSTM_IGST_PRCNT/100)),2),0) +
+                  decode(GSTM_INDICATOR,'U',ROUND((DCM_CHRG*(GSTM_UGST_PRCNT/100)),2),0)),
+                  GSTM_STATE_CD,
+                  GSTM_ISEC_STATE_CD
+          FROM    (
+                  SELECT  /*+ parallel(20) */ DISTINCT MPD_CLNT_MTCH_ACCNT MATCH_ID,
+                          MPD_XCHNG_CD EXG_CD,
+                          MPD_STCK_CD STK_CD,
+                          MPD_XCHNG_SGMNT_STTLMNT STTLMNT,
+                          MPD_TRD_DT TRD_DT,
+                          DECODE(SUBSTR(MPD_DP_ID,1,1),'1','CDSL','NSDL') DEPO_TYP,
+                          MPD_DP_ID DPID,
+                          MPD_DP_CLNT_ID DPCLNT_ID,
+                          MPD_PLG_TXN_TYP PLG_TYP,
+                          MPD_TXN_STTLMNT_NMBR TXN_STTLMNT
+                  FROM    MPD_MTF_PLG_DTLS
+                  WHERE   MPD_DPM_CHRG_STTS = 'I'
+                  AND     MPD_STTS = DECODE(MPD_PLG_TXN_TYP,'W','R','I','R','P','P')  /** For Transaction typ W (Withdrawal) and I(Invocation) Status should be R (Requested). For Transaction typ P (Pledge Creation) status should be P (Pledge Created) **/
+                  ) MPD_TAB,
+                  DCM_DEPOSITRY_CHRG_MSTR,
+                  IAI_INFO_ACCOUNT_INFO,
+									IAD_INFO_ADDRESS_DTLS,
+                  GSTM_GST_STATE_MSTR,
+                  ICD_INFO_CLIENT_DTLS,
+                  ISM_INFO_STATE_MASTER
+          WHERE   DCM_DEPOSTRY_NM   = DECODE(SUBSTR(MPD_TAB.DPID,1,1),'1','CDSL','NSDL')
+          AND     MPD_TAB.PLG_TYP   = DECODE(DCM_TRNS_TYP,'Creation','P','Withdrawal','W','Invocation','I')
+          AND     DCM_PRODUCT_CD    = 'DCM'
+          AND     MPD_TAB.MATCH_ID  = IAI_MATCH_ACCOUNT_NO
+          AND     IAI_SERIAL_NO     = IAD_SERIAL_NO
+          AND     IAD_ADDRESS_TYPE  = 'APPLICANT_CORR'
+          AND     ISM_STATE_CD      = IAD_STATE_CD
+          AND     ICD_SERIAL_NO     = IAD_SERIAL_NO
+          AND     GSTM_STATE_CD     = DECODE(ICD_CUST_TYPE,'NRI','NR',GSTM_STATE_CD)
+          AND     NVL(ISM_ACTIVE_FLAG, 'N') = 'Y'
+          AND     GSTM_STATE_CD     = ISM_GST_STATE_CODE
+        );
+
+        if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+        {
+          fn_errlog(c_ServiceName,"S31160",SQLMSG,c_err_msg );
+         	tpabort(0); 
+          return;
+        }
+        else if ( SQLCODE == NO_DATA_FOUND )
+        {
+          fn_userlog (c_ServiceName,"NO records found");
+					tpabort(0);
+          return;
+        }
+
+        userlog("No of records inserted in MPC |%d|", sqlca.sqlerrd[ 2 ]);
+
+				EXEC SQL
+       		UPDATE /*+ parallel(20) */ MPD_MTF_PLG_DTLS  /* parallel added in Ver 1.4 */
+       		SET    MPD_DPM_CHRG_STTS = 'Y'
+       		WHERE  NVL(MPD_DPM_CHRG_STTS,'N') = 'I'
+          AND    MPD_TRD_DT <= :c_trd_dt  /** Added only for index ***/
+       		AND    MPD_STTS = DECODE(MPD_PLG_TXN_TYP,'W','R','I','R','P','P');
+
+      	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      	{
+        	fn_errlog(c_ServiceName,"S31165",SQLMSG,c_err_msg );
+        	tpabort(0);
+        	return;
+      	}
+
+      	userlog("Updated MPD");
+			}		/** If mpc_count > 0 ***/
+
+      if ( tpcommit(0) == -1 )
+      {
+        fn_errlog(c_ServiceName, "S31170", TPMSG, c_err_msg );
+        tpabort(0);
+        return;
+      }
+
+			i_trnsctn = tpbegin(0, 0); /* Ver 1.4 LOCAL_TRAN_TIMEOUT to 0 */
+
+      if ( i_trnsctn == -1 )
+      {
+        fn_errlog(c_ServiceName,"S31175",TPMSG,c_err_msg);
+        return;
+      }
+
+      EXEC SQL
+        INSERT /*+ parallel(20)  */ INTO MDC_MISC_DR_CR   /* parallel added in Ver 1.4 */
+        (
+          MDC_CLM_MTCH_ACCNT,
+          MDC_PRDCT_TYP,
+          MDC_STCK_CD,
+          MDC_CRDT_NMBR,
+          MDC_AMT1,
+          MDC_AMT2,
+          MDC_TOT_AMT,
+          MDC_INVOICE_NMBR,
+          MDC_CGST_AMT,
+          MDC_SGST_AMT,
+          MDC_IGST_AMT,
+          MDC_UGST_AMT,
+          MDC_GST_STATE_CD,
+          MDC_GST_ISEC_STATE_CD,
+          MDC_FROM_DT,
+          MDC_TO_DT,
+          MDC_DR_CR_FLG,
+          MDC_MTCH_STTS,
+          MDC_BNK_STTS,
+          MDC_ENTRY_DT,
+          MDC_MTCH_UPD_AMT,
+          MDC_BNK_UPD_AMT,
+          MDC_LMT_UPD_STTS,
+          MDC_STTLMNT_TRD_DT
+        )
+        (
+          SELECT  /*+parallel(20) */ MATCH_ACC, /* parallel added in Ver 1.4 */
+                  'DCM',
+                  '',
+                  '01'||TO_CHAR(SYSDATE,'YYDDMM')||Next_doc_no.nextval,
+                  DP_CHRG,
+                  0,
+                  TOT_AMT,
+                  fn_gst_seq_OTHR_DBIT(GST_ISEC_STATE,to_char(trunc(sysdate))),
+                  CGST_AMT,
+                  SGST_AMT,
+                  IGST_AMT,
+                  UGST_AMT,
+                  GST_STATE,
+                  GST_ISEC_STATE,
+                  TRUNC(SYSDATE),
+                  TRUNC(SYSDATE),
+                  'D',
+                  'N',
+                  'N',
+                  TRUNC(SYSDATE),
+                  0,
+                  0,
+                  'N',
+                  TRADE_DT
+          FROM
+          (
+            SELECT  /*+ parallel(20) */  MPC_CLM_MTCH_ACCNT MATCH_ACC, /* parallel added in Ver 1.4 */ 
+                    SUM(MPC_DCM_CHRG) DP_CHRG,
+                    SUM(MPC_TOT_CHRG) TOT_AMT,
+                    SUM(MPC_CGST_AMT) CGST_AMT,
+                    SUM(MPC_SGST_AMT) SGST_AMT,
+                    SUM(MPC_IGST_AMT) IGST_AMT,
+                    SUM(MPC_UGST_AMT) UGST_AMT,
+                    MPC_GST_STATE_CD GST_STATE,
+                    MPC_GST_ISEC_STATE_CD GST_ISEC_STATE,
+                    MPC_TRD_DT TRADE_DT
+            FROM    MPC_MTF_PLG_DP_CHRG
+            WHERE   MPC_TRD_DT = :c_trd_dt
+            AND     MPC_STTS = 'N'
+            GROUP BY MPC_CLM_MTCH_ACCNT,MPC_GST_STATE_CD,MPC_GST_ISEC_STATE_CD,MPC_TRD_DT
+          )
+        );
+
+        if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+        {
+          fn_errlog(c_ServiceName,"S31180",SQLMSG,c_err_msg );
+         	tpabort(0); 
+          return;
+        }
+        else if ( SQLCODE == NO_DATA_FOUND )
+        {
+          fn_userlog (c_ServiceName,"NO records found");
+					tpabort(0);
+          return;
+        }
+
+        l_tot_mdc_count = sqlca.sqlerrd[ 2 ];
+        fn_userlog (c_ServiceName,"No of records inserted in MDC |%d|", sqlca.sqlerrd[ 2 ]);
+
+        EXEC SQL
+        INSERT /*+ parallel(20)  */ INTO INM_INVOICE_NMBR_MSTR  /* parallel added in Ver 1.4 */ 
+        (
+          INM_PRODUCT_CD,
+          INM_INV_NO,
+          INM_INV_DT,
+          INM_MATCH_ACCT,
+          INM_CUST_GSTN_NO,
+          INM_CUST_NAME,
+          INM_CUST_ADDR,
+          INM_CUST_STATE,
+          INM_CUST_CONTRY,
+          INM_CUST_STATE_CD,
+          INM_TOTAL_TRNSCTN_CHRGS,
+          INM_TOTAL_CGST,
+          INM_TOTAL_SGST,
+          INM_TOTAL_UGST,
+          INM_TOTAL_IGST,
+          INM_TOTAL_INV_VAL,
+          INM_ISEC_GSTN_NO,
+          INM_SERVICE_DESC,
+          INM_HSN_CODE,
+          INM_CLNT_TYPE,
+          INM_ISEC_BRANCH_CD,
+          INM_ISEC_STATE_CD,
+          INM_SUB_PRODUCT_CD,
+          INM_SUB_PRODUCT_DESC,
+          INM_CGST_PRCNT,
+          INM_SGST_PRCNT,
+          INM_UGST_PRCNT,
+          INM_IGST_PRCNT
+        )
+        (
+          SELECT  /*+ parallel(20) */ GHM_PRDCT_TYP ,  /* parallel added in Ver 1.4 */
+                  MDC_INVOICE_NMBR,
+                  TRUNC(SYSDATE),
+                  MDC_CLM_MTCH_ACCNT,
+                  ICD_GSTIN,
+                  nvl(ipd_first_name,' ') ||' '|| nvl(ipd_middle_name,' ') ||' '|| nvl(ipd_last_name,' '),
+              nvl(IAD_ADDRESS_1,' ') ||','|| nvl(IAD_ADDRESS_2,' ') ||','|| nvl(IAD_ADDRESS_3,' ') ||','|| nvl(IAD_ADDRESS_4,' '),
+                  ISM_STATE_DESC,
+                  ICM_COUNTRY_DESC,
+                  GSTM_STATE_CD,
+                  MDC_AMT1,
+                  MDC_CGST_AMT,
+                  MDC_SGST_AMT,
+                  MDC_UGST_AMT,
+                  MDC_IGST_AMT,
+                  MDC_TOT_AMT,
+                  GSTM_ISEC_GST_NO,
+                  GHM_NATURE_OF_SRVC,
+                  GHM_HSN_CODE,
+                  ICD_CUST_TYPE,
+                  GSTM_ISEC_BRANCH_CD,
+                  MDC_GST_ISEC_STATE_CD,
+                  IPM_PRDCT_NM,
+                  IPM_DESC,
+                  nvl(GSTM_CGST_PRCNT,0),
+                  nvl(GSTM_SGST_PRCNT,0),
+                  nvl(GSTM_UGST_PRCNT,0),
+                  nvl(GSTM_IGST_PRCNT,0)
+          FROM    MDC_MISC_DR_CR,IAD_INFO_ADDRESS_DTLS,IPD_INFO_PERSONAL_DTLS,IAI_INFO_ACCOUNT_INFO,
+                  ICD_INFO_CLIENT_DTLS,ISM_INFO_STATE_MASTER,ICM_INFO_COUNTRY_MASTER,
+                  ICM_INFO_CITY_MASTER,GSTM_GST_STATE_MSTR,IPM_INCNTV_PRDCT_MSTR,GHM_GST_HSN_MSTR
+          WHERE   IAI_MATCH_ACCOUNT_NO = MDC_CLM_MTCH_ACCNT
+          AND     IAI_SERIAL_NO = IPD_SERIAL_NO
+          AND     IPD_SERIAL_NO = IAD_SERIAL_NO
+          AND     ICD_SERIAL_NO = IAD_SERIAL_NO
+          AND     ipd_type = 'APPLICANT'
+          AND     IAD_ADDRESS_TYPE = 'APPLICANT_CORR'
+          AND     ISM_STATE_CD = IAD_STATE_CD
+          AND     MDC_PRDCT_TYP = IPM_PRDCT_NM
+          AND     MDC_GST_ISEC_STATE_CD = GSTM_ISEC_STATE_CD
+          AND     MDC_GST_STATE_CD = GSTM_STATE_CD
+          AND     NVL(ISM_ACTIVE_FLAG, 'N') = 'Y'
+          AND     iad_country_cd = ICM_COUNTRY_CD
+          AND     ISM_COUNTRY_CD =ICM_COUNTRY_CD
+          AND     ICM_CITY_CD =  IAD_CITY_CD
+          AND     ICM_STATE_CD = ISM_STATE_CD
+          AND     ICM_ACTIVE_FLG  = 'Y'
+          AND     MDC_PRDCT_TYP = 'DCM'
+          AND     GHM_PRDCT_TYP = 'OTHRDB'
+          AND     GHM_SUB_PRODUCT_CD = IPM_PRDCT_NM
+          AND     trunc(MDC_ENTRY_DT) = trunc(sysdate)
+      );
+
+      if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_errlog(c_ServiceName,"S31185",SQLMSG,c_err_msg );
+       	tpabort(0); 
+        return;
+      }
+      else if ( SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog (c_ServiceName,"NO records found");
+				tpabort(0);
+        return;
+      }
+
+      l_tot_inm_count = sqlca.sqlerrd[ 2 ];
+      fn_userlog(c_ServiceName,"INM Count |%d|",l_tot_inm_count);
+
+      if(l_tot_mdc_count != l_tot_inm_count)
+      {
+        fn_errlog(c_ServiceName,"S31190","MDC INM mismatch",c_err_msg );
+        /** tpabort(0);
+        return; ** Ver. 1.2 ** commented **/
+      }
+
+      EXEC SQL
+      DECLARE cur_mdc_list CURSOR FOR
+      SELECT  MDC_CLM_MTCH_ACCNT,
+              MDC_PRDCT_TYP,
+              MDC_TOT_AMT,
+              MDC_DR_CR_FLG,
+              ROWID
+      FROM    MDC_MISC_DR_CR
+      WHERE   MDC_PRDCT_TYP = 'DCM'
+      AND     MDC_LMT_UPD_STTS = 'N'
+      AND     TRUNC(MDC_ENTRY_DT) = TRUNC(SYSDATE);
+
+      EXEC SQL OPEN cur_mdc_list;
+
+      if(SQLCODE != 0)
+      {
+        fn_errlog(c_ServiceName,"S31195",SQLMSG,c_err_msg );
+       	tpabort(0); 
+        return;
+      }
+
+      l_mdc_lim_count=0;
+
+      while(1)
+      {
+        MEMSET(sql_mdc_clm_mtch_accnt);
+        MEMSET(sql_mdc_prdct_typ);
+        MEMSET(c_mdc_rowid);
+        MEMSET(sql_mdc_sttlmnt_trd_dt);
+        sql_mdc_tot_amt=0;
+        sql_mdc_dr_cr_flg='X';
+        sql_mdc_sttlmnt_nmbr=0;
+
+        EXEC SQL
+          FETCH cur_mdc_list
+          INTO  :sql_mdc_clm_mtch_accnt,
+                :sql_mdc_prdct_typ,
+                :sql_mdc_tot_amt,
+                :sql_mdc_dr_cr_flg,
+                :c_mdc_rowid;
+
+        if(SQLCODE != 0)
+        {
+          if(SQLCODE == NO_DATA_FOUND)
+          {
+            EXEC SQL CLOSE cur_mdc_list;
+            break;
+          }
+          else
+          {
+            EXEC SQL CLOSE cur_mdc_list;
+            fn_errlog(c_ServiceName,"S31200",SQLMSG,c_err_msg );
+           	tpabort(0); 
+            return;
+          }
+        }
+
+        rtrim(c_mdc_rowid);
+
+        if(DEBUG_MSG_LVL_3)
+          userlog("sql_mdc_clm_mtch_accnt :%s:, sql_mdc_prdct_typ :%s:, sql_mdc_tot_amt :%lf:, sql_mdc_dr_cr_flg :%c:,c_mdc_rowid :%s:",sql_mdc_clm_mtch_accnt, sql_mdc_tot_amt,sql_mdc_dr_cr_flg,c_mdc_rowid);
+
+        i_ret_cd=fn_upd_segment_lmt(c_ServiceName,
+                                sql_mdc_clm_mtch_accnt,
+                                sql_mdc_tot_amt,
+                                sql_mdc_prdct_typ,
+                                sql_mdc_dr_cr_flg,
+                                sql_mdc_sttlmnt_trd_dt.arr,
+                                &sql_mdc_sttlmnt_nmbr,
+                                c_err_msg);
+
+        if(i_ret_cd != 0)
+        {
+          EXEC SQL CLOSE cur_mdc_list;
+          fn_errlog(c_ServiceName,"S31205",LIBMSG,c_err_msg );
+         	tpabort(0); 
+          return;
+        }
+
+        SETLEN(sql_mdc_sttlmnt_trd_dt);
+
+        EXEC SQL
+        UPDATE  /*+ parallel(20) */  MDC_MISC_DR_CR  /* parallel added in Ver 1.4 */
+        SET     MDC_LMT_UPD_STTS = 'Y',
+                MDC_STTLMNT_TRD_DT=:sql_mdc_sttlmnt_trd_dt,
+                MDC_STTLMNT_NMBR = :sql_mdc_sttlmnt_nmbr
+        WHERE   MDC_LMT_UPD_STTS = 'N'
+        AND     ROWID = :c_mdc_rowid;
+
+        if(SQLCODE != 0)
+        {
+          EXEC SQL CLOSE cur_mdc_list;
+          fn_errlog(c_ServiceName,"S31210",SQLMSG,c_err_msg );
+         	tpabort(0); 
+          return;
+        }
+
+        l_mdc_lim_count++;
+      }  /** End of while loop **/
+
+      userlog("MDC update limit count :%ld:",l_mdc_lim_count);
+
+      if(l_tot_mdc_count == l_tot_inm_count && l_tot_mdc_count == l_mdc_lim_count)
+      {
+        userlog("MDC Insert |%ld|, INM Insert |%ld|, MDC Limits |%ld|",l_tot_mdc_count,l_tot_inm_count,l_mdc_lim_count);
+      }
+      else
+      {
+        userlog("MDC and INM count mismatch. MDC Insert |%ld|, INM Insert |%ld|, MDC Limits |%ld|",l_tot_mdc_count,l_tot_inm_count,l_mdc_lim_count);
+      }
+
+      EXEC SQL
+      UPDATE  /*+ parallel(20) */  MPC_MTF_PLG_DP_CHRG /* parallel added in Ver 1.4 */
+      SET     MPC_STTS = 'P',
+							MPC_CHRG_CALC_DT = trunc(sysdate)   /* Ver 1.3 */
+      WHERE   MPC_TRD_DT = :c_trd_dt
+      AND     MPC_STTS = 'N';
+
+      if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_errlog(c_ServiceName,"S31215",SQLMSG,c_err_msg );
+       	tpabort(0);	 
+        return;
+      }
+
+      userlog("Updated MPC");
+
+      if ( tpcommit(0) == -1 )
+      {
+        fn_errlog(c_ServiceName, "S31220", TPMSG, c_err_msg );
+       	tpabort(0); 
+        return;
+      }
+    }	/** End of call for MTF product ***/	
+
+		/***** Ver 1.3 starts ****/
+		MEMSET(c_prd_stck_cd);
+		if(c_prd_typ_flg == 'M')
+		{
+			strcpy(c_prd_stck_cd,"MTF");
+		}
+		else
+		{
+			strcpy(c_prd_stck_cd,"MRG");
+		}
+
+		i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog(c_ServiceName,"S31225",LIBMSG,c_err_msg);
+      return;
+    }
+
+		i_returncode = 0;
+
+		i_returncode = fn_prd_insert(c_ServiceName, "N", "NA",0, "BO", c_prd_stck_cd, DEF_USR, c_trd_dt, v_start_time.arr, l_tot_mdc_count);
+		if(i_returncode != 0)
+    {
+    	fn_errlog(c_ServiceName,"S31230",SQLMSG,c_err_msg );
+      tpabort(0);
+      return;
+    }
+
+		if ( tpcommit(0) == -1 )
+    {
+    	fn_errlog(c_ServiceName, "S31235", TPMSG, c_err_msg );
+      tpabort(0);
+      return;
+    }
+
+		/***** Ver 1.3 starts.Insert in PRD table ****/
+
+
+	/*** End of Ver 1.3 *****/
+
+
+  return;      
+}
+
+int fn_gst_failed_mark ( )
+{
+  i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31240",LIBMSG,c_err_msg);
+    return -1;
+  }
+  
+  EXEC SQL
+     UPDATE PDC_PLG_DP_CHRG
+     SET    PDC_GST_CONF_STTS ='F'
+     WHERE  PDC_GST_CONF_STTS ='N'
+     AND    PDC_PLG_DP_CHRG.ROWID  = :c_rowid;
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31245",SQLMSG,c_err_msg );
+    tpabort(0);
+    return -1;
+  }
+  if ( tpcommit(0) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31250", TPMSG, c_err_msg );
+    tpabort(0);
+    return -1;
+  }
+  return 0;
+}
+
+int  fn_mdc_failed_mark ( )
+{
+    i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog(c_ServiceName,"S31255",LIBMSG,c_err_msg);
+      return -1;
+    }
+ 
+    EXEC SQL
+     UPDATE PDC_PLG_DP_CHRG
+     SET    PDC_MDC_CONF_STTS ='F'
+     WHERE  PDC_MDC_CONF_STTS ='N'
+     AND    PDC_CLNT_MTCH_ACCNT = :c_clm_mtch_accnt
+     AND    PDC_TRDE_DT = :c_trd_dt
+     AND    PDC_GST_CONF_STTS ='Y';
+
+   if(SQLCODE != 0)
+   {
+     fn_errlog(c_ServiceName, "S31260", SQLMSG, c_err_msg);
+    tpabort(0);
+     return -1;
+   }
+   if ( tpcommit(0) == -1 )
+   {
+     fn_errlog(c_ServiceName, "S31265", TPMSG, c_err_msg );
+     tpabort(0);
+     return -1;
+   }
+   return 0;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_COMP_SAM_CHRG;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}

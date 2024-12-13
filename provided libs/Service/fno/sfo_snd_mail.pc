@@ -1,0 +1,320 @@
+/**************************************************************************************************
+* Service       :     sfo_snd_mail.pc                                                             *
+*                                                                                                 *
+* Purpose       :     This service gets the Order and Trade data, User info data from EBA for a   *
+*                     given trade date and insert it into CLICK database from which FNOTOC mails  *
+*                     are get generated.It also insert a record per trade date in CLICK for       *
+*                     maintaing LOG infomation of the mail sent.                                  *
+* Input param   :                                                                                 *
+*                     FFO_PRDCT_TYP   :   Flag indicating whether service called for inserting    *
+*                                         TRNSACTION data(T),USERINFO(U) data or MAIL LOG data(M) *
+*                     FFO_CBUF     	  :   Buffer containg actual data.                            *
+*                     FFO_ORD_TOT_QTY :   Number of records inserted.                             *
+*                     FFO_TRD_DT	    :   Trade Date                                              *
+*                                                                                                 *
+* Output param  :     FFO_ERR_MSG     :   Error Message if any.                                   *
+*                                                                                                 *
+* Log			      :    	07-May-2012 		Ver1.0		Bhushan Sonwane	   -  New Release                 *
+*																																																	*
+**************************************************************************************************/
+
+
+
+#include <stdio.h>  	 					/***** C Header File *****/
+#include <string.h>		 					/***** C Header File *****/
+#include <sqlca.h> 							/***** Oracle header file *****/
+#include <atmi.h>								/***** TUXEDO Header File *****/
+#include <fml32.h>							/***** TUXEDO Header File *****/
+#include <fo_fml_def.h>					/***** FML declaration file *****/
+#include <eba.h>								/***** User defined header files *****/
+#include <fn_log.h>             /***** User defined Header File *****/
+#include <fn_read_debug_lvl.h>	/***** Header file for Debug level *****/
+
+#define BATCH_SIZE  1000
+#define ORDTRD_TRANSACTION 	'T'
+#define USERINFO  					'U'
+#define MAIL_LOG_HEADER 		'M'
+#define TOTAL_FML 10
+
+void  SFO_SND_MAIL(TPSVCINFO * ptr_rqst)
+{
+	/******** Structure Declaration for Order and Trade Transaction 
+						And User Info                                                 *******/
+	
+	struct struct_ordtrd
+	{
+		char c_match_id[30]		;
+    char c_xchng_cd[5]		;
+    char c_prdct_typ			;
+    char c_undrlying[30]	;
+    char c_expr_dt[20]		;
+    char c_exert_typ			;
+    char c_opt_typ				;
+    long l_strk_prc				;
+    char c_ordr_flw[10]		;
+    char c_rqst_typ[30]		;
+    long l_tot_qty				;
+    long l_price					;
+    char c_ordr_typ[10]		;
+    long l_sltp						;
+    char c_ack_no[25]			;
+    char c_ord_ref_no[30]	;
+    char c_xchng_tm[30]		;
+    char c_remark[100]		;
+    long l_record_id			;
+    char c_filename[100]	;
+    long l_lot						;	
+    char c_stmt_dt[30]		;
+	};
+	struct struct_ordtrd st_ordtrd_array[BATCH_SIZE];
+
+	struct struct_userinfo
+	{
+  	long l_record_id			;
+    char c_usr_nm[100]		;
+    char c_match_id[30]		;
+    char c_email_id1[101]	;
+    char c_email_id2[101]	;
+    char c_filename[100]	;
+		char c_stmt_dt[30]		;
+	};
+	struct struct_userinfo st_userinf_array[BATCH_SIZE];
+
+	unsigned char  *c_msg_cbuf;                           /** Buffer for bulk records. **/
+
+	unsigned char  *c_row;
+
+	/***** Variable Declaration  *****/
+	int i_err[TOTAL_FML]		;
+	int i_ferr[TOTAL_FML]		;
+	int i_rec_count = 0			;
+	int i_fml_cnt = 0				;
+	int i_trnsctn = 0				;
+	int cnt=0								;
+	long l_bufferlength = 0	;
+
+	char  c_ServiceName[33]	;                              /** Name of called service **/
+	char  c_errmsg[256]			;
+	char  c_trd_dt[23]			;
+  char	c_action_flg			; 
+
+ 	FBFR32  *ptr_fml_Ibuffer;
+ 	FBFR32  *ptr_fml_Obuffer;
+	
+	/***** Retrieve the FML buffer from the input request.    *****/
+ 	
+	ptr_fml_Ibuffer = (FBFR32 *)ptr_rqst->data;
+ 	ptr_fml_Obuffer = (FBFR32 *)NULL;
+ 	INITDBGLVL(ptr_rqst->name);
+
+ 	strcpy( c_ServiceName, ptr_rqst->name );
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"SFO_SND_MAIL Starts..............");
+ 	}
+  
+	/***** Allocating memory to output buffer   *****/
+
+	ptr_fml_Obuffer = ( FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  if(ptr_fml_Obuffer == NULL)
+ 	{
+ 		fn_errlog(c_ServiceName,  "S31005", FMLMSG, c_errmsg);
+   	Fadd32( ptr_fml_Ibuffer,FFO_ERR_MSG, c_errmsg, 0 );
+   	tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+	}
+
+ 	if( Fget32(ptr_fml_Ibuffer,FFO_PRDCT_TYP,0,(char *)&c_action_flg,0)  == -1 )
+  {
+    fn_errlog(c_ServiceName,  "S31010", FMLMSG, c_errmsg);
+    Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+    tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);
+  }
+
+  if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName,"Action Flag :%c:",c_action_flg);
+  }
+
+  if ( c_action_flg != MAIL_LOG_HEADER )
+  {	
+		MEMSET(st_ordtrd_array);
+		MEMSET(st_userinf_array);
+	
+		/***** Fetching values from input buffer   *****/
+
+		if (Fget32(ptr_fml_Ibuffer,FFO_AVL_QTY,0,(char *)&l_bufferlength,0)  == -1)
+  	{
+  		fn_errlog(c_ServiceName,  "S31015", FMLMSG, c_errmsg);
+    	Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+    	tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);
+  	}
+
+  	if(DEBUG_MSG_LVL_3)
+		{
+  		fn_userlog(c_ServiceName,"l_bufferlength = %ld",l_bufferlength);
+  	}
+
+		c_msg_cbuf  = (char *)tpalloc("CARRAY", NULL,l_bufferlength);
+  	if(c_msg_cbuf == NULL)
+  	{
+  		fn_errlog(c_ServiceName,  "S31020", FMLMSG, c_errmsg);
+    	Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+    	tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);
+		} 
+	
+		INIT(i_err,TOTAL_FML);
+  	INIT(i_ferr,TOTAL_FML);
+  
+		i_err[0] = Fget32(ptr_fml_Ibuffer,FFO_CBUF, 0, (char *)c_msg_cbuf,0);
+  	i_ferr[0]=Ferror32;
+  	i_err[1] = Fget32(ptr_fml_Ibuffer,FFO_ORD_TOT_QTY, 0, (char *)&i_rec_count,0);
+  	i_ferr[1]=Ferror32;
+
+		for(i_fml_cnt = 0;i_fml_cnt <2; i_fml_cnt++)
+  	{
+  		if(i_err[i_fml_cnt] == -1 )
+    	{
+    		tpfree(c_msg_cbuf);
+      	fn_userlog(c_ServiceName,"Error while fetching the data.FML COUNT = :%d:",i_fml_cnt);
+      	fn_errlog(c_ServiceName, "S31025", Fstrerror32(i_ferr[i_fml_cnt]), c_errmsg);
+      	Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+      	tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);
+			}
+		}
+
+		/***** Insert data from struct_ordtrd structure to FNO_ORDTRD_MAIL_DTLS table *****/
+  
+		if(DEBUG_MSG_LVL_3)
+		{
+  		fn_userlog(c_ServiceName,"Number of records to be inserted :%d:",i_rec_count);
+  	}
+
+		if(c_action_flg == ORDTRD_TRANSACTION)
+		{
+			/***** Copy the data from i/p buffer in st_ordtrd_array and free the buffer. *****/
+ 	
+			memcpy(st_ordtrd_array,c_msg_cbuf,l_bufferlength);
+			
+			if(DEBUG_MSG_LVL_3)
+			{
+  			fn_userlog(c_ServiceName,"Inserting data to FNO_ORDTRD_MAIL_DTLS table in CLICK......");
+  		}
+
+			/***** Insert data into FNO_ORDTRD_MAIL_DTLS   *****/
+
+			EXEC ORACLE OPTION (CHAR_MAP=STRING);
+
+			EXEC SQL FOR :i_rec_count	
+  			INSERT
+    		INTO FNO_ORDTRD_MAIL_DTLS
+				(
+      		FMD_CLM_MTCH_ACCNT		,
+      		FMD_XCHNG_CD					,
+      		FMD_PRDCT_TYP					,
+      		FMD_UNDRLYNG					,
+      		FMD_EXPY_DT						,
+      		FMD_EXER_TYP					,
+      		FMD_OPT_TYP						,
+      		FMD_STRK_PRC					,
+      		FMD_ORDR_FLW					,
+      		FMD_EVENT							,
+      		FMD_TOTAL_QTY					,	
+      		FMD_PRICE							,
+      		FMD_LMT_MRKT_SL_FLG		,
+      		FMD_STP_LSS_TGR				,
+      		FMD_ACK_NMBR					,
+      		FMD_ORDR_RFRNC				,
+      		FMD_ACK_TIME					,
+      		FMD_REMARKS						,
+					FMD_RECORD_NO					,
+					FMD_FILENAME					,
+      		FMD_NO_LOTS						,
+					FMD_STMTDT
+   		 )
+			 VALUES (:st_ordtrd_array);
+  		
+			if( SQLCODE !=0)
+  		{
+				tpfree(c_msg_cbuf);
+    		fn_userlog(c_ServiceName,"Error while inserting FNO_ORDTRD_MAIL_DTLS data in CLICK.");
+    		fn_errlog(c_ServiceName, "S31030",SQLMSG, c_errmsg);
+    		Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+  			tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);	
+  		}
+		}
+		else
+		if(c_action_flg == USERINFO)
+		{
+			/***** Copy the data from i/p buffer in st_userinf_array  and free the buffer. *****/
+  
+			memcpy(st_userinf_array,c_msg_cbuf,l_bufferlength);
+  		if(DEBUG_MSG_LVL_3)
+			{
+  			fn_userlog(c_ServiceName,"Inserting data to FNO_USER_INFO table in CLICK......");
+  		}
+   
+  		EXEC SQL FOR :i_rec_count
+  			INSERT
+    		INTO FNO_USER_INFO
+				(
+     			FUI_RECORD_NO					,
+      		FUI_USER_NM						,
+      		FUI_CLM_MTCH_ACCNT		,
+     			FUI_EMAIL_1						,
+      		FUI_EMAIL_2						,
+      		FUI_FILENAME					,
+					FUI_STMTDT
+    		)  
+    		VALUES (:st_userinf_array);
+
+			if( SQLCODE !=0 )
+  		{
+  			tpfree(c_msg_cbuf);
+    		fn_userlog(c_ServiceName,"Error while inserting FNO_USER_INFO  data in CLICK.");
+    		fn_errlog(c_ServiceName, "S31035",SQLMSG, c_errmsg);
+    		Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+    		tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);
+			}
+		}
+		tpfree(c_msg_cbuf);
+	}
+	else
+	{	
+		/***** Inserting record in Mail Log Header table *****/
+  
+  	/***** Get run-date. *****/
+
+  	if (Fget32(ptr_fml_Ibuffer,FFO_TRD_DT,0,(char *)c_trd_dt,0)  == -1)
+  	{
+  		fn_errlog(c_ServiceName,  "S31040", FMLMSG, c_errmsg);
+    	Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+    	tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);
+  	}
+		
+  	EXEC SQL
+  		INSERT
+    	INTO MAIL_LOG_HEADER(DOC_TYPE,STMTDT,PR_STATUS)
+    	VALUES ('FNOTOC',to_date(:c_trd_dt,'dd-Mon-yyyy'),1);
+	
+		if( SQLCODE !=0 )
+  	{
+  		fn_userlog(c_ServiceName,"Error while inserting MAIL_LOG_HEADER data in CLICK.");
+    	fn_errlog(c_ServiceName, "S31045",SQLMSG, c_errmsg);
+    	Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_errmsg, 0 );
+    	tpreturn(TPFAIL,0L, (char *)ptr_fml_Obuffer, 0L, 0);
+  	}
+  	if(DEBUG_MSG_LVL_3)
+		{
+  		fn_userlog(c_ServiceName,"One record inserted in to Mail Log Header table for :%s:",c_trd_dt);
+  	}
+	}
+  
+	if(DEBUG_MSG_LVL_3)
+	{
+ 		fn_userlog(c_ServiceName,"Service executed successfully..:%d: Records Inserted",sqlca.sqlerrd[2]);
+ 	}
+
+	tpreturn(TPSUCCESS, 0, (char *)ptr_fml_Obuffer, 0L, 0);
+
+}/** main loop end **/

@@ -1,0 +1,720 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_CNT_FOR_ENT                                       */
+/*                                                                            */
+/*  Input             : vw_mtch_cntrct                                        */
+/*                      vw_nse_cntrct                                         */
+/*                      vw_contract                                           */
+/*                                                                            */
+/*  Output            : vw_contract                                           */
+/*                      vw_err_msg                                            */
+/*                                                                            */
+/*  Description       : To get the details of the underlying for the given    */
+/*                      input of exchange code, product type and underlying   */
+/*                                                                            */
+/*  Log               : 1.0   21-Sep-2001   S. Swaminathan                    */
+/*										: 1.1		28-Dec-2007		Sandeep Patil											*/
+/*										:	1.2		19-Aug-2010		Sandeep Patil											*/
+/*										:	1.3		31-Jan-2012		Swati A.B                         */
+/*										:	1.4		27-Feb-2014		Mahesh Shinde                     */
+/*                    : 1.5   06-Aug-2015   Anand Dhopte                      */ 
+/*                    : 1.6   19-Jul-2018   Anand Dhopte                      */
+/*										: VQC		07-Mar-2019		Bhushan Harekar										*/
+/******************************************************************************/
+/*  1.0  -  New release                                                       */
+/*	1.1	 -  IBM Migration Changes                                             */
+/*	1.2  -	SEM Mapping Changes																								*/
+/*	1.3  -	BSE-ORS Changes                                                   */
+/*	1.4  -	Handling of INDIA VIX (CR_ISEC14_48665) Mahesh Shinde							*/
+/*  1.5  -  Contract Master and Trade Quote Table Merger Changes              */
+/*  1.6  -  Core Fix changes                                                  */
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>				/** Ver 1.1 **/
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <fo.h>
+/***	#include <fo_fml_def.h>		*** Commented in VQC ***/
+#include <fml_def.h>
+#include <fo_view_def.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>				/** Ver 1.1 **/
+#include <fml_rout.h>			/** Ver 1.1 **/
+#include <fn_read_debug_lvl.h>      /*** Ver 1.1 ***/
+
+void SFO_CNT_FOR_ENT( TPSVCINFO *rqst )
+{
+	char c_ServiceName[ 33];
+	char c_errmsg[256]; 
+	char type[64];
+	char c_strike_price[20];  /*** Changed to 20 from 12 in Ver 1.6 ***/
+	char subtype[64];
+	char c_expry_dt[12];  			 /*** added in VQC ***/
+	long int  li_returncode = 0; /*** Variable initialized in VQC ***/
+	int  i_returncode = 0;       /*** Variable initialized in VQC ***/
+	int i_sem_entty=0;
+	long li_recvbuf = 0;
+	
+
+	FBFR32  *ptr_fml_Ibuf;
+	FBFR32  *ptr_fml_Obuf;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		struct vw_contract *ptr_i_st_cntrct;
+		struct vw_contract *ptr_o_st_cntrct;
+		struct vw_nse_cntrct *ptr_st_nse_cntrct;
+		struct vw_mtch_cntrct *ptr_st_mtch_cntrct;
+	EXEC SQL END DECLARE SECTION;
+
+	struct vw_err_msg *ptr_st_err_msg;
+
+	MEMSET(subtype);			/** added in VQC **/
+	MEMSET(type);					/** added in VQC **/
+	MEMSET(c_expry_dt);		/** added in VQC **/
+
+	li_returncode = tptypes( rqst->data, type, subtype );
+
+	if ( li_returncode == -1 )
+	{
+		fn_userlog(c_ServiceName, "Error in Calling tptypes");
+		tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+	}
+	
+	strcpy( c_ServiceName, rqst->name );
+
+	INITDBGLVL(c_ServiceName);			/*** Ver 1.1 ***/			
+
+	ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32",
+                                                     "vw_err_msg",
+                                                sizeof ( struct vw_err_msg ) );
+	if ( ptr_st_err_msg ==  NULL )
+	{
+		fn_errlog ( c_ServiceName, "S31005", TPMSG, c_errmsg );
+		tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+	}
+	memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) );
+
+	ptr_o_st_cntrct = ( struct vw_contract * ) tpalloc ( "VIEW32",
+                                                     "vw_contract",
+                                                sizeof ( struct vw_contract ) );
+	if ( ptr_o_st_cntrct ==  NULL )
+	{
+    fn_errlog ( c_ServiceName, "S31010", TPMSG, ptr_st_err_msg->c_err_msg);
+		tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+	}
+	memset ( ptr_o_st_cntrct, 0, sizeof ( struct vw_contract ) );
+  memset ( c_strike_price, '\0', sizeof (c_strike_price) );    /*** Ver 1.6 ***/
+
+	if ( strcmp( subtype, "vw_mtch_cntrct" ) == 0 )
+	{
+		fn_userlog(c_ServiceName,"Inside vw_mtch_cntrct case.");
+		ptr_st_mtch_cntrct = ( struct vw_mtch_cntrct *)rqst->data;
+
+  	/*** Added for Order Routing ***/
+  	fn_init_ddr_val ( ptr_st_mtch_cntrct->c_rout_crt );
+
+		if ( ptr_st_mtch_cntrct->c_rqst_typ != MATCH_ID_TO_CONTRACT )
+		{
+			fn_userlog(c_ServiceName, "Invalid Request Type ");
+			strcpy( ptr_st_err_msg->c_err_msg, "Invalid Request Type" );
+			tpfree( (char *) ptr_o_st_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		strcpy( ptr_o_st_cntrct->c_xchng_cd, ptr_st_mtch_cntrct->c_xchng_cd ); 
+
+		ptr_o_st_cntrct->l_ca_lvl = ptr_st_mtch_cntrct->l_ca_lvl; 
+    /*1.1*/
+		/*ptr_o_st_cntrct->l_strike_prc = ptr_st_mtch_cntrct->d_strike_prc * 100; */
+    sprintf(c_strike_price,"%lf",ptr_st_mtch_cntrct->d_strike_prc*100);
+    ptr_o_st_cntrct->l_strike_prc = atoi(c_strike_price);					/**Ver 1.1**/
+		if( DEBUG_MSG_LVL_0)	/*** Debug Level Added in VQC ***/
+		{
+    	fn_userlog(c_ServiceName,"After data type change l_strike_price is %ld",ptr_o_st_cntrct->l_strike_prc);  /*** %d changed to %ld in Ver 1.6 ***/
+		}
+
+		strcpy( ptr_o_st_cntrct->c_expry_dt, ptr_st_mtch_cntrct->c_expry_dt ); 
+    
+		EXEC SQL
+         SELECT to_char(to_date(:ptr_st_mtch_cntrct->c_expry_dt,'dd-mm-yyyy'),
+                        'dd-Mon-yyyy')
+         /*** INTO  	:ptr_o_st_cntrct->c_expry_dt *** Commented in VQC ***/
+				 INTO		:c_expry_dt		/** added in VQC **/
+         FROM   dual;
+
+    if (SQLCODE != 0)
+    {
+    	fn_errlog ( c_ServiceName, "S31015", SQLMSG, ptr_st_err_msg->c_err_msg);
+			tpfree( (char *) ptr_o_st_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    }
+
+		rtrim(c_expry_dt);	/*** added in VQC ***/
+		strcpy(ptr_o_st_cntrct->c_expry_dt,c_expry_dt);  /*** added in VQC ***/
+
+		rtrim(ptr_o_st_cntrct->c_expry_dt);
+
+		ptr_fml_Ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+		if ( ptr_fml_Ibuf == NULL )
+		{
+			fn_errlog( c_ServiceName, "S31020", TPMSG, ptr_st_err_msg->c_err_msg  );
+			tpfree( (char *) ptr_o_st_cntrct );		/*** added in VQC ***/
+			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+		if ( ptr_fml_Obuf == NULL )
+		{
+			fn_errlog( c_ServiceName, "S31025", TPMSG, ptr_st_err_msg->c_err_msg  );
+			tpfree ( ( char * ) ptr_fml_Ibuf );
+			tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		/*** Following Commented In Ver 1.3 
+		i_sem_entty=3;  * For Temp NSE - Original Match change to 3 later *			***	Ver	1.2 i_sem_entty Changed From 1 To 3	***
+		 ***/
+
+		/*** Ver 1.3  Starts ***/
+
+		if( DEBUG_MSG_LVL_0)  /*** Debug Level Added in VQC ***/
+    {
+			fn_userlog(c_ServiceName,"Exchange Code Is :%s:",ptr_o_st_cntrct->c_xchng_cd);
+		}
+	
+		if (strcmp(ptr_o_st_cntrct->c_xchng_cd ,"NFO") == 0)
+    {
+			i_sem_entty=3;
+    }
+    else if (strcmp(ptr_o_st_cntrct->c_xchng_cd,"BFO") == 0)
+    {
+    	i_sem_entty=13;  
+    }
+	
+		/*** Ver 1.3  Ends   ***/
+
+
+		if ( Fadd32( ptr_fml_Ibuf, FML_SEM_ENTTY, 
+                       (char *)&i_sem_entty, 0) == -1 )
+		{
+			fn_errlog( c_ServiceName, "S31030", FMLMSG, ptr_st_err_msg->c_err_msg  );
+			tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+			tpfree ( ( char * ) ptr_fml_Ibuf );
+			tpfree ( ( char * ) ptr_fml_Obuf );
+			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		if ( Fadd32( ptr_fml_Ibuf, FML_SEM_MAP_VL,
+                (char *)ptr_st_mtch_cntrct->c_symbol, 0 ) == -1 )
+		{
+			fn_errlog( c_ServiceName, "S31035", FMLMSG, ptr_st_err_msg->c_err_msg  );
+			tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+			tpfree ( ( char * ) ptr_fml_Ibuf );
+			tpfree ( ( char * ) ptr_fml_Obuf );
+			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		fn_cpy_ddr ( ptr_st_mtch_cntrct->c_rout_crt );
+
+		if ( Fadd32( ptr_fml_Ibuf, FFO_ROUT_CRT,
+                (char *)ptr_st_mtch_cntrct->c_rout_crt, 0 ) == -1 )
+		{
+			fn_errlog( c_ServiceName, "S31040", FMLMSG, ptr_st_err_msg->c_err_msg  );
+			tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+			tpfree ( ( char * ) ptr_fml_Ibuf );
+			tpfree ( ( char * ) ptr_fml_Obuf );
+			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		if( DEBUG_MSG_LVL_0)  /*** Debug Level Added in VQC ***/
+    {
+			fn_userlog(c_ServiceName,"Before Call i_sem_entty Is :%d:",i_sem_entty); 	  	/*** '%ld' replace by '%d' in VQC ***/
+		fn_userlog(c_ServiceName,"Before Call ptr_st_mtch_cntrct->c_symbol Is  :%s:",ptr_st_mtch_cntrct->c_symbol);
+		}
+
+		i_returncode = tpcall ( "SVC_ENTTY_MAP", 
+                            ( char * )ptr_fml_Ibuf,
+                            0,
+                            ( char ** )&ptr_fml_Obuf,
+                            &li_recvbuf,
+                            0 );
+
+		if ( i_returncode == -1 )
+		{
+			if ( TPCODE != TPESVCFAIL )
+			{
+				fn_errlog( c_ServiceName, "S31045", TPMSG, ptr_st_err_msg->c_err_msg );
+			}
+			else
+			{
+				Fget32(ptr_fml_Obuf, FML_ERR_MSG, 0, ptr_st_err_msg->c_err_msg,0);
+			}
+			tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+			tpfree( (char *)ptr_fml_Ibuf );
+			tpfree( (char *)ptr_fml_Obuf );
+			tpreturn( TPFAIL, ERR_BFR, ( char *)ptr_st_err_msg, 0, 0 );
+		}
+
+		if( DEBUG_MSG_LVL_0)  /*** Debug Level Added in VQC ***/
+    {
+			fn_userlog(c_ServiceName,"After Call To SVC_ENTTY_MAP");
+		}
+
+		if ( Fget32 ( ptr_fml_Obuf, FML_SEM_STCK_CD, 0, 
+                             ( char * )ptr_o_st_cntrct->c_undrlyng, 0 ) == -1 )
+		{
+				fn_errlog( c_ServiceName, "S31050", FMLMSG, ptr_st_err_msg->c_err_msg );
+				tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+				tpfree( (char *)ptr_fml_Ibuf );
+				tpfree( (char *)ptr_fml_Obuf );
+				tpreturn( TPFAIL, ERR_BFR, ( char *)ptr_st_err_msg, 0, 0 );
+		}
+
+		tpfree( (char *)ptr_fml_Ibuf );
+		tpfree( (char *)ptr_fml_Obuf );
+
+		/**** Added in Ver 1.4 ******/
+
+    if ( strncmp( ptr_st_mtch_cntrct->c_instrmnt_typ,"FUTIVX",(int)strlen("FUTIVX")) == 0)
+    {
+      strcpy(ptr_st_mtch_cntrct->c_instrmnt_typ,"FUTIDX");
+    }
+
+    /**** Added in Ver 1.4 ******/
+	
+		if ( strncmp( ptr_st_mtch_cntrct->c_instrmnt_typ, "FUT", 
+                                                      (int)strlen("FUT")) == 0 ) 
+		{
+			ptr_o_st_cntrct->c_prd_typ = 'F'; 
+		}
+		else if ( strncmp( ptr_st_mtch_cntrct->c_instrmnt_typ, "OPT", 
+                                                      (int)strlen("OPT")) == 0 ) 
+		{
+			ptr_o_st_cntrct->c_prd_typ = 'O'; 
+		}
+		else
+		{
+			fn_userlog(c_ServiceName, "Invalid Product Type ");
+			strcpy( ptr_st_err_msg->c_err_msg, "Invalid Product Type" );
+			tpfree( (char *) ptr_o_st_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		if ( strncmp( ptr_st_mtch_cntrct->c_instrmnt_typ + 3, "IDX", 
+                                                      (int)strlen("IDX")) == 0 )	
+		{
+			ptr_o_st_cntrct->c_ctgry_indstk = 'I';
+		}
+		else if ( strncmp( ptr_st_mtch_cntrct->c_instrmnt_typ + 3, "STK", 
+                                                      (int)strlen("STK")) == 0 )	
+		{
+			ptr_o_st_cntrct->c_ctgry_indstk = 'S';
+		}
+		else
+		{
+			fn_userlog(c_ServiceName, "Invalid Instrument Type ");
+			strcpy( ptr_st_err_msg->c_err_msg, "Invalid Instrument Type" );
+			tpfree( (char *) ptr_o_st_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		if ( ptr_st_mtch_cntrct->c_opt_typ[0] == 'C' )
+		{
+				ptr_o_st_cntrct->c_opt_typ = 'C';
+		}
+		else if ( ptr_st_mtch_cntrct->c_opt_typ[0] == 'P' )
+		{
+				ptr_o_st_cntrct->c_opt_typ = 'P';
+		}
+		else if ( ( ptr_st_mtch_cntrct->c_opt_typ[0] == 'F' ) || 
+						  ( ptr_st_mtch_cntrct->c_opt_typ[0] == '\0' ) )
+		{
+				ptr_o_st_cntrct->c_opt_typ = '*';
+				ptr_o_st_cntrct->c_exrc_typ = 'E';
+		}
+		else
+		{
+			fn_userlog(c_ServiceName, "Invalid Option Type ");
+			strcpy( ptr_st_err_msg->c_err_msg, "Invalid Option Type" );
+			tpfree( (char *) ptr_o_st_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		if ( ptr_o_st_cntrct->c_prd_typ == 'O' )
+		{
+
+			if ( ptr_st_mtch_cntrct->c_opt_typ[1] == 'A' )
+			{
+					ptr_o_st_cntrct->c_exrc_typ = 'A';
+			}
+			else if ( ptr_st_mtch_cntrct->c_opt_typ[1] == 'E' )
+			{
+					ptr_o_st_cntrct->c_exrc_typ = 'E';
+			}
+			else
+			{
+				fn_userlog(c_ServiceName, "Invalid Exercise Type ");
+				strcpy( ptr_st_err_msg->c_err_msg, "Invalid Exercise Type" );
+				tpfree( (char *) ptr_o_st_cntrct );
+    		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+			}
+		}
+		tpfree( (char *) ptr_st_err_msg );
+  	tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_o_st_cntrct, 
+                                    sizeof( struct vw_contract ), 0 );
+	}	
+	else if ( strcmp( subtype, "vw_nse_cntrct" ) == 0 )
+	{
+		ptr_st_nse_cntrct = ( struct vw_nse_cntrct *)rqst->data;
+
+  	/*** Added for Order Routing ***/
+  	fn_init_ddr_val ( ptr_st_nse_cntrct->c_rout_crt );
+
+		switch ( ptr_st_nse_cntrct->c_rqst_typ )
+		{
+			case NSE_ID_TO_CONTRACT :
+
+				ptr_fml_Ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+				if ( ptr_fml_Ibuf == NULL )
+				{
+					fn_errlog( c_ServiceName, "S31055", TPMSG, 
+                     ptr_st_err_msg->c_err_msg  );
+					tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+					tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				}
+		
+				ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+				if ( ptr_fml_Obuf == NULL )
+				{
+					fn_errlog( c_ServiceName, "S31060", TPMSG, 
+                          ptr_st_err_msg->c_err_msg  );
+					tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+					tpfree ( ( char * ) ptr_fml_Ibuf );
+					tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				}
+		
+				i_sem_entty = 3; /* For NSE */						/***	Ver	1.2	i_sem_entty	Changed From 1 To 3	***/
+				if ( Fadd32( ptr_fml_Ibuf, FML_SEM_ENTTY, 
+													(char *)&i_sem_entty, 0) == -1 )
+				{
+					fn_errlog( c_ServiceName, "S31065", FMLMSG, 
+                           ptr_st_err_msg->c_err_msg  );
+					tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+					tpfree ( ( char * ) ptr_fml_Ibuf );
+					tpfree ( ( char * ) ptr_fml_Obuf );
+					tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				}
+		
+				if ( Fadd32( ptr_fml_Ibuf, FML_SEM_MAP_VL,
+		                (char *)ptr_st_nse_cntrct->c_symbol, 0 ) == -1 )
+				{
+					fn_errlog( c_ServiceName, "S31070", FMLMSG, 
+                           ptr_st_err_msg->c_err_msg  );
+					tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+					tpfree ( ( char * ) ptr_fml_Ibuf );
+					tpfree ( ( char * ) ptr_fml_Obuf );
+					tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				}
+	
+				fn_cpy_ddr ( ptr_st_nse_cntrct->c_rout_crt );	
+
+				if ( Fadd32( ptr_fml_Ibuf, FFO_ROUT_CRT,
+		                (char *)ptr_st_nse_cntrct->c_rout_crt, 0 ) == -1 )
+				{
+					fn_errlog( c_ServiceName, "S31075", FMLMSG, 
+                           ptr_st_err_msg->c_err_msg  );
+					tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+					tpfree ( ( char * ) ptr_fml_Ibuf );
+					tpfree ( ( char * ) ptr_fml_Obuf );
+					tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				}
+		
+				i_returncode = tpcall ( "SVC_ENTTY_MAP", 
+		                            ( char * )ptr_fml_Ibuf,
+		                            0,
+		                            ( char ** )&ptr_fml_Obuf,
+		                            &li_recvbuf,
+		                            0 );
+		
+				if ( i_returncode == -1 )
+				{
+					if ( TPCODE != TPESVCFAIL )
+					{
+						fn_errlog( c_ServiceName, "S31080", TPMSG, 
+                        ptr_st_err_msg->c_err_msg );
+					}
+					else
+					{
+						Fget32(ptr_fml_Obuf, FML_ERR_MSG, 0, ptr_st_err_msg->c_err_msg,0);
+					}
+					tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+					tpfree( (char *)ptr_fml_Ibuf );
+					tpfree( (char *)ptr_fml_Obuf );
+					tpreturn( TPFAIL, ERR_BFR, ( char *)ptr_st_err_msg, 0, 0 );
+				}
+		
+				if ( Fget32 ( ptr_fml_Obuf, FML_SEM_STCK_CD, 0, 
+		                     ( char * )ptr_o_st_cntrct->c_undrlyng, 0 ) == -1 )
+				{
+					fn_errlog( c_ServiceName, "S31085", FMLMSG, 
+                           ptr_st_err_msg->c_err_msg );
+					tpfree( (char *) ptr_o_st_cntrct );   /*** added in VQC ***/
+					tpfree( (char *)ptr_fml_Ibuf );
+					tpfree( (char *)ptr_fml_Obuf );
+					tpreturn( TPFAIL, ERR_BFR, ( char *)ptr_st_err_msg, 0, 0 );
+				}
+		
+				tpfree( (char *)ptr_fml_Ibuf );
+				tpfree( (char *)ptr_fml_Obuf );
+		
+				if(ptr_st_nse_cntrct->c_exrc_typ	== 'X')
+				{
+					ptr_st_nse_cntrct->c_exrc_typ = 'E';
+				}
+				if( ptr_st_nse_cntrct->c_opt_typ	== 'X')
+				{
+					ptr_st_nse_cntrct->c_opt_typ = '*';
+				}
+				if (ptr_st_nse_cntrct->l_strike_prc	== -1)
+				{
+					ptr_st_nse_cntrct->l_strike_prc = 0;
+				}
+
+        /*** Commented in Ver 1.5 ***
+				EXEC SQL
+					SELECT	fcm_xchng_cd,
+									fcm_prdct_typ,
+									fcm_undrlyng,
+									to_char(fcm_expry_dt,'DD-Mon-YYYY'),
+									fcm_exer_typ,
+									fcm_opt_typ,
+									fcm_strk_prc,
+									fcm_ca_lvl,
+									fcm_indstk
+					INTO		:ptr_o_st_cntrct->c_xchng_cd,
+									:ptr_o_st_cntrct->c_prd_typ,
+									:ptr_o_st_cntrct->c_undrlyng,
+									:ptr_o_st_cntrct->c_expry_dt,
+									:ptr_o_st_cntrct->c_exrc_typ,
+									:ptr_o_st_cntrct->c_opt_typ,
+									:ptr_o_st_cntrct->l_strike_prc,
+									:ptr_o_st_cntrct->l_ca_lvl,
+									:ptr_o_st_cntrct->c_ctgry_indstk
+					FROM		fcm_fo_cntrct_mstr
+					WHERE		fcm_xchng_cd	= :ptr_st_nse_cntrct->c_xchng_cd	
+					AND			fcm_prdct_typ	= :ptr_st_nse_cntrct->c_prd_typ	
+					AND			fcm_undrlyng	= :ptr_o_st_cntrct->c_undrlyng	
+					AND			fcm_expry_dt	= to_date(:ptr_st_nse_cntrct->c_expry_dt,
+																	'DD-Mon-YYYY')
+					AND			fcm_exer_typ	= :ptr_st_nse_cntrct->c_exrc_typ	
+					AND			fcm_opt_typ		= :ptr_st_nse_cntrct->c_opt_typ	
+					AND			fcm_strk_prc  = :ptr_st_nse_cntrct->l_strike_prc;	
+	        ***/
+          /*** Ver 1.5 Starts ***/
+  	
+          EXEC SQL
+          SELECT  ftq_xchng_cd,
+                  ftq_prdct_typ,
+                  ftq_undrlyng,
+                  to_char(ftq_expry_dt,'DD-Mon-YYYY'),
+                  ftq_exer_typ,
+                  ftq_opt_typ,
+                  ftq_strk_prc,
+                  ftq_ca_lvl,
+                  ftq_indstk
+          INTO    :ptr_o_st_cntrct->c_xchng_cd,
+                  :ptr_o_st_cntrct->c_prd_typ,
+                  :ptr_o_st_cntrct->c_undrlyng,
+                  :ptr_o_st_cntrct->c_expry_dt,
+                  :ptr_o_st_cntrct->c_exrc_typ,
+                  :ptr_o_st_cntrct->c_opt_typ,
+                  :ptr_o_st_cntrct->l_strike_prc,
+                  :ptr_o_st_cntrct->l_ca_lvl,
+                  :ptr_o_st_cntrct->c_ctgry_indstk
+          FROM    ftq_fo_trd_qt      
+          WHERE   ftq_xchng_cd  = :ptr_st_nse_cntrct->c_xchng_cd
+          AND     ftq_prdct_typ = :ptr_st_nse_cntrct->c_prd_typ
+          AND     ftq_undrlyng  = :ptr_o_st_cntrct->c_undrlyng
+          AND     ftq_expry_dt  = to_date(:ptr_st_nse_cntrct->c_expry_dt,
+                                  'DD-Mon-YYYY')
+          AND     ftq_exer_typ  = :ptr_st_nse_cntrct->c_exrc_typ
+          AND     ftq_opt_typ   = :ptr_st_nse_cntrct->c_opt_typ
+          AND     ftq_strk_prc  = :ptr_st_nse_cntrct->l_strike_prc;
+
+          /*** Ver 1.5 Ends   ***/
+
+				if ( SQLCODE != 0 )
+				{
+		    	fn_errlog ( c_ServiceName, "S31090", SQLMSG, 
+                         ptr_st_err_msg->c_err_msg);
+					tpfree( (char *) ptr_o_st_cntrct );
+		    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				}
+				rtrim( ptr_o_st_cntrct->c_xchng_cd);
+				rtrim( ptr_o_st_cntrct->c_undrlyng);
+				rtrim( ptr_o_st_cntrct->c_expry_dt);
+				tpfree ( ( char * ) ptr_st_err_msg );
+				break;
+
+			case NSE_TOKEN_TO_CONTRACT :
+
+        /*** Commented in Ver 1.5 ***
+				EXEC SQL
+					SELECT	fcm_xchng_cd,
+									fcm_prdct_typ,
+									fcm_undrlyng,
+									to_char(fcm_expry_dt,'DD-Mon-YYYY'),
+									fcm_exer_typ,
+									fcm_opt_typ,
+									fcm_strk_prc,
+									fcm_ca_lvl,
+									fcm_indstk
+					INTO		:ptr_o_st_cntrct->c_xchng_cd,
+									:ptr_o_st_cntrct->c_prd_typ,
+									:ptr_o_st_cntrct->c_undrlyng,
+									:ptr_o_st_cntrct->c_expry_dt,
+									:ptr_o_st_cntrct->c_exrc_typ,
+									:ptr_o_st_cntrct->c_opt_typ,
+									:ptr_o_st_cntrct->l_strike_prc,
+									:ptr_o_st_cntrct->l_ca_lvl,
+									:ptr_o_st_cntrct->c_ctgry_indstk
+					FROM		fcm_fo_cntrct_mstr
+					WHERE		fcm_token_no	= :ptr_st_nse_cntrct->l_token_id;	
+	       ***/
+         /*** Ver 1.5 Starts ***/
+
+          EXEC SQL
+          SELECT  ftq_xchng_cd,
+                  ftq_prdct_typ,
+                  ftq_undrlyng,
+                  to_char(ftq_expry_dt,'DD-Mon-YYYY'),
+                  ftq_exer_typ,
+                  ftq_opt_typ,
+                  ftq_strk_prc,
+                  ftq_ca_lvl,
+                  ftq_indstk
+          INTO    :ptr_o_st_cntrct->c_xchng_cd,
+                  :ptr_o_st_cntrct->c_prd_typ,
+                  :ptr_o_st_cntrct->c_undrlyng,
+                  :ptr_o_st_cntrct->c_expry_dt,
+                  :ptr_o_st_cntrct->c_exrc_typ,
+                  :ptr_o_st_cntrct->c_opt_typ,
+                  :ptr_o_st_cntrct->l_strike_prc,
+                  :ptr_o_st_cntrct->l_ca_lvl,
+                  :ptr_o_st_cntrct->c_ctgry_indstk
+          FROM    ftq_fo_trd_qt     
+          WHERE   ftq_token_no  = :ptr_st_nse_cntrct->l_token_id;
+
+         /*** Ver 1.5 Ends   ***/
+      
+  			if ( SQLCODE != 0 )
+				{
+		    	fn_errlog ( c_ServiceName, "S31095", SQLMSG, 
+                         ptr_st_err_msg->c_err_msg);
+					tpfree( (char *) ptr_o_st_cntrct );
+		    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				}
+				rtrim( ptr_o_st_cntrct->c_xchng_cd);
+				rtrim( ptr_o_st_cntrct->c_undrlyng);
+				rtrim( ptr_o_st_cntrct->c_expry_dt);
+				tpfree ( ( char * ) ptr_st_err_msg );
+				break;
+
+			default :
+				fn_userlog(c_ServiceName, "Invalid Request Type ");
+				strcpy( ptr_st_err_msg->c_err_msg, "Invalid Request Type" );
+				tpfree( (char *) ptr_o_st_cntrct );
+    		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+				break;
+		}
+  	tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_o_st_cntrct, 
+                                  sizeof( struct vw_contract ), 0 );
+	}	
+	else if ( strcmp( subtype, "vw_contract" ) == 0 )
+	{
+		ptr_i_st_cntrct = ( struct vw_contract *)rqst->data;
+
+  	/*** Added for Order Routing ***/
+  	fn_init_ddr_val ( ptr_i_st_cntrct->c_rout_crt );
+
+		if ( ptr_i_st_cntrct->c_rqst_typ != EBA_ID_TO_CONTRACT )
+		{
+			fn_userlog(c_ServiceName, "Invalid Request Type ");
+			strcpy( ptr_st_err_msg->c_err_msg, "Invalid Request Type" );
+			tpfree( (char *) ptr_o_st_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+    /*** Commented in Ver 1.5 ***
+		EXEC SQL
+			SELECT	fcm_xchng_cd,
+							fcm_prdct_typ,
+							fcm_undrlyng,
+							to_char(fcm_expry_dt,'DD-Mon-YYYY'),
+							fcm_exer_typ,
+							fcm_opt_typ,
+							fcm_strk_prc,
+							fcm_ca_lvl
+			INTO		:ptr_o_st_cntrct->c_xchng_cd,
+							:ptr_o_st_cntrct->c_prd_typ,
+							:ptr_o_st_cntrct->c_undrlyng,
+							:ptr_o_st_cntrct->c_expry_dt,
+							:ptr_o_st_cntrct->c_exrc_typ,
+							:ptr_o_st_cntrct->c_opt_typ,
+							:ptr_o_st_cntrct->l_strike_prc,
+							:ptr_o_st_cntrct->l_ca_lvl
+			FROM		fcm_fo_cntrct_mstr
+			WHERE		fcm_eba_cntrct_id = :ptr_i_st_cntrct->l_eba_cntrct_id;	
+      ***/
+      /*** Ver 1.5 Starts ***/
+
+      EXEC SQL
+      SELECT  ftq_xchng_cd,
+              ftq_prdct_typ,
+              ftq_undrlyng,
+              to_char(ftq_expry_dt,'DD-Mon-YYYY'),
+              ftq_exer_typ,
+              ftq_opt_typ,
+              ftq_strk_prc,
+              ftq_ca_lvl
+      INTO    :ptr_o_st_cntrct->c_xchng_cd,
+              :ptr_o_st_cntrct->c_prd_typ,
+              :ptr_o_st_cntrct->c_undrlyng,
+              :ptr_o_st_cntrct->c_expry_dt,
+              :ptr_o_st_cntrct->c_exrc_typ,
+              :ptr_o_st_cntrct->c_opt_typ,
+              :ptr_o_st_cntrct->l_strike_prc,
+              :ptr_o_st_cntrct->l_ca_lvl
+      FROM    ftq_fo_trd_qt     
+      WHERE   ftq_eba_cntrct_id = :ptr_i_st_cntrct->l_eba_cntrct_id;
+
+      /*** Ver 1.5 Ends   ***/   
+    
+			if ( SQLCODE != 0 )
+			{
+    		fn_errlog ( c_ServiceName, "S31100", SQLMSG, ptr_st_err_msg->c_err_msg);
+				tpfree( (char *) ptr_o_st_cntrct );
+    		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+			}
+
+			rtrim( ptr_o_st_cntrct->c_xchng_cd);
+			rtrim( ptr_o_st_cntrct->c_undrlyng);
+
+			ptr_o_st_cntrct->l_eba_cntrct_id = ptr_i_st_cntrct->l_eba_cntrct_id;
+
+			tpfree ( ( char * ) ptr_st_err_msg );
+  		tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_o_st_cntrct, 
+                                  sizeof( struct vw_contract ), 0 );
+	}
+	else
+	{
+		fn_userlog(c_ServiceName, "Invalid Request Type ");
+		strcpy( ptr_st_err_msg->c_err_msg, "Invalid Request Type" );
+		tpfree( (char *) ptr_o_st_cntrct );
+   	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+	}	
+}

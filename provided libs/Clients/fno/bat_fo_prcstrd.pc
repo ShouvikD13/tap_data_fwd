@@ -1,0 +1,1068 @@
+/******************************************************************************/
+/*  Program           : bat_fo_prcstrd.pc                                     */
+/*                                                                            */
+/*  Description       : This Program Will Process All Unmatured Trades		    */
+/*  Log               : 1.0   14-Aug-2009  Sandeep|Infotech                   */
+/*										:	1.1		08-Mar-2010	 Sandeep|Infotech										*/
+/*										:	1.2		10-Mar-2010	 Shailesh|Infotech									*/
+/*                    : 1.3   15-Feb-2012  Sachin|Infotech                    */
+/*                    : 1.4   15-Apr-2012  Sachin|Infotech                    */
+/*                    : 1.5   26-Jun-2012  Sachin|Infotech                    */
+/*                    : 1.6   20-Mar-2014	 Mahesh|Infotech										*/ 
+/*                    : 1.7   09-Sep-2014	 Sachin|Infotech										*/ 
+/*                    : 1.8   16-Dec-2015	 Sachin|Infotech										*/ 
+/*                    : 1.9   16-Dec-2016	 Tanmay|Infotech										*/
+/*                    : 2.1   22-Feb-2018  Suchita|Infotech                   */ 
+/*                    : 2.2   25-Feb-2019  Parag|Infotech                     */
+/*                    : 2.3   03-Sep-2019  Suchita|Infotech                   */
+/*                    : 2.4   02-Feb-2023  Mahehsh|Infotech                   */
+/*                    : 2.5   03-Feb-2023  Shailesh|Infotech                   */
+/*                    : TOL   23-Aug-2023  Agam                               */
+/******************************************************************************/
+/*  1.0    	-  	New Release                                                   */
+/*	1.1			-		Trigger Filter Changed from Pipe ID To Exchange Code					*/
+/*	1.2			-		FO NNF Message Download changes																*/
+/*  1.3     -   Bug Fix                                                       */
+/*  1.4     -   FNO BSE Changes                                               */
+/*  1.5     -   FNO BSE time change                                           */
+/*  1.6     -   FNO BSE Ack change                                            */
+/*  1.7     -   View to FML Changes                                           */
+/*  1.8     -   Sleep time changed                                            */
+/*  1.9     -   selecting trades in order they come														*/
+/*  2.1     -   Temporarily skip records of unprocessed ack                   */
+/*  2.2     -   FO Direct Connectivity                                        */
+/*  2.3     -   Changes for converting last act ref string to long long int   */ 
+/*  2.4     -   pipe id changes    */ 
+/*  2.5     -   Trigger removed changes    */ 
+/*  TOL     -   Tux on Linux                                                  */ 
+/******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fo_fml_def.h>
+/** #include <fo_view_def.h> ** ver 1.7 **/
+
+#include <fo.h>
+#include <fn_env.h>
+#include <fn_battmpt.h>
+#include <fo_exch_comnN.h>
+#include <eba_to_ors.h>
+#include <fn_tuxlib.h>
+#include <fn_fil_log.h>
+#include <fn_ddr.h>
+#include <fn_log.h>
+#include <fml_rout.h>
+#include <fn_scklib_tap.h>
+#include <fn_signal.h>
+#include <fn_read_debug_lvl.h>
+#include <fo_bse_exch_comnN.h>         /*** Ver 1.4 ***/
+#include <fn_fo_bse_convrtn.h>         /*** Ver 1.4 ***/
+#include <signal.h>                    /* Added in Ver TOL */
+
+varchar	c_trd_dt [LEN_DATE];
+varchar c_trd_ref [LEN_DATE];
+char	c_xchng_cd [4];
+char	c_pipe_id [3];
+char	c_prcsd_flg;
+char  c_filter2[32];
+char  *c_ptr_pipe_lst = NULL; /*** Ver 2.2 ***/ 
+
+int i_trg_stts;
+int i_exit_stts;
+int	i_trdprcsd_tab;
+
+long int li_prcs_trd_hnd = 0;
+
+double d_response_order_number;
+
+EXEC SQL INCLUDE  "table/ftt_fo_tmp_trd.h";
+
+int fn_prcs_trd(char *c_ServiceName,
+                char *c_pipe_lst, /*** Ver 2.2 ***/
+           			char *c_errmsg);
+
+int fn_prcs_flg (char *c_ServiceName,
+                 char c_prcsd_flg,
+								 /* double d_response_order_number,	*Ver 1.6 */
+								 char *c_response_order_number,	/* Ver 1.6 */
+								 long	l_xchngtrd_no,
+								 char *c_rowid,
+                 char *c_errmsg);
+
+void fn_sgnl_usr2(int i_sig_no);
+
+void trim(char *str);  /*** Ver 1.4 ***/
+void BAT_FO_PRCSTRD( int argc, char *argv[] )
+{
+	char	c_ServiceName[256];
+	char  c_errmsg[256];
+	char  c_skip_ordref[19];
+
+  /*** Ver 2.2 starts ***/
+  char  c_ini_fname[20] = "\0";
+  char c_pipe_list[30] = "\0";
+  /*** Ver 2.2 ends ***/
+
+	int i_trnsctn;
+	int i_ret_val;
+	int i_ch_val;
+
+	strcpy(c_ServiceName,argv[0]);
+	strcpy(c_xchng_cd,argv[2]);
+
+	INITBATDBGLVL(argv[0]);
+
+	fn_userlog(c_ServiceName,"Inside BAT_FO_PRCSTRD for %s",c_xchng_cd);     /*** Ver 1.4 ***/
+
+	if(argc<4)
+  {
+    fn_userlog(c_ServiceName,"In argc < 4 ");
+   /** fn_userlog(c_ServiceName,"Usage:bat_fo_prcstrd <NFO> <NFO> <NA> "); ** Ver 1.4 **/
+    fn_userlog(c_ServiceName,"Usage:bat_fo_prcstrd <INI FIle> <Exchange cd> <NA>"); /*** Ver 1.4 ***/
+    exit(0);
+  }
+
+	if ( fn_set_sgn_hnd ( SIGUSR2, fn_sgnl_usr2, c_ServiceName, c_errmsg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31005", LIBMSG, c_errmsg );
+    return;
+  }
+
+  /*** Ver 2.2 starts ***/
+  /*** sprintf(c_ini_fname, "%s/%s", getenv("BIN"), "NFO.ini"); **** Ver 2.4 **/
+  sprintf(c_ini_fname, "%s/%s.ini", getenv("BIN"), c_pipe_id);  /** Ver 2.4 **/
+  fn_userlog(c_ServiceName,"c_ini_fname :%s:",c_ini_fname);  /* Ver 2.4 */
+  if( fn_init_prcs_spc ( c_ServiceName,c_ini_fname,c_ServiceName) == -1 )
+  {
+    fn_userlog(c_ServiceName,"Error in Reading the ini File");
+    exit(0);
+  }
+  c_ptr_pipe_lst = (char *)fn_get_prcs_spc(c_ServiceName,"PIPE_LIST");
+  if( c_ptr_pipe_lst == NULL )
+  {
+    fn_userlog(c_ServiceName,"Unable to read PIPE_LIST from ini File");
+    exit(0);
+  }
+  fn_userlog(c_ServiceName,"The List Of Pipe No.s is :%s:",c_ptr_pipe_lst);
+  strcpy(c_pipe_list,c_ptr_pipe_lst);
+  /*** Ver 2.2 ends ***/
+	
+	while ( i_exit_stts == DONT_EXIT)
+	{
+		fn_userlog(c_ServiceName,"Inside Condition DONT_EXIT");
+		/*Commented in ver 2.5 
+		while(i_trdprcsd_tab == TRUE)
+		{
+		*/
+			fn_userlog(c_ServiceName,"Before Call To Function fn_prcs_trd");
+
+			i_ret_val = fn_prcs_trd(c_ServiceName, 
+                              c_pipe_list, /*** ver 2.2 ***/
+															c_errmsg);
+
+			if(i_ret_val == -1)
+			{
+				fn_userlog(c_ServiceName,"Failed While Processing Trade ");
+			}
+			
+		/*Commented in ver 2.5	
+			i_trdprcsd_tab = FALSE;
+  		li_prcs_trd_hnd =  tpsubscribe ( "TRG_PRCS_TRD",
+                                   		 (char *)c_filter2,
+																			 (TPEVCTL *)NULL,
+																			 0);
+  		if ( li_prcs_trd_hnd == -1 )
+  		{
+    		fn_errlog(c_ServiceName,"S31010", TPMSG, c_errmsg);
+				return;
+  		}
+
+		 }*/
+
+    /*** sleep (10);  **** Ver 1.8 ***/
+		/**sleep (5);   Ver 1.8 sleep time changed form 10 to 5 seconds ***/
+		sleep (2);  /*** Ver 2.5 sleep reduced to 2 seconds **/
+
+		/**Commented in Ver 2.5
+		i_ch_val = fn_chk_stts ( c_ServiceName ) ;
+
+    if ( i_ch_val == -1 )
+    {
+    	fn_errlog(c_ServiceName,"S31015", LIBMSG, c_errmsg);
+    }
+		**/
+	}		
+
+	return;
+
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+
+	char c_ServiceName [ 33 ];
+	char c_errmsg [ 256 ];
+
+
+	i_exit_stts = DONT_EXIT;
+	strcpy(c_ServiceName, argv[0]);
+	strcpy(c_xchng_cd,argv[2]);
+	strcpy(c_pipe_id,argv[3]);
+
+	/***	Commented In Ver 1.1
+  sprintf ( c_filter2, "FFO_FILTER=='%s'", c_pipe_id );
+	**********/
+
+	fn_userlog(c_ServiceName,"Exchange Code Is :%s:",c_xchng_cd);
+
+  sprintf ( c_filter2, "FFO_FILTER=='%s'", c_xchng_cd);			/***	Ver 1.1	***/
+  fn_userlog(c_ServiceName," c_filter2 :%s:",c_filter2);    /*** Ver 1.4 ***/
+
+	EXEC SQL
+		SELECT	to_char ( EXG_NXT_TRD_DT, 'dd-mon-yyyy' ),
+						to_char ( EXG_NXT_TRD_DT, 'yyyymmdd' )
+		INTO		:c_trd_dt,
+						:c_trd_ref
+		FROM		exg_xchng_mstr
+		WHERE		exg_xchng_cd = :c_xchng_cd;
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31020", SQLMSG, c_errmsg);
+    return ( -1 );
+  }
+
+
+	i_trdprcsd_tab = FALSE;
+
+	li_prcs_trd_hnd =  tpsubscribe ( "TRG_PRCS_TRD", 
+                                   (char *)c_filter2,
+																	 (TPEVCTL *)NULL,
+																 	0);
+
+	if ( li_prcs_trd_hnd == -1 )
+  {
+  	fn_errlog(c_ServiceName,"S31025", TPMSG, c_errmsg);
+    return (-1);
+  }
+
+  fn_var = BAT_FO_PRCSTRD;
+  return 0;
+}
+
+int fn_prcs_trd(char *c_ServiceName,
+                char *c_pipe_list, /*** Ver 2.2 ***/
+		    				char *c_errmsg)
+{
+	char  c_skip_ordref[19];
+	char  c_rowid[19];
+
+	int i_rec_cnt;
+	int i_trnsctn;
+	int i_dwnld_flg= DOWNLOAD;
+  int i_err[9];	
+  int i_ferr[9];	
+  int i_read_size;
+	int i_loop;
+	int i_cnt;
+  int i_ret_val;
+	int i_ch_val;
+	int i_deferred_dwnld_flg = 0;
+  
+  /*** Ver 1.4 Starts Here ***/
+  int i_yyyy;
+  int i_dd;
+  int i_mm;
+  int i_hh;
+  int i_mi;
+  int i_ss; 
+  
+  long l_scrip_cd;
+  long l_trade_no;
+  long l_rate;
+  long l_exec_qty;
+  long l_ord_seq;  
+  long long ll_exchange_ack;
+ 
+  /*** Ver 1.4 Ends Here ****/
+  long  li_recvbuf = 0;
+	long	l_xchngtrd_no;
+
+	long long ll_xchng_jiffy;
+
+	double d_jiffy;
+	double d_exchrespnse_ordr_nmbr;
+	double d_xchng_jiffy;
+
+  struct st_trade_confirm st_trd_conf;
+	long l_trans_cd = 0;													/*** Ver 2.2 ***/
+	char c_lst_act_ref [22];											/*** Ver 2.2 ***/
+	MEMSET(c_lst_act_ref);												/*** Ver 2.2 ***/
+  struct st_trade_confirm_tr st_trd_conf_tr;		/*** Ver 2.2 ***/
+  struct st_trd_cnfrmtn   st_bse_trd_conf;      /*** Ver 1.4 ***/
+
+  FBFR32  *ptr_fml_Sbuf;
+  FBFR32  *ptr_fml_Rbuf;
+
+
+	fn_userlog(c_ServiceName,"Inside Function fn_prcs_trd");
+
+  /**** commented in version 2.1 ****
+  EXEC SQL
+    SELECT count(*)
+    INTO   :i_rec_cnt
+    FROM   ftt_fo_tmp_trd
+    WHERE  trunc(ftt_trd_tm) = :c_trd_dt
+    AND    ftt_prcsd_flg = 'N'
+    AND    ftt_xchng_cd = :c_xchng_cd;  *** Ver 1.4 ***
+ **** comment ends for version 2.1 ****/ 
+
+  /**** version 2.1 started ****/
+	EXEC SQL
+    SELECT COUNT(*)
+    INTO   :i_rec_cnt
+    FROM   FTT_FO_TMP_TRD,FOD_FO_ORDR_DTLS
+    WHERE  trunc(FTT_TRD_TM) = :c_trd_dt 
+    AND    FTT_PRCSD_FLG = 'N'
+    AND    FTT_XCHNG_CD = :c_xchng_cd 
+    AND    FTT_XCHNG_CD = FOD_XCHNG_CD
+    AND    FTT_PIPE_ID  = FOD_PIPE_ID  
+    AND    FTT_ACK_NMBR = trim(FOD_ACK_NMBR)  
+    AND   FOD_PIPE_ID IN ( SELECT REGEXP_SUBSTR ( :c_pipe_list ,'[^,]+',1,ROWNUM)  /*** Ver 2.4 ***/ 
+                                                 FROM DUAL
+                                                 CONNECT BY REGEXP_SUBSTR(:c_pipe_list,'[^,]+',1,ROWNUM) IS NOT NULL);  
+  /**** version 2.1 ended ****/
+ 
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog ( c_ServiceName, "S31030",SQLMSG, c_errmsg);
+    fn_userlog(c_ServiceName,"Failed While Getting Count Of Records To Be Processed");
+  }
+
+  fn_userlog(c_ServiceName,"Total No. Of Records To Be Processed :%d:",i_rec_cnt);
+
+  ptr_fml_Sbuf  = (FBFR32 *)tpalloc("FML32", NULL, MIN_FML_BUF_LEN);
+  if ( ptr_fml_Sbuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31035", TPMSG, c_errmsg  );
+  }
+
+  ptr_fml_Rbuf  = (FBFR32 *)tpalloc("FML32", NULL, MIN_FML_BUF_LEN);
+  if ( ptr_fml_Rbuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31040", TPMSG, c_errmsg  );
+  }
+  
+/***  if( strcmp(c_xchng_cd,"NFO") == 0 )  *** Ver 1.4, If condition added***	Commented in Ver 2.2 ***
+  {
+	 st_trd_conf.st_hdr.si_transaction_code = TRADE_CONFIRMATION ;
+  }	*** Ver 2.2 ***/
+
+	fn_userlog(c_ServiceName,"BEFORE FOR LOOP");
+
+	for(i_cnt=0;i_cnt < i_rec_cnt;i_cnt++)
+  {
+    fn_userlog(c_ServiceName,"Inside For Loop Processing Record No. :%d:",i_cnt);
+
+		sql_ftt_token_no = 0;
+		sql_ftt_xchngtrd_no = 0;
+		sql_ftt_exctd_qty = 0;
+		sql_ftt_exctd_rt = 0;
+		sql_ftt_jiffy = 0;	
+
+		MEMSET(c_pipe_id);
+		MEMSET(c_rowid);
+		MEMSET(sql_ftt_ack_nmbr);
+
+/** Commented in Ver 1.9 **** 
+    EXEC SQL
+      SELECT  ftt_ack_nmbr,
+              ftt_pipe_id,
+              ftt_token_no,
+              ftt_xchngtrd_no,
+              to_char(ftt_trd_tm,'dd-Mon-yyyy hh24:mi:ss'),
+              ftt_exctd_qty,
+              ftt_exctd_rt,
+              ftt_jiffy,
+							ftt_stream_no,									**Ver 1.2 **
+              ftt_xchng_cd,                    ** Ver 1.4 **
+							rowid
+      INTO    :sql_ftt_ack_nmbr,
+              :sql_ftt_pipe_id,
+              :sql_ftt_token_no,
+              :sql_ftt_xchngtrd_no,
+              :sql_ftt_trd_tm,
+              :sql_ftt_exctd_qty,
+              :sql_ftt_exctd_rt,
+							:sql_ftt_jiffy,
+							:sql_ftt_stream_no,							**Ver 1.2 **
+              :sql_ftt_xchng_cd,              ** Ver 1.4 **
+							:c_rowid
+      FROM    ftt_fo_tmp_trd
+			WHERE		ftt_prcsd_flg = 'N'
+			AND			trunc(ftt_trd_tm) = :c_trd_dt
+      AND     ftt_xchng_cd   = :c_xchng_cd       *** Ver 1.4 ***
+			AND 		ROWNUM < 2
+			ORDER BY	ftt_trd_tm;
+
+			******** Commented Ends for ver 1.9 *****/
+
+	/**** Ver 1.9 Added ******** Commented in version 2.1
+
+		EXEC SQL
+		Select ftt_ack_nmbr,
+					 ftt_pipe_id,
+					 ftt_token_no,
+					 ftt_xchngtrd_no,
+					 ftt_trd_tm,
+					 ftt_exctd_qty,
+					 ftt_exctd_rt,
+					 ftt_jiffy,
+					 ftt_stream_no, 
+					 ftt_xchng_cd, 
+					 rowid
+	  	INTO    :sql_ftt_ack_nmbr,
+              :sql_ftt_pipe_id,
+              :sql_ftt_token_no,
+              :sql_ftt_xchngtrd_no,
+              :sql_ftt_trd_tm,
+              :sql_ftt_exctd_qty,
+              :sql_ftt_exctd_rt,
+              :sql_ftt_jiffy,
+              :sql_ftt_stream_no,            
+              :sql_ftt_xchng_cd,            
+              :c_rowid
+			FROM (
+			SELECT  ftt_ack_nmbr,
+              ftt_pipe_id,
+              ftt_token_no,
+              ftt_xchngtrd_no,
+              to_char(ftt_trd_tm,'dd-Mon-yyyy hh24:mi:ss') ftt_trd_tm,
+              ftt_exctd_qty,
+              ftt_exctd_rt,
+              ftt_jiffy,
+              ftt_stream_no,               
+              ftt_xchng_cd,               
+              rowid
+      FROM    ftt_fo_tmp_trd
+      WHERE   ftt_prcsd_flg = 'N'
+      AND     trunc(ftt_trd_tm) = :c_trd_dt
+      AND     ftt_xchng_cd   = :c_xchng_cd  
+      ** AND     ROWNUM < 2  ** Commented in Ver 1.9 **
+      ORDER BY  ftt_trd_tm)                
+			WHERE    ROWNUM < 2;								
+
+     ***** Ver 1.9 Added ********comment ends for version 2.1 ****/
+
+/** Added in version 2.1 **/
+/** The query fetches only those records present in ftt table whose ack has been processed by now**/ 
+       EXEC SQL
+       SELECT
+         FTT_ACK_NMBR,
+         FTT_PIPE_ID,
+         FTT_TOKEN_NO,
+         FTT_XCHNGTRD_NO,
+         ftt_trd_tm,
+         FTT_EXCTD_QTY,
+         FTT_EXCTD_RT,
+         FTT_JIFFY,
+         FTT_STREAM_NO,
+         FTT_XCHNG_CD,
+         rid,
+				 ftt_trans_cd,								/*** Ver 2.2 ***/
+				 ftt_lst_act_ref							/*** Ver 2.2 ***/
+        INTO    :sql_ftt_ack_nmbr,
+                :sql_ftt_pipe_id,
+                :sql_ftt_token_no,
+                :sql_ftt_xchngtrd_no,
+                :sql_ftt_trd_tm,
+                :sql_ftt_exctd_qty,
+                :sql_ftt_exctd_rt,
+                :sql_ftt_jiffy,
+                :sql_ftt_stream_no,
+                :sql_ftt_xchng_cd,
+                :c_rowid,
+								:l_trans_cd,					/*** Ver 2.2 ***/
+								:c_lst_act_ref				/*** Ver 2.2 ***/
+        FROM
+                ( SELECT
+                  FTT_ACK_NMBR,
+                  FTT_PIPE_ID,
+                  FTT_TOKEN_NO,
+                  FTT_XCHNGTRD_NO,
+                  TO_CHAR(FTT_TRD_TM,'dd-Mon-yyyy hh24:mi:ss') ftt_trd_tm,
+                  FTT_EXCTD_QTY,
+                  FTT_EXCTD_RT,
+                  FTT_JIFFY,
+                  FTT_STREAM_NO,
+                  FTT_XCHNG_CD,
+                  A.ROWID rid,
+									NVL(FTT_TRANS_CD,2222) ftt_trans_cd,					/*** Ver 2.2 ***/
+									NVL(FTT_LST_ACT_REF,'NA')	ftt_lst_act_ref			/*** Ver 2.2 ***/
+                  FROM    FTT_FO_TMP_TRD  A,FOD_FO_ORDR_DTLS
+                          WHERE FTT_PRCSD_FLG = 'N'
+                          AND   TRUNC(FTT_TRD_TM) = :c_trd_dt
+                          AND   FTT_XCHNG_CD  = :c_xchng_cd 
+                          AND   FTT_XCHNG_CD  = FOD_XCHNG_CD 
+                          AND   FTT_ACK_NMBR  = TRIM(FOD_ACK_NMBR)
+                          AND   FOD_PIPE_ID   = FTT_PIPE_ID
+                          AND   FOD_PIPE_ID IN ( SELECT REGEXP_SUBSTR ( :c_pipe_list ,'[^,]+',1,ROWNUM) 
+                                                 FROM DUAL 
+                                                 CONNECT BY REGEXP_SUBSTR(:c_pipe_list,'[^,]+',1,ROWNUM) IS NOT NULL) /*** Ver 2.2 ***/ 
+                          ORDER BY FTT_TRD_TM
+        )
+        WHERE  ROWNUM < 2;
+/** Version 2.1 ended **/
+
+     if ( SQLCODE != 0 &&  SQLCODE != NO_DATA_FOUND)
+     {
+       fn_errlog ( c_ServiceName, "S31045",SQLMSG, c_errmsg);
+     }
+
+    if ( SQLCODE == NO_DATA_FOUND  )  /*** Ver 2.1 **/
+    {
+      fn_userlog( c_ServiceName,"In NO_DATA_FOUND case for record number :%d:",i_cnt );  
+      continue;
+    }
+
+		rtrim(sql_ftt_pipe_id);
+		strcpy(c_pipe_id,sql_ftt_pipe_id);
+	  rtrim(sql_ftt_xchng_cd);         /*** Ver 1.4 ***/
+		
+		SETNULL(c_trd_dt);
+		SETNULL(c_trd_ref);
+    SETNULL(sql_ftt_ack_nmbr);      /***  Ver 1.3 ***/
+    SETNULL(sql_ftt_trd_tm);      /***  Ver 1.3 ***/
+
+		if(DEBUG_MSG_LVL_3)
+		{
+      fn_userlog(c_ServiceName," Exchange Code :%s:",sql_ftt_xchng_cd);  /*** Ver 1.4 **/
+			fn_userlog(c_ServiceName,"Ack Number Is :%s:",sql_ftt_ack_nmbr.arr); /***  Ver 1.3 ***/
+    	fn_userlog(c_ServiceName,"Token NO. Is :%ld:",sql_ftt_token_no);
+    	fn_userlog(c_ServiceName,"Trade NO. Is :%ld:",sql_ftt_xchngtrd_no);
+    	fn_userlog(c_ServiceName,"Trade Time Is :%s:",sql_ftt_trd_tm.arr);
+    	fn_userlog(c_ServiceName,"Trade Qty Is :%ld:",sql_ftt_exctd_qty);
+    	fn_userlog(c_ServiceName,"Trade Price Is :%ld:",sql_ftt_exctd_rt);
+    	fn_userlog(c_ServiceName,"Pipe Id Is :%s:",c_pipe_id);
+    	fn_userlog(c_ServiceName,"Trade Date Is :%s:",c_trd_dt.arr);
+    	fn_userlog(c_ServiceName,"Trade Ref. Date :%s:",c_trd_ref.arr);
+    	fn_userlog(c_ServiceName,"Trade stream number :%ld:",sql_ftt_stream_no);
+			fn_userlog(c_ServiceName,"Trade Jiffy Is :%lf:",sql_ftt_jiffy);
+			fn_userlog(c_ServiceName,"Trans Code Is :%ld:",l_trans_cd);								/*** Ver 2.2 ***/
+			fn_userlog(c_ServiceName,"Last Activity Ref Is :%s:",c_lst_act_ref);			/*** Ver 2.2 ***/
+		}
+		/*** Ver 2.2 Starts ***/
+		if ( l_trans_cd == TRADE_CONFIRMATION_TR )
+		{
+		 MEMSET(st_trd_conf_tr);
+		 st_trd_conf_tr.si_transaction_code = TRADE_CONFIRMATION_TR ;
+		 d_response_order_number = atof((char *)sql_ftt_ack_nmbr.arr);
+     l_xchngtrd_no = (long)sql_ftt_xchngtrd_no;
+
+     d_xchng_jiffy = sql_ftt_jiffy;
+     ll_xchng_jiffy = (long long) d_xchng_jiffy;
+
+     memcpy(st_trd_conf_tr.c_timestamp1,&ll_xchng_jiffy,sizeof(ll_xchng_jiffy));
+
+     st_trd_conf_tr.li_fill_number = sql_ftt_xchngtrd_no;
+     st_trd_conf_tr.li_fill_quantity = sql_ftt_exctd_qty;
+     st_trd_conf_tr.li_fill_price = sql_ftt_exctd_rt;
+     st_trd_conf_tr.l_token = sql_ftt_token_no;
+
+     fn_timearr_to_long(sql_ftt_trd_tm.arr,&st_trd_conf_tr.li_activity_time);
+     st_trd_conf_tr.d_response_order_number=d_response_order_number;
+     st_trd_conf_tr.d_timestamp2 = sql_ftt_stream_no;		/*** Check & Confirm ***/
+		 /** st_trd_conf_tr.ll_lastactivityref = atol(c_lst_act_ref); commented in ver 2.3 ***/
+     st_trd_conf_tr.ll_lastactivityref = atoll(c_lst_act_ref); /*** ver 2.3 ***/
+
+     if(DEBUG_MSG_LVL_3)
+     {
+       fn_userlog(c_ServiceName,"Exchange Ack Number Is :%lf:",st_trd_conf_tr.d_response_order_number);
+       fn_userlog(c_ServiceName,"Exchange Token NO. Is :%ld:",st_trd_conf_tr.l_token);
+       fn_userlog(c_ServiceName,"Exchange Trade NO. Is :%ld:",st_trd_conf_tr.li_fill_number);
+       fn_userlog(c_ServiceName,"Exchange Trade Time Is :%ld:",st_trd_conf_tr.li_activity_time);
+       fn_userlog(c_ServiceName,"Exchange Trade Qty Is :%ld:",st_trd_conf_tr.li_fill_quantity);
+       fn_userlog(c_ServiceName,"Exchange Trade Price Is :%ld:",st_trd_conf_tr.li_fill_price);
+       fn_userlog(c_ServiceName,"Exchange Trade Stream No Is :%lf:",st_trd_conf_tr.d_timestamp2);
+       fn_userlog(c_ServiceName,"Exchange Jiffy Is :%lld:",st_trd_conf_tr.c_timestamp1);
+       fn_userlog(c_ServiceName,"Exchange Lst Act Ref Is :%lld:",st_trd_conf_tr.ll_lastactivityref);
+     }
+
+     i_read_size = sizeof(struct st_trade_confirm_tr);
+
+		 i_err[0] = Fchg32( ptr_fml_Sbuf, FFO_CBUF, 0, (char *)&st_trd_conf_tr, i_read_size );
+     i_ferr[0] = Ferror32;
+     i_err[1] =  Fchg32( ptr_fml_Sbuf, FFO_TMPLT, 0, (char *)&i_read_size, 0 );
+     i_ferr[1] = Ferror32;
+     i_err[2] = Fchg32( ptr_fml_Sbuf, FFO_BIT_FLG, 0, (char *)&i_dwnld_flg, 0 );
+     i_ferr[2] = Ferror32;
+     i_err[3] = Fchg32( ptr_fml_Sbuf, FFO_NXT_TRD_DT, 0 , (char *)c_trd_dt.arr, 0 );
+     i_ferr[3] = Ferror32;
+     i_err[4] = Fchg32( ptr_fml_Sbuf, FFO_PIPE_ID,0, (char *)c_pipe_id, 0 );
+     i_ferr[4] = Ferror32;
+     i_err[5] = Fchg32( ptr_fml_Sbuf, FFO_XCHNG_CD,0, (char *)c_xchng_cd, 0 );
+     i_ferr[5] = Ferror32;
+     i_err[6] = Fchg32( ptr_fml_Sbuf, FFO_REF_NO, 0,(char *)c_trd_ref.arr, 0 );
+     i_ferr[6] = Ferror32;
+     i_err[7] = Fchg32( ptr_fml_Sbuf, FFO_ORDR_RFRNC, 0,(char *)c_skip_ordref, 0 );
+     i_ferr[7] = Ferror32;
+     i_err[8] = Fchg32( ptr_fml_Sbuf, FFO_DWNLD_FLG, 0,(char *)&i_deferred_dwnld_flg, 0 );
+     i_ferr[8] = Ferror32;
+
+     for( i_loop=0; i_loop<=8; i_loop++ )
+     {
+      if(i_err[i_loop] == -1)
+      {
+        fn_userlog(c_ServiceName,"Error [%d] in Fchange at [%d], for pipe [%s] ", i_ferr[i_loop],i_loop, c_pipe_id );
+        break;
+      }
+     }
+     i_ret_val = tpcall ( "SFO_RCV_CLNT",
+                         (char *)ptr_fml_Sbuf,
+                          0,
+                          (char **)&ptr_fml_Rbuf,
+                          &li_recvbuf,
+                          0
+                        );
+
+		 if(i_ret_val == -1)
+     {
+      fn_userlog(c_ServiceName,"Failed To Call SFO_RCV_CLNT");
+      c_prcsd_flg ='F';
+
+      fn_userlog(c_ServiceName,"Before Call To fn_prcs_flg With Processed Flag As :%c:",c_prcsd_flg);
+     i_ch_val = fn_prcs_flg( c_ServiceName,
+                              c_prcsd_flg,
+                              sql_ftt_ack_nmbr.arr,
+                              l_xchngtrd_no,
+                              c_rowid,
+                              c_errmsg);
+
+      if( i_ch_val == -1 )
+      {
+        fn_userlog(c_ServiceName,"Failed in Update Flag Function For Processed Flag F");
+      }
+
+     }
+     else
+     {
+
+      c_prcsd_flg ='P';
+
+      fn_userlog(c_ServiceName,"Before Call To fn_prcs_flg With Processed Flag As :%c:",c_prcsd_flg);
+
+      i_ch_val = fn_prcs_flg( c_ServiceName,
+                              c_prcsd_flg,
+                              sql_ftt_ack_nmbr.arr,
+                              l_xchngtrd_no,
+                              c_rowid,
+                              c_errmsg);
+      if( i_ch_val == -1 )
+      {
+				fn_userlog(c_ServiceName,"Failed in Update Flag Function For Processed Flag P");
+      }
+
+     }
+
+		}
+		else
+		{
+		/*** Ver 2.2 Ends ***/
+    if( strcmp(sql_ftt_xchng_cd,"NFO") == 0 )   /*** Ver 1.4, If condition Added ***/
+    { 
+		 MEMSET(st_trd_conf);		/*** Ver 2.2 ***/
+		 st_trd_conf.st_hdr.si_transaction_code = TRADE_CONFIRMATION ;
+		 d_response_order_number= atof((char *)sql_ftt_ack_nmbr.arr);
+		 l_xchngtrd_no = (long)sql_ftt_xchngtrd_no;
+
+		 d_xchng_jiffy = sql_ftt_jiffy;
+		 ll_xchng_jiffy = (long long) d_xchng_jiffy;
+
+		 memcpy(st_trd_conf.st_hdr.c_time_stamp_1,&ll_xchng_jiffy,sizeof(ll_xchng_jiffy));
+
+
+	 	 st_trd_conf.li_fill_number = sql_ftt_xchngtrd_no; 
+		 st_trd_conf.li_fill_quantity = sql_ftt_exctd_qty;
+		 st_trd_conf.li_fill_price = sql_ftt_exctd_rt;
+		 st_trd_conf.l_token = sql_ftt_token_no;
+		
+		 fn_timearr_to_long(sql_ftt_trd_tm.arr,&st_trd_conf.li_activity_time);
+		 st_trd_conf.d_response_order_number=d_response_order_number;
+		 st_trd_conf.st_hdr.c_time_stamp_2[LEN_TIME_STAMP - 1] = sql_ftt_stream_no;			/**Ver 1.2 **/
+		 st_trd_conf.ll_lastactivityref = atol(c_lst_act_ref);			/*** Ver 2.2 ***/
+
+		 if(DEBUG_MSG_LVL_3)
+		 {
+			 fn_userlog(c_ServiceName,"Exchange Ack Number Is :%lf:",st_trd_conf.d_response_order_number);
+			 fn_userlog(c_ServiceName,"Exchange Token NO. Is :%ld:",st_trd_conf.l_token);
+			 fn_userlog(c_ServiceName,"Exchange Trade NO. Is :%ld:",st_trd_conf.li_fill_number);
+			 fn_userlog(c_ServiceName,"Exchange Trade Time Is :%ld:",st_trd_conf.li_activity_time);
+			 fn_userlog(c_ServiceName,"Exchange Trade Qty Is :%ld:",st_trd_conf.li_fill_quantity);
+			 fn_userlog(c_ServiceName,"Exchange Trade Price Is :%ld:",st_trd_conf.li_fill_price);
+			 fn_userlog(c_ServiceName,"Exchange Trade Stream No Is :%ld:",st_trd_conf.st_hdr.c_time_stamp_2[LEN_TIME_STAMP - 1]);
+			 fn_userlog(c_ServiceName,"Exchange Jiffy Is :%lld:",st_trd_conf.st_hdr.c_time_stamp_1);
+			 fn_userlog(c_ServiceName,"Exchange Lst Act Ref Is :%lld:",st_trd_conf.ll_lastactivityref);		/*** Ver 2.2 ***/
+		 }
+    
+     i_read_size = sizeof(struct st_trade_confirm);
+
+     i_err[0] = Fchg32( ptr_fml_Sbuf, FFO_CBUF, 0, (char *)&st_trd_conf, i_read_size );
+     i_ferr[0] = Ferror32;
+     i_err[1] =  Fchg32( ptr_fml_Sbuf, FFO_TMPLT, 0, (char *)&i_read_size, 0 );
+     i_ferr[1] = Ferror32;
+     i_err[2] = Fchg32( ptr_fml_Sbuf, FFO_BIT_FLG, 0, (char *)&i_dwnld_flg, 0 );
+     i_ferr[2] = Ferror32;
+     i_err[3] = Fchg32( ptr_fml_Sbuf, FFO_NXT_TRD_DT, 0 , (char *)c_trd_dt.arr, 0 );
+     i_ferr[3] = Ferror32;
+     i_err[4] = Fchg32( ptr_fml_Sbuf, FFO_PIPE_ID,0, (char *)c_pipe_id, 0 );
+     i_ferr[4] = Ferror32;
+     i_err[5] = Fchg32( ptr_fml_Sbuf, FFO_XCHNG_CD,0, (char *)c_xchng_cd, 0 );
+     i_ferr[5] = Ferror32;
+     i_err[6] = Fchg32( ptr_fml_Sbuf, FFO_REF_NO, 0,(char *)c_trd_ref.arr, 0 );
+     i_ferr[6] = Ferror32;
+     i_err[7] = Fchg32( ptr_fml_Sbuf, FFO_ORDR_RFRNC, 0,(char *)c_skip_ordref, 0 );
+     i_ferr[7] = Ferror32;
+ 		 i_err[8] = Fchg32( ptr_fml_Sbuf, FFO_DWNLD_FLG, 0,(char *)&i_deferred_dwnld_flg, 0 );
+     i_ferr[8] = Ferror32;
+
+		 for( i_loop=0; i_loop<=8; i_loop++ )
+     {
+      if(i_err[i_loop] == -1)
+      {
+        fn_userlog(c_ServiceName,"Error [%d] in Fchange at [%d], for pipe [%s] ", i_ferr[i_loop],i_loop, c_pipe_id );
+        break;
+      }
+     }
+     i_ret_val = tpcall ( "SFO_RCV_CLNT",
+                         (char *)ptr_fml_Sbuf,
+                          0,
+                          (char **)&ptr_fml_Rbuf,
+                          &li_recvbuf,
+                          0
+                        );
+    
+		 if(i_ret_val == -1)
+     {
+      fn_userlog(c_ServiceName,"Failed To Call SFO_RCV_CLNT");
+			c_prcsd_flg ='F';
+
+			fn_userlog(c_ServiceName,"Before Call To fn_prcs_flg With Processed Flag As :%c:",c_prcsd_flg);
+
+			i_ch_val = fn_prcs_flg( c_ServiceName,
+															c_prcsd_flg,
+														/*	d_response_order_number, Ver 1.6 */
+															sql_ftt_ack_nmbr.arr,			/* Ver 1.6 */
+															l_xchngtrd_no,
+															c_rowid,
+															c_errmsg);
+
+			if( i_ch_val == -1 )
+			{
+				fn_userlog(c_ServiceName,"Failed in Update Flag Function For Processed Flag F");
+			}
+		
+     }
+		 else
+     {
+
+			c_prcsd_flg ='P';
+	
+		  fn_userlog(c_ServiceName,"Before Call To fn_prcs_flg With Processed Flag As :%c:",c_prcsd_flg);
+			
+			i_ch_val = fn_prcs_flg( c_ServiceName,
+                              c_prcsd_flg,
+															/* d_response_order_number, ver 1.6 */
+															sql_ftt_ack_nmbr.arr,     /* Ver 1.6 */
+															l_xchngtrd_no,
+															c_rowid,
+                              c_errmsg);
+
+      if( i_ch_val == -1 )
+      {
+        fn_userlog(c_ServiceName,"Failed in Update Flag Function For Processed Flag P");
+      }
+
+     }
+
+    }
+    else if( strcmp(sql_ftt_xchng_cd,"BFO") == 0 )   /*** Ver 1.4, Started ***/ 
+	  {
+
+      MEMSET(st_bse_trd_conf);
+      l_scrip_cd=0;
+      l_trade_no=0;
+      l_rate=0;
+      l_exec_qty=0;
+      l_ord_seq=0;
+      ll_exchange_ack=0;
+
+      d_response_order_number= atof((char *)sql_ftt_ack_nmbr.arr);
+      l_xchngtrd_no = (long)sql_ftt_xchngtrd_no;
+
+      d_xchng_jiffy = sql_ftt_jiffy;
+      ll_xchng_jiffy = (long long) d_xchng_jiffy;
+
+      /*** Convert data into exchange format ****/
+      l_scrip_cd = fn_swap_long((long)sql_ftt_token_no); 
+      l_trade_no = fn_swap_long(sql_ftt_xchngtrd_no);
+      l_rate     = fn_swap_long(sql_ftt_exctd_rt);
+      l_exec_qty = fn_swap_long(sql_ftt_exctd_qty);
+      l_ord_seq  = fn_swap_long((long)sql_ftt_jiffy);
+      ll_exchange_ack = fn_swap_ulnglng(atoll(sql_ftt_ack_nmbr.arr));
+
+      st_bse_trd_conf.l_msg_type = fn_swap_long(BSE_TRADE_CONFIRMATION) ; 
+      st_bse_trd_conf.l_total_rec=  fn_swap_long(1);
+      st_bse_trd_conf.st_trd_dtls[0].l_scrp_cd = l_scrip_cd;
+      st_bse_trd_conf.st_trd_dtls[0].l_trd_id  = l_trade_no;
+      st_bse_trd_conf.st_trd_dtls[0].l_rt = l_rate;
+      st_bse_trd_conf.st_trd_dtls[0].l_trd_qty = l_exec_qty;
+      st_bse_trd_conf.st_trd_dtls[0].l_msg_tag = l_ord_seq;
+      st_bse_trd_conf.st_trd_dtls[0].ll_transaction_id = ll_exchange_ack;
+           
+      EXEC SQL
+            SELECT TO_NUMBER( TO_CHAR(to_date(:sql_ftt_trd_tm,'DD-MM-YYYY HH24:MI:SS'),'YYYY'))- 1900,
+                   TO_NUMBER( TO_CHAR(to_date(:sql_ftt_trd_tm,'DD-MM-YYYY HH24:MI:SS'),'DD')) ,
+                   TO_NUMBER( TO_CHAR(to_date(:sql_ftt_trd_tm,'DD-MM-YYYY HH24:MI:SS'),'MM')),
+                   TO_NUMBER( TO_CHAR(to_date(:sql_ftt_trd_tm,'DD-MM-YYYY HH24:MI:SS'),'HH24')), /** Ver 1.5 **/
+                   TO_NUMBER( TO_CHAR(to_date(:sql_ftt_trd_tm,'DD-MM-YYYY HH24:MI:SS'),'MI')),
+                   TO_NUMBER( TO_CHAR(to_date(:sql_ftt_trd_tm,'DD-MM-YYYY HH24:MI:SS'),'SS'))
+            INTO  :i_yyyy,
+                  :i_dd,
+                  :i_mm,
+                  :i_hh,
+                  :i_mi,
+                  :i_ss
+            FROM  DUAL;
+      if ( SQLCODE != 0 )
+      {
+        fn_errlog ( c_ServiceName, "S31050",SQLMSG, c_errmsg);
+      }
+      st_bse_trd_conf.st_trd_dtls[0].st_timestmp_dmyhms.c_year  = i_yyyy;
+      st_bse_trd_conf.st_trd_dtls[0].st_timestmp_dmyhms.c_month = i_mm; 
+      st_bse_trd_conf.st_trd_dtls[0].st_timestmp_dmyhms.c_day   = i_dd;
+      st_bse_trd_conf.st_trd_dtls[0].st_timestmp_dmyhms.c_hour  = i_hh;
+      st_bse_trd_conf.st_trd_dtls[0].st_timestmp_dmyhms.c_min   = i_mi;
+      st_bse_trd_conf.st_trd_dtls[0].st_timestmp_dmyhms.c_sec   = i_ss;
+
+      i_read_size = sizeof(struct st_trd_cnfrmtn);
+
+      i_err[0] = Fchg32( ptr_fml_Sbuf, FFO_CBUF, 0, (char *)&st_bse_trd_conf, i_read_size );
+      i_ferr[0] = Ferror32;
+      i_err[1] =  Fchg32( ptr_fml_Sbuf, FFO_TMPLT, 0, (char *)&i_read_size, 0 );
+      i_ferr[1] = Ferror32;
+      i_err[2] = Fchg32( ptr_fml_Sbuf, FFO_BIT_FLG, 0, (char *)&i_dwnld_flg, 0 );
+      i_ferr[2] = Ferror32;
+      i_err[3] = Fchg32( ptr_fml_Sbuf, FFO_NXT_TRD_DT, 0 , (char *)c_trd_dt.arr, 0 );
+      i_ferr[3] = Ferror32;
+      i_err[4] = Fchg32( ptr_fml_Sbuf, FFO_PIPE_ID,0, (char *)c_pipe_id, 0 );
+      i_ferr[4] = Ferror32;
+      i_err[5] = Fchg32( ptr_fml_Sbuf, FFO_XCHNG_CD,0, (char *)c_xchng_cd, 0 );
+      i_ferr[5] = Ferror32;
+      i_err[6] = Fchg32( ptr_fml_Sbuf, FFO_REF_NO, 0,(char *)c_trd_ref.arr, 0 );
+      i_ferr[6] = Ferror32;
+      i_err[7] = Fchg32( ptr_fml_Sbuf, FFO_ORDR_RFRNC, 0,(char *)c_skip_ordref, 0 );
+      i_ferr[7] = Ferror32;
+      i_err[8] = Fchg32( ptr_fml_Sbuf, FFO_DWNLD_FLG, 0,(char *)&i_deferred_dwnld_flg, 0 );
+      i_ferr[8] = Ferror32;
+
+      for( i_loop=0; i_loop<=8; i_loop++ )
+      {
+       if(i_err[i_loop] == -1)
+       {
+        fn_userlog(c_ServiceName,"Error [%d] in Fchange at [%d], for pipe [%s] ", i_ferr[i_loop],i_loop, c_pipe_id );
+        break;
+       }
+      }
+     
+      i_ret_val = tpcall ( "SFO_BTRD_CLNT",
+                         (char *)ptr_fml_Sbuf,
+                          0,
+                          (char **)&ptr_fml_Rbuf,
+                          &li_recvbuf,
+                          0
+                        );
+
+     if(i_ret_val == -1)
+     {
+      fn_userlog(c_ServiceName,"Failed To Call SFO_BTRD_CLNT");
+      c_prcsd_flg ='F';
+
+      fn_userlog(c_ServiceName,"Before Call To fn_prcs_flg With Processed Flag As :%c:",c_prcsd_flg);
+
+      i_ch_val = fn_prcs_flg( c_ServiceName,
+                              c_prcsd_flg,
+                              /* d_response_order_number, *ver 1.6 */
+															sql_ftt_ack_nmbr.arr,     /* Ver 1.6 */
+                              l_xchngtrd_no,
+                              c_rowid,
+                              c_errmsg);
+
+      if( i_ch_val == -1 )
+      {
+        fn_userlog(c_ServiceName,"Failed in Update Flag Function For Processed Flag F");
+      }
+
+     }
+     else if( i_ret_val == 2 )
+     {
+       fn_userlog(c_ServiceName,"Trade already Exists with process flag 'N'");
+     }
+     else
+     {
+
+      c_prcsd_flg ='P';
+
+      fn_userlog(c_ServiceName,"Before Call To fn_prcs_flg With Processed Flag As :%c:",c_prcsd_flg);
+
+      i_ch_val = fn_prcs_flg( c_ServiceName,
+                              c_prcsd_flg,
+                              /* d_response_order_number, *ver 1.6 */
+															sql_ftt_ack_nmbr.arr,     /* Ver 1.6 */
+                              l_xchngtrd_no,
+                              c_rowid,
+                              c_errmsg);
+
+      if( i_ch_val == -1 )
+      {
+        fn_userlog(c_ServiceName,"Failed in Update Flag Function For Processed Flag P");
+      }
+     }
+    } /*** Ver 1.4 Ended ***/	
+		}					/*** Ver 2.2 ***/
+		fn_userlog(c_ServiceName,"Inside For Loop End :%ld:",i_cnt);
+  } /*** End Of FOR Loop ***/		
+		
+	return 0;
+}
+
+int fn_prcs_flg (char *c_ServiceName,
+		    				 char	c_prcsd_flg,
+								 /* double d_response_order_number, *ver 1.6 */
+								 char *c_response_order_number,
+								 long	l_xchngtrd_no,
+								 char *c_rowid,
+						     char	*c_errmsg)
+{
+	char c_ord_ack_nmbr[20];
+	int i_trnsctn;
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Inside Function fn_prcs_flg");
+		fn_userlog(c_ServiceName,"Order Number Is :%lf:",d_response_order_number);
+		fn_userlog(c_ServiceName,"Order Number Is :%s:",c_response_order_number);
+		fn_userlog(c_ServiceName,"Processed Flag Is :%c:",c_prcsd_flg);
+		fn_userlog(c_ServiceName,"Exchange Trd No. Is :%ld:",l_xchngtrd_no);
+	}
+	
+	/* sprintf(c_ord_ack_nmbr,"%16.0lf",d_response_order_number); * ver 1.6 */
+
+	strcpy(c_ord_ack_nmbr,c_response_order_number);		/* Var 1.6 */
+
+  trim(c_ord_ack_nmbr);  /*** Ver 1.4 ***/
+
+	fn_userlog(c_ServiceName,"After Conversion Ack Number Is :%s:",c_ord_ack_nmbr);
+
+	i_trnsctn= fn_begintran( c_ServiceName, c_errmsg );
+
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog ( c_ServiceName, "S31055", LIBMSG, c_errmsg );
+    return -1;
+  }
+
+	EXEC SQL
+  	UPDATE ftt_fo_tmp_trd
+    SET    ftt_prcsd_flg = :c_prcsd_flg
+    WHERE  ftt_ack_nmbr = :c_ord_ack_nmbr
+		AND		 ftt_xchngtrd_no = :l_xchngtrd_no
+		AND		 rowid =:c_rowid
+		AND 	 ftt_prcsd_flg ='N'
+    AND    ftt_xchng_cd = :c_xchng_cd;  /*** Ver 1.4 ***/
+
+	if( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName, "S31060", SQLMSG,c_errmsg);
+    fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg);
+    return -1;
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn,c_errmsg ) == -1 )
+  {
+    fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg);
+    fn_errlog ( c_ServiceName, "S31065", LIBMSG, c_errmsg );
+    return -1;
+  }
+
+  return 0;
+
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+
+int fn_prcs_trg ( char *c_ServiceName, int i_trg_typ )
+{
+	int i_ch_val;
+  char c_err_msg[256];
+
+	if ( i_trg_typ == SYSTM_TRG )
+  {
+    i_exit_stts = EXIT;
+    return ( -1 );
+  }
+  fn_userlog(c_ServiceName," c_trg_msg :%s:",c_trg_msg);  /*** Ver 1.4 ***/
+	
+  if ( strcmp ( c_trg_msg, "TRG_PRCS_TRD" ) == 0 )
+  {
+    i_trdprcsd_tab = TRUE;
+    i_ch_val = tpunsubscribe ( li_prcs_trd_hnd, 0 );
+    if ( i_ch_val == -1 )
+    {
+      fn_errlog(c_ServiceName,"S31070", TPMSG, c_err_msg);
+    }
+  }
+
+  return 0;
+}
+void fn_sgnl_usr2(int i_sig_no)
+{
+  fn_userlog("bat_fo_prcstrd","bat_fo_prcstrd SIGUSER2 exit");
+  i_exit_stts = EXIT;
+	return;
+}
+
+/**** Ver 1.4, Starts ****/
+
+void trim(char *str)
+{
+  int i=0;
+  char *ptr;
+  ptr = str;
+  while ( *str != '\0' )
+  {
+    if (*str != ' ' && *str != '\t')
+    {
+      i=i+1;
+      *ptr++=*str;
+    }
+    str++;
+  }
+  *ptr='\0';
+  while( i != 0 )
+  {
+    ptr--;
+    i=i-1;
+  }
+  str = ptr;
+}
+/**** Ver 1.4, Ends here ***/

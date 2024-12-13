@@ -1,0 +1,175 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_GT_EODADJRC                                       */
+/*                                                                            */
+/*  Input             : FFO_XCHNG_CD                                          */
+/*                      FFO_TRD_DT                                            */
+/*                                                                            */
+/*  Output            : FFO_XCHNG_CD                                          */
+/*                      FFO_TRD_DT                                            */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                      FFO_PRDCT_TYP                                         */
+/*                      FFO_AMOUNT                                            */
+/*                                                                            */
+/*  Description       : To get the records for running the End-of-day         */
+/*                      adjustment of uncrystalized margins and pass it on to */
+/*                      the Calling batch program                             */
+/*                                                                            */
+/*  Log               :                                                       */
+/*                                                                            */
+/******************************************************************************/
+/*  19-Dec-2001     Ver 1.0        Vinod Banjan      Release 1.0              */
+/*	26-Feb-2008			Ver 1.1				 Ranjit Gouda			 IBM Migration						*/
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+/*Add header files here */
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fn_battmpt.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h>	/* ver 1.1 */
+#include <fn_read_debug_lvl.h>	/* ver 1.1 */
+
+void SFO_GT_EODADJRC( TPSVCINFO *rqst )
+{
+
+  FBFR32 *ptr_fml_Ibuf;
+  FBFR32 *ptr_fml_Obuf;
+
+  char c_ServiceName [ 33 ];
+  char c_err_msg [ 256 ];
+
+  int i_returncode;
+
+  EXEC SQL BEGIN DECLARE SECTION;
+    char c_xchng_cd [ 4 ];
+    char c_mtch_accnt_no [ 11 ];
+    varchar c_trd_dt [ LEN_DATE ];
+		char		c_dr_cr_flg;
+		char		c_prdct_typ;
+		double	d_amount;
+  EXEC SQL END DECLARE SECTION;
+
+  ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);	/* ver 1.1 */
+
+  i_returncode = fn_unpack_fmltovar ( c_ServiceName,
+                                    c_err_msg,
+                                    ptr_fml_Ibuf,
+                                    2,
+                                    FFO_TRD_DT, ( char * )c_trd_dt.arr, NULL,
+                                    FFO_XCHNG_CD, ( char * )c_xchng_cd, NULL);
+
+  if( i_returncode != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31005", LIBMSG , c_err_msg );
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  }
+
+	SETLEN ( c_trd_dt );
+  if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog( c_ServiceName, "c_xchng_cd :%s:", c_xchng_cd );
+    fn_userlog( c_ServiceName, "c_trd_dt   :%s:", c_trd_dt.arr );
+  }
+
+  ptr_fml_Obuf = NULL;
+
+
+/*********************************
+11-Apr-2002 query found to not suit the requirement
+    EXEC SQL
+      DECLARE cur_eodadj_rec CURSOR FOR
+			SELECT 	fup_clm_mtch_accnt, 
+							sum( fup_uexctd_mrgn + fup_uordr_mrgn )
+			FROM 		fup_fut_undrlyng_pstn
+			WHERE 	fup_xchng_cd = :c_xchng_cd
+			AND 		( fup_uexctd_mrgn > 0 OR fup_uordr_mrgn > 0 )
+			AND 		fup_trd_dt = to_date(:c_trd_dt,'DD-Mon-YYYY')
+			GROUP BY 	fup_clm_mtch_accnt;
+*******************************/
+    EXEC SQL
+      DECLARE cur_eodadj_rec CURSOR FOR
+			SELECT 	fup_clm_mtch_accnt, 
+							fup_prdct_typ,
+							sum( fup_utrd_mrgn + fup_uordr_mrgn )
+			FROM 		fup_fut_undrlyng_pstn
+			WHERE 	fup_xchng_cd = :c_xchng_cd
+			AND 		fup_trd_dt = to_date(:c_trd_dt,'DD-Mon-YYYY')
+			GROUP BY fup_clm_mtch_accnt,fup_prdct_typ
+
+			UNION
+			SELECT 	fop_clm_mtch_accnt, 
+							fop_prdct_typ,
+							sum( fop_uexctd_mrgn + fop_uordr_mrgn )
+			FROM 		fop_fo_options_pstn
+			WHERE 	fop_xchng_cd = :c_xchng_cd
+			AND 		fop_trd_dt = to_date(:c_trd_dt,'DD-Mon-YYYY')
+			GROUP BY fop_clm_mtch_accnt,fop_prdct_typ;
+
+
+    EXEC SQL
+      OPEN cur_eodadj_rec;
+
+    if( SQLCODE != 0 ) 
+    {
+      fn_errlog( c_ServiceName, "S31010", SQLMSG, c_err_msg );
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    while(1)
+    {
+      EXEC SQL
+        FETCH cur_eodadj_rec
+        INTO  :c_mtch_accnt_no,
+							:c_prdct_typ,
+							:d_amount;
+
+        if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+        {
+          fn_errlog( c_ServiceName, "S31015", SQLMSG, c_err_msg );
+          EXEC SQL
+            CLOSE cur_eodadj_rec;
+          tpfree ( ( char * ) ptr_fml_Obuf );
+					Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+        if( SQLCODE == NO_DATA_FOUND )
+        {
+          break;
+        }
+
+        rtrim(c_mtch_accnt_no);
+
+        i_returncode = fn_pack_vartofml( c_ServiceName,
+                                         c_err_msg,
+                                         &ptr_fml_Obuf,
+                                         5,
+                             FFO_XCHNG_CD, ( char * )c_xchng_cd,
+                             FFO_TRD_DT, ( char * )c_trd_dt.arr,
+                             FFO_EBA_MTCH_ACT_NO, ( char * )c_mtch_accnt_no,
+                             FFO_PRDCT_TYP, ( char * )&c_prdct_typ,
+                             FFO_AMOUNT, ( char * )&d_amount );
+
+        if( i_returncode == -1 )
+        {
+          fn_errlog( c_ServiceName, "S31020", LIBMSG, c_err_msg );
+          EXEC SQL
+            CLOSE cur_eodadj_rec;
+					Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+        }
+     }
+
+    EXEC SQL
+      CLOSE cur_eodadj_rec;
+  tpreturn(TPSUCCESS, SUCC_BFR, ( char * )ptr_fml_Obuf, 0, 0 );
+}

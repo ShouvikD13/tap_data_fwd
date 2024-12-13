@@ -1,0 +1,10 @@
+build sfo_fos_trg
+build sfo_exreq_ack
+build sfo_enq_msg
+build sfo_new_rout
+build sfo_call_frwdB
+build sfo_call_frwdA
+build sfo_heckyl_find
+build sfo_ftov
+build sfo_brdlzo_rout
+build sfo_cnt_dwld

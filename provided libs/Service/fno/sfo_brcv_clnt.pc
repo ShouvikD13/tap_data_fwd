@@ -1,0 +1,2295 @@
+/****************************************************************************************/
+/*  Program           : SFO_BRCV_CLNT																									  */
+/*																																											*/
+/*  Input             : C_PIPE_ID																												*/
+/*																																											*/
+/*  Output            :																																	*/
+/*																																											*/
+/*  Description       : Program  to process different type of responses									*/
+/*											received from exchange.																					*/
+/*											Depending on the message type received in exchange response,    */
+/*											corresponding operations need to be performed at EBA level.			*/
+/*										       																													  */
+/*  Log               : 1.0   31-Oct-2011     Nitin Save																*/
+/****************************************************************************************/
+/*  Version 1.0 -	New Release with modified structure( 28-Jun-2012 Sachin Birje )				*/
+/*  Version 1.1 - Error Queue handling ( 27-Jul-2012 Sachin Birje )                     */
+/*  Version 1.2 - Broker Suspension[RRM UMS) Handling( 10-Sep-2012 Sandip Tambe )       */
+/*  Version 1.3 - BSE SPAN CHANGES                   ( 11-Oct-2012 Sandip Tambe )       */
+/*  Version 1.4 - BSE CAP UTLZN UMS Handling Changes ( 21-Jan-2013 Sandip Tambe )       */
+/*	Version 1.5 - BSE Cancel UMS Handling Changes		 ( 05-Feb-2013 Sandeep Patil )			*/
+/*  Version 1.5.1 - New BSE EQ Derivative IML  Changes ( 06-Feb-2014 Sandip Tambe )       */
+/*  Version 1.6 - VIew to FML Conversion             ( 07-Sep-2014 Sachin Birje )       */
+/*  Version TOL - Tux on Linux                       ( 07-Aug-2023 Agam )               */
+/****************************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+
+#include <sqlca.h>
+
+#include <fo_fml_def.h>
+/** #include <fo_view_def.h> ** Ver 1.6 **/
+#include <fo.h>
+#include <fn_env.h>
+#include <fn_tuxlib.h>
+#include <fn_fil_log.h>
+#include <fn_ddr.h>
+#include <fn_log.h>
+#include <fml_rout.h>
+#include <fml_def.h>
+#include <userlog.h>
+#include <fn_session.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_fo_bse_convrtn.h>
+#include <fo_bse_rcv_lib.h>
+#include <fo_bse_spn_rcv_lib.h>  /** Added for BSE-SPAN&NORMAL change **//** Ver 1.3 uncomment**/
+
+#include <fn_fobse_bcast.h>
+#include <fo_exch_msgs.h>
+
+# define LEN_CLNT_ID			12     /* Added in Ver TOL */
+
+EXEC SQL INCLUDE  "table/fxd_fo_xchng_dwnld.h";
+
+void SFO_BRCV_CLNT ( TPSVCINFO *rqst )
+{
+	FBFR32 *ptr_fml_ibuf;
+	
+	FLDLEN32  ud_len;
+	char c_ServiceName[33];
+	char *ptr_car_sbuf;
+	char c_pipe_id[ 2 + 1 ];
+	char c_qspacename[32];
+	char c_err_qn[32];
+	char c_err_msg[256];
+	char c_xchng_cd [ 3+1 ];
+	char c_skpord_ref[18 + 1];
+	char c_rout_str [ 4 ];
+	char c_errmsg [ 256 ];
+	char c_time_str[22];
+  char c_message[256] ;                             /** ver 1.2 **/
+  char c_span_flag;																	/***	Ver	1.5	***/
+	varchar c_trd_dt [ 20 + 1 ];
+	varchar c_trd_ref [8 + 1];
+	varchar c_fxd_xchng_ack [19 + 1];		 /** Ver 1.5.1 **/
+
+	int i_rtrn_cd ;
+	int i_ret_val ;
+	int i_dwnld_flg ;
+	int i_errno;
+	int i_err [ 7 ];
+	int i_ferr [ 7 ];
+	int i_cnt;
+	int li_sbuf_len;
+	int i_deferred_dwnld_flg;
+  int i_read_size;  /*** Ver 1.1 ***/
+	int i_trnsctn = 0;
+	int i_ch_val = 0;
+	int i_event;																				/** ver 1.2 **/
+	int i_count=0;																			/** Ver 1.4 **/
+
+	long l_msg_type;
+	long l_tot_no_records = 0;
+	long l_rec_cnt = 0;
+	long l_ioc_killed_qty = 0;
+	long l_segment_type;															/** ver 1.2 **/
+
+	long long ll_ack_nmbr = 0 ;												/***	Ver	1.5	***/
+
+	/*** Added for BSE_NORMAL/SPAN Change Start ***/
+	 char c_spn_flg;													/** Ver 1.3 Uncomment ***/		
+	 char c_mod_trd_dt[23]; 									/** Ver 1.3 Uncomment ***/
+	 long l_ordr_sqnc = 0;   									/** Ver 1.3 Uncomment ***/
+
+	/*** Added for BSE_NORMAL/SPAN Change End ***/
+
+  struct st_ord_rqst_rply st_ord_rqst_rply_data;
+  struct st_ioc_ordr_rqst st_ioc_order_rqst; 
+  struct st_stoploss_ord_rply st_stoploss_ord_rply_data;
+  struct st_del_ord_rply st_del_ord_rply_data;
+  struct st_mkrt_to_lmt_ord st_mkrt_to_lmt_ord_data;
+  struct st_prsnl_ordr_ums st_prsnl_ordr_ums_data;
+  struct st_kill_min_fill_ordr st_kill_min_fill_ordr_data;
+  struct st_sltp_ord_ums st_sltp_ord_ums_data;
+  struct st_prsnl_sltp_ums st_prsnl_sltp_ums_data;
+  struct st_prsnl_ordr_ums st_prsnl_ordr_ums_data_tmp;   /*** Ver 1.1 ***/
+  struct st_prsnl_sltp_ums st_prsnl_sltp_ums_data_tmp;   /*** Ver 1.1 ***/
+  struct st_trd_lmt_exceed ptr_st_lmt_exceed;
+	struct st_pos_alrt_ums ptr_st_pos_alrt;
+  struct st_broker_susp ptr_st_broker_susp;
+  struct st_trader_susp ptr_st_trader_susp;
+  struct st_mbr_reactv ptr_st_mbr_reactv;
+  struct st_rrm_alrt_ums ptr_st_rrm_alrt_ums ;        /** Ver 1.2 **/
+  struct st_cap_adeq_ums ptr_st_cap_adeq_ums;         /** ver 1.2 **/
+  struct st_conn_refused_reply ptr_st_conn_refused_reply; /** ver 1.2 **/
+	struct st_cap_utlztn ptr_st_cap_utlztn;							/** Ver 1.4 **/
+	struct st_cancel_ordr_ums	st_bse_cncl_ums;				/***	Ver	1.5	***/
+	struct st_cancel_sub_ums st_cncl_ums_rply[14];		/***  Ver 1.5 ***/
+	struct st_ordr_rate_ums ptr_st_ordr_rate_ums;			  /** Ver 1.5.1 **/
+
+	strcpy(c_ServiceName, "SFO_BRCV_CLNT" );
+
+	INITDBGLVL(c_ServiceName);
+
+	ptr_fml_ibuf = (FBFR32 *)rqst->data;
+
+	MEMSET (c_pipe_id);
+
+	i_err  [0] = Fget32(ptr_fml_ibuf,FFO_PIPE_ID,0,(char *)c_pipe_id, 0);
+	i_ferr [0] = Ferror32;
+	i_err  [1] = Fget32(ptr_fml_ibuf,FFO_BIT_FLG,0,(char *)&i_dwnld_flg,0);
+	i_ferr [1] = Ferror32;
+	i_err  [2] = Fget32(ptr_fml_ibuf,FFO_NXT_TRD_DT,0,(char *)c_trd_dt.arr,0);
+	i_ferr [2] = Ferror32;
+	i_err  [3] = Fget32(ptr_fml_ibuf,FFO_XCHNG_CD,0,(char *)c_xchng_cd,0);
+	i_ferr [3] = Ferror32;
+	i_err  [4] = Fget32(ptr_fml_ibuf,FFO_REF_NO,0,(char *)c_trd_ref.arr,0);
+	i_ferr [4] = Ferror32;
+	i_err  [5] = Fget32(ptr_fml_ibuf,FFO_ORDR_RFRNC,0,(char *)c_skpord_ref,0);
+	i_ferr [5] = Ferror32;
+	i_err  [6] = Fget32(ptr_fml_ibuf,FFO_DWNLD_FLG,0,(char *)&i_deferred_dwnld_flg,0);
+	i_ferr [6] = Ferror32;
+
+	for ( i_cnt=0; i_cnt<=6; i_cnt++ )
+	{
+	  if (i_err[i_cnt] == -1)
+	  {
+		 fn_userlog(c_ServiceName, "Error in field no. %d",i_cnt);
+		 fn_errlog(c_ServiceName, "S31005", Fstrerror32(i_ferr[i_cnt]),c_err_msg );
+		 tpfree ( ( char * )ptr_fml_ibuf);
+		 tpreturn(TPFAIL,0 , (char *)NULL, 0, 0 );
+	  }
+	}
+	SETLEN(c_trd_dt);							/*** Ver 1.3 ***/
+	if(DEBUG_MSG_LVL_5)
+	{
+		fn_userlog(c_ServiceName,"I/P Pipe ID Is <%s>",c_pipe_id);
+		fn_userlog(c_ServiceName,"I/P Down Load Flag Is <%d>",i_dwnld_flg);
+		fn_userlog(c_ServiceName,"I/P Exchange Code Is <%s>",c_xchng_cd);
+		fn_userlog(c_ServiceName,"I/P Next Trade Date <%s>",c_trd_dt.arr);
+		fn_userlog(c_ServiceName,"I/P Trade Ref Is <%s>",c_trd_ref.arr);
+		fn_userlog(c_ServiceName,"I/P Skip Order Ref Is <%s>",c_skpord_ref);
+		fn_userlog(c_ServiceName,"I/P Deffered DownLoad Flag Is <%d>",i_deferred_dwnld_flg);
+		fn_userlog(c_ServiceName,"Step 1 CARRAY");
+	}
+	ptr_car_sbuf =(char *)tpalloc("CARRAY", NULL, MIN_FML_BUF_LEN);
+
+	if (ptr_car_sbuf == NULL)
+	{
+		fn_errlog( c_ServiceName, "S31010", TPMSG, c_err_msg  );
+		tpfree ( ( char * )ptr_fml_ibuf);
+		tpreturn(TPFAIL, 0, (char *)NULL, 0, 0 );
+	}
+	MEMSET(c_qspacename);
+	MEMSET(c_err_qn);
+
+	sprintf(c_err_qn,"ERR_%s_Q",c_pipe_id);
+	sprintf(c_qspacename,"%s_QSPACE",c_pipe_id);
+
+	if( Fadd32(ptr_fml_ibuf,FML_FILE_NAME, (char *)c_err_qn, 0) == -1)
+	{
+		fn_errlog( c_ServiceName, "S31015", UNXMSG, c_err_msg  );
+		tpfree ( ( char * )ptr_car_sbuf );
+
+		if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+		{
+			fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+		}
+		tpfree ( ( char * )ptr_fml_ibuf);
+		tpreturn(TPFAIL, 0, (char *)NULL, 0, 0 );
+	}
+
+	if ( Fadd32(ptr_fml_ibuf,FML_GMS_NM, (char *)c_qspacename, 0) == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31020", UNXMSG, c_err_msg  );
+		tpfree ( ( char * )ptr_car_sbuf );
+
+		if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+		{
+			 fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+		}
+		tpfree ( ( char * )ptr_fml_ibuf);
+		tpreturn(TPFAIL, 0, (char *)NULL, 0, 0 );
+	}
+
+	ud_len = (FLDLEN32)sizeof(li_sbuf_len);
+	i_ret_val = Fget32(ptr_fml_ibuf, FFO_TMPLT, 0,(char *)&li_sbuf_len, &ud_len);
+
+	if(i_ret_val == -1 )
+	{
+		fn_errlog(c_ServiceName,"S31025", DEF_USR,c_err_msg);
+		tpfree ( ( char * )ptr_car_sbuf );
+		if( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+		{
+			 fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+		}
+		tpfree ( ( char * )ptr_fml_ibuf);
+		tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+	}
+
+	ud_len = (FLDLEN32)li_sbuf_len;
+	i_ret_val = Fget32(ptr_fml_ibuf, FFO_CBUF, 0,(char *)ptr_car_sbuf, &ud_len);
+
+	if (i_ret_val == -1)
+	{
+		fn_errlog(c_ServiceName,"S31030",DEF_USR,c_err_msg);
+		tpfree ( ( char * )ptr_car_sbuf );
+		if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+		{
+			 fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+		}
+		tpfree ( ( char * )ptr_fml_ibuf);
+		tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+	}
+	if(c_pipe_id[0] == 'A')
+	{
+	  c_rout_str[0] = c_pipe_id[1];
+  	c_rout_str[1] = c_pipe_id[1];
+  	c_rout_str[2] = c_pipe_id[1];
+  	c_rout_str[3] = '\0';
+	}
+	else
+	{
+	  strcpy(c_rout_str,"000");
+	}
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"c_rout_str is :%s:",c_rout_str);
+	}
+
+	memcpy(&l_msg_type, ptr_car_sbuf + sizeof(struct st_bfo_header), sizeof(long));  
+
+	if(DEBUG_MSG_LVL_3)
+	{
+	fn_userlog(c_ServiceName,"Message type Received From Exchange in Rcv_clnt before convertion:%ld:",l_msg_type);
+	}
+	
+	l_msg_type = fn_swap_long(l_msg_type); 
+	if(DEBUG_MSG_LVL_3)
+	{
+  fn_userlog ( c_ServiceName, "Message type Received From Exchange in Rcv_clnt After convertion:%ld:",l_msg_type); 
+  }
+	
+  switch (l_msg_type)
+	{
+
+	  case LIMIT_MARKET_ORD: /** 1025 **/
+
+				 if(DEBUG_MSG_LVL_3)
+				 {
+				 fn_userlog(c_ServiceName,"Inside ORDER LIMIT_MARKET_ORD Case in bse_rcv_clnt");
+				 }
+
+				 MEMSET(st_ord_rqst_rply_data);
+				 memcpy (&st_ord_rqst_rply_data,ptr_car_sbuf,sizeof (struct st_ord_rqst_rply ));
+
+			 	 if(DEBUG_MSG_LVL_3)
+				 {
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt :%ld:",st_ord_rqst_rply_data.l_msg_typ);
+		   	  fn_userlog(c_ServiceName,"Val of l_msg_tag1 in bse_rcv_clnt :%ld:",st_ord_rqst_rply_data.l_msg_tag1);
+		  	  fn_userlog(c_ServiceName,"Val of s_rply_cd in bse_rcv_clnt :%d:",st_ord_rqst_rply_data.s_rply_cd);
+		  	  fn_userlog(c_ServiceName,"Val of l_amended_qty in bse_rcv_clnt :%ld:",st_ord_rqst_rply_data.l_amended_qty);
+		  	  fn_userlog(c_ServiceName,"Val of ll_ord_id in bse_rcv_clnt :%ld:",st_ord_rqst_rply_data.ll_ord_id);
+		  	  fn_userlog(c_ServiceName,"Val of c_ordr_actn_cd in bse_rcv_clnt :%c:",st_ord_rqst_rply_data.c_ordr_actn_cd);
+		  	  fn_userlog(c_ServiceName,"Val of c_ord_typ in bse_rcv_clnt :%c:",st_ord_rqst_rply_data.c_ord_typ);
+		  	  fn_userlog(c_ServiceName,"Val of c_rply_txt in bse_rcv_clnt :%s:",st_ord_rqst_rply_data.c_rply_txt);
+		  	  fn_userlog(c_ServiceName,"Val of l_pending_qty in bse_rcv_clnt :%ld:",st_ord_rqst_rply_data.l_pending_qty);
+				 }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+					
+				/*** Ver 1.3 Starts *******/
+					l_ordr_sqnc = 0;
+					l_ordr_sqnc = fn_swap_long(st_ord_rqst_rply_data.l_msg_tag1);
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"l_ordr_sqnc in LIMIT_MARKET_ORD is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+					}
+					EXEC SQL
+						SELECT NVL(FXB_SPN_FLG,'N')
+						INTO   :c_spn_flg
+						FROM 	 FXB_FO_XCHNG_BOOK
+						WHERE  FXB_XCHNG_CD =:c_xchng_cd
+						AND		 FXB_PIPE_ID  =:c_pipe_id
+						AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+						AND    FXB_MOD_TRD_DT=:c_trd_dt;
+					if(SQLCODE != 0)
+					{
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB %s",SQLMSG);
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+					}
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Span Flag From FXB is :%c: for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+					}
+					if(c_spn_flg == 'S' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnord_confirmation");
+						}
+			     	i_ret_val = fn_bse_spnord_confirmation( &st_ord_rqst_rply_data,	
+																										c_xchng_cd,
+																										c_pipe_id,
+																										c_rout_str,	
+																										c_trd_dt.arr,
+																										c_skpord_ref,
+																										i_dwnld_flg,
+																										c_ServiceName,
+																										c_err_msg );
+						
+					}
+					else if(c_spn_flg == 'N')
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_ord_confirmation");
+						}
+					/*** Ver 1.3 Ends **********/	
+	
+			     	i_ret_val = fn_bse_ord_confirmation( &st_ord_rqst_rply_data,	
+																									c_xchng_cd,
+																									c_pipe_id,
+																									c_rout_str,	
+																									c_trd_dt.arr,
+																									c_skpord_ref,
+																									i_dwnld_flg,
+																									c_ServiceName,
+																									c_err_msg );
+
+				  }			/** Ver 1.3 Starts**/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc); 
+					}
+					/*** Ver 1.3 Ends ***/
+	        if(i_ret_val == -1)
+		       {
+						 if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+						 {
+			  			 fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+						 }
+						 fn_userlog(c_ServiceName,"Error in call To fn_bse_ord_cnfrmtn-");
+		       }		     
+			
+				 if(i_ret_val == 0)
+				 {
+					fn_userlog(c_ServiceName,"After Successful Call To fn_bse_ord_cnfrmtn-");
+				 }
+
+		break;
+
+	  case CONVRTED_MKT_TO_LMT: /** 1530 **/
+
+				 if(DEBUG_MSG_LVL_3)
+				 {
+				 fn_userlog(c_ServiceName,"Inside  CONVRTED_MKT_TO_LMT Case in bse_rcv_clnt");
+				 }
+
+				 MEMSET(st_mkrt_to_lmt_ord_data);
+				 memcpy (&st_mkrt_to_lmt_ord_data,ptr_car_sbuf,sizeof (struct st_mkrt_to_lmt_ord ));
+
+			 	 if(DEBUG_MSG_LVL_3)
+				 {
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt :%ld:",st_mkrt_to_lmt_ord_data.l_msg_typ);
+		   	  fn_userlog(c_ServiceName,"Val of l_msg_tag in bse_rcv_clnt :%ld:",st_mkrt_to_lmt_ord_data.l_msg_tag);
+		  	  fn_userlog(c_ServiceName,"Val of l_scrip_cd in bse_rcv_clnt :%ld:",st_mkrt_to_lmt_ord_data.l_scrip_cd);
+		  	  fn_userlog(c_ServiceName,"Val of ll_ord_id in bse_rcv_clnt :%ld:",st_mkrt_to_lmt_ord_data.ll_order_id);
+		  	  fn_userlog(c_ServiceName,"Val of l_cnvtdrate in bse_rcv_clnt :%ld:",st_mkrt_to_lmt_ord_data.l_cnvtdrate);
+
+		  	  fn_userlog(c_ServiceName,"Val After Convertn of l_msg_typ in bse_rcv_clnt :%ld:",fn_swap_long(st_mkrt_to_lmt_ord_data.l_msg_typ));
+		   	  fn_userlog(c_ServiceName,"Val After Convertn of l_msg_tag in bse_rcv_clnt :%ld:",fn_swap_long(st_mkrt_to_lmt_ord_data.l_msg_tag));
+		  	  fn_userlog(c_ServiceName,"Val After Convertn of l_scrip_cd in bse_rcv_clnt :%ld:",fn_swap_long(st_mkrt_to_lmt_ord_data.l_scrip_cd));
+		  	  fn_userlog(c_ServiceName,"Val After Convertn of ll_ord_id in bse_rcv_clnt :%lld:",fn_swap_ulnglng(st_mkrt_to_lmt_ord_data.ll_order_id));
+		  	  fn_userlog(c_ServiceName,"Val After Convertn of l_cnvtdrate in bse_rcv_clnt :%ld:",fn_swap_long(st_mkrt_to_lmt_ord_data.l_cnvtdrate));
+				 }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+
+				 /*** Ver 1.3 Starts *******/
+					l_ordr_sqnc = 0;
+					l_ordr_sqnc = fn_swap_long(st_mkrt_to_lmt_ord_data.l_msg_tag);
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"l_ordr_sqnc in CONVRTED_MKT_TO_LMT is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+					}
+					EXEC SQL
+						SELECT NVL(FXB_SPN_FLG,'N')
+						INTO   :c_spn_flg
+						FROM 	 FXB_FO_XCHNG_BOOK
+						WHERE  FXB_XCHNG_CD = :c_xchng_cd
+						AND		 FXB_PIPE_ID  = :c_pipe_id
+						AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+						AND    FXB_MOD_TRD_DT=:c_trd_dt;
+					if(SQLCODE != 0)
+					{
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+					}
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Span Flag From FXB is :%c: for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+					}
+			  	if(c_spn_flg == 'S' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_spn_cnvrt_mrkttolmt");
+						}
+			  		 i_ret_val = fn_spn_cnvrt_mrkttolmt( &st_mkrt_to_lmt_ord_data,	
+																									c_xchng_cd,
+																									c_pipe_id,
+																									c_rout_str,	
+																									c_trd_dt.arr,
+																									c_skpord_ref,
+																									i_dwnld_flg,
+																									c_ServiceName,
+																									c_err_msg );
+					}
+					else if (c_spn_flg == 'N') 
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_cnvrt_mrkttolmt");
+						}
+				 /*** Ver 1.3 Ends **/
+
+			  		 i_ret_val = fn_cnvrt_mrkttolmt( &st_mkrt_to_lmt_ord_data,	
+																							c_xchng_cd,
+																							c_pipe_id,
+																							c_rout_str,	
+																							c_trd_dt.arr,
+																							c_skpord_ref,
+																							i_dwnld_flg,
+																							c_ServiceName,
+																							c_err_msg );
+  				}			/*** Ver 1.3 Starts**/	                          
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc); 
+					}
+					/*** Ver 1.3 Ends ***/
+
+		    	if(i_ret_val == -1)
+		     	{
+						if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+						{
+			  			 fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+						}
+						fn_userlog(c_ServiceName,"Error in Call To fn_cnvrt_mrkttolmt");
+		      }
+		   	 
+				  if(i_ret_val == 0 )
+				  {
+						fn_userlog(c_ServiceName,"After Successful Call To fn_cnvrt_mrkttolmt");
+				  }
+
+		break;
+	  case PRSNL_ORDR_DWNLD: /** 1092 **/
+
+
+				 MEMSET(st_ord_rqst_rply_data);
+				 MEMSET(st_prsnl_ordr_ums_data);
+
+				 memcpy (&st_prsnl_ordr_ums_data,ptr_car_sbuf,sizeof (struct st_prsnl_ordr_ums ));
+
+			 	 if(DEBUG_MSG_LVL_3)
+				 {
+				 fn_userlog(c_ServiceName,"Inside ORDER PRSNL_ORDR_DWNLD Case in bse_rcv_clnt");
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt :%ld:",st_prsnl_ordr_ums_data.l_msg_typ);
+		   	  fn_userlog(c_ServiceName,"Val of l_total_no_of_records in bse_rcv_clnt :%ld:",st_prsnl_ordr_ums_data.l_no_of_records);
+			 	 }
+
+			   l_tot_no_records = fn_swap_long(st_prsnl_ordr_ums_data.l_no_of_records);
+		   	  fn_userlog(c_ServiceName,"After Convrtn- Val of l_no_of_records in bse_rcv_clnt :%ld:",l_tot_no_records);
+
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+
+			   /* Called fn_bse_ord_confirmation in loop for l_no_of_records - with structure mapping */
+			   l_rec_cnt = 0;
+			   if(DEBUG_MSG_LVL_3)
+			   {
+			   fn_userlog (c_ServiceName," Total Number of order being processed in DWLD<%ld>", l_tot_no_records);
+			   }
+
+			   while (l_rec_cnt < l_tot_no_records )
+         { /** While loop starts for each order dwnld detail **/
+ 
+			   
+				    if(DEBUG_MSG_LVL_5)
+				    {
+				    fn_userlog (c_ServiceName," Number of order being processed in DWLD-loop <%ld>", l_rec_cnt);
+				    }
+
+
+			      fn_tmstmp_ymdhms_to_arr(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms, c_time_str);
+			      fn_tmstmp_ymdhms_to_arr(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms, sql_fxd_lst_mod_tm.arr);
+			   	  sql_fxd_lmt_rt = fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_rate);
+					  sprintf ( sql_fxd_stck_cd.arr, "%ld", fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_scrip_cd ));
+						fn_string_to_char ( sql_fxd_clnt_cd.arr, LEN_FXD_CLNT_CD-1, st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].c_client_id, LEN_CLNT_ID );
+						sql_fxd_lst_trd_no	= fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_ltid);
+
+						sql_fxd_seq_no = fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_msg_tag);
+						/*sql_fxd_xchng_ack = (double) fn_swap_ulnglng(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].ll_order_id);  *** Ver 1.5.1 comment */
+
+						MEMSET(c_fxd_xchng_ack);		/** Ver 1.5.1 **/
+						sprintf(c_fxd_xchng_ack.arr,"%lld",fn_swap_ulnglng(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].ll_order_id) );					/** Ver 1.5.1 **/
+						SETLEN(c_fxd_xchng_ack);		/** Ver 1.5.1 **/
+
+			   		sql_fxd_ord_typ = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].c_ordr_typ;
+			   		sql_fxd_ordr_flw = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].c_ordr_flw;
+			  	 	sql_fxd_ordr_qty = fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_original_qty);
+			   		sql_fxd_pndng_qty = fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_pendng_qty);
+            
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName,"Val of l_msg_type being inserted in FXD -in rcv_clnt-ORDER- DWLD :%ld:",l_msg_type);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_stck_cd being inserted in FXD -ORDER- DWLD :%d:",sql_fxd_stck_cd.arr);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_xchng_ack being inserted in FXD -ORDER- DWLD :%d:",sql_fxd_xchng_ack);
+							fn_userlog(c_ServiceName,"Val of c_fxd_xchng_ack being inserted in FXD -ORDER- DWLD :%s:",c_fxd_xchng_ack); /** Ver 1.5.1 **/
+							fn_userlog(c_ServiceName,"Val of sql_fxd_lmt_rt being inserted in FXD -ORDER- DWLD :%ld:",sql_fxd_lmt_rt);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_ordr_qty being inserted in FXD -ORDER- DWLD :%ld:",sql_fxd_ordr_qty);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_pndng_qty being inserted in FXD -ORDER-DWLD :%ld:",sql_fxd_pndng_qty);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_seq_no being inserted in FXD -ORDER- DWLD :%ld:",sql_fxd_seq_no);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_lst_trd_no being inserted in FXD - DWLD :%ld:",sql_fxd_lst_trd_no);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_ord_typ being inserted in FXD -ORDER- DWLD :%c:",sql_fxd_ord_typ);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_ordr_flw being inserted in FXD -ORDER- DWLD :%c:",sql_fxd_ordr_flw);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_lst_mod_tm being inserted in FXD - DWLD :%d:",sql_fxd_lst_mod_tm.arr);
+							fn_userlog(c_ServiceName,"Val of c_time_str being inserted in FXD -ORDER- DWLD :%d:",c_time_str);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_clnt_cd being inserted in FXD -ORDER- DWLD :%s:",sql_fxd_clnt_cd.arr);
+							fn_userlog(c_ServiceName,"Val of c_pipe_id being inserted in FXD -ORDER- DWLD :%s:",c_pipe_id);
+						}
+
+			  		i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+			  		fn_userlog(c_ServiceName,"Val of i_trnsctn -in begintran for FXD -insert <%d>", i_trnsctn);
+			  		if ( i_trnsctn == -1)
+			  		{
+			    		fn_errlog(c_ServiceName,"S31035", LIBMSG, c_errmsg);
+    			    fn_userlog(c_ServiceName,"Error in transaction begin-brcv clnt for dwnld");
+			    		fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+			    		tpreturn(TPFAIL, 0, (char *)NULL, 0, 0);
+			  		}
+
+						EXEC SQL
+							INSERT INTO	
+							FXD_FO_XCHNG_DWNLD
+							(
+				        FXD_MSG_TYP,
+       					FXD_STCK_CD,
+        				FXD_XCHNG_ACK,
+        			  FXD_LMT_RT,
+        			  FXD_ORDR_QTY,
+        				FXD_PNDNG_QTY,
+        				FXD_SEQ_NO,
+        				FXD_LST_TRD_NO,
+        				FXD_ORD_TYP,
+        				FXD_ORDR_FLW,
+        				FXD_LST_MOD_TM,
+        				FXD_CLNT_CD,
+        				FXD_PIPE_ID
+							)
+							VALUES
+							(
+        				:l_msg_type,
+  		 		      :sql_fxd_stck_cd,
+        				/*:sql_fxd_xchng_ack, *** Ver 1.5.1 **/
+        				to_number(:c_fxd_xchng_ack,'99999999999999999999'), /** Ver 1.5.1 **/
+        				:sql_fxd_lmt_rt,
+        				:sql_fxd_ordr_qty,
+        				:sql_fxd_pndng_qty,
+        				:sql_fxd_seq_no,
+        				:sql_fxd_lst_trd_no,
+        				:sql_fxd_ord_typ,
+        				:sql_fxd_ordr_flw,
+        				to_date ( :c_time_str, 'DD-Mon-YYYY hh24:mi:ss' ),
+        				:sql_fxd_clnt_cd,
+        				:c_pipe_id
+							);
+
+					  if ( SQLCODE != 0 )
+  					{
+    					fn_errlog(c_ServiceName,"S31040", SQLMSG, c_errmsg);
+							fn_userlog(c_ServiceName,"Error -Storing data in FXD table for trade dwld for :%s:",c_pipe_id);
+    					tpfree ( ( char * )ptr_fml_ibuf);
+							tpreturn(TPFAIL,0 , (char *)NULL, 0, 0 );
+  					}
+
+					  i_ch_val = fn_committran( c_ServiceName, i_trnsctn, c_errmsg );
+			 		  fn_userlog(c_ServiceName,"Val of i_trnsctn -in committran for FXD -insert <%d>", i_trnsctn);
+					  if ( i_ch_val == -1 )
+			 			{
+			  		  fn_errlog(c_ServiceName,"S31045", LIBMSG, c_errmsg);
+			   			tpreturn(TPFAIL, 0, (char *)NULL, 0, 0);
+					  }
+
+
+						  st_ord_rqst_rply_data.l_msg_typ = PRSNL_ORDR_DWNLD;
+
+         
+	  					st_ord_rqst_rply_data.ll_ord_id = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].ll_order_id;
+					   	st_ord_rqst_rply_data.l_msg_tag1 = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_msg_tag;
+					   	st_ord_rqst_rply_data.c_ord_typ = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].c_ordr_typ;
+					   	st_ord_rqst_rply_data.c_buysell_flg = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].c_ordr_flw;
+					   	st_ord_rqst_rply_data.l_amended_qty = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_original_qty;
+			  		 	st_ord_rqst_rply_data.l_pending_qty = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_pendng_qty;
+
+							st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_year = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms.c_year;
+							st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_month = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms.c_month;
+							st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_day = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms.c_day;
+							st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_hour = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms.c_hour;
+							st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_min  = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms.c_min;
+							st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_sec  = st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms.c_sec;
+
+
+						  if(DEBUG_MSG_LVL_3)
+						  {
+						  fn_userlog(c_ServiceName,"Val of ll_ord_id in bse_rcv_clnt-DWLD :%ld:",st_ord_rqst_rply_data.ll_ord_id);
+						  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt-DWLD :%ld:",st_ord_rqst_rply_data.l_msg_typ);
+		   			  fn_userlog(c_ServiceName,"Val of l_msg_tag1 in bse_rcv_clnt-DWLD :%ld:",st_ord_rqst_rply_data.l_msg_tag1);
+		   			  fn_userlog(c_ServiceName,"Val of c_ord_typ in bse_rcv_clnt-DWLD :%c:",st_ord_rqst_rply_data.c_ord_typ);
+		 		  	  fn_userlog(c_ServiceName,"Val of c_buysell_flg in bse_rcv_clnt-DWLD :%c:",st_ord_rqst_rply_data.c_buysell_flg);
+		 		  	  fn_userlog(c_ServiceName,"Val of l_amended_qty in bse_rcv_clnt-DWLD:%ld:",st_ord_rqst_rply_data.l_amended_qty);
+		  		 	  fn_userlog(c_ServiceName,"Val of l_pending_qty in bse_rcv_clnt-DWLD:%ld:",st_ord_rqst_rply_data.l_pending_qty);
+			  			fn_userlog(c_ServiceName,"Val of year in rcv_clnt-DWLD Y:%d:",st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_year);
+			  			fn_userlog(c_ServiceName,"Val of mnth in rcv_clnt-DWLD M:%d:",st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_month);
+			  			fn_userlog(c_ServiceName,"Val of day in rcv_clnt-DWLD D:%d:",st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_day);
+			  			fn_userlog(c_ServiceName,"Val of hr in rcv_clnt-DWLD H:%d:",st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_hour); 
+			  			fn_userlog(c_ServiceName,"Val of min in rcv_clnt-DWLD M:%d:",st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_min);  
+			 			  fn_userlog(c_ServiceName,"Val of sec in rcv_clnt-DWLD S:%d:",st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_sec);  
+  			  		fn_userlog(c_ServiceName,"Val of time in rcv_clnt-DWLD -Final-string :%s:",c_time_str);  
+					}
+
+					/*** Ver 1.3 Starts *******/
+					l_ordr_sqnc = 0;
+					l_ordr_sqnc = fn_swap_long(st_ord_rqst_rply_data.l_msg_tag1);
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"l_ordr_sqnc in PRSNL_ORDR_DWNLD is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+					}
+					EXEC SQL
+						SELECT NVL(FXB_SPN_FLG,'N')
+						INTO   :c_spn_flg
+						FROM 	 FXB_FO_XCHNG_BOOK
+						WHERE  FXB_XCHNG_CD = :c_xchng_cd
+						AND		 FXB_PIPE_ID  = :c_pipe_id
+						AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+						AND    FXB_MOD_TRD_DT=:c_trd_dt;
+					if(SQLCODE != 0)
+					{
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+					}
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Span Flag From FXB is :%c: for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+					}
+					if(c_spn_flg == 'S' )
+					{
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnord_confirmation");
+						}
+			     	i_ret_val = fn_bse_spnord_confirmation( &st_ord_rqst_rply_data,	
+																										c_xchng_cd,
+																										c_pipe_id,
+																										c_rout_str,	
+																										c_trd_dt.arr,
+																										c_skpord_ref,
+																										i_dwnld_flg,
+																										c_ServiceName,
+																										c_err_msg );
+						
+					}
+					else if(c_spn_flg == 'N')
+					{
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_ord_confirmation");
+						}
+					/*** Ver 1.3 Ends **********/	
+
+			   				i_ret_val = fn_bse_ord_confirmation( &st_ord_rqst_rply_data,	
+																											c_xchng_cd,
+																											c_pipe_id,
+																											c_rout_str,	
+																											c_trd_dt.arr,
+																											c_skpord_ref,
+																											i_dwnld_flg,
+																											c_ServiceName,
+																											c_err_msg );
+					}		/** Ver 1.3 Starts***/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc); 
+					}
+					/*** Ver 1.3 Ends ***/
+					 if(i_ret_val == -1)
+		     	 {
+
+                  /*** Ver 1.1 starts here *** Write the particular response(record) in error queue
+                   *** instead of complete response packet ****/
+
+                  if(DEBUG_MSG_LVL_3)
+                  {
+                   fn_userlog(c_ServiceName," Writing ORDR UMS data to Error Queue");
+                  }
+
+                  MEMSET(st_prsnl_ordr_ums_data_tmp);
+                  st_prsnl_ordr_ums_data_tmp.l_msg_typ = fn_swap_long(PRSNL_ORDR_DWNLD);
+                  st_prsnl_ordr_ums_data_tmp.l_no_of_records = fn_swap_long(1);
+                  memcpy(&st_prsnl_ordr_ums_data_tmp.st_ums_order_data[0],&st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt], sizeof(st_prsnl_ordr_ums_data_tmp.st_ums_order_data[0]));
+                  i_read_size = sizeof( struct st_prsnl_ordr_ums);
+
+                  i_err[0] = Fchg32( ptr_fml_ibuf, FFO_CBUF, 0, (char *)&st_prsnl_ordr_ums_data_tmp, i_read_size );
+                  i_ferr[0] = Ferror32;
+                  i_err[1] =  Fchg32( ptr_fml_ibuf, FFO_TMPLT, 0, (char *)&i_read_size, 0 );
+                  i_ferr[1] = Ferror32;
+
+                  for( i_cnt=0; i_cnt<=1; i_cnt++ )
+                  {
+                    if(i_err[i_cnt] == -1)
+                    {
+                     fn_userlog(c_ServiceName,"Error [%d] in Fchange at [%d]", i_ferr[i_cnt],i_cnt);
+                    }
+                  }
+
+                  /**** Ver 1.1 Ends here ****/
+
+									if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+									{
+			 			 				fn_userlog(c_ServiceName,"S3880",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+									}
+		    	 	}
+
+
+         
+ 
+				    if(i_ret_val == 0)
+				  	{
+					 		fn_userlog(c_ServiceName,"After Successful Call To fn_bse_ord_cnfrmtn in DWLD case for l_rec_cnt= <%d> ", l_rec_cnt);
+				  	}
+			    	l_rec_cnt ++;
+         }  /** While loop ends for each order dwnld detail **/
+
+	  break;
+
+	  case PRSN_SLTP_ORDR_DWNLD: /** 1097 **/
+
+				 MEMSET(st_stoploss_ord_rply_data);
+				 MEMSET(st_prsnl_sltp_ums_data);
+
+				 memcpy (&st_prsnl_sltp_ums_data,ptr_car_sbuf,sizeof (struct st_prsnl_sltp_ums ));
+
+			 	 if(DEBUG_MSG_LVL_3)
+				 {
+			  fn_userlog(c_ServiceName,"Inside SLTP DWNLD PRSN_SLTP_ORDR_DWNLD Case in bse_rcv_clnt");
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt -SLTP DWNLD:%ld:",st_prsnl_sltp_ums_data.l_msg_typ);
+		   	  fn_userlog(c_ServiceName,"Val of l_total_no_of_records in bse_rcv_clnt -SLTP DWNLD:%ld:",st_prsnl_sltp_ums_data.l_no_of_records);
+			 	 }
+
+			   l_tot_no_records = fn_swap_long(st_prsnl_sltp_ums_data.l_no_of_records);
+		   	 if(DEBUG_MSG_LVL_3)
+			 {
+			 fn_userlog(c_ServiceName,"After Convrtn- Val of l_no_of_records in bse_rcv_clnt-SLTP DWNLD:%ld:",l_tot_no_records);
+			 }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+
+			   /* Called fn_bsesltp_cnfrmtn in loop for l_no_of_records - with structure mapping */
+			   l_rec_cnt = 0;
+			   if(DEBUG_MSG_LVL_3)
+			   {
+			   fn_userlog (c_ServiceName,"11 Total Number of order being processed in SLTP- DWLD<%ld>", l_tot_no_records);
+         fn_userlog (c_ServiceName," INCREMENTED l_rec_cnt :%ld:",l_rec_cnt);
+	 }
+			   while (l_rec_cnt < l_tot_no_records )
+         {
+				
+        		fn_tmstmp_ymdhms_to_arr(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms, c_time_str);
+						if(DEBUG_MSG_LVL_5)
+						{
+						fn_userlog (c_ServiceName," Number of order being processed in SLTP-DWLD-loop <%ld>", l_rec_cnt);
+						fn_userlog(c_ServiceName,"Val of time in bse_rcv_clnt SLTP-DWLD -Final-string :%s:",c_time_str);
+						}
+
+			      fn_tmstmp_ymdhms_to_arr(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms, sql_fxd_lst_mod_tm.arr);
+			   		sql_fxd_lmt_rt = fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_limit_rate);
+						sql_fxd_trg_rt = fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_trg_rate);
+
+						sprintf (sql_fxd_stck_cd.arr,"%ld",fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_scrip_cd ));
+						fn_string_to_char ( sql_fxd_clnt_cd.arr, LEN_FXD_CLNT_CD-1, st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].c_client_id, LEN_CLNT_ID );
+						sql_fxd_lst_trd_no= '\0'; /*fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_ltid)*/
+
+						sql_fxd_seq_no = fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_msg_tag);
+						sql_fxd_xchng_ack = (double) fn_swap_ulnglng(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].ll_ordr_id);
+
+						MEMSET(c_fxd_xchng_ack);		/** Ver 1.5.1 **/
+						sprintf(c_fxd_xchng_ack.arr,"%lld",fn_swap_ulnglng(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].ll_ordr_id) );					/** Ver 1.5.1 **/
+						SETLEN(c_fxd_xchng_ack);		/** Ver 1.5.1 **/
+
+			   		sql_fxd_ord_typ = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].c_ordr_typ;
+			   		sql_fxd_ordr_flw = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].c_ordr_flw;
+			   		sql_fxd_ordr_qty = fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_qty);
+			   		sql_fxd_pndng_qty = fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_avalbl_qty);
+
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName,"Val of l_msg_type being inserted in FXD -SLTP- DWLD :%ld:",l_msg_type);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_stck_cd being inserted in FXD -SLTP DWLD :%d:",sql_fxd_stck_cd.arr);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_xchng_ack being inserted -SLTP -ORDER- DWLD :%d:",sql_fxd_xchng_ack);
+							fn_userlog(c_ServiceName,"Val of c_fxd_xchng_ack being inserted -SLTP -ORDER- DWLD :%s:",c_fxd_xchng_ack);  /** ver 1.5.1 **/
+							fn_userlog(c_ServiceName,"Val of sql_fxd_lmt_rt being inserted in FXD -SLTP DWLD :%ld:",sql_fxd_lmt_rt);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_trg_rt being inserted in FXD -SLTP DWLD :%ld:",sql_fxd_trg_rt);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_ordr_qty being inserted in FXD -SLTP DWLD :%ld:",sql_fxd_ordr_qty);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_pndng_qty being inserted in FXD-SLTP DWLD :%ld:",sql_fxd_pndng_qty);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_seq_no being inserted in FXD -SLTP DWLD :%ld:",sql_fxd_seq_no);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_lst_trd_no being inserted in FXD-SLTP DWLD :%ld:",sql_fxd_lst_trd_no);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_ord_typ being inserted in FXD -SLTP DWLD :%c:",sql_fxd_ord_typ);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_ordr_flw being inserted in FXD -SLTP DWLD :%c:",sql_fxd_ordr_flw);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_lst_mod_tm being inserted in SLTP DWLD :%d:",sql_fxd_lst_mod_tm.arr);
+							fn_userlog(c_ServiceName,"Val of c_time_str being inserted in FXD -SLTP DWLD :%d:",c_time_str);
+							fn_userlog(c_ServiceName,"Val of sql_fxd_clnt_cd being inserted in FXD -SLTP DWLD :%s:",sql_fxd_clnt_cd.arr);
+							fn_userlog(c_ServiceName,"Val of c_pipe_id being inserted in FXD SLTP- DWLD :%s:",c_pipe_id);
+						}
+
+			  		i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+			 			fn_userlog(c_ServiceName,"Val of i_trnsctn -in begintran for FXD -insert -SLTP<%d>", i_trnsctn);
+			  		if ( i_trnsctn == -1)
+			  		{
+			    		fn_errlog(c_ServiceName,"S31050", LIBMSG, c_errmsg);
+    			    fn_userlog(c_ServiceName,"Error in transaction begin-brcv clnt for SLTP-dwnld");
+			    		fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+			    		tpreturn(TPFAIL, 0, (char *)NULL, 0, 0);
+			  		}
+			  		/** Begin tran started here for issue of transaction -lock -20-Dec-2011**/
+						EXEC SQL
+							INSERT INTO	
+							FXD_FO_XCHNG_DWNLD
+							(
+        				FXD_MSG_TYP,
+        				FXD_STCK_CD,
+        				FXD_XCHNG_ACK,
+        				FXD_LMT_RT,
+								FXD_TRG_RT,
+        				FXD_ORDR_QTY,
+        				FXD_PNDNG_QTY,
+        				FXD_SEQ_NO,
+        				FXD_LST_TRD_NO,
+        				FXD_ORD_TYP,
+        				FXD_ORDR_FLW,
+        				FXD_LST_MOD_TM,
+        				FXD_CLNT_CD,
+        				FXD_PIPE_ID
+							 )
+							 VALUES
+							 (
+        				:l_msg_type,
+        				:sql_fxd_stck_cd,
+        				/**:sql_fxd_xchng_ack, ** Ver 1.5.1 comment **/
+        				to_number(:c_fxd_xchng_ack,'99999999999999999999'), /** Ver 1.5.1 **/
+        				:sql_fxd_lmt_rt,
+								:sql_fxd_trg_rt,
+        				:sql_fxd_ordr_qty,
+        				:sql_fxd_pndng_qty,
+        				:sql_fxd_seq_no,
+        				:sql_fxd_lst_trd_no,
+        				:sql_fxd_ord_typ,
+        				:sql_fxd_ordr_flw,
+        				to_date ( :c_time_str, 'DD-Mon-YYYY hh24:mi:ss' ),
+        				:sql_fxd_clnt_cd,
+        				:c_pipe_id
+							 );
+
+						if ( SQLCODE != 0 )
+  				  {
+    					fn_errlog(c_ServiceName,"S31055", SQLMSG, c_errmsg);
+							fn_userlog(c_ServiceName,"Error -Storing data in FXD table for trade dwld for :%s:",c_pipe_id);
+    					tpfree ( ( char * )ptr_fml_ibuf);
+							tpreturn(TPFAIL,0 , (char *)NULL, 0, 0 );
+  					}
+
+
+					  i_ch_val = fn_committran( c_ServiceName, i_trnsctn, c_errmsg );
+			 		  fn_userlog(c_ServiceName,"Val of i_trnsctn -in committran for FXD -insert-SLTP <%d>", i_trnsctn);
+					  if ( i_ch_val == -1 )
+			 		  {
+			 		   fn_errlog(c_ServiceName,"S31060", LIBMSG, c_errmsg);
+			  		 tpreturn(TPFAIL, 0, (char *)NULL, 0, 0);
+					  }
+					 
+            MEMSET(st_ord_rqst_rply_data);
+            st_ord_rqst_rply_data.l_msg_typ = PRSN_SLTP_ORDR_DWNLD; 
+            st_ord_rqst_rply_data.ll_ord_id =   st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].ll_ordr_id;
+            st_ord_rqst_rply_data.l_msg_tag1 = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_msg_tag;
+            st_ord_rqst_rply_data.c_ord_typ =  st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].c_ordr_typ;
+            st_ord_rqst_rply_data.c_buysell_flg = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].c_ordr_flw;
+            st_ord_rqst_rply_data.l_amended_qty = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_qty;
+            st_ord_rqst_rply_data.l_pending_qty = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_avalbl_qty;
+
+            st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_year = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms.c_year;
+            st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_month = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms.c_month;
+            st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_day = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms.c_day;
+            st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_hour = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms.c_hour;
+            st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_min  = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms.c_min;
+            st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_sec  = st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms.c_sec;
+
+					/*** Ver 1.3 Starts *******/
+					l_ordr_sqnc = 0;
+					l_ordr_sqnc = fn_swap_long(st_ord_rqst_rply_data.l_msg_tag1);
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"l_ordr_sqnc in PRSN_SLTP_ORDR_DWNLD is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+					}
+
+					EXEC SQL
+						SELECT NVL(FXB_SPN_FLG,'N')
+						INTO   :c_spn_flg
+						FROM 	 FXB_FO_XCHNG_BOOK
+						WHERE  FXB_XCHNG_CD = :c_xchng_cd
+						AND		 FXB_PIPE_ID  = :c_pipe_id
+						AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+						AND    FXB_MOD_TRD_DT=:c_trd_dt;
+					if(SQLCODE != 0)
+					{
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+					}
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Span Flag From FXB is :%c: for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+					}
+					if(c_spn_flg == 'S' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnord_confirmation");
+						}
+			     	i_ret_val = fn_bse_spnord_confirmation( &st_ord_rqst_rply_data,	
+																										c_xchng_cd,
+																										c_pipe_id,
+																										c_rout_str,	
+																										c_trd_dt.arr,
+																										c_skpord_ref,
+																										i_dwnld_flg,
+																										c_ServiceName,
+																										c_err_msg );
+						
+					}
+					else if(c_spn_flg == 'N')
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_ord_confirmation");
+						}
+					/*** Ver 1.3 Ends **********/	
+            i_ret_val = fn_bse_ord_confirmation( &st_ord_rqst_rply_data,
+                                                   c_xchng_cd,
+                                                   c_pipe_id,
+                                                   c_rout_str,
+                                                   c_trd_dt.arr,
+                                                   c_skpord_ref,
+                                                   i_dwnld_flg,
+                                                   c_ServiceName,
+                                                   c_err_msg ); 
+
+					}  /**** Ver 1.3  Starts***/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc); 
+					}
+					/*** Ver 1.3 Ends ***/
+         	if(i_ret_val == -1)
+		      {
+
+              /*** Ver 1.1 starts here *** Write the particular response(record) in error queue
+               *** instead of complete response packet ****/
+              if(DEBUG_MSG_LVL_3)
+              {
+               fn_userlog(c_ServiceName," Writing SLTP UMS data to Error Queue");
+              }
+              MEMSET(st_prsnl_sltp_ums_data_tmp);
+              st_prsnl_sltp_ums_data_tmp.l_msg_typ = fn_swap_long(PRSN_SLTP_ORDR_DWNLD);
+              st_prsnl_sltp_ums_data_tmp.l_no_of_records = fn_swap_long(1);
+              memcpy(&st_prsnl_sltp_ums_data_tmp.st_ums_sltp_data[0],&st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt],
+                   sizeof(st_prsnl_sltp_ums_data_tmp.st_ums_sltp_data[0]));
+              i_read_size = sizeof( struct st_prsnl_sltp_ums);
+
+              i_err[0] = Fchg32( ptr_fml_ibuf, FFO_CBUF, 0, (char *)&st_prsnl_sltp_ums_data_tmp, i_read_size );
+              i_ferr[0] = Ferror32;
+              i_err[1] =  Fchg32( ptr_fml_ibuf, FFO_TMPLT, 0, (char *)&i_read_size, 0 );
+              i_ferr[1] = Ferror32;
+
+              for( i_cnt=0; i_cnt<=1; i_cnt++ )
+              {
+               if(i_err[i_cnt] == -1)
+               {
+                fn_userlog(c_ServiceName,"Error [%d] in Fchange at [%d]", i_ferr[i_cnt],i_cnt);
+               }
+              }
+              /**** Ver 1.1 Ends here ****/   
+
+							if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+							{
+			  				fn_userlog(c_ServiceName,"S3880",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+							}
+		     	  }
+		     		
+			
+				  	if(DEBUG_MSG_LVL_3)
+				  	{
+					 		fn_userlog(c_ServiceName,"After Successful fn_bse_ord_cnfrmtn in DWLD case ");
+				  	}
+
+			    	l_rec_cnt ++;
+          	if(DEBUG_MSG_LVL_3)
+		{
+		fn_userlog(c_ServiceName," INCREMENTED l_rec_cnt :%ld:",l_rec_cnt);
+		}
+     
+         }
+        
+       	 if(DEBUG_MSG_LVL_3)
+	 {
+	 fn_userlog(c_ServiceName," 11 INCREMENTED l_rec_cnt :%ld:",l_rec_cnt);  
+	 }
+		break;
+
+	  case ADD_IOC_BUY_ORDR: /** 1051 **/
+	  case ADD_IOC_SELL_ORDR: /** 1061 **/
+
+				 if(DEBUG_MSG_LVL_3)
+				 {
+				 fn_userlog(c_ServiceName,"Inside ORDER ADD_IOC_BUY_ORDR/ ADD_IOC_SELL_ORDR Case in bse_rcv_clnt");
+				 }
+
+				 MEMSET(st_del_ord_rply_data);
+				 memcpy (&st_del_ord_rply_data,ptr_car_sbuf,sizeof (struct st_del_ord_rply ));
+
+			 	 if(DEBUG_MSG_LVL_3)
+				 {
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt : for IOC%ld:",st_del_ord_rply_data.l_msg_typ);
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_tag in bse_rcv_clnt : for IOC%ld:",st_del_ord_rply_data.l_msg_tag);
+		  	  fn_userlog(c_ServiceName,"Val of s_rply_cd in bse_rcv_clnt : for IOC%d:",st_del_ord_rply_data.s_rply_cd);
+		  	  fn_userlog(c_ServiceName,"Val of s_ratediff in bse_rcv_clnt : for IOC%d:",st_del_ord_rply_data.s_ratediff);
+		  	  fn_userlog(c_ServiceName,"Val of ll_transn_id in bse_rcv_clnt : for IOC%lld:",st_del_ord_rply_data.ll_transn_id);
+		  	  fn_userlog(c_ServiceName,"Val of c_rply_txt in bse_rcv_clnt : for IOC%s:",st_del_ord_rply_data.c_rply_txt);
+				 }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+					/*** Ver 1.3 Starts *******/
+					l_ordr_sqnc = 0;
+					l_ordr_sqnc = fn_swap_long(st_del_ord_rply_data.l_msg_tag);
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"l_ordr_sqnc in ADD_IOC_BUY_SELL_ORDR is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+					}
+					EXEC SQL
+						SELECT NVL(FXB_SPN_FLG,'N')
+						INTO   :c_spn_flg
+						FROM 	 FXB_FO_XCHNG_BOOK
+						WHERE  FXB_XCHNG_CD = :c_xchng_cd
+						AND		 FXB_PIPE_ID  = :c_pipe_id
+						AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+						AND    FXB_MOD_TRD_DT=:c_trd_dt;
+					if(SQLCODE != 0)
+					{
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+					}
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Span Flag From FXB is:%c:for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+				  }	
+					if(c_spn_flg == 'S' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnioc_confirmation");
+						}
+			   		i_ret_val = fn_bse_spnioc_confirmation( &st_del_ord_rply_data,	
+																										 c_xchng_cd,
+																										 c_pipe_id,
+																										 c_rout_str,	
+																										 c_trd_dt.arr,
+																										 c_skpord_ref,
+																										 i_dwnld_flg,
+																										 c_ServiceName,
+																										 c_err_msg );
+						
+					}
+					else if(c_spn_flg == 'N')
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_ioc_confirmation");
+						}
+					/*** Ver 1.3 Ends **********/	
+
+			   		i_ret_val = fn_bse_ioc_confirmation( &st_del_ord_rply_data,	
+																									c_xchng_cd,
+																									c_pipe_id,
+																									c_rout_str,	
+																									c_trd_dt.arr,
+																									c_skpord_ref,
+																									i_dwnld_flg,
+																									c_ServiceName,
+																									c_err_msg );
+					}		/** Ver 1.3 Starts***/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc); 
+					}
+					/*** Ver 1.3 Ends ***/
+
+		  		if(i_ret_val == -1)
+		     	{
+						if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+						{
+			  			fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+						}
+		      }
+			
+				 if(i_ret_val == 0)
+				 {
+					fn_userlog(c_ServiceName,"After Successful Call To fn_bse_ioc_ord_conf-");
+				 }
+		break;
+
+  	case ADD_STOPLOSS_BUY_ORD:  /** 2501 **/
+		case UPD_STOPLOSS_BUY_ORD:  /** 2502 **/
+		case ADD_STOPLOSS_SELL_ORD: /** 2504 **/
+		case UPD_STOPLOSS_SELL_ORD: /** 2505 **/
+
+				 if(DEBUG_MSG_LVL_3)
+				 {
+				 fn_userlog(c_ServiceName,"Inside STOP_LOSS ORDER  Case in bse_rcv_clnt");
+				 }
+
+				 MEMSET(st_stoploss_ord_rply_data);
+				 memcpy (&st_stoploss_ord_rply_data,ptr_car_sbuf,sizeof (struct st_stoploss_ord_rply ));
+
+			 	 if(DEBUG_MSG_LVL_3)
+				 {
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in STOP_LOSS - bse_rcv_clnt :%ld:",st_stoploss_ord_rply_data.l_msg_typ);
+		   	  fn_userlog(c_ServiceName,"Val of l_msg_tag in STOP_LOSS - bse_rcv_clnt :%ld:",st_stoploss_ord_rply_data.l_msg_tag);
+		  	  fn_userlog(c_ServiceName,"Val of s_rply_cd in STOP_LOSS - bse_rcv_clnt :%d:",st_stoploss_ord_rply_data.s_rply_cd);
+		  	  fn_userlog(c_ServiceName,"Val of ll_transn_id in STOP_LOSS - bse_rcv_clnt :%lld:",st_stoploss_ord_rply_data.ll_transn_id);
+		  	  fn_userlog(c_ServiceName,"Val of c_rply_txt in STOP_LOSS - bse_rcv_clnt :%s:",st_stoploss_ord_rply_data.c_reply_txt);
+				 }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S5630",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+				 /*** Ver 1.3 Starts *******/
+				 l_ordr_sqnc = 0;
+				 l_ordr_sqnc = fn_swap_long(st_del_ord_rply_data.l_msg_tag);
+				 if(DEBUG_MSG_LVL_0)
+				 {
+					 fn_userlog(c_ServiceName,"l_ordr_sqnc in ADD_IOC_BUY_SELL_ORDR is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+				 }
+				 EXEC SQL
+					 SELECT NVL(FXB_SPN_FLG,'N')
+				 	 INTO   :c_spn_flg
+					 FROM 	 FXB_FO_XCHNG_BOOK
+					 WHERE  FXB_XCHNG_CD = :c_xchng_cd
+					 AND		 FXB_PIPE_ID  = :c_pipe_id
+					 AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+					 AND    FXB_MOD_TRD_DT=:c_trd_dt;
+				 if(SQLCODE != 0)
+				 {
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+				 }
+				 if(DEBUG_MSG_LVL_0)
+				 {
+						fn_userlog(c_ServiceName,"Span Flag From FXB is:%c:for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+				 }	
+				 if(c_spn_flg == 'S' )
+				 {
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnsltp_cnfrmtn");
+						}
+			  		 i_ret_val = fn_bse_spnsltp_cnfrmtn( &st_stoploss_ord_rply_data,	
+																							c_xchng_cd,
+																							c_pipe_id,
+																							c_rout_str,	
+																							c_trd_dt.arr,
+																							c_trd_ref.arr,
+																							i_dwnld_flg,
+																							c_ServiceName,
+																							c_err_msg );
+					}
+					else if(c_spn_flg == 'N' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bsesltp_cnfrmtn");
+						}
+					/*** Ver 1.3 Ends **/
+			  		 i_ret_val = fn_bsesltp_cnfrmtn( &st_stoploss_ord_rply_data,	
+																							c_xchng_cd,
+																							c_pipe_id,
+																							c_rout_str,	
+																							c_trd_dt.arr,
+																							c_trd_ref.arr,
+																							i_dwnld_flg,
+																							c_ServiceName,
+																							c_err_msg );
+					}	/** Ver 1.3 Starts**/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc); 
+					}
+					/*** Ver 1.3 Ends ***/
+		     	if(i_ret_val == -1)
+		     	{
+							if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+							{
+			  					fn_userlog(c_ServiceName,"S8930",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+							}
+		     	}
+		     
+				 if(i_ret_val == 0)
+				 {
+					fn_userlog(c_ServiceName,"After Successful Call To fn_bsesltp_cnfrmtn");
+				 }
+
+		break;
+
+  	case DEL_STOPLOSS_BUY_ORD: /** 2503 **/
+		case DEL_STOPLOSS_SELL_ORD: /** 2506 **/
+    case UPD_SLTP_BUY_AFTER_TRG: /** 2508 **/
+    case UPD_SLTP_SELL_AFTER_TRG: /** 2510 **/
+    case DEL_SLTP_BUY_AFTER_TRIGGER: /** 2509 **/
+    case DEL_SLTP_SELL_AFTER_TRIGGER: /** 2511 **/
+
+				 MEMSET(st_del_ord_rply_data);
+				 memcpy (&st_del_ord_rply_data,ptr_car_sbuf,sizeof (struct st_del_ord_rply ));
+
+
+				 if(DEBUG_MSG_LVL_3)
+				 {
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt for sltp-del:%ld:",st_del_ord_rply_data.l_msg_typ);
+		   	  fn_userlog(c_ServiceName,"Val of l_msg_tag in bse_rcv_clnt for sltp-del:%ld:",st_del_ord_rply_data.l_msg_tag);
+		  	  fn_userlog(c_ServiceName,"Val of s_rply_cd in bse_rcv_clnt for sltp-del:%d:",st_del_ord_rply_data.s_rply_cd);
+		  	  fn_userlog(c_ServiceName,"Val of ll_transn_id in rcv_clnt for sltp-del :%lld:",st_del_ord_rply_data.ll_transn_id);
+			  fn_userlog(c_ServiceName,"Inside Delete ORDER  Case in bse_rcv_clnt");
+				 }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S5633",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+                 
+         MEMSET(st_stoploss_ord_rply_data);
+         st_stoploss_ord_rply_data.l_msg_typ = st_del_ord_rply_data.l_msg_typ; 
+         st_stoploss_ord_rply_data.l_msg_tag =  st_del_ord_rply_data.l_msg_tag;
+         st_stoploss_ord_rply_data.s_rply_cd =  st_del_ord_rply_data.s_rply_cd;
+         st_stoploss_ord_rply_data.ll_transn_id = st_del_ord_rply_data.ll_transn_id;
+
+         st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_year = st_del_ord_rply_data.st_timestmp_dmyhms.c_year; 
+         st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_month= st_del_ord_rply_data.st_timestmp_dmyhms.c_month;
+         st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_day =  st_del_ord_rply_data.st_timestmp_dmyhms.c_day;
+         st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_hour = st_del_ord_rply_data.st_timestmp_dmyhms.c_hour;
+         st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_min  = st_del_ord_rply_data.st_timestmp_dmyhms.c_min;
+         st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_sec  = st_del_ord_rply_data.st_timestmp_dmyhms.c_sec;
+				 /*** Ver 1.3 Starts *******/
+				 l_ordr_sqnc = 0;
+				 l_ordr_sqnc = fn_swap_long(st_del_ord_rply_data.l_msg_tag);
+				 if(DEBUG_MSG_LVL_0)
+				 {
+					 fn_userlog(c_ServiceName,"l_ordr_sqnc in ADD_IOC_BUY_SELL_ORDR is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+				 }
+				 EXEC SQL
+					 SELECT NVL(FXB_SPN_FLG,'N')
+				 	 INTO   :c_spn_flg
+					 FROM 	 FXB_FO_XCHNG_BOOK
+					 WHERE  FXB_XCHNG_CD = :c_xchng_cd
+					 AND		 FXB_PIPE_ID  = :c_pipe_id
+					 AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+					 AND    FXB_MOD_TRD_DT=:c_trd_dt;
+				 if(SQLCODE != 0)
+				 {
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+				 }
+				 if(DEBUG_MSG_LVL_0)
+				 {
+						fn_userlog(c_ServiceName,"Span Flag From FXB is:%c:for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+				 }	
+				 if(c_spn_flg == 'S' )
+				 {
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnsltp_cnfrmtn");
+						}
+          	i_ret_val =  fn_bse_spnsltp_cnfrmtn(&st_stoploss_ord_rply_data,
+                		                         		 c_xchng_cd,
+         		    		                         		 c_pipe_id,
+                        		                 		 c_rout_str,
+                            		             		 c_trd_dt.arr,
+                                		         		 c_skpord_ref,
+                                    		     		 i_dwnld_flg,
+                                        		 		 c_ServiceName,
+                                  		       		 c_err_msg );
+
+					}
+					else if(c_spn_flg == 'N' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bsesltp_cnfrmtn");
+						}
+					/*** Ver 1.3 Ends ***/
+          	i_ret_val =  fn_bsesltp_cnfrmtn(&st_stoploss_ord_rply_data,
+                		                         c_xchng_cd,
+         		    		                         c_pipe_id,
+                        		                 c_rout_str,
+                            		             c_trd_dt.arr,
+                                		         c_skpord_ref,
+                                    		     i_dwnld_flg,
+                                        		 c_ServiceName,
+                                  		       c_err_msg );
+					}	/*** Ver 1.3 Starts***/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc); 
+					}
+					/*** Ver 1.3 Ends ***/
+		     	if(i_ret_val == -1)
+		     	{
+		     		fn_userlog(c_ServiceName,"Error -in fn_bse_spnsltp_cnfrmtn -sltp-del for Normal");
+						if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+						{
+			  			fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+						}
+		     	}
+			
+				 if(i_ret_val == 0)
+				 {
+					fn_userlog(c_ServiceName,"After Successful Call To fn_bsesltp_cnfrmtn-for DEL_STOPLOSS_BUY/SELL_ORD");
+				 }
+
+		break;
+    
+  	case KILL_MIN_FILL_ORDR: /** 1531 **/
+
+
+				 MEMSET(st_kill_min_fill_ordr_data);
+				 memcpy (&st_kill_min_fill_ordr_data,ptr_car_sbuf,sizeof (struct st_kill_min_fill_ordr ));
+
+				 if(DEBUG_MSG_LVL_3)
+				 {
+			  fn_userlog(c_ServiceName,"Inside KILL_MIN_FILL_ORDR Case in bse_rcv_clnt");
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt -KILL_MIN_FILL_ORDR :%ld:",st_kill_min_fill_ordr_data.l_msg_typ);
+		  	  fn_userlog(c_ServiceName,"Val of l_scrip_cd in bse_rcv_clnt -KILL_MIN_FILL_ORDR :%ld:",st_kill_min_fill_ordr_data.l_scrip_cd);
+		  	  fn_userlog(c_ServiceName,"Val of ll_ordr_id in bse_rcv_clnt -KILL_MIN_FILL_ORDR :%lld:",st_kill_min_fill_ordr_data.ll_ordr_id);
+		  	  fn_userlog(c_ServiceName,"Val of l_killed_qty in bse_rcv_clnt -KILL_MIN_FILL_ORDR :%ld:",st_kill_min_fill_ordr_data.l_killed_qty);
+		  	  fn_userlog(c_ServiceName,"Val of l_ltid_id in bse_rcv_clnt -KILL_MIN_FILL_ORDR :%ld:",st_kill_min_fill_ordr_data.l_ltid_id);
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_tag in bse_rcv_clnt -KILL_MIN_FILL_ORDR :%ld:",st_kill_min_fill_ordr_data.l_msg_tag);
+			  }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S5633",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+			
+
+			   l_ioc_killed_qty = fn_swap_long(st_kill_min_fill_ordr_data.l_killed_qty);
+
+				 sleep (3); 
+
+         if (l_ioc_killed_qty != 0)
+			   {
+			   	if(DEBUG_MSG_LVL_3)
+			   	{
+			   		fn_userlog(c_ServiceName,"Call fn_bse_ioc_cancellation in KILL_MIN_FILL_ORDR only when - l_ioc_killed_qty:%ld: > 0", l_ioc_killed_qty);
+			   	}
+					/*** Ver 1.3 Starts *******/
+					l_ordr_sqnc = 0;
+					l_ordr_sqnc = fn_swap_long(st_kill_min_fill_ordr_data.l_msg_tag);
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"l_ordr_sqnc in KILL_MIN_FILL_ORDR is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+					}
+					EXEC SQL
+						SELECT NVL(FXB_SPN_FLG,'N')
+						INTO   :c_spn_flg
+						FROM 	 FXB_FO_XCHNG_BOOK
+						WHERE  FXB_XCHNG_CD = :c_xchng_cd
+						AND		 FXB_PIPE_ID  = :c_pipe_id
+						AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+						AND    FXB_MOD_TRD_DT=:c_trd_dt;
+					if(SQLCODE != 0)
+					{
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+					}
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Span Flag From FXB is :%c: for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+					}
+					if(c_spn_flg == 'S' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnioc_cancellation");
+						}
+			   		i_ret_val = fn_bse_spnioc_cancellation( &st_kill_min_fill_ordr_data,	
+																									c_xchng_cd,
+																									c_pipe_id,
+																									c_rout_str,	
+																									c_trd_dt.arr,
+																									c_skpord_ref,
+																									i_dwnld_flg,
+																									c_ServiceName,
+																									c_err_msg );
+					}
+					else if (c_spn_flg == 'N' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_ioc_cancellation");
+						}
+					/*** Ver 1.3 Ends **/		
+			   		i_ret_val = fn_bse_ioc_cancellation( &st_kill_min_fill_ordr_data,	
+																									c_xchng_cd,
+																									c_pipe_id,
+																									c_rout_str,	
+																									c_trd_dt.arr,
+																									c_skpord_ref,
+																									i_dwnld_flg,
+																									c_ServiceName,
+																									c_err_msg );
+
+					}		/**** Ver 1.3 Starts***/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc);
+					}
+					/*** Ver 1.3 Ends ***/
+		     	if(i_ret_val == -1)
+		     	{
+						if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+						{
+			  			fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+						}
+		     	}
+		     
+         }	
+				 if(i_ret_val == 0)
+				 {
+					fn_userlog(c_ServiceName,"After Successful Call To fn_bse_ioc_cancellation in KILL_MIN_FILL_ORDR-sltp-del");
+				 }
+
+		break;
+  	case STOPLOSS_ORDR_UMS: /** 2507 **/
+
+
+				 MEMSET(st_sltp_ord_ums_data);
+				 memcpy (&st_sltp_ord_ums_data,ptr_car_sbuf,sizeof (struct st_sltp_ord_ums ));
+
+				 if(DEBUG_MSG_LVL_3)
+				 {
+		  	  fn_userlog(c_ServiceName,"Inside STOPLOSS_ORDR_UMS Case in bse_rcv_clnt");
+			  fn_userlog(c_ServiceName,"Val of l_msg_typ in bse_rcv_clnt :%ld:",st_sltp_ord_ums_data.l_msg_typ);
+		  	  fn_userlog(c_ServiceName,"Val of ll_ordr_id in bse_rcv_clnt :%ld:",st_sltp_ord_ums_data.l_scrip_cd);
+		  	  fn_userlog(c_ServiceName,"Val of l_rate in bse_rcv_clnt :%ld:",st_sltp_ord_ums_data.ll_ordr_id);
+		  	  fn_userlog(c_ServiceName,"Val of ll_ord_id in bse_rcv_clnt :%lld:",st_sltp_ord_ums_data.l_rate);
+		  	  fn_userlog(c_ServiceName,"Val of l_qty in bse_rcv_clnt :%ld:",st_sltp_ord_ums_data.l_qty);
+		  	  fn_userlog(c_ServiceName,"Val of l_avaqty in bse_rcv_clnt :%ld:",st_sltp_ord_ums_data.l_avaqty);
+		  	  fn_userlog(c_ServiceName,"Val of l_msg_tag in bse_rcv_clnt :%ld:",st_sltp_ord_ums_data.l_msg_tag);
+		  	  fn_userlog(c_ServiceName,"Val of c_ordr_typ in bse_rcv_clnt :%c:",st_sltp_ord_ums_data.c_ordr_typ);
+			    fn_userlog(c_ServiceName,"Val of c_ordr_flw in bse_rcv_clnt :%c:",st_sltp_ord_ums_data.c_ordr_flw);
+				 }
+
+				 if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+  			 {
+    			 fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+    			 if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 {
+      		  fn_userlog(c_ServiceName,"S7733",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   }
+    			 tpfree ( ( char * )ptr_fml_ibuf);
+    			 tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+  			 }
+			   sleep(3);
+
+					/*** Ver 1.3 Starts *******/
+					l_ordr_sqnc = 0;
+					l_ordr_sqnc = fn_swap_long(st_sltp_ord_ums_data.l_msg_tag);
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"l_ordr_sqnc in STOPLOSS_ORDR_UMS is :%ld:",l_ordr_sqnc);
+						fn_userlog(c_ServiceName,"c_xchng_cd in LIMIT_MARKET_ORD is :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_pipe_id in LIMIT_MARKET_ORD is :%s:",c_pipe_id);
+						fn_userlog(c_ServiceName,"c_trd_dt in LIMIT_MARKET_ORD is :%s:",c_trd_dt.arr);
+					}
+
+					EXEC SQL
+						SELECT NVL(FXB_SPN_FLG,'N')
+						INTO   :c_spn_flg
+						FROM 	 FXB_FO_XCHNG_BOOK
+						WHERE  FXB_XCHNG_CD = :c_xchng_cd
+						AND		 FXB_PIPE_ID  = :c_pipe_id
+						AND		 FXB_ORDR_SQNC= :l_ordr_sqnc
+						AND    FXB_MOD_TRD_DT=:c_trd_dt;
+					if(SQLCODE != 0)
+					{
+    			 	fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB");
+    			 	if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+    			 	{
+      		  	fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    		   	}
+    			 	tpfree ( ( char * )ptr_fml_ibuf);
+    			 	tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+					}
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Span Flag From FXB is :%c: for seq:%ld:",c_spn_flg,l_ordr_sqnc);
+					}
+					if(c_spn_flg == 'S' )
+					{
+						if(DEBUG_MSG_LVL_0)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bse_spnsltp_trggrd");
+						}
+			   	 		i_ret_val = fn_bse_spnsltp_trggrd( &st_sltp_ord_ums_data,	
+																							c_xchng_cd,
+																							c_pipe_id,
+																							c_rout_str,	
+																							c_trd_dt.arr,
+																							TRIGGERED,
+																							c_ServiceName,
+																							i_dwnld_flg,
+																							c_err_msg );
+					}
+					else if (c_spn_flg == 'N' )
+					{
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName,"Calling fn_bsesltp_trggrd");
+						}
+					/*** Ver 1.3 Ends *******/
+
+			   	 		i_ret_val = fn_bsesltp_trggrd( &st_sltp_ord_ums_data,	
+																							c_xchng_cd,
+																							c_pipe_id,
+																							c_rout_str,	
+																							c_trd_dt.arr,
+																							TRIGGERED,
+																							c_ServiceName,
+																							i_dwnld_flg,
+																							c_err_msg );
+
+					}				/*** Ver 1.3 Starts**/
+					else
+					{
+						fn_userlog(c_ServiceName,"Invalid Span Flag :%c: for :%s|%s|%s|%ld:",
+																						c_spn_flg,
+																						c_xchng_cd,
+																						c_pipe_id,
+																						c_trd_dt,
+																						l_ordr_sqnc);
+					}
+					/*** Ver 1.3 Ends ***/
+		     	if(i_ret_val == -1)
+		     	{
+		     		fn_userlog(c_ServiceName,"Error- in  Call To fn_bsesltp_trggrd in STOPLOSS_ORDR_UMS for Normal");
+						if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+						{
+			  				fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+						}
+		     	}
+
+		     if(i_ret_val == 0) 
+		     {
+		       fn_userlog(c_ServiceName,"After Successful Call To fn_bsesltp_trggrd in STOPLOSS_ORDR_UMS");
+		     }
+
+		break;
+    case BCAST_TRDR_LIMIT_EXCEED:
+    case POS_ALERT_UMS :
+      	 if(l_msg_type == BCAST_TRDR_LIMIT_EXCEED )
+      	 {
+        		if(DEBUG_MSG_LVL_3)
+			{
+			 fn_userlog(c_ServiceName , " Trader LIMIT EXCEEDED Broadcast[25100] ");
+			}
+        		memset(&ptr_st_lmt_exceed ,'\0',sizeof(struct st_trd_lmt_exceed));
+        		memcpy((char *)&ptr_st_lmt_exceed,ptr_car_sbuf,sizeof(struct st_trd_lmt_exceed));
+        		/**fn_cnvt_to_hfmt_swap_trd_limit(&ptr_st_lmt_exceed);**/
+        		i_ret_val = fn_trd_limit_exceed(&ptr_st_lmt_exceed,
+            		                            c_xchng_cd,
+                		                        c_ServiceName,
+                    		                    c_err_msg);
+        		if(i_ret_val == -1)
+        		{
+          		if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+          		{
+            		fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+          		}
+        		}
+        		else
+        		{
+          		if(DEBUG_MSG_LVL_3)
+          		{
+           			fn_userlog(c_ServiceName,"After Successful Call To fn_trd_limit_exceed in TRDR_LIMIT_EXCEED_UMS");
+          		}
+        		}
+      	 }
+      	 else if(l_msg_type == POS_ALERT_UMS)
+      	 {
+        		fn_userlog(c_ServiceName , "Inside POSITION ALERET UMS [1921]");
+        		memset (&ptr_st_pos_alrt ,'\0',sizeof(struct st_pos_alrt_ums));
+        		memcpy((char*)&ptr_st_pos_alrt ,ptr_car_sbuf ,sizeof(struct st_pos_alrt_ums));
+        		i_ret_val = fn_pos_alert_processing(&ptr_st_pos_alrt,
+          		                                  c_xchng_cd,
+            		                                c_ServiceName,
+              		                              c_err_msg);
+       	  	if(i_ret_val == -1)
+        		{
+          		if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+          		{
+            		fn_userlog(c_ServiceName,"S8135",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+          		}
+         		}
+        		else
+        		{
+          		if(DEBUG_MSG_LVL_3)
+          		{
+           			fn_userlog(c_ServiceName,"After Successful Call To fn_pos_alert_processing");
+          		}
+        		}
+     	   }
+     break;
+
+     case BROKER_SUSPENDED_UMS: /** 24004 **/
+      	 if(DEBUG_MSG_LVL_3)
+	 {
+	  fn_userlog(c_ServiceName,"Broker SUSPENDED");
+	  }
+    
+       	 memset(&ptr_st_broker_susp ,'\0',sizeof(struct st_broker_susp));
+       	 memcpy((char *)&ptr_st_broker_susp,ptr_car_sbuf,sizeof (struct st_broker_susp));
+       	 i_ret_val = fn_brkr_susp_ums (&ptr_st_broker_susp,
+         		                            c_xchng_cd,
+            		                         c_ServiceName,
+                		                     c_err_msg);
+       	 if(i_ret_val == -1)
+       	 {
+        		if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+       			{
+           		fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+        		}
+       	 }
+         else
+         {
+         		if(DEBUG_MSG_LVL_3)
+         		{
+           		fn_userlog(c_ServiceName,"After Successful Call To fn_brkr_susp_ums in BROKER_SUSPENDED_UMS");
+        		}
+      	 }
+ 	   break;
+
+     case TRADER_SUSPENDED_UMS : /** 1524 **/
+         fn_userlog(c_ServiceName,"Inside Trader suspended UMS :1524");
+         memset(&ptr_st_trader_susp ,'\0',sizeof(struct st_trader_susp));
+         memcpy(&ptr_st_trader_susp ,ptr_car_sbuf,sizeof (struct st_trader_susp));
+         i_ret_val = fn_trader_susp_ums(&ptr_st_trader_susp,
+         	                              c_xchng_cd,
+																				c_pipe_id,					/*** Ver 1.2 Pipe Id added ***/
+                                        c_ServiceName,
+                                        c_err_msg);
+         if(i_ret_val == -1)
+         {
+          	if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+            {
+               fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            }
+         }
+         else
+         {
+          if(DEBUG_MSG_LVL_3)
+          {
+             fn_userlog(c_ServiceName,"After Successful Call To fn_brkr_susp_ums in BROKER_SUSPENDED_UMS");
+          }
+         }
+     break;
+     case MEMBER_REACTIVATED_UMS : /** 1528 **/
+    		 if(DEBUG_MSG_LVL_3)
+		 {
+		  fn_userlog(c_ServiceName," Inside Member reactivated UMS");
+		 }
+         memset(&ptr_st_mbr_reactv ,'\0',sizeof(struct st_mbr_reactv));
+         memcpy(&ptr_st_mbr_reactv,ptr_car_sbuf,sizeof (struct st_mbr_reactv));
+         i_ret_val = fn_member_reactivated(&ptr_st_mbr_reactv,
+                                           c_xchng_cd,
+                                           c_ServiceName,
+                                           c_err_msg);
+
+         if(i_ret_val == -1)
+         {
+          	if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+           	{
+               fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            }
+         }
+         else
+         {
+           if(DEBUG_MSG_LVL_3)
+           {
+             fn_userlog(c_ServiceName,"After Successful Call To fn_member_reactivated in MEMBER_REACTIVATED_UMS");
+           }
+         }
+    break;
+
+
+          /***** Ver 1.2 Starts *****/
+     case RRM_UMS:
+				 	MEMSET(st_ord_rqst_rply_data);
+          fn_userlog(c_ServiceName,"Inside Risk Reducimg Mode UMS ");
+          memset(&ptr_st_rrm_alrt_ums , '\0' , sizeof(struct st_rrm_alrt_ums));
+          memcpy(&ptr_st_rrm_alrt_ums , ptr_car_sbuf , sizeof(struct st_rrm_alrt_ums));
+					i_cnt = fn_swap_short(ptr_st_rrm_alrt_ums.si_no_records);
+
+					fn_userlog(c_ServiceName,"Records in RRM_UMS =:%d:",i_cnt);
+
+					for(i_count =0;i_count < i_cnt ; i_count++)
+					{
+						l_segment_type= fn_swap_long(ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].li_segment_typ);
+						i_event= fn_swap_short(ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].si_event);
+						fn_userlog(c_ServiceName,"SEGMENT TYPE IN RRM UMS :%ld:",l_segment_type);
+						fn_userlog(c_ServiceName,"EVENT in RRM UMS :%d:",i_event);
+
+						if( i_event != 4 					&&
+								l_segment_type== 2
+							 )
+						{
+          		l_ordr_sqnc = 0;
+          		l_ordr_sqnc = fn_swap_long(ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].li_odr_tag);
+          		if(DEBUG_MSG_LVL_0)
+          		{
+            		fn_userlog(c_ServiceName,"l_ordr_sqnc in RRM_UMS is :%ld:",l_ordr_sqnc);
+            		fn_userlog(c_ServiceName,"c_xchng_cd in RRM_UMS is :%s:",c_xchng_cd);
+            		fn_userlog(c_ServiceName,"c_pipe_id in RRM_UMS is :%s:",c_pipe_id);
+            		fn_userlog(c_ServiceName,"c_trd_dt in RRM_UMS is :%s:",c_trd_dt.arr);
+							}
+          		EXEC SQL
+            		SELECT NVL(FXB_SPN_FLG,'N')
+            		INTO   :c_spn_flg
+            		FROM   FXB_FO_XCHNG_BOOK
+            		WHERE  FXB_XCHNG_CD =:c_xchng_cd
+            		AND    FXB_PIPE_ID  =:c_pipe_id
+            		AND    FXB_ORDR_SQNC= :l_ordr_sqnc
+            		AND    FXB_MOD_TRD_DT=:c_trd_dt;
+          		if(SQLCODE != 0)
+          		{
+            		fn_userlog(c_ServiceName,"Failed in getting SPAN Flag From FXB %s",SQLMSG);
+            		if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+            		{
+              		fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            		}
+            		tpfree ( ( char * )ptr_fml_ibuf);
+            		tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+          		}
+						}
+						if( l_segment_type == 2 &&
+							 	i_event == 4 
+							 )
+          	{
+							i_ret_val = fn_rrm_ums_processing( &ptr_st_rrm_alrt_ums,
+            		                                 c_xchng_cd,
+              		                               c_ServiceName,
+                		                             c_err_msg
+                  		                         );
+         			if(i_ret_val == -1)
+         			{
+            		if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+            		{
+              		 fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            		}
+         			}
+         			else
+         			{
+            		 fn_userlog(c_ServiceName,"After Successful Call To fn_rrm_ums_processing in RRM_UMS");
+         			}
+						}
+						else if ( l_segment_type == 2 &&
+											(i_event == 1	|| i_event == 2 )
+										)
+						{
+								st_ord_rqst_rply_data.l_msg_typ=1920;
+								st_ord_rqst_rply_data.l_msg_tag1 = ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].li_odr_tag;
+								 st_ord_rqst_rply_data.s_rply_cd = ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].si_error_cd;
+								st_ord_rqst_rply_data.s_filler1=0;
+								st_ord_rqst_rply_data.s_filler1 = 0;
+								st_ord_rqst_rply_data.l_amended_qty = 0;
+								st_ord_rqst_rply_data.ll_ord_id = ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].ll_ordr_id;
+								st_ord_rqst_rply_data.c_ordr_actn_cd = ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_add_upd_flg[0];
+								st_ord_rqst_rply_data.c_buysell_flg = '\0';
+								st_ord_rqst_rply_data.c_ord_typ = ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_ordr_typ[0];
+								strcpy(st_ord_rqst_rply_data.c_rply_txt,"ORDER REJECTION DUE TO RRM CHECK");	
+								st_ord_rqst_rply_data.l_msg_tag2 = 0;
+								st_ord_rqst_rply_data.l_pending_qty = 0;
+								st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_day = ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_day;
+								st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_month=ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_month;
+								st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_year =ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_year;
+								st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_hour=ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_hour;
+								st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_min =ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_minutes;
+								st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_sec=ptr_st_rrm_alrt_ums.st_sub_rrm_alrt[i_count].c_seconds;
+
+								if(c_spn_flg == 'N' )
+								{
+            				i_ret_val = fn_bse_ord_confirmation( &st_ord_rqst_rply_data,
+                                                  c_xchng_cd,
+                                                  c_pipe_id,
+                                                  c_rout_str,
+                                                  c_trd_dt.arr,
+                                                  c_skpord_ref,
+                                                  i_dwnld_flg,
+                                                  c_ServiceName,
+                                                  c_err_msg );
+
+
+								}
+								else if (c_spn_flg == 'S')
+								{
+									   i_ret_val = fn_bse_spnord_confirmation( &st_ord_rqst_rply_data,
+                                                  c_xchng_cd,
+                                                  c_pipe_id,
+                                                  c_rout_str,
+                                                  c_trd_dt.arr,
+                                                  c_skpord_ref,
+                                                  i_dwnld_flg,
+                                                  c_ServiceName,
+                                                  c_err_msg );
+
+								}
+        				if(i_ret_val == -1)
+           			{
+             			if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+             			{
+               			fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+             			}
+             			fn_userlog(c_ServiceName,"Error in call To fn_bse_ord_cnfrmtn-");
+           			}
+						}
+					 }
+    			break;
+    case CAP_ADEQ_UMS_70:
+    case CAP_ADEQ_UMS_80:
+    case CAP_ADEQ_UMS_85:
+		case CAP_UTLZTN_UMS :				/** Ver 1.4 replacement of 24001,24002,24003 **/
+
+					if(l_msg_type == CAP_UTLZTN_UMS )/** Ver 1.4 starts **/
+					{
+          	fn_userlog(c_ServiceName,"Inside CAP_UTLZTN_UMS processing ");
+          	memset(&ptr_st_cap_utlztn , '\0' , sizeof(struct st_cap_utlztn));
+          	memcpy(&ptr_st_cap_utlztn , ptr_car_sbuf , sizeof(struct st_cap_utlztn));
+
+          	i_ret_val = fn_prcs_capitl_info_ums(	c_ServiceName,
+																								 	&ptr_st_cap_utlztn,
+                                             			c_xchng_cd,
+                                             			c_err_msg
+                                           		 	);
+         		if(i_ret_val == -1)
+         		{
+            	if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+            	{
+               	fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            	}
+         		}
+         		else
+         		{
+             	fn_userlog(c_ServiceName,"After Successful Call To fn_prcs_capitl_info_ums in CAP_UTLZTN_UMS");
+         		}
+					}
+					else
+					{					/*** Ver 1.4 Ends **/
+          	fn_userlog(c_ServiceName,"Inside CAP_ADEQ_UMS processing ");
+          	MEMSET(c_message);
+          	memset(&ptr_st_cap_adeq_ums , '\0' , sizeof(struct st_cap_adeq_ums));
+          	memcpy(&ptr_st_cap_adeq_ums , ptr_car_sbuf , sizeof(struct st_cap_adeq_ums));
+          	ptr_st_cap_adeq_ums.li_msg_type = fn_swap_long(ptr_st_cap_adeq_ums.li_msg_type);
+          	ptr_st_cap_adeq_ums.li_term_id = fn_swap_long(ptr_st_cap_adeq_ums.li_term_id);
+
+          	fn_userlog(c_ServiceName,"Terminal Id =:%ld:",ptr_st_cap_adeq_ums.li_term_id);
+
+          	if( ptr_st_cap_adeq_ums.li_msg_type == CAP_ADEQ_UMS_70 )
+          	{
+            	fn_userlog(c_ServiceName,"70 percent Cash UTilezed in BSE FNO");
+							fn_userlog(c_ServiceName,"Message from exchang is:%s:",ptr_st_cap_adeq_ums.c_message);
+							strcpy(c_message,ptr_st_cap_adeq_ums.c_message);
+							fn_userlog(c_ServiceName,"Message Copied is :%s:",c_message);
+          	}
+          	else if( ptr_st_cap_adeq_ums.li_msg_type == CAP_ADEQ_UMS_80)
+          	{
+            	fn_userlog(c_ServiceName,"80 percent Cash UTilezed in BSE FNO");
+							fn_userlog(c_ServiceName,"Message from exchang is:%s:",ptr_st_cap_adeq_ums.c_message);
+							strcpy(c_message,ptr_st_cap_adeq_ums.c_message);
+							fn_userlog(c_ServiceName,"Message Copied is :%s:",c_message);
+          	}
+          	else if( ptr_st_cap_adeq_ums.li_msg_type == CAP_ADEQ_UMS_85)
+          	{
+            	fn_userlog(c_ServiceName,"85 percent Cash UTilezed in BSE FNO");
+							fn_userlog(c_ServiceName,"Message from exchang is:%s:",ptr_st_cap_adeq_ums.c_message);
+							strcpy(c_message,ptr_st_cap_adeq_ums.c_message);
+							fn_userlog(c_ServiceName,"Message Copied is :%s:",c_message);
+          	}
+          	i_ret_val = fn_insert_ftm_msg( c_ServiceName,
+            			                         c_message,
+                  			                   c_xchng_cd,
+                        			             c_err_msg
+                              			     );
+         		if(i_ret_val == -1)
+         		{
+            	if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+            	{
+              	 fn_userlog(c_ServiceName,"S8130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            	}
+         		}
+        		 else
+         		{
+            	 fn_userlog(c_ServiceName,"After Successful Call To CAP_ADEQ_UMS ");
+         		}
+					}
+          break;
+
+      case CANCELLED_ORDR_UMS :												/***	Ver	1.5	***/
+
+          if(DEBUG_MSG_LVL_0)
+          {
+            fn_userlog(c_ServiceName,"Inside CANCELLED_ORDR_UMS processing ");
+          }
+
+					sleep(1); /*** To Be Remove ***/
+
+					l_tot_no_records  = 0;
+					l_rec_cnt         = 0;
+
+					MEMSET(st_bse_cncl_ums);
+					memcpy(&st_bse_cncl_ums,(struct st_cancl_ordr_ums *)ptr_car_sbuf,sizeof(st_bse_cncl_ums));
+
+
+					l_tot_no_records  = fn_swap_long(st_bse_cncl_ums.li_no_of_recrds);
+					
+					fn_userlog(c_ServiceName,"Total No. Of Records In Cancel UMs Is :%ld:",l_tot_no_records);
+					
+          if(i_dwnld_flg == DOWNLOAD && i_deferred_dwnld_flg == 1 )
+          {
+            fn_userlog(c_ServiceName,"Inside Deffered Download Condition");
+
+            if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+            {
+              fn_userlog(c_ServiceName,"S3660",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+            }
+
+            tpfree ( ( char * )ptr_fml_ibuf);
+            tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+          }
+
+          while ( l_rec_cnt < l_tot_no_records )
+          {
+
+            ll_ack_nmbr = fn_swap_ulnglng ( st_bse_cncl_ums.st_cncl_ums_rply[l_rec_cnt].ll_ordr_id);
+
+            fn_userlog(c_ServiceName,"Order Ack Numbe is :%lld:",ll_ack_nmbr);
+
+            EXEC SQL
+              SELECT  FOD_SPN_FLG
+              INTO    :c_span_flag
+              FROM    FOD_FO_ORDR_DTLS
+              WHERE   FOD_ACK_NMBR  = :ll_ack_nmbr;
+
+            if(SQLCODE != 0)
+            {
+              fn_userlog(c_ServiceName,"Failed in getting SPAN Flag for Cancel UMS.");
+
+              if(tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+              {
+                fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+              }
+
+              tpfree ( ( char * )ptr_fml_ibuf);
+              tpreturn ( TPFAIL, 0, (char *)NULL, 0, 0 );
+            }
+
+						fn_userlog(c_ServiceName,"SANDEEP SPAN Flag Is :%c:",c_span_flag);
+
+            if ( c_span_flag == 'N' )
+            {
+              i_ret_val = fn_bse_cncl_ums ( &st_bse_cncl_ums.st_cncl_ums_rply[l_rec_cnt],
+                                            c_xchng_cd,
+                                            c_pipe_id,
+                                            c_rout_str,
+                                            c_trd_dt.arr,
+                                            c_skpord_ref,
+                                            i_dwnld_flg,
+                                            c_ServiceName,
+                                            c_err_msg
+                                          );
+            }
+            else
+            {
+              i_ret_val = fn_bse_spncncl_ums  ( &st_bse_cncl_ums.st_cncl_ums_rply[l_rec_cnt],
+                                                c_xchng_cd,
+                                                c_pipe_id,
+                                                c_rout_str,
+                                                c_trd_dt.arr,
+                                                c_skpord_ref,
+                                                i_dwnld_flg,
+                                                c_ServiceName,
+                                                c_err_msg
+                                              );
+
+            }
+
+            if ( i_ret_val == -1 )
+            {
+              if ( tpacall("SVC_ENQ_MSG", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+              {
+                  fn_userlog(c_ServiceName,"S3130",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+              }
+
+              fn_userlog(c_ServiceName,"Error in call To fn_bse_cncl_ums.");
+            }
+
+            l_rec_cnt ++;
+
+          }
+
+          fn_userlog(c_ServiceName,"After Successful Call To CANCELLED_ORDR_UMS ");
+
+          break;
+      case PROTOCOL_MSG_CONN_REF :
+
+          fn_userlog(c_ServiceName,"Inside PROTOCOL_MSG_CONN_REF processing ");
+          memset(&ptr_st_conn_refused_reply , '\0' , sizeof(struct st_conn_refused_reply));
+          memcpy(&ptr_st_conn_refused_reply , ptr_car_sbuf , sizeof(struct st_conn_refused_reply));
+
+          ptr_st_conn_refused_reply.li_slot_no=fn_swap_long(ptr_st_conn_refused_reply.li_slot_no);
+          ptr_st_conn_refused_reply.li_msg_tag=fn_swap_long(ptr_st_conn_refused_reply.li_msg_tag);
+          ptr_st_conn_refused_reply.li_err_no=fn_swap_long(ptr_st_conn_refused_reply.li_err_no);
+
+          if(DEBUG_MSG_LVL_0)
+          {
+            fn_userlog(c_ServiceName,"SLOT NO is :%ld:",ptr_st_conn_refused_reply.li_slot_no);
+            fn_userlog(c_ServiceName,"MSG TAG is :%ld:",ptr_st_conn_refused_reply.li_msg_tag);
+            fn_userlog(c_ServiceName,"ERROR NO IS:%ld:",ptr_st_conn_refused_reply.li_err_no);
+            fn_userlog(c_ServiceName,"Error Message is :%s:",ptr_st_conn_refused_reply.c_err_txt);
+          }
+          break;
+          /***** Ver 1.2 Ends *****/
+				/** Ver 1.5.1 starts **/
+			case ORDR_RATE_UMS :
+      case RESUME_ORDR_REQ_UMS:
+					fn_userlog(c_ServiceName,"Inside Order Rate UMS ");
+					 memset(&ptr_st_ordr_rate_ums, '\0' , sizeof(struct st_ordr_rate_ums));
+          memcpy(&ptr_st_ordr_rate_ums , ptr_car_sbuf , sizeof(struct st_ordr_rate_ums));
+					ptr_st_ordr_rate_ums.li_order_rate = fn_swap_long(ptr_st_ordr_rate_ums.li_order_rate);
+					fn_userlog(c_ServiceName,"Order Rate:%ld:",ptr_st_ordr_rate_ums.li_order_rate);
+					break;
+				/** Ver 1.5.1 starts **/
+		default:
+					fn_userlog( c_ServiceName, "Protocol error-Invalid message type  %ld", l_msg_type);
+					i_ret_val = -1;
+		break;
+	
+	}
+
+	fn_userlog(c_ServiceName,"End Of Switch Case");
+
+  tpfree ( (char *)ptr_car_sbuf );
+  tpfree ( (char *)ptr_fml_ibuf );
+
+  if ( i_ret_val == -1 )
+  {
+    tpreturn(TPFAIL, 0, (char *)NULL, 0, 0);
+  }
+
+  tpreturn(TPSUCCESS, 0, (char *)NULL, 0, 0);
+
+}

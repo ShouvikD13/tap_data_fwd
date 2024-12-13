@@ -1,0 +1,1411 @@
+/**********************************************************************************************
+* Service name :  BAT_ATS_MST                                    					 			              * 	 
+*                                                                					 			              * 
+* Description  :  This Batch Program updates the Columns with EOD values   			              * 
+*                 used in calculations for ATS microsite         					 			              * 
+*                                                                					 			              * 
+* Output      :                                                  					 			              * 
+*                                                                					 			              * 
+* Log         :   29-Jan-2010 Initial Release  - Vidyayini Krish|Shailesh Hinge	              * 
+* Log  Ver 1.1:   28-Jun-2010 Bug Fix          - Shailesh Hinge 					 			              * 
+* Log  Ver 1.2:   21-Jul-2010 IV cal chng      - Shailesh Hinge 					 			              * 
+* Log  Ver 1.3:   27-Jul-2010 Closing Price col'n add'n - Shailesh Hinge 				              * 
+* Log  Ver 1.4:   30-Jul-2010 RollOver cal'n error handling  - Shailesh Hinge	                * 
+* Log  Ver 1.5:   02-Aug-2010 Cls IV:Days to expiry cal'n change- Shailesh Hinge              * 
+*	Log	 Ver 1.6:		11-Jan-2011	Process Optimization	Sandeep Patil								              *
+* Log  Ver 1.7:   22-Sep-2011 Exclude Global indices and Bug Fix - Navina D.                  *
+* Log  Ver 1.8:   04-Jul-2012 FNO BSE Changes - Sachin Birje                                  *
+* Log  Ver 2.0:   01-Sep-2014 View to FML Changes - Samip M                                   *
+* Log  Ver 2.1:   14-Aug-2015 Contract Master and Trade Quote Table                           *
+*                             Merger Changes   - Ritesh Deolekar                              *
+* Log  Ver 2.2:   30-Nov-2015 Changes for automation of process - Vishal B.                   *  
+*	Log	 Ver 2.3:		28-Apr-2017	Changes for contract housekeep issue.						              	*
+* Log  Ver 2.4:   10-Jul-2018 Set sysdate for table -Varadraj G.                              *
+* Log  Ver 2.5:   26-Aug-2020 CR-ISEC10-138335 changes for updating previous OI for Snap View *
+* Log  Ver 2.6:   19-Apr-2022 CR-ISEC10-160824 Pay-off Analyzer - Chart upgrade - Ravindra P  *
+***********************************************************************************************/
+#include <string.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fo_fml_def.h>
+/*** #include <fo_view_def.h> ***/  /** Commented for Ver 2.0 **/
+#include <fo_view_def.h>          /** Added for Ver 2.0 **/
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <ctype.h>
+#include <time.h>
+#include <fn_read_debug_lvl.h>
+#define TOTAL_FML 30
+
+struct st_ats_output
+{
+  char c_prdct_typ;
+  char c_xchng_cd[4];
+  char c_ats_undrlyng[7];
+  long l_ats_mkt_lot;
+  char c_ats_actn_dt[23];
+  char c_ats_tablename[5];
+  double d_ats_price;
+  double d_ats_prc_prcnt_chng;
+  double d_ats_oi_chng;
+  double d_ats_oi_prcnt_chng;
+  double d_ats_vol_prcnt_chng;
+  double d_ats_imp_vltly;
+  double d_ats_imp_vltly_prcnt;
+  char   c_exrc_typ;
+  char   c_opt_typ;
+  long   l_strk_prc;
+};
+
+int fn_calc_implied_volatility( char  *c_ServiceName,
+                                struct vw_cntrt_gen_inf *ptr_st_cntrct_gen_inf,
+                                struct st_ats_output *ptr_output
+                              );
+
+struct vw_cntrt_gen_inf st_cntrct_gen_inf;
+struct st_ats_output st_output;
+
+void fn_chk_process_status(char *c_ServiceName, 
+							char *c_err_msg ); 	  /**ver 2.2**/
+
+
+void fn_chk_process_status(char *c_ServiceName, char *c_err_msg )	 /**ver 2.2**/
+{
+	char  c_command[100];
+	MEMSET(c_command); 
+	sprintf(c_command,"ksh $HOME/sh_scripts/fo_process_status_mail.sh '%s' '%s'",c_ServiceName,c_err_msg);	
+  system(c_command);	
+}
+
+void BAT_ATS_MST ( int argc, char *argv[] )
+{
+
+  char c_errmsg[256];
+  int  i_returncode;
+  int  i_dategreater=0;
+  int  i_record_exists=0;
+	int  no_of_records = 0;
+	int  i_trnsctn = 0;
+	int	 i_cmt_cnt=1000;			/***	Ver	1.6	***/
+		
+	double d_oi_near = 0.0;
+	double d_oi_mid = 0.0;
+	double d_oi_far = 0.0;
+	double d_clsprc_near = 0.0;
+	double d_clsprc_mid = 0.0;
+
+	long   l_fcm_count = 0;
+	long   l_lot_sz=0;
+	long   li_tot_rcrds =0;
+	long	 li_rec_cmt=0;			/***	Ver	1.6	***/
+	
+	char    c_expry_dt[3][12];
+	char   c_ServiceName[256];
+	char   c_msg[256];
+	char   c_err_msg[256];
+
+	char  c_rowid[18+1]; /*** Ver 1.7 ***/
+	char c_command[100];    /****Added****/
+
+	strcpy ( c_ServiceName, argv[0] );
+	INITBATDBGLVL(argv[0]);    
+	
+  fn_bat_pst_msg ( c_ServiceName, " ***** ATS value updation Process Started *****", c_tag );
+
+	MEMSET(c_expry_dt);
+
+  /*** Commented in Ver 2.1 ***
+
+  EXEC SQL
+       SELECT  fcm_expry_dt
+       INTO   :c_expry_dt
+       FROM    (
+                 SELECT distinct(fcm_expry_dt)
+                 FROM   fcm_fo_cntrct_mstr
+								 WHERE	fcm_xchng_cd = 'NFO'			*** Ver 1.7 ***
+								 AND    fcm_prdct_typ = 'F'				*** Ver 1.7 ***
+								 AND		fcm_undrlyng = 'NIFTY'		*** Ver 1.7 ***
+                 ORDER BY fcm_expry_dt
+               )
+       WHERE ROWNUM < 4;
+
+  *** Ver 2.1 Comment Ends ***/
+
+  /*** Ver 2.1 Starts ***/
+
+  EXEC SQL
+       SELECT  ftq_expry_dt
+       INTO   :c_expry_dt
+       FROM    (
+                 SELECT distinct(ftq_expry_dt)
+                 FROM   ftq_fo_trd_qt
+                 WHERE  ftq_xchng_cd = 'NFO'
+                 AND    ftq_prdct_typ = 'F'
+                 AND    ftq_undrlyng = 'NIFTY'
+                 AND		ftq_expry_dt >= trunc(sysdate)		/*** Added in Ver 2.3 ***/
+								 ORDER BY ftq_expry_dt
+               )
+       WHERE ROWNUM < 4;
+
+  /*** Ver 2.1 Ends ***/
+
+  no_of_records = sqlca.sqlerrd[2];
+
+  if( (SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND) )
+  {
+    fn_userlog( c_ServiceName,"Cannot get expiry dates " );
+	  strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,"Cannot get expiry dates ");  /**ver 2.2**/
+	
+	  return;
+  }
+
+  if( SQLCODE == NO_DATA_FOUND )
+  {
+    fn_userlog( c_ServiceName," No data found for expiry dates " );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    fn_chk_process_status(c_ServiceName," No data found for expiry dates "  );   /**ver 2.2**/
+
+    return;
+  }
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog( c_ServiceName, "Trade Quote c_expry_dt :%s:", c_expry_dt );
+	}
+
+	/***	Ver	1.6	Starts	***/
+
+	EXEC	SQL
+				TRUNCATE	TABLE ATS_IMP_VOL_TMP;		
+
+	if( SQLCODE != 0 )
+  {
+    fn_userlog( c_ServiceName,"Not Able To Truncate Temp Table.");
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,"Not Able To Truncate Temp Table.");	  /**ver 2.2**/
+    
+    return;
+  }
+
+	/***  Ver 1.6 Ends	***/
+
+  i_returncode = tpbegin( 0, 0 );
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31005",TPMSG,c_errmsg);
+	  strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );	  /**ver 2.2**/
+    
+    return;
+  }
+
+  fn_bat_pst_msg ( c_ServiceName, "EOD Process - Updating Values", c_tag );
+
+/**Ver 1.3 starts **/
+  EXEC SQL
+			 UPDATE FTQ_FO_TRD_QT
+			 SET    FTQ_ATS_CLS_PRC = FTQ_CLS_PRC,
+							FTQ_CLS_OI = FTQ_CRNT_OI,								/***	Ver	1.6	***/
+              FTQ_PRVS_OI = FTQ_CLS_OI,               /*** Ver 2.5 ***/
+              FTQ_FRESH_OI = 0,                       /*** ver 2.5 ***/                  
+							FTQ_CLS_TRD_QTY = FTQ_TOT_QTY_TRDD			/***  Ver 1.6 ***/
+       WHERE  FTQ_XCHNG_CD = 'NFO';                   /***  Ver 1.8 ***/   
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31010",SQLMSG,c_errmsg);
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );  /**ver 2.2**/
+
+    return;
+  }
+/**Ver 1.3 ends **/
+/***************** Ver 2.4 starts **********************/
+ 
+  EXEC SQL                                  /**** Updated time in live database ****/
+       UPDATE FSP_FO_SYSTM_PRMTR
+       SET    FSP_ATS_CLSPRC_UPDDT = sysdate;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31015",SQLMSG,c_errmsg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    return;
+  }
+/********************* Ver 2.4 Ends **********************/
+	/*******	Commented In Ver	1.6
+
+  EXEC SQL
+			 UPDATE ftq_fo_trd_qt
+			 SET    ftq_cls_oi = ftq_crnt_oi; 
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31020",SQLMSG,c_errmsg);
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    
+    return;
+  }
+
+	EXEC SQL
+			 UPDATE ftq_fo_trd_qt
+			 SET    ftq_cls_trd_qty = ftq_tot_qty_trdd;
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31025",SQLMSG,c_errmsg);
+	  fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );	
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    
+    return;
+  }
+
+	**********************************************************************/
+	
+	EXEC SQL
+			 UPDATE LTQ_TRD_QT 
+			 SET    LTQ_PRV_HGH = LTQ_HGH_PRC,
+							LTQ_PRV_LOW = LTQ_LOW_PRC;			/***	Ver	1.6	***/
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31030",SQLMSG,c_errmsg);
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );	  /**ver 2.2**/
+
+    return;
+  }
+
+	/***	Commented In Ver 1.6
+	EXEC SQL
+       UPDATE ltq_trd_qt
+       SET    ltq_prv_low = ltq_low_prc;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31035",SQLMSG,c_errmsg);
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+   
+    return;
+  }
+
+	*************************************************/
+
+	i_returncode = tpcommit(0);
+  if ( i_returncode == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31040",TPMSG,c_errmsg);
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );	 /**ver 2.2**/
+
+    return;
+  }
+
+  /**** Ver 2.4 Starts Here *** for update in content DB ****/
+  fn_userlog(c_ServiceName," Before update of ftq_ats_clsprc_upd");
+  MEMSET(c_command);
+  sprintf(c_command,"ksh $HOME/sh_scripts/ftqcnt_ats_clsprc_upd.sh");
+  system(c_command);
+  fn_userlog(c_ServiceName," After update of ftq_ats_clsprc_upd");
+  /*** Ver 2.4 Ends Here **********/
+
+	i_returncode = tpbegin( 0, 0 );
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31045",TPMSG,c_errmsg);
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );	   /**ver 2.2**/
+
+    return;
+  }
+
+	if(DEBUG_MSG_LVL_0) 
+	{
+		fn_userlog( c_ServiceName,"First expiry date is :%s:", c_expry_dt[0] );
+		fn_userlog( c_ServiceName,"Second expiry date is :%s:", c_expry_dt[1] );
+		fn_userlog( c_ServiceName,"Third expiry date is :%s:", c_expry_dt[2] );
+	}
+
+  EXEC SQL
+			 DECLARE ats_rollover CURSOR FOR 
+       SELECT  distinct(ftq_undrlyng),
+               ftq_expry_dt,
+							 ftq_min_lot_qty
+       FROM    ftq_fo_trd_qt
+       WHERE   ftq_prdct_typ = 'F'
+       AND     ftq_xchng_cd = 'NFO'
+       AND     ftq_expry_dt in ( to_date(:c_expry_dt[0],'dd-Mon-YYYY') ,to_date(:c_expry_dt[1],'dd-Mon-YYYY') , to_date(:c_expry_dt[2],'dd-Mon-YYYY') );  
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31050", SQLMSG,c_err_msg);
+    EXEC SQL CLOSE ats_rollover;
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_err_msg );  /**ver 2.2**/
+
+    return;
+  }
+
+	EXEC SQL
+			 OPEN ats_rollover;
+
+	if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31055", SQLMSG,c_err_msg);
+    EXEC SQL CLOSE ats_rollover;
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+  	fn_chk_process_status(c_ServiceName,c_err_msg );  /**ver 2.2**/
+
+	  return;
+  }
+
+  while(1)	
+  {
+		MEMSET(st_cntrct_gen_inf.c_expry_dt);
+		MEMSET(st_cntrct_gen_inf.c_undrlyng);
+
+    EXEC SQL
+         FETCH ats_rollover
+         INTO  :st_cntrct_gen_inf.c_undrlyng,
+               :st_cntrct_gen_inf.c_expry_dt,
+							 :l_lot_sz;
+
+    if( SQLCODE != 0 && SQLCODE != -1405 && SQLCODE != NO_DATA_FOUND ) /* 1405 :Null data error , we will proceed */
+    {
+      fn_errlog(c_ServiceName, "S31060", SQLMSG, c_err_msg);
+      EXEC SQL CLOSE ats_rollover;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );   /**ver 2.2**/
+
+      return;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      EXEC SQL CLOSE ats_rollover;
+      break;
+    }
+
+	if(DEBUG_MSG_LVL_0) 
+	{
+		fn_userlog(c_ServiceName,"Underlyng:%s:Expiry Date:%s:",st_cntrct_gen_inf.c_undrlyng,c_expry_dt[0]);
+	}
+
+	/**Ver 1.4 starts**/
+
+		d_oi_near = 0;
+		d_clsprc_near = 0;
+
+	/**Ver 1.4 ends **/
+
+    EXEC SQL
+         SELECT nvl(FTQ_CRNT_OI,0),
+								nvl(FTQ_CLS_PRC,0)
+         INTO   :d_oi_near,
+							  :d_clsprc_near
+         FROM   ftq_fo_trd_qt
+         WHERE  FTQ_EXPRY_DT = :c_expry_dt[0]
+         AND    ftq_undrlyng = :st_cntrct_gen_inf.c_undrlyng
+         AND    ftq_prdct_typ = 'F'
+         AND    ftq_xchng_cd = 'NFO';
+
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND) /**Ver 1.4 **/
+    {
+      fn_errlog(c_ServiceName, "S31065", SQLMSG,c_err_msg);
+      EXEC SQL CLOSE ats_rollover;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );	 /**ver 2.2**/
+
+      return;
+    }
+
+	if(DEBUG_MSG_LVL_0) 
+	{
+		fn_userlog(c_ServiceName,"Underlyng:%s:Expiry Date:%s:",st_cntrct_gen_inf.c_undrlyng,c_expry_dt[1]);
+	}
+
+	/**Ver 1.4 starts**/
+
+		d_oi_mid = 0;
+		d_clsprc_mid = 0;
+
+	/**Ver 1.4 ends **/
+
+		EXEC SQL
+         SELECT nvl(FTQ_CRNT_OI,0),
+								nvl(FTQ_CLS_PRC,0)
+         INTO   :d_oi_mid,
+								:d_clsprc_mid
+         FROM   ftq_fo_trd_qt
+         WHERE  FTQ_EXPRY_DT = :c_expry_dt[1]
+         AND    ftq_undrlyng = :st_cntrct_gen_inf.c_undrlyng
+         AND    ftq_prdct_typ = 'F'
+         AND    ftq_xchng_cd = 'NFO';
+
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)		/**Ver 1.4 **/
+    {
+      fn_errlog(c_ServiceName, "S31070", SQLMSG,c_err_msg);
+      EXEC SQL CLOSE ats_rollover;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );	   /**ver 2.2**/
+
+      return;
+    }
+
+	if(DEBUG_MSG_LVL_0) 
+	{
+		fn_userlog(c_ServiceName,"Underlyng:%s:Expiry Date:%s:",st_cntrct_gen_inf.c_undrlyng,c_expry_dt[2]);
+	}
+
+	/**Ver 1.4 starts**/
+
+		d_oi_far = 0;
+
+	/**Ver 1.4 ends **/
+
+    EXEC SQL
+         SELECT nvl(FTQ_CRNT_OI,0)
+         INTO   :d_oi_far
+         FROM   ftq_fo_trd_qt
+         WHERE  FTQ_EXPRY_DT = :c_expry_dt[2]
+         AND    ftq_undrlyng = :st_cntrct_gen_inf.c_undrlyng
+         AND    ftq_prdct_typ = 'F'
+         AND    ftq_xchng_cd = 'NFO';
+
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)			/**Ver 1.4 **/
+    {
+      fn_errlog(c_ServiceName, "S31075", SQLMSG,c_err_msg);
+      EXEC SQL CLOSE ats_rollover;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );         /**ver 2.2**/
+	  
+			return;
+    }
+
+    EXEC SQL
+         UPDATE ftq_fo_trd_qt
+         SET    ftq_roll_over =  CASE WHEN (:d_oi_near+:d_oi_mid+:d_oi_far) = 0 THEN 0 ELSE (( :d_oi_mid+:d_oi_far)*100/( :d_oi_near+:d_oi_mid+:d_oi_far )) END,
+                ftq_rlvr_per  = CASE WHEN :d_clsprc_near = 0 THEN 0 ELSE (( :d_clsprc_mid-:d_clsprc_near)*100/:d_clsprc_near) END,	
+								ftq_rlvr_opn_cntrcts = CASE WHEN :l_lot_sz = 0 THEN 0 ELSE ((:d_oi_near+:d_oi_mid+:d_oi_far)/:l_lot_sz) END
+         WHERE  ftq_prdct_typ = 'F'
+         AND    ftq_undrlyng = :st_cntrct_gen_inf.c_undrlyng
+				 AND		ftq_expry_dt = :st_cntrct_gen_inf.c_expry_dt
+         AND    ftq_xchng_cd = 'NFO';
+
+		if(SQLCODE != 0)
+    {
+      fn_errlog(c_ServiceName, "S31080", SQLMSG,c_err_msg);
+      EXEC SQL CLOSE ats_rollover;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );		/**ver 2.2**/
+
+      return;
+    }
+
+
+  }/* End of While looop */
+
+
+  i_returncode = tpcommit(0);
+  if ( i_returncode == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31085",TPMSG,c_errmsg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );	   /**ver 2.2**/
+    
+		return;
+  }
+
+	if(DEBUG_MSG_LVL_0) 
+	{
+		fn_userlog( c_ServiceName,"After rollover calculation" );
+	}
+
+	i_returncode = tpbegin( 0, 0 );
+
+  if ( i_returncode == -1 )
+  {
+  	fn_errlog(c_ServiceName,"S31090",TPMSG,c_errmsg);
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );	   /**ver 2.2**/
+  
+	 	return;
+  }
+	
+	EXEC SQL
+		SELECT COUNT(ROWID)
+		into   :li_tot_rcrds
+		FROM FTQ_FO_TRD_QT
+		WHERE FTQ_PRDCT_TYP = 'O'
+		AND   FTQ_XCHNG_CD = 'NFO'
+    AND   FTQ_EXPRY_DT between trunc(sysdate) and :c_expry_dt[2];  /** ver 2.5 **/
+	 /**	AND   FTQ_EXPRY_DT in ( to_date(:c_expry_dt[0],'dd-Mon-YYYY') ,to_date(:c_expry_dt[1],'dd-Mon-YYYY') , to_date(:c_expry_dt[2],'dd-Mon-YYYY') ); **  ver 2.5 to consider all weekly expiry as weel **/
+  if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31095", SQLMSG,c_err_msg);
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_err_msg );	   /**ver 2.2**/
+
+    return;
+  }	
+
+	/***	Ver	1.6	Starts	***/
+	
+	EXEC SQL
+		INSERT INTO ATS_IMP_VOL_TMP
+				(
+					ATS_UNDRLYNG,
+					ATS_XCHNG_CD,
+				 	ATS_EXPRY_DT,
+ 					ATS_EXER_TYP,
+ 					ATS_OPT_TYP,
+ 					ATS_STRK_PRC,
+ 					ATS_INDSTK,
+					ATS_PRCSD_FLG
+				)
+				(
+					SELECT	DISTINCT(FTQ_UNDRLYNG),
+									FTQ_XCHNG_CD,
+									FTQ_EXPRY_DT,
+									FTQ_EXER_TYP,
+									FTQ_OPT_TYP,
+									FTQ_STRK_PRC,
+									FTQ_INDSTK,
+									'N'
+					FROM		FTQ_FO_TRD_QT
+					WHERE		FTQ_PRDCT_TYP = 'O'
+					AND     FTQ_XCHNG_CD = 'NFO'
+          AND     FTQ_EXPRY_DT between trunc(sysdate) and :c_expry_dt[2] /** ver 2.5 **/
+				/**	AND     FTQ_EXPRY_DT IN ( to_date(:c_expry_dt[0],'dd-Mon-YYYY') ,to_date(:c_expry_dt[1],'dd-Mon-YYYY') , to_date(:c_expry_dt[2],'dd-Mon-YYYY') ) ** ver 2.5 **/
+				);
+
+
+	if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31100", SQLMSG,c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_err_msg );	 /**ver 2.2**/
+
+    return;
+  }
+
+	i_returncode = tpcommit(0);
+
+  if ( i_returncode == -1 )
+  {
+  	fn_errlog(c_ServiceName,"S31105",TPMSG,c_errmsg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	  fn_chk_process_status(c_ServiceName,c_errmsg );	   /**ver 2.2**/
+    
+    return;
+  }
+
+	/***	Ver	1.6	Ends	***/
+
+	/***	Commented In Ver	1.6
+	EXEC SQL
+			 DECLARE ats_imp_vol CURSOR FOR  
+			 SELECT  distinct(ftq_undrlyng),
+							 ftq_expry_dt,
+							 ftq_exer_typ,	
+							 ftq_opt_typ,
+							 ftq_strk_prc,
+							 ftq_indstk
+			 FROM    ftq_fo_trd_qt
+			 WHERE   ftq_prdct_typ = 'O'
+			 AND     ftq_xchng_cd = 'NFO'
+			 AND     ftq_expry_dt in ( to_date(:c_expry_dt[0],'dd-Mon-YYYY') ,to_date(:c_expry_dt[1],'dd-Mon-YYYY') , to_date(:c_expry_dt[2],'dd-Mon-YYYY') )
+			 ORDER BY 1,2;
+
+	EXEC SQL
+       OPEN ats_imp_vol;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31110", SQLMSG,c_err_msg);
+    EXEC SQL CLOSE ats_imp_vol;
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    
+		return;
+  }
+
+	***************************************/
+
+	while(1)	
+	{
+	
+		MEMSET(c_rowid);						/*** Ver 1.7 ***/
+
+		if ( li_rec_cmt == 0 )      /***  Ver 1.6 ***/
+		{
+		 	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+ 	 		if ( i_trnsctn == -1 )
+  		{
+    		fn_errlog(c_ServiceName,"S31115",TPMSG,c_errmsg);
+    		strcpy ( c_msg, "System error. Contact system support" );
+    		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    		fn_chk_process_status(c_ServiceName,c_errmsg );	   /**ver 2.2**/
+    		return;
+  		}
+		}
+	
+		/***	Commented In Ver 1.6
+
+		EXEC SQL
+     FETCH ats_imp_vol
+     INTO  :st_cntrct_gen_inf.c_undrlyng,
+           :st_cntrct_gen_inf.c_expry_dt,
+           :st_cntrct_gen_inf.c_exrc_typ,
+           :st_cntrct_gen_inf.c_opt_typ,
+           :st_cntrct_gen_inf.l_strike_prc,
+           :st_cntrct_gen_inf.c_ctgry_indstk;
+		***************************************************/
+
+		EXEC SQL
+			SELECT	DISTINCT(ATS_UNDRLYNG),
+							ATS_EXPRY_DT,
+							ATS_EXER_TYP,
+							ATS_OPT_TYP,
+							ATS_STRK_PRC,
+							ATS_INDSTK,	
+							ATS_XCHNG_CD,											/*** Ver 1.7 ***/
+							ROWID															/*** Ver 1.7 ***/
+		 	INTO  :st_cntrct_gen_inf.c_undrlyng,
+				   	:st_cntrct_gen_inf.c_expry_dt,
+					  :st_cntrct_gen_inf.c_exrc_typ,
+					  :st_cntrct_gen_inf.c_opt_typ,
+					  :st_cntrct_gen_inf.l_strike_prc,
+					  :st_cntrct_gen_inf.c_ctgry_indstk,
+						:st_cntrct_gen_inf.c_xchng_cd,			/*** Ver 1.7 ***/
+						:c_rowid														/*** Ver 1.7 ***/
+			FROM	ATS_IMP_VOL_TMP
+      WHERE ATS_XCHNG_CD = 'NFO'
+      AND   ATS_EXPRY_DT >= trunc(sysdate)  /** ver 2.5 **/
+      /** AND   ATS_EXPRY_DT IN ( to_date(:c_expry_dt[0],'dd-Mon-YYYY') ,to_date(:c_expry_dt[1],'dd-Mon-YYYY') , to_date(:c_expry_dt[2],'dd-Mon-YYYY') ) ** ver 2.5 **/
+			AND		ATS_PRCSD_FLG	=	'N'
+			AND 	ROWNUM < 2;
+
+	  if( SQLCODE != 0 && SQLCODE != -1405 && SQLCODE != NO_DATA_FOUND ) /* 1405 :Null data error , we will proceed */
+    {
+      fn_errlog(c_ServiceName, "S31120", SQLMSG, c_err_msg);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+    	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );	   /**ver 2.2**/
+
+    	return;
+    }
+		if( SQLCODE == NO_DATA_FOUND )
+		{
+			/**EXEC SQL CLOSE ats_imp_vol;***/
+
+			i_returncode = tpcommit(0);
+
+			if ( i_returncode == -1 )
+			{
+  			fn_errlog(c_ServiceName,"S31125",TPMSG,c_errmsg);
+  			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+  			strcpy ( c_msg, "System error. Contact system support" );
+  			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	      fn_chk_process_status(c_ServiceName,c_errmsg );	  /**ver 2.2**/
+  			 
+			  return;
+			}
+		  break;
+	  }
+
+		rtrim(st_cntrct_gen_inf.c_undrlyng);		/*** Ver 1.7 ***/
+		rtrim(st_cntrct_gen_inf.c_expry_dt);		/*** Ver 1.7 ***/
+
+		EXEC SQL
+			 SELECT FTQ_CLS_PRC
+			 INTO   :st_output.d_ats_price
+			 FROM   FTQ_FO_TRD_QT
+			 WHERE  FTQ_UNDRLYNG 	= :st_cntrct_gen_inf.c_undrlyng
+		   AND		FTQ_PRDCT_TYP	=	:st_cntrct_gen_inf.c_prd_typ			/***	Ver	1.6	***/
+			 AND		FTQ_XCHNG_CD	=	:st_cntrct_gen_inf.c_xchng_cd			/***	Ver	1.6	***/
+			 AND    FTQ_EXPRY_DT 	= :st_cntrct_gen_inf.c_expry_dt
+			 AND    FTQ_EXER_TYP 	= :st_cntrct_gen_inf.c_exrc_typ
+			 AND    FTQ_OPT_TYP  	= :st_cntrct_gen_inf.c_opt_typ
+			 AND    FTQ_STRK_PRC 	= :st_cntrct_gen_inf.l_strike_prc; 
+
+			if( SQLCODE != 0 && SQLCODE != -1405 && SQLCODE != NO_DATA_FOUND )	/* 1405 :Null data error , we will proceed */
+			{
+				fn_errlog(c_ServiceName, "S31130", SQLMSG, c_err_msg);
+				/***EXEC SQL CLOSE ats_imp_vol;***/
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				strcpy ( c_msg, "System error. Contact system support" );
+				fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+				fn_chk_process_status(c_ServiceName,c_err_msg );	  /**ver 2.2**/
+				
+        return;
+			}
+
+
+		l_fcm_count = l_fcm_count + 1;
+
+		if(l_fcm_count % 100 == 1)
+    {
+      sprintf ( c_msg, "Processing record %ld of %ld", l_fcm_count , li_tot_rcrds );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    }
+
+		if(DEBUG_MSG_LVL_3) 
+		{
+			fn_userlog( c_ServiceName,"Stock is :%s:,Expiry date is :%s:, Strike is :%ld:, Opt type is :%c:", st_cntrct_gen_inf.c_undrlyng, st_cntrct_gen_inf.c_expry_dt, st_cntrct_gen_inf.l_strike_prc, st_cntrct_gen_inf.c_opt_typ );
+		}
+
+		/* Call service to calculate Implied Volatility */
+
+
+    i_returncode = fn_calc_implied_volatility( c_ServiceName,
+                                               &st_cntrct_gen_inf,
+                                               &st_output
+                                             );
+
+    if( i_returncode == -1 )
+    {
+      fn_errlog(c_ServiceName, "S31135", SQLMSG,c_err_msg);
+			/**EXEC SQL CLOSE ats_imp_vol;***/
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );	  /**ver 2.2**/
+
+      return;
+    }
+
+
+	if(DEBUG_MSG_LVL_3) 
+  {
+		fn_userlog( c_ServiceName," Implied volatility returned for :%s:%s:%c:%s:%c:%c:%ld: is :%lf:", st_cntrct_gen_inf.c_undrlyng,st_cntrct_gen_inf.c_xchng_cd,st_cntrct_gen_inf.c_prd_typ,st_cntrct_gen_inf.c_expry_dt,st_cntrct_gen_inf.c_exrc_typ,st_cntrct_gen_inf.c_opt_typ,st_cntrct_gen_inf.l_strike_prc,st_output.d_ats_imp_vltly );
+	}
+
+		 /****** COMMENTED IN VER 2.6 *****
+		st_output.d_ats_imp_vltly  = st_output.d_ats_imp_vltly * 100;
+		******* VER 2.6 COMMENT ENDS HERE *******/
+
+    st_output.d_ats_imp_vltly  = st_output.d_ats_imp_vltly;  /**** Added in Ver 2.6 ****/
+
+
+		EXEC SQL
+				 UPDATE FTQ_FO_TRD_QT
+				 SET    FTQ_CLS_IV   	= :st_output.d_ats_imp_vltly 
+				 WHERE  FTQ_UNDRLYNG 	= :st_cntrct_gen_inf.c_undrlyng
+				 AND		FTQ_XCHNG_CD 	= :st_cntrct_gen_inf.c_xchng_cd			/***  Ver 1.6 ***/
+				 AND    FTQ_PRDCT_TYP = :st_cntrct_gen_inf.c_prd_typ      /***  Ver 1.6 ***/
+				 AND    FTQ_EXPRY_DT 	= :st_cntrct_gen_inf.c_expry_dt			
+				 AND    FTQ_EXER_TYP 	= :st_cntrct_gen_inf.c_exrc_typ   
+				 AND    FTQ_OPT_TYP  	= :st_cntrct_gen_inf.c_opt_typ
+				 AND    FTQ_STRK_PRC 	= :st_cntrct_gen_inf.l_strike_prc;  
+
+		if( SQLCODE != 0 && SQLCODE != -1405 && SQLCODE != NO_DATA_FOUND ) /* 1405 :Null data error , we will proceed */
+    {
+      fn_errlog(c_ServiceName, "S31140", SQLMSG, c_err_msg);
+			/***EXEC SQL CLOSE ats_imp_vol;***/
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	    fn_chk_process_status(c_ServiceName,c_err_msg );	  /**ver 2.2**/
+
+      return;
+    }
+
+		li_rec_cmt	++;			/***	Ver	1.6	***/
+
+		/*** Ver 1.7 ***/
+		
+		EXEC SQL
+			UPDATE  ats_imp_vol_tmp
+			SET	ATS_PRCSD_FLG	=	'P'
+			WHERE	ROWID = :c_rowid;
+
+		if( SQLCODE != 0 ) 
+		{
+			fn_errlog(c_ServiceName, "S31145", SQLMSG, c_err_msg);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			fn_chk_process_status(c_ServiceName,c_err_msg );	/**ver 2.2**/
+
+			return;
+		}
+		/*** Ver 1.7 ***/
+
+		if ( li_rec_cmt == 1000 || l_fcm_count== li_tot_rcrds)
+		{
+			fn_userlog(c_ServiceName,"Inside li_rec_cmt == 1000 ");
+			
+			/*** Commented in Ver 1.7 ***
+			EXEC SQL
+				UPDATE  ats_imp_vol_tmp
+				SET	ATS_PRCSD_FLG	=	'P'
+				WHERE	ROWNUM < 1000
+				AND		ATS_PRCSD_FLG	=	'N';
+			***/
+
+		/*	i_returncode = tpcommit(0);*/
+
+			if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  		{
+    		fn_errlog(c_ServiceName,"S31150",TPMSG,c_errmsg);
+    		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    		strcpy ( c_msg, "System error. Contact system support" );
+    		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			  fn_chk_process_status(c_ServiceName,c_errmsg );   /**ver 2.2**/
+
+    		return;
+  		}
+			
+			li_rec_cmt	=	0	;
+		}
+
+	} /* End of while loop */
+
+	/***	Commented In Ver 1.6
+	i_returncode = tpcommit(0);
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31155",TPMSG,c_errmsg);
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+	  strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    
+    return;
+  }
+
+	**********************************/
+
+	if(DEBUG_MSG_LVL_0) 
+  {
+		fn_userlog( c_ServiceName,"After implied volatility calculation" );
+		fn_userlog(c_ServiceName,"Sucessfully completed Closing data updation");
+		fn_userlog(c_ServiceName,"bat_ats_mst ended sucessfully");
+	}
+
+  fn_bat_pst_msg ( c_ServiceName,"bat_ats_mst ended sucessfully", c_tag );
+
+	return;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+	fn_var = BAT_ATS_MST;
+
+	return 0;
+}
+
+void fn_bat_term (  int argc, char *argv[] )
+{
+   return ;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}
+int fn_calc_implied_volatility ( char   *c_ServiceName,
+                                 struct vw_cntrt_gen_inf *ptr_st_cntrct_gen_inf,
+                                 struct st_ats_output *ptr_output
+                               )
+{
+  int i = 0;
+  int i_err[TOTAL_FML];
+  int i_ferr[TOTAL_FML];
+  int i_count = 0;
+  int i_cnt = 0;
+  int i_ret_val = 0;
+  int i_date_diff = 0;    /**Ver 1.2 **/
+
+  long l_bufferlength = 0;
+  long l_risk_free_interest = 0;
+  long l_dividend = 1;
+  long l_user_index = 0;
+  long l_spot_level = 10;
+  long l_interval = 100;
+	long  l_session_id_temp = 0;  /** ver 2.6 **/
+
+	double d_ltq_stck = 0.0;
+	double d_ltq_nifty = 0.0;
+	double d_ltp_prc = 0.0;
+	double d_days_to_exp = 0.0;
+  double d_days_to_exp_temp = 0.0;    /**Ver 1.2 **/
+	double d_strk_price = 0.0;
+	double d_beta = 1.0;
+	double d_dividend = 25;  /** Ver 2.6 **/
+	double d_risk_free_interest = 12;  /** Ver 2.6 **/
+
+  char c_err_msg[256];
+  char c_tablename[4];
+  char c_system_user_flg = 'S';
+  char c_ltq_xchng_cd [4];
+  char c_temp_exgcd [4]; /** Ver 1.1 ***/
+  char c_prev_trd_dt[11+1]; /** Ver 1.5 ***/
+  char c_crrnt_expry_dt[12] = "\0"; /** ver 2.5 **/
+	char c_user_id_temp[10] = "\0";  /** ver 2.6 **/
+
+  strcpy(c_user_id_temp,"system");  /** Ver 2.6 **/
+
+   char c_command[100];    /****Added****/
+   char success_msg[100];
+
+  struct st_ats_output st_output;
+
+  FBFR32 *ptr_Ibuf;
+  FBFR32 *ptr_Obuf;
+
+  /* Initializing input buffer */
+
+  ptr_Ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN*10 );
+
+  if ( ptr_Ibuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31160", TPMSG, c_err_msg  );
+
+    return -1;
+  }
+
+  /* Initializing output buffer */
+
+  ptr_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN*10 );
+
+  if ( ptr_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31165", TPMSG, c_err_msg  );
+
+    return -1;
+  }
+
+  memset(c_temp_exgcd,0,sizeof(c_temp_exgcd)); /** Ver 1.1 ***/
+  memset(c_prev_trd_dt,0,sizeof(c_prev_trd_dt)); /** Ver 1.5***/
+
+  strcpy(c_ltq_xchng_cd,"NSE");
+
+  EXEC SQL
+       SELECT NVL(LTQ_CLS_PRC,0)			/**Take closing price since we want closing IV **/
+       INTO   :d_ltq_stck
+       FROM   LTQ_TRD_QT
+       WHERE  LTQ_XCHNG_CD = :c_ltq_xchng_cd
+       AND    LTQ_STCK_CD = :ptr_st_cntrct_gen_inf->c_undrlyng;
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31170", SQLMSG, c_err_msg  );
+
+    return -1;
+  }
+
+
+/**Commented in Ver 1.5
+**Ver 1.1, added 1 day to the calculation to avoid expiry day computation of IV as zero **
+** Ver 1.2 New logic of Calculation of Days to expiry given by Strategy Team **
+  EXEC SQL
+       SELECT (to_date(:ptr_st_cntrct_gen_inf->c_expry_dt,'dd-Mon-YYYY') - to_date(:c_prev_trd_dt,'dd-Mon-YYYY') + 1 )/365,
+              (to_date(:ptr_st_cntrct_gen_inf->c_expry_dt,'dd-Mon-YYYY') - to_date(:c_prev_trd_dt,'dd-Mon-YYYY') )/365,
+              to_date(:ptr_st_cntrct_gen_inf->c_expry_dt,'dd-Mon-YYYY') - to_date(sysdate,'dd-Mon-YYYY')
+       INTO   :d_days_to_exp,
+              :d_days_to_exp_temp ,
+              :i_date_diff
+       FROM   DUAL;
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31175", SQLMSG, c_err_msg  );
+    return -1;
+  }
+
+  if(i_date_diff == 0 )
+  {
+    d_days_to_exp = d_days_to_exp_temp;
+  }**
+**Ver 1.2 ends **
+********/
+
+
+/*Ver 1.5 starts **/
+  EXEC SQL
+				SELECT MAX(FBC_TRD_DT) 
+				INTO   :c_prev_trd_dt
+				FROM FBC_FO_BRNCH_CAL 
+				WHERE fbc_branch='0004' 
+				AND FBC_GRP_ID=1 
+				AND FBC_TRD_DT BETWEEN  TRUNC(SYSDATE -10) AND TRUNC(SYSDATE-1)
+        AND FBC_XCHNG_CD = 'NFO';  /*** Ver 1.8 ***/
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31180", SQLMSG, c_err_msg  );
+    return -1;
+  }
+
+	/***** COMMENTED IN VER 2.6 *****************************************
+  EXEC SQL
+       SELECT (to_date(:ptr_st_cntrct_gen_inf->c_expry_dt,'dd-Mon-YYYY') - to_date(:c_prev_trd_dt,'dd-Mon-YYYY') )/365
+       INTO   :d_days_to_exp
+       FROM   DUAL;
+	*********************** COMMENT OF VER 2.6 ENDS HERE ***************/
+
+  /******************* Added in Ver 2.6 *********************/
+
+  EXEC SQL
+  SELECT (to_date(:ptr_st_cntrct_gen_inf->c_expry_dt,'dd-Mon-YYYY') - to_date(:c_prev_trd_dt,'dd-Mon-YYYY') )
+  INTO   :d_days_to_exp
+  FROM   DUAL;
+
+  /****************** Ver 2.6 ends here ********************/
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31185", SQLMSG, c_err_msg  );
+
+
+    return -1;
+  }
+/*Ver 1.5 ends **/
+
+	if(DEBUG_MSG_LVL_3) 
+  {
+	fn_userlog( c_ServiceName,"Days to expiry is :%lf:", d_days_to_exp ); 
+	}
+
+  /*commented in Ver 1.2
+  EXEC SQL
+       SELECT ltq_rt
+       INTO   :d_ltq_nifty
+       FROM   ltq_trd_qt
+       WHERE   ltq_xchng_cd = :c_ltq_xchng_cd
+       AND    ltq_stck_cd = 'NIFTY';
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31190", SQLMSG, c_err_msg  );
+    return -1;
+  }*/
+
+  /** ver 2.5 starts **/
+
+  EXEC SQL
+  select min(FTQ_EXPRY_DT)
+  into :c_crrnt_expry_dt
+  from FTQ_FO_TRD_QT 
+  where FTQ_XCHNG_CD='NFO' 
+  and FTQ_PRDCT_TYP='F' 
+  and FTQ_UNDRLYNG='NIFTY'
+  and FTQ_EXPRY_DT >= :ptr_st_cntrct_gen_inf->c_expry_dt;
+
+  if( SQLCODE != 0 )
+  {
+   fn_errlog( c_ServiceName, "S31195", SQLMSG, c_err_msg  );
+   return -1;
+  }
+
+  /** ver 2.5 ends **/
+
+  EXEC SQL
+     SELECT NVL(FTQ_CLS_PRC/100,0)			/**Take closing price since we calculating closing IV **/
+     INTO   :d_ltq_nifty
+     FROM   FTQ_FO_TRD_QT
+     WHERE  FTQ_XCHNG_CD = 'NFO'
+     AND    FTQ_PRDCT_TYP= 'F'
+     AND    FTQ_UNDRLYNG = 'NIFTY'
+     AND    FTQ_EXPRY_DT = :c_crrnt_expry_dt; /** ver 2.5 **/
+     /** AND    FTQ_EXPRY_DT = :ptr_st_cntrct_gen_inf->c_expry_dt; ** ver 2.5 **/
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31200", SQLMSG, c_err_msg  );
+    return -1;
+  }
+
+	ptr_st_cntrct_gen_inf->c_prd_typ = 'O';
+	d_strk_price = ptr_st_cntrct_gen_inf->l_strike_prc/100;
+  d_ltp_prc = ptr_output->d_ats_price/100;
+  ptr_output->d_ats_price = ptr_output->d_ats_price/100;
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog( c_ServiceName,"c_ltq_xchng_cd :%s:", c_ltq_xchng_cd );
+    fn_userlog( c_ServiceName,"c_temp_exgcd :%s:", c_temp_exgcd );
+    fn_userlog( c_ServiceName,"c_prd_typ :%c:", ptr_st_cntrct_gen_inf->c_prd_typ );
+    fn_userlog( c_ServiceName,"c_undrlyng :%s:", ptr_st_cntrct_gen_inf->c_undrlyng );
+  }
+
+/*****Not required since we are not calculating Profit/Losses
+  EXEC SQL
+    SELECT FUM_BETA
+    INTO :d_beta
+    FROM FUM_FO_UNDRLYNG_MSTR
+    WHERE FUM_XCHNG_CD = 'NFO'
+    AND FUM_PRDCT_TYP = :ptr_st_cntrct_gen_inf->c_prd_typ
+    AND FUM_UNDRLYNG = :ptr_st_cntrct_gen_inf->c_undrlyng;
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31205", SQLMSG, c_err_msg  );
+    return -1;
+  }
+*********/
+
+  /* Adding Values to FMLs to call service for calculating Implied Volatility */
+
+/******************************** COMMENTED IN VER 2.6 **************************************
+if(DEBUG_MSG_LVL_3)
+{
+	fn_userlog( c_ServiceName,"Days to expiry is :%lf:", d_days_to_exp );
+	fn_userlog( c_ServiceName,"Product type :%c:", ptr_st_cntrct_gen_inf->c_prd_typ );
+	fn_userlog( c_ServiceName,"Option type :%c:", ptr_st_cntrct_gen_inf->c_opt_typ );
+	fn_userlog( c_ServiceName,"Strike Price :%ld:", ptr_st_cntrct_gen_inf->l_strike_prc );
+	fn_userlog( c_ServiceName,"NIFTY LTQ Price :%lf:", d_ltq_nifty );
+	fn_userlog( c_ServiceName," ATS Price :%lf:", ptr_output->d_ats_price );
+	fn_userlog( c_ServiceName," Beta :%lf:", d_beta );
+	fn_userlog( c_ServiceName," Risk free interest :%ld:", l_risk_free_interest );
+	fn_userlog( c_ServiceName," Dividend :%ld:", l_dividend );
+	fn_userlog( c_ServiceName," Days to expiry :%lf:", d_days_to_exp );
+	fn_userlog( c_ServiceName," System/user :%c:", c_system_user_flg );
+	fn_userlog( c_ServiceName," ATS Price :%lf:", ptr_output->d_ats_price );
+	fn_userlog( c_ServiceName," User Index :%ld:", l_user_index );
+	fn_userlog( c_ServiceName," Interval :%ld:", l_interval );
+	fn_userlog( c_ServiceName," Spot level :%ld:", l_spot_level );
+	fn_userlog( c_ServiceName," Open Position qty :%ld:", ptr_st_cntrct_gen_inf->l_board_lot_qty );
+	fn_userlog( c_ServiceName," Open Position flow :%c:", ptr_st_cntrct_gen_inf->c_rqst_typ );
+	fn_userlog( c_ServiceName," Implied volatility input :%lf:", ptr_output->d_ats_imp_vltly );
+	fn_userlog( c_ServiceName," Category Index/Stock :%c:", ptr_st_cntrct_gen_inf->c_ctgry_indstk );
+	fn_userlog( c_ServiceName," LTQ Spot price :%lf:", d_ltq_stck );
+	fn_userlog( c_ServiceName," Profit/Loss :%lf:", d_ltp_prc );
+}
+*************************** COMMENT FOR VER 2.6 ENDS HERE ***************************************/
+
+  /************************** Ver 2.6 starts here ************************************/
+
+  /**** Values passed to service SFO_CAL_GREEKS for volatility computation ****/
+	
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog( c_ServiceName, "*** Values passed to service SFO_CAL_GREEKS for underlying :%s: is ***",ptr_st_cntrct_gen_inf->c_undrlyng )
+;
+    fn_userlog( c_ServiceName, "User ID :%s:",c_user_id_temp );
+    fn_userlog( c_ServiceName, "Session ID :%ld:",l_session_id_temp);
+    fn_userlog( c_ServiceName, "Closing price fetched from FTQ table :%lf:",d_ltp_prc);
+    fn_userlog( c_ServiceName, "Closing price fetched from LTQ table :%lf:", d_ltq_stck);
+    fn_userlog( c_ServiceName, "Strike price :%lf:",d_strk_price);
+    fn_userlog( c_ServiceName, "Option type :%c:",ptr_st_cntrct_gen_inf->c_opt_typ);
+    fn_userlog( c_ServiceName, "Exer type :%c:",ptr_st_cntrct_gen_inf->c_exrc_typ);
+    fn_userlog( c_ServiceName, "Risk free interest rate :%lf:",d_risk_free_interest);
+    fn_userlog( c_ServiceName, "Dividend values :%lf:",d_dividend);
+    fn_userlog( c_ServiceName, "Days to expiry :%lf:",d_days_to_exp);
+    fn_userlog( c_ServiceName, "**************************************************************");
+    fn_userlog( c_ServiceName,"******** Contract Descriptor is *********");
+    fn_userlog( c_ServiceName,"Underlying :%s:",ptr_st_cntrct_gen_inf->c_undrlyng);
+    fn_userlog( c_ServiceName,"Expiry date :%s:",ptr_st_cntrct_gen_inf->c_expry_dt);
+    fn_userlog( c_ServiceName,"Option type :%c:",ptr_st_cntrct_gen_inf->c_opt_typ);
+    fn_userlog( c_ServiceName,"Strike price :%lf:",d_strk_price);
+  }
+	
+	/**** Ver 2.6 ends here ****/
+
+  /**** COMMENTED IN VER 2.6 **** Product type *
+  i_err[0]  = Fadd32 ( ptr_Ibuf, FFO_PRDCT_TYP,( char *)&ptr_st_cntrct_gen_inf->c_prd_typ, 0 );
+
+  * Option type *
+  i_err[1]  = Fadd32 ( ptr_Ibuf, FFO_OPT_TYP,( char *)&ptr_st_cntrct_gen_inf->c_opt_typ, 0 );
+
+  * Strike price *
+  i_err[2]  = Fadd32 ( ptr_Ibuf, FFO_STRIKE_PRC,( char *)&d_strk_price, 0 );
+
+  * Spot price of NIFTY *
+  i_err[3]  = Fadd32 ( ptr_Ibuf, FFO_INDEX,(char *)&d_ltq_nifty, 0 );
+
+  * Base price i.e ftq_lst_trd_prc *
+  i_err[4]  = Fadd32 ( ptr_Ibuf, FFO_BASE_ORD_VAL,(char *)&ptr_output->d_ats_price, 0 );
+
+  * Beta as 1 *
+  i_err[5]  = Fadd32 ( ptr_Ibuf, FFO_AVM_PRCNT,(char *)&d_beta, 0 );
+
+  * Risk free interest. Hardcoded as 0 *
+  i_err[6]  = Fadd32 ( ptr_Ibuf, FFO_INTRST_RT,(char *)&l_risk_free_interest, 0 );
+
+  * Dividend. Hardcoded as 1 *
+  i_err[7]  = Fadd32 ( ptr_Ibuf, FFO_PLG_RT,(char *)&l_dividend, 0 );
+
+  * Time to expiry *
+  i_err[8]  = Fadd32 ( ptr_Ibuf, FFO_DAY_TO_EXP,(char *)&d_days_to_exp, 0 );
+
+  * S - system *
+  i_err[9]  = Fadd32 ( ptr_Ibuf, FFO_RQST_TYP,(char *)&c_system_user_flg, 0 );
+
+  * Last traded price i.e ftq_lst_trd_prc *
+  i_err[10]  = Fadd32 ( ptr_Ibuf, FFO_EFF_LTP,(char *)&ptr_output->d_ats_price, 0 );
+
+  * Not required .Hardcoded but called service looks for it *
+  i_err[11]  = Fadd32 ( ptr_Ibuf, FFO_USER_INDEX,(char *)&l_user_index, 0 );
+
+  * Interval between 2 spots of NIFTY. Hardcoded as 100 *
+  i_err[12]  = Fadd32 ( ptr_Ibuf, FFO_INTERVAL,(char *)&l_interval, 0 );
+
+  * Not required. No of spot levels to calculate P&L. Hardcoded to 10 *
+  i_err[13]  = Fadd32 ( ptr_Ibuf, FFO_COUNT,(char *)&l_spot_level, 0 );
+
+  * Not required. Open position qty *
+  i_err[14]  = Fadd32 ( ptr_Ibuf, FFO_OPNPSTN_QTY,(char *)&ptr_st_cntrct_gen_inf->l_board_lot_qty, 0 );
+
+  * Not required. Open position flow *
+  i_err[15]  = Fadd32 ( ptr_Ibuf, FFO_OPNPSTN_FLW,(char *)&ptr_st_cntrct_gen_inf->c_rqst_typ, 0 );
+
+  * Result obtained in this is Implied volatility *
+  i_err[16]  = Fadd32 ( ptr_Ibuf, FFO_EFF_LMT_RT,(char *)&ptr_output->d_ats_imp_vltly, 0 );
+
+  * Category Index/Stock *
+  i_err[17]  = Fadd32 ( ptr_Ibuf, FFO_CTGRY_INDSTK,(char *)&ptr_st_cntrct_gen_inf->c_ctgry_indstk, 0 );
+
+  * Stock spot price in LTQ *
+  i_err[18]  = Fadd32 ( ptr_Ibuf, FFO_STCK_PRICE,(char *)&d_ltq_stck, 0 );
+
+	* Profit - Loss Not required for this batch *
+  i_err[19]  = Fadd32 ( ptr_Ibuf, FFO_OPT_PREMIUM,(char *)&d_ltp_prc, 0 );
+
+  for( i_cnt = 0; i_cnt < 20; i_cnt++ )
+  {
+    if( i_err[i_cnt] == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31210",FMLMSG,c_err_msg);
+      return -1;
+    }
+  }
+	
+	****** VER 2.6 COMMENT ENDS HERE *****/
+
+	/*** Ver 2.6 starts here ***/
+
+	/* User id passed as SYSTEM */
+  i_err[0] = Fadd32(ptr_Ibuf, FFO_USR_ID,        (char *)c_user_id_temp, 0 );
+
+  /* Session id passed as 0 */
+  i_err[1] = Fadd32(ptr_Ibuf, FFO_SSSN_ID,       (char *)&l_session_id_temp, 0 );
+
+  /* Closing price  from FTQ table, in rupees*/
+  i_err[2] = Fadd32(ptr_Ibuf, FFO_EFF_LTP,       (char *)&d_ltp_prc, 0);
+
+  /* LTQ_CLS_PRC from LTQ table, in rupees*/
+  i_err[3] = Fadd32(ptr_Ibuf, FFO_STCK_PRICE,    (char *)&d_ltq_stck, 0);
+
+  /* Strike price in rupess */
+  i_err[4] = Fadd32(ptr_Ibuf, FFO_STRIKE_PRC,    (char *)&d_strk_price, 0);
+
+  /* Option type */
+  i_err[5] = Fadd32(ptr_Ibuf, FFO_OPT_TYP,       (char *)&ptr_st_cntrct_gen_inf->c_opt_typ, 0);
+
+  /* Exer type */
+  i_err[6] = Fadd32(ptr_Ibuf, FFO_EXER_TYP,      (char *)&ptr_st_cntrct_gen_inf->c_exrc_typ, 0);
+
+  /* Risk free rate, hard coded as 12 */
+  i_err[7] = Fadd32(ptr_Ibuf, FFO_INTRST_RT,     (char *)&d_risk_free_interest, 0 );
+
+  /* Hard coded as 25 */
+  i_err[8] = Fadd32(ptr_Ibuf, FFO_PLG_RT,        (char *)&d_dividend, 0 );
+
+  /* Days to expiry */
+  i_err[9] = Fadd32(ptr_Ibuf, FFO_DAY_TO_EXP,    (char *)&d_days_to_exp, 0 );
+
+	for( i_cnt = 0; i_cnt < 10; i_cnt++ )   /*** count reduced to 10 in Ver 2.6 ***/
+  {
+    if( i_err[i_cnt] == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31215",FMLMSG,c_err_msg);
+      return -1;
+    }
+  }
+
+	/*** ver 2.6 ends here ***/
+
+	l_bufferlength  = Fneeded32(1, sizeof(st_cntrct_gen_inf)*2);
+
+	/**** COMMENTED IN VER 2.6 ****
+  i_ret_val = tpcall("SFO_CALC_RSK",(char*)ptr_Ibuf,0,(char **)&ptr_Obuf,&l_bufferlength,0);
+	***** COMMENET OF VER 2.6 ENDS HERE ****/
+
+	i_ret_val = tpcall("SFO_CAL_GREEKS",(char*)ptr_Ibuf,0,(char **)&ptr_Obuf,&l_bufferlength,0);  /*** Added in Ver 2.6 ***/
+
+  if( i_ret_val == -1 )
+  {
+    fn_userlog( c_ServiceName," Call to service for fetching implied volatility failed " );
+    return -1;
+  }
+
+	/**** COMMENTED IN VER 2.6 ****
+  i_err  [0] = Fget32( ptr_Obuf,FFO_FUT_PRC,0,(char *)&ptr_output->d_ats_imp_vltly, 0 );  ***  Run Time Volatility ***
+  i_ferr [0] = Ferror32;
+ 	**** COMMENT OF VER 2.6 ENDS HERE ****/
+
+	/*** Added in Ver 2.6 ***/
+	i_err  [0] = Fget32( ptr_Obuf,FFO_EFF_LMT_RT,0,(char *)&ptr_output->d_ats_imp_vltly, 0 );  /***  Run Time Volatility ***/
+  i_ferr [0] = Ferror32;
+  if( i_ferr[0] == -1 )
+  {
+    fn_userlog( c_ServiceName,"Cannot get Implied volatility values " );
+    return -1;
+  }
+
+	if(DEBUG_MSG_LVL_3) 
+	{
+		fn_userlog( c_ServiceName,"Implied volatility is function is :%lf:", ptr_output->d_ats_imp_vltly );
+	}
+
+	tpfree((char *)ptr_Ibuf);
+	tpfree((char *)ptr_Obuf);
+
+	return 0;
+}
+

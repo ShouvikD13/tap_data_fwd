@@ -1,0 +1,557 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_GET_CSH_TRN                                       */
+/*                                                                            */
+/*  Input             : FFO_USR_ID                                            */
+/*                      FFO_SSSN_ID                                           */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                      FFO_TRD_DT                                            */
+/*                      FFO_GID                                               */
+/*                      FFO_ROUT_CRT                                          */
+/*                                                                            */
+/*  Output            : FFO_PRDCT_DESC                                        */
+/*                      FFO_XCHNG_CD                                          */
+/*                      FFO_AMOUNT                                            */
+/*                      FFO_TRD_DT                                            */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                                                                            */
+/*  Description       : This service gives you cash transaction details for   */
+/*                      the given parameters. User has to specify the         */
+/*                      parameters viz. Match account number, trade date      */
+/*                      session id and user id.                               */
+/*                                                                            */
+/*  Log               :                                                       */
+/*                                                                            */
+/******************************************************************************/
+/*      22-Nov-2001     Version 1.0      S.Balamurugan      Release 1.0       */
+/*      28-Dec-2006     Version 1.1      Abhishek/Sushil 		Release 1.1 			*/
+/*      03-Mar-2008			Version 1.2			 Sandeep Patil												*/
+/*			11-May-2008			Version 1.3			 Shamili Dalvi												*/
+/*			16-Jan-2012			Version 1.4			 Sandip Tambe	 												*/
+/*			04-Dec-2019			Version 1.5			 Vinod Deore	 												*/
+/*      22-Apr-2022     Version 1.6      Roshni Pawar                         */
+/******************************************************************************/
+/* Version 1.1       : DL Optimization / Mem. Realloc. Modification						*/
+/* Version 1.2			 : IBM MIGRATION CHANGES																	*/
+/* Version 1.3			 : Change for Reallocation				                        */ 	
+/* Version 1.4			 : Change for FNO BSE							                        */ 	
+/* Version 1.5			 : Change for CR-ISEC03-118638_DEPOSIT_MODEL              */ 	
+/* Version 1.6       : CR-ISEC10-165267 Cash Projection Download in Excel     */
+/******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fn_log.h>
+/*Add header files here */
+
+#include <fo.h>
+#include <fml_def.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_read_debug_lvl.h>			/*** Ver 1.2 ***/
+
+
+void SFO_GET_CSH_TRN( TPSVCINFO *rqst )
+{
+	FBFR32 *ptr_fml_Ibuf;
+	FBFR32 *ptr_fml_Obuf;
+	FBFR32 *ptr_fml_Tempbuf;				/***	VER 1.1 FOR MEMORY REALLOCATION	***/
+	char c_ServiceName[33];
+	char c_err_msg[256];
+	char c_exchange_cd[4];					/*** Ver 1.4 ****/
+  char c_excl_req_type = 'N';    /*** Ver 1.6 ****/
+	char c_cln_mtch_accnt[11]="\0";   /*** Ver 1.6 ****/
+  int i_returncode;
+	int i_err[7];                  /*** Ver 1.6 changed from 5 to 6 ****/
+	int i_ferr[7];                  /*** Ver 1.6 changed from 5 to 6 ****/
+	int i_counter=1;
+	int i_cnt;
+
+/*int rec_cnt = 0;	
+	int ret_val = 0;	 ******	Ver 1.1: Added by AA Commented by SKS	************/
+
+	long l_bufferlength;					/***  VER 1.1 FOR MEMORY REALLOCATION ***/
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		struct vw_usr_prfl st_usr_prfl;
+		varchar c_trd_dt [LEN_DATE];
+		double d_amount;
+		char c_xchng_cd[4];
+		char c_narr_desc[133];
+		char c_remarks[133];
+		int	i_grp_id;
+    varchar c_end_date [LEN_DATE];  /*** Ver 1.6 ****/
+    char c_trd_rfrnc_no[132]="\0";    /*** Ver 1.6 ****/
+    varchar c_exetrd_dt [LEN_DATE]; /*** Ver 1.6 ****/
+	EXEC SQL END DECLARE SECTION;
+  
+  sql_cursor cur_cash_trn; /** Ver 1.4 ***/
+  MEMSET(c_end_date); /*** Ver 1.6 ***/
+  MEMSET(c_exetrd_dt); /*** Ver 1.6 ***/
+
+	struct vw_err_msg st_err_msg;
+
+  ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+
+	INITDBGLVL(c_ServiceName);			/*** Ver 1.2 ***/
+	
+	/* Store the input value in the view vw_usr_prfl */
+  i_returncode = Fvftos32( ptr_fml_Ibuf,
+                           (char *)&st_usr_prfl,
+                           "vw_usr_prfl" );
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( st_usr_prfl.c_rout_crt );
+
+	i_err[0] = Fget32( ptr_fml_Ibuf, FFO_TRD_DT, 0, (char *)c_trd_dt.arr,0);
+  i_ferr [0] = Ferror32;
+
+  if ( i_err[0] == -1 )
+  {
+     fn_errlog( c_ServiceName, "S31010", Fstrerror32(i_ferr[0]),c_err_msg);
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+  SETLEN(c_trd_dt);
+
+	/**  Added on 23-May-2002 for Group id  ***/
+	i_err[1] = Fget32( ptr_fml_Ibuf, FFO_GID, 0, (char *)&i_grp_id,0);
+  i_ferr [1] = Ferror32;
+
+  if ( i_err[1] == -1 )
+  {
+     fn_errlog( c_ServiceName, "S31015", Fstrerror32(i_ferr[0]),c_err_msg);
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+  
+  /*** Ver 1.6 start ***/
+
+  i_err[2] = Fget32( ptr_fml_Ibuf, FFO_NKD_BLKD_FLG, 0, (char *)&c_excl_req_type,0);
+  i_ferr [2] = Ferror32;
+
+  if ( i_err[2] == -1 )
+  {
+      if ( i_ferr [2] == FNOTPRES )
+     {
+       if (DEBUG_MSG_LVL_3)
+       {
+         fn_userlog( c_ServiceName, " Request type is not present");
+       }
+
+     }
+     else
+     {
+       fn_userlog( c_ServiceName, " Error occured....");
+       fn_errlog( c_ServiceName, "S31020", Fstrerror32(i_ferr[2]),c_err_msg);
+       Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+
+  }
+
+  i_err[3] = Fget32( ptr_fml_Ibuf, FFO_ASGN_DT, 0, (char *)c_end_date.arr,0);
+  i_ferr [3] = Ferror32;
+
+  if ( i_err[3] == -1 )
+  {
+     if ( i_ferr [3] == FNOTPRES )
+     {
+       if (DEBUG_MSG_LVL_3)
+       {
+         fn_userlog( c_ServiceName, " End date not present");
+       }
+
+     }
+     else
+     {
+       fn_userlog( c_ServiceName, " Error occured....");
+       fn_errlog( c_ServiceName, "S31025", Fstrerror32(i_ferr[3]),c_err_msg);
+       Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+  }
+
+  SETLEN(c_end_date);
+  SETNULL(c_end_date);
+  /*** Ver 1.6 end ***/
+
+	if (DEBUG_MSG_LVL_3)			/*** Ver 1.2 ***/ 
+	{
+		fn_userlog( c_ServiceName, " c_user_id : [%s] ", st_usr_prfl.c_user_id );
+		fn_userlog( c_ServiceName, " c_session id : [%ld] ", 
+	                              st_usr_prfl.l_session_id );
+		fn_userlog( c_ServiceName, "c_cln_mtch_accnt : [%s] ", 
+                               st_usr_prfl.c_cln_mtch_accnt );
+		fn_userlog( c_ServiceName, "c_trd_dt : [%s] ", c_trd_dt.arr );
+		fn_userlog( c_ServiceName, " i_grp_id : [%d] ", i_grp_id );
+    fn_userlog( c_ServiceName, "c_excl_req_type : [%c] ", c_excl_req_type );      /*** Ver 1.6 ***/
+    fn_userlog( c_ServiceName, "c_end_date : [%s] ", c_end_date.arr );            /*** Ver 1.6 ***/
+    fn_userlog( c_ServiceName, "c_exetrd_dt : [%s] ", c_exetrd_dt.arr );          /*** Ver 1.6 ***/ 
+	}
+	/*** Ver 1.4 code starts *****/
+	if(Fget32( ptr_fml_Ibuf, FFO_XCHNG_CD, 0, (char *) c_exchange_cd,0) == -1)
+	{
+     if( Ferror32 == FNOTPRES )
+     {
+      strcpy(c_exchange_cd,"NFO");
+      fn_userlog(c_ServiceName,"Exchange Code copied to NFO..");
+     }
+     else
+     {    
+		  fn_errlog( c_ServiceName, "S31030", Fstrerror32(i_ferr[0]),c_err_msg);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+	}
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"exchange code after fget:%s:",c_exchange_cd);
+	}
+		/**** Ver 1.4 code ends *******/
+  /* Check the session */
+  i_returncode = fn_chk_sssn( c_ServiceName, &st_usr_prfl,
+                                             &st_err_msg ) ;
+
+  if ( i_returncode == -1 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/************Ver 1.1 Starts ***************************/
+    EXEC SQL
+        SELECT to_char(to_date(:c_trd_dt),'DD-Mon-YYYY')
+        INTO   :c_trd_dt
+        FROM   dual;
+    if(SQLCODE != 0)
+    {
+      fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+    SETNULL( c_trd_dt );
+
+		if (DEBUG_MSG_LVL_3)			/*** Ver 1.2 ***/ 
+		{
+    	fn_userlog(c_ServiceName, "After converting - c_trd_dt is <%s>", c_trd_dt.arr);
+		}
+
+	/************Ver 1.1 Ends  ***************************/
+
+	ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+  if ( Fadd32 ( ptr_fml_Obuf, FFO_EBA_MTCH_ACT_NO,
+                              (char *)st_usr_prfl.c_cln_mtch_accnt, 0 ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31040", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+/**** Commented in ver 1.1 *********
+	if ( Fadd32 ( ptr_fml_Obuf, FFO_TRD_DT,
+                              (char *)c_trd_dt.arr, 0 ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31045", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+******** End of comment ver 1.1 *******/
+/******* Commented in Ver 1.6 *******
+  	EXEC SQL
+		DECLARE cur_cash_trn CURSOR for
+		SELECT fll_dc_amt,
+					 fll_xchng_cd,
+           fnm_narration_desc,
+					 nvl(fll_ref_rmrks,' ')
+		FROM	 fll_fo_lmtupd_log, 
+					 fnm_fo_narration_mstr
+		WHERE	 fll_narration_id = fnm_narration_id
+		AND 	 FLL_XCHNG_CD = :c_exchange_cd							*** Ver 1.4******
+		*AND		 fnm_lmt_prj_flg in ('P','A','B')*Prjtn,Adjstmnt,Payin/payout ***Ver 1.5**
+		AND		 fnm_lmt_prj_flg in ('P','A','B','M')*Prjtn,Adjstmnt,Payin/payout,MDC Payin/payout* *Ver 1.5*
+		AND		 fll_clm_mtch_accnt = :st_usr_prfl.c_cln_mtch_accnt
+		AND		 fll_trd_dt = to_date( :c_trd_dt, 'DD-Mon-YYYY' )
+		AND		 fll_grp_id = fnm_grp_id
+		AND		 fll_grp_id = :i_grp_id
+		ORDER BY fll_seq_num;
+
+	EXEC SQL
+		OPEN cur_cash_trn;		
+
+	if( SQLCODE != 0 ) 
+  {
+    fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_Obuf );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+  
+  ***********Comment 1.6 ends here *****/
+  
+  /***************** Ver 1.6 Starts Here ********************************/
+
+  EXEC SQL ALLOCATE :cur_cash_trn;
+ 
+  if(c_excl_req_type == 'Y')
+   {
+   if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog( c_ServiceName, "*********** To Download In Excel Starts Here ");
+        fn_userlog( c_ServiceName, "From date is |%s|",c_trd_dt.arr );
+        fn_userlog( c_ServiceName, "End date is |%s|",c_end_date.arr );
+      }
+     strcpy (c_cln_mtch_accnt,st_usr_prfl.c_cln_mtch_accnt);
+     
+           EXEC SQL  EXECUTE 
+           BEGIN
+           OPEN :cur_cash_trn FOR
+           SELECT fll_dc_amt,
+                  fll_xchng_cd,
+                  fnm_narration_desc,
+                  /* SUBSTR(nvl(fll_ref_rmrks,' '),1,LENGTH(nvl(fll_ref_rmrks,' '))-21),*/
+                  Decode(INSTR(nvl(fll_ref_rmrks,' ') || ' ','-T ',1,1),0,nvl(fll_ref_rmrks,' '),SUBSTR(nvl(fll_ref_rmrks,' '),1,LENGTH(nvl(fll_ref_rmrks,' ')) - 21)),
+                  Decode(INSTR(nvl(fll_ref_rmrks,' ') || ' ' ,'-T ',1,1),0,NULL,SUBSTR(nvl(fll_ref_rmrks,' '),-20,18)),
+                  /* SUBSTR(nvl(fll_ref_rmrks,' '), -20, 18), */
+                  to_date(fll_trd_dt,'DD-Mon-YYYY')
+           FROM   fll_fo_lmtupd_log,
+                  fnm_fo_narration_mstr
+           WHERE  fll_narration_id = fnm_narration_id
+           AND    FLL_XCHNG_CD = :c_exchange_cd
+           AND    fnm_lmt_prj_flg in ('P','A','B','M')
+           AND    fll_clm_mtch_accnt = :c_cln_mtch_accnt
+           AND    fll_trd_dt >= to_date( :c_trd_dt, 'DD-Mon-YYYY' )
+           AND    fll_trd_dt <= to_date( :c_end_date, 'DD-Mon-YYYY' )
+           AND    fll_grp_id = fnm_grp_id
+           AND    fll_grp_id = :i_grp_id
+           ORDER BY fll_trd_dt,fll_seq_num;
+      END;
+      END-EXEC;
+    }
+    else
+    {
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"For Normal View");
+      }
+       strcpy (c_cln_mtch_accnt,st_usr_prfl.c_cln_mtch_accnt);    
+
+          EXEC SQL  EXECUTE
+          BEGIN
+          OPEN :cur_cash_trn FOR 
+          SELECT fll_dc_amt,
+                 fll_xchng_cd,
+                 fnm_narration_desc,
+                 nvl(fll_ref_rmrks,' '),
+                 SUBSTR(nvl(fll_ref_rmrks,' '), 1, 18),
+                 to_date(fll_trd_dt,'DD-Mon-YYYY')
+          FROM   fll_fo_lmtupd_log,
+                 fnm_fo_narration_mstr
+          WHERE  fll_narration_id = fnm_narration_id
+          AND    FLL_XCHNG_CD = :c_exchange_cd              /*** Ver 1.4******/
+          /*AND    fnm_lmt_prj_flg in ('P','A','B')*Prjtn,Adjstmnt,Payin/payout ***Ver 1.5**/
+          AND    fnm_lmt_prj_flg in ('P','A','B','M')/*Prjtn,Adjstmnt,Payin/payout,MDC Payin/payout*/ /*Ver 1.5*/
+          AND    fll_clm_mtch_accnt = :c_cln_mtch_accnt
+          AND    fll_trd_dt = to_date( :c_trd_dt, 'DD-Mon-YYYY' )
+          AND    fll_grp_id = fnm_grp_id
+          AND    fll_grp_id = :i_grp_id
+          ORDER BY fll_seq_num;
+
+      END;
+      END-EXEC;
+    }
+
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg );
+    EXEC SQL CLOSE :cur_cash_trn;
+    EXEC SQL FREE :cur_cash_trn;
+    tpfree ( ( char * ) ptr_fml_Obuf );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+  
+  /***************** Ver 1.6 Ends Here ********************************/
+
+  /***  VER 1.1 FOR MEMORY REALLOCATION ***/
+  l_bufferlength  =  sizeof( st_usr_prfl.c_cln_mtch_accnt )
+                  +  sizeof( c_trd_dt.arr )
+                  +  sizeof( c_narr_desc )
+                  +  sizeof( c_xchng_cd )
+                  +  sizeof( d_amount )
+                  +  sizeof( c_remarks )
+                  +  sizeof( c_trd_rfrnc_no )   /** Ver 1.6 **/
+                  +  sizeof( c_exetrd_dt.arr )      /** Ver 1.6 **/ 
+                  +  100;
+	if (DEBUG_MSG_LVL_3)			/*** Ver 1.2 ***/ 
+	{
+  	fn_userlog( c_ServiceName, "BUFFER LENGTH IS :%ld:", l_bufferlength);
+	}          /***  VER 1.1   ***/
+
+	while(1)
+	{
+/*		i_counter++;  			VER 1.1 MEM. REALLOC. */
+		EXEC SQL
+			FETCH :cur_cash_trn
+			INTO	:d_amount,
+						:c_xchng_cd,
+            :c_narr_desc,
+						:c_remarks,
+            :c_trd_rfrnc_no,                   /** Ver 1.6 **/
+            :c_exetrd_dt;                      /** Ver 1.6 **/
+
+		if (DEBUG_MSG_LVL_3)			/*** Ver 1.2 ***/ 
+		{
+			fn_userlog( c_ServiceName, "sqlcode is :%ld:", SQLCODE );
+		}		/***  VER 1.1   ***/
+
+  	if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+    {
+      fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg );
+      /** EXEC SQL **/
+      EXEC SQL CLOSE :cur_cash_trn;       /*** Ver 1.6 ***/
+      EXEC SQL FREE :cur_cash_trn;         /*** Ver 1.6 ***/
+      tpfree ( ( char * ) ptr_fml_Obuf );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      break;
+    }
+    
+    SETNULL( c_exetrd_dt );    /** Ver 1.6 **/ 
+
+/**	rec_cnt ++;		**** Added by AA Commented by SKS	***********/
+
+		i_err[0] = Fadd32 ( ptr_fml_Obuf, FFO_PRDCT_DESC, (char *)c_narr_desc,0 );
+    i_ferr[0] = Ferror32;
+    i_err[1] = Fadd32 ( ptr_fml_Obuf, FFO_XCHNG_CD, (char *)c_xchng_cd, 0 );
+    i_ferr[1] = Ferror32;
+    i_err[2] = Fadd32 ( ptr_fml_Obuf, FFO_AMOUNT, (char *)&d_amount, 0 );
+    i_ferr[2] = Ferror32;
+    i_err[3] = Fadd32 ( ptr_fml_Obuf, FFO_REMARKS, (char *)c_remarks, 0 );
+    i_ferr[3] = Ferror32;
+    i_err[4] = Fadd32 ( ptr_fml_Obuf, FFO_TRD_DT, (char *)c_trd_dt.arr, 0 );  /** Added in ver 1.1 **/
+    i_ferr[4] = Ferror32;
+    i_err[5] = Fadd32 ( ptr_fml_Obuf, FFO_INTADJ_RFRNC, (char *)c_trd_rfrnc_no, 0);  /** Added in ver 1.6 **/
+    i_ferr[5] = Ferror32;
+    i_err[6] = Fadd32 ( ptr_fml_Obuf, FFO_RCRD_DT, (char *)c_exetrd_dt.arr, 0);  /** Added in ver 1.6 **/
+    i_ferr[6] = Ferror32;
+
+		for(i_cnt = 0; i_cnt < 7; i_cnt++)
+    {
+      if ( i_err [ i_cnt ] == -1 )
+      {
+        fn_userlog(c_ServiceName,"i_cnt : %d",i_cnt);
+        fn_errlog( c_ServiceName, "S31065", Fstrerror32 ( i_ferr[i_cnt] ),
+                     c_err_msg  );
+        /** EXEC SQL
+          CLOSE cur_cash_trn; **/
+        EXEC SQL  CLOSE :cur_cash_trn;       /*** Ver 1.6 ***/
+        EXEC SQL FREE :cur_cash_trn;         /*** Ver 1.6 ***/
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    }
+
+    /***  VER 1.1 FOR MEMORY REALLOCATION STARTS  ***/
+
+		if (DEBUG_MSG_LVL_3)			/*** Ver 1.2 ***/ 
+		{
+			fn_userlog( c_ServiceName, "PRDCT_DESC   :%s: ", c_narr_desc );
+			fn_userlog( c_ServiceName, "EXCHANGE CODE:%s: ", c_xchng_cd );
+			fn_userlog( c_ServiceName, "AMOUNT			 :%ld:", d_amount );
+			fn_userlog( c_ServiceName, "REMARKS			 :%s:	", c_remarks );
+      fn_userlog( c_ServiceName, "trade date   :%s: ", c_exetrd_dt.arr );   /*** Ver 1.6 **/
+			fn_userlog( c_ServiceName, "UNUSED SPACE :%ld:", Funused32( ptr_fml_Obuf ) );
+			fn_userlog( c_ServiceName, "SPACE NEEDED :%ld:", Fneeded32( 1, l_bufferlength ) );
+		}
+
+    if ( Funused32( ptr_fml_Obuf ) < Fneeded32( 1, l_bufferlength ) )
+    {
+      i_counter++;
+      ptr_fml_Tempbuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf,(Fsizeof32(ptr_fml_Obuf)+
+													(i_counter * MIN_FML_BUF_LEN ))); /*1.3*/
+      if ( ptr_fml_Tempbuf == NULL )
+      {
+        fn_errlog( c_ServiceName, "S31070", TPMSG, c_err_msg  );
+        /** EXEC SQL CLOSE cur_cash_trn;  **/
+        EXEC SQL  CLOSE :cur_cash_trn;       /*** Ver 1.6 ***/
+        EXEC SQL FREE :cur_cash_trn;         /*** Ver 1.6 ***/
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+      else
+      {
+        ptr_fml_Obuf = ptr_fml_Tempbuf;
+				if(DEBUG_MSG_LVL_3)			/*** Ver 1.2 ***/ 
+				{
+					fn_userlog( c_ServiceName, "COUNT IS :%ld: & BUFFER LENGTH IS :%ld:", 
+																		i_counter, i_counter * MIN_FML_BUF_LEN );
+				}
+      }
+    }
+/******************************************************************
+    ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf,
+                                     i_counter * MIN_FML_BUF_LEN );
+
+    if ( ptr_fml_Obuf == NULL )
+    {
+      fn_errlog( c_ServiceName, "S31075", TPMSG, c_err_msg  );
+      EXEC SQL
+        CLOSE cur_cash_trn; 
+      tpfree ( ( char * ) ptr_fml_Obuf );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+******************************************************************/
+		/***  VER 1.1 FOR MEMORY REALLOCATION ENDS  ***/
+
+	} /* While Loop */
+
+	/********Added in V1.1 by AA	commmented By SKS	*****
+	if ( Fadd32 ( ptr_fml_Obuf, FFO_SUB_BUF_CNT, (char *)&rec_cnt, 0 ) == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31080", FMLMSG, c_err_msg  );
+		EXEC SQL
+			CLOSE cur_cash_trn;
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+	ret_val = 0;
+	if ( Fadd32 ( ptr_fml_Obuf, FFO_ACTN_ID, (char *)&ret_val, 0 ) == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31085", FMLMSG, c_err_msg  );
+		EXEC SQL
+			CLOSE cur_cash_trn;
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+	********Added in V1.1 by AA  commmented By SKS *************/
+
+  /** EXEC SQL CLOSE cur_cash_trn; **/
+  
+  EXEC SQL  CLOSE :cur_cash_trn;       /*** Ver 1.6 ***/
+  EXEC SQL FREE :cur_cash_trn;         /*** Ver 1.6 ***/
+	tpreturn( TPSUCCESS, 0, (char *)ptr_fml_Obuf, 0, 0 );
+	
+}
+

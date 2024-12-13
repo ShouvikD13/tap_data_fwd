@@ -1,0 +1,2508 @@
+/******************************************************************************/
+/*  Program           : BAT_FO_APPLY_BHAV                                     */
+/*                                                                            */
+/*  Output            : Success / Failure                                     */
+/*                                                                            */
+/*  Description       : Apply bhavcopy for auto enablement/disablement of     */
+/*                      contracts on the basis of Open interest and no. of    */
+/*                      contrcts                                              */
+/*                                                                            */
+/*  Log               :                                                       */
+/*                                                                            */
+/******************************************************************************/
+/*  29-Jan-2009     Ver 1.0  Shailesh Hinge  Release 1.0                	    */
+/*  31-Jan-2009     Ver 1.1  Shailesh Hinge  Strike Price long to double	    */
+/*  12-Mar-2009     Ver 1.2  Shailesh Hinge  CRCSN274730								  		*/
+/*  																				 Provision for online data				*/
+/*  07-Apr-2009     Ver 1.3  Shailesh Hinge  Bug Fix of typecasting and	change*/ 
+/*																					 the logic of enable/disable			*/
+/*  13-Apr-2009     Ver 1.4  Prakash/Shailesh CRCSN27074                      */
+/*                                            Run no addition for Report      */
+/*  16-Apr-2009     Ver 1.5  Prakash/Shailesh CRCSN29820 online enblement     */
+/*                                            on the basis of LTP timestamp   */
+/*  21-Jul-2010     Ver 1.6  Shailesh CRCON36561 Updation of Closing OI				*/
+/*  19-Aug-2010     Ver 1.7  Shailesh Handling Multiple mapping in SEM        */
+/*  18-Jan-2012     Ver 1.8  Sachin Birje  FNO BSE Changes                    */
+/*  28-Jun-2012     Ver 1.9  Sachin Birje Bug Fixing                          */                
+/*  01-Sep-2014     Ver 2.2  Sachin Birje     View to FML Changes             */
+/*  22-Dec-2014     Ver 2.1  Deepali Kasabale Insert for Options Top20 MIS    */
+/*  03-Mar-2015     Ver 2.3  Deepali Kasabale Validations for exchange NFO    */
+/*  19-Jun-2015     Ver 2.5  Ritesh Contract Master & Trade Quote merger 			*/
+/* 																	Changes 																	*/
+/*  26-Jun-2014			Ver 2.6  Shailesh Sabale Changes for Option contract			*/ 
+/*																					 enablement/disablement           */
+/*  26-Sep-2017     Ver 2.7  Anand Dhopte    Disable expired contracts        */ 
+/*  25-Apr-2018     Ver 2.8  Anand Dhopte    Check added to find mismatch in  */
+/*                                           count of records in file and     */
+/*                                           records processed                */     
+/*  27-Mar-2018     Ver 2.9  Tanmay Patel    Changes in contract Enable-      */
+/*                                           Disable.                         */
+/*  21-Aug-2018     Ver 3.0  Parag Kanojia   Error Handling and reporting in  */
+/*                                           case of incomplete file          */
+/*                                           processing                       */
+/*  31-Oct-2018     Ver 3.1  Prachi Bile     SQL Loader												*/
+/*  12-Nov-2019     Ver 3.2  Suchita D.      Rollover with spread             */
+/*  07-Mar-2022     Ver 3.3  Suchita D.      CR-ISEC14-163069 changes         */
+/*  13-Jan-2023     Ver 3.4  Roshni Pawar    CR-ISEC14-182549 Enablement of   */ 
+/*                                           long dated expiry contracts in   */  
+/*                                           F&O                              */
+/******************************************************************************/
+#include <stdio.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+/** #include <fo_view_def.h> ** Ver 2.2 ***/
+#include <fo_view_def.h> /** Ver 2.2 **/
+#include <eba_to_ors.h>
+#include <fn_ddr.h>
+#include <errno.h>
+#include <string.h>
+#include <time.h>
+#include <stdlib.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_env.h>             /** Ver 3.1 **/
+
+#define BHAVCOPY_UPLOAD 'B'
+#define ONLINE_BROADCAST 'O'
+#define BAT_TRAN_LOCAL 2000  /* 1.1*/
+#define MAX_LENGTH  1000      /** Ver 3.1 **/
+#define EQ_CONTRACT "EQ_CONTRACT.ini"   /** Ver 3.1 **/
+
+/*** Ver 3.1 starts ***/
+char    c_ServiceName[33];
+int     fn_read_db_para_ini(void );
+int     i_ret = 0;
+char    c_oracle_uid[50];
+char    c_oracle_pwd[50];
+char    c_err_skip[8];
+/**** Ver 3.1 ends ***/
+
+int fn_cntrct_enbl_dsbl(char *c_ServiceName,
+                        struct vw_contract *ptr_cntrct_details,
+                        double  d_open_interest,
+                        double  d_volume,
+												char    *c_time,
+												char    *c_frm_dt,
+												char    *c_to_dt,
+                        long l_runno,                          /* run no added in Ver 1.4 */
+                        struct vw_err_msg *ptr_st_err_msg);
+
+void BAT_FO_APPLY_BHAV( int argc, char *argv[] )
+{
+  /* char	c_ServiceName[33]; Ver 3.1 commented and taken up as global variable */
+	char c_msg[256];
+  char c_err_msg[256];
+
+  char	c_run_mode;					/*Ver 1.2 */
+  char c_command1[100];     /* ver 2.1 */ 
+
+  /********** Ver 3.1 starts here **********/
+	char  	c_loader_upl[MAX_LENGTH];
+	char    c_ora_upl[100];
+  char    c_ctl_file_nm[100];
+  char    c_bad_file_nm[100];
+  char    c_log_file_nm[100];
+  /********** Ver 3.1 ends here ************/
+
+  /**File handling variables **/
+	FILE *ptr_bhavcopy_file;
+  char c_file_name[256];
+  char c_data[1024+1];
+  /*** char c_temp_data[1024+1];    **** Ver 1.8 *** *** Commented in Ver 1.9 ***/
+  char *c_temp_data;             /*** Ver 1.9 ****/
+  char c_o_data[1024+1];
+  char *ptr_c_tmp;
+  char *null_ptr = 0;           /**** Ver 1.8 ***/
+  
+  /*** Ver 1.8 starts ****/
+  char c_strike_prc[30];
+  char c_opn_prc[30];
+  char c_high_prc[30];
+  char c_low_prc[30];
+  char c_close_prc[30];
+  char c_wt_avg_price[30];
+  char c_prem_disc[30];
+  char c_prem_disc_prcnt[30];
+  char c_volume[30];
+  char c_val[30];
+  char c_open_interest[30];
+  char c_chng_in_oi[30];
+  char c_prcnt_chng_in_oi[30];
+  char c_cost_carry_prcnt_pa[30];
+  char c_margin_prcnt[30];
+  char c_margin_value[30];
+  /*** Ver 1.8 Ends *****/
+
+  /*** Ver 2.8 Starts ***/
+ 
+  char c_cmd[100];        
+  char c_ts_command[100]; 
+  char c_ts[21];          
+  long l_c_ts = 0;
+  long l_counter = 0; 
+  FILE *pf;              
+
+  /*** Ver 2.8 Ends ***/
+
+EXEC SQL BEGIN DECLARE SECTION;
+	char c_xchng_cd[3+1];
+  char c_instrument[6+1];
+  char c_symbol[20+1];
+  char c_expry_dt[11+1];
+  char c_last_trade_dt[11+1];  /*** Ver 1.8 ***/
+  char c_contrct_trd_dt[11+1]; /*** Ver 1.8 ***/
+  char c_scrip_cd[20+1];       /*** Ver 1.8 ***/
+  char c_bse_ex_opt_typ[4+1];      /*** Ver 1.8 ***/
+  long l_strike_prc;
+  double d_strike_prc;    /*Ver 1.1 */
+  char c_ex_opt_typ[2+1];
+  double d_opn_prc;
+  double d_high_prc;
+  double d_low_prc;
+  double d_close_prc;
+  double d_stlmnt_prc;
+  double d_volume;
+  double d_val;
+  double d_open_interest;
+  double d_chng_in_oi;
+  /***** Ver 1.8 *****/
+  double  d_wt_avg_price;
+  double  d_prem_disc;
+  double  d_prem_disc_prcnt;
+  double  d_prcnt_chng_in_oi;
+  double  d_cost_carry_prcnt_pa;
+  double  d_margin_prcnt;
+  double  d_margin_value;
+  /*** Ver 1.8 Ends ***/ 
+  char c_time_stamp[20+1];
+
+  char c_stck_cd[6+1];
+  char c_prdct_typ;
+  char c_indstk_typ;
+  char c_exer_typ;
+  char c_opt_typ;
+  char c_apply_flg;
+  char c_remarks[200];
+  char c_traded_flag[2];  /*** Ver 1.8 ***/
+  char c_traded_flg;      /*** Ver 1.8 ***/
+    
+  double d_fum_open_interest;
+  double d_fum_volume;
+  char c_qt_trdng_flg;
+  char c_fcm_qt_trdng_flg;
+  char c_time[20+1];
+	char c_from_dt[11+1]; 		/*Ver 1.2*/
+	char c_to_dt[11+1]; 			/*Ver 1.2*/
+  char c_to_dt_tmp[11+1];   /* Ver 3.4 */
+	char c_tmp_date[8+1];    /** Ver 3.1 **/
+	char c_max_dt[11+1]="\0";		 /** Ver 3.1 **//** initialised in ver 3.3 ***/
+  char c_tmp_mail_date[20] = "\0"; /*** Ver 3.2 ***/
+
+	struct vw_contract st_cntrct_details;		/*Ver 1.2 */
+	struct vw_err_msg st_err_msg;						/*Ver 1.2 */
+
+	int i_date_check; 				/*Ver 1.2 */
+  int i_longdate_check = 0;     /* Ver 3.4 */
+  long l_run_no;            /* Ver 1.4 */
+
+  varchar c_valid_dt [12];    /*** Added In Ver 2.7	***/
+ 
+ EXEC SQL END DECLARE SECTION;
+
+  int i_ch_val;
+  int i;
+  int i_len;
+  int i_trnsctn;
+
+	strcpy(c_ServiceName, argv[0]);
+  strcpy(c_xchng_cd, argv[2]);
+
+  strcpy(c_from_dt, argv[4]);
+  strcpy(c_to_dt, argv[5]);
+
+	c_run_mode = argv[6][0];
+  l_run_no = atol(argv[7]);  /* Ver 1.4 */
+
+  fn_userlog( c_ServiceName, "Run NO. :%ld:", l_run_no );
+/**Initiate Debug Level **/
+  INITBATDBGLVL(argv[0]);
+
+	if(c_run_mode == BHAVCOPY_UPLOAD )
+	{
+		if (argc != 10)          /* incremented by 1 in Ver 1.4 */
+		{
+			fn_userlog("bat_fo_apply_bhav",
+				"Usage - %s <configuration file> <Exchange code> <pipe_id> <From Date(dd-mon-yyyy)> <To Date(dd-mon-yyyy)> <Run Mode(B/O)> <RUN NO> <Date(yyyymmdd)> <fileName>",argv[0]);
+			fn_bat_pst_msg ( "bat_fo_apply_bhav", "Invalid number of arguments", c_tag );
+			return ;
+		}
+	}
+	else if (c_run_mode == ONLINE_BROADCAST)
+			 {
+					if (argc != 8)     /* incremented by 1 in Ver 1.4 */
+					{
+						fn_userlog("bat_fo_apply_bhav",
+							"Usage - %s <configuration file> <Exchange code> <pipe_id> <From Date(dd-mon-yyyy)> <To Date(dd-mon-yyyy)> <Run Mode(B/O)> <RUN NO> ",argv[0]);
+						fn_bat_pst_msg ( "bat_fo_apply_bhav", "Invalid number of arguments", c_tag );
+						return ;
+					}
+				}
+  fn_userlog( c_ServiceName, "Run NO. :%ld:", l_run_no );    /* Ver 1.4 */
+
+		MEMSET(c_time);
+
+		EXEC SQL
+		SELECT to_char(SYSDATE,'DD-MON-YYYY HH24:MI:SS')
+		INTO :c_time
+		FROM DUAL;
+		if (SQLCODE != 0)
+		{
+			fn_errlog(c_ServiceName, "S31005", SQLMSG, c_err_msg);
+			fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+			return;
+		}
+
+	/****** Ver 3.1 added ****/
+
+  EXEC SQL
+    TRUNCATE TABLE BHAVCOPY_TMP;
+
+  if ( SQLCODE != 0 )
+  {
+     tpabort(0);
+     fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_msg);
+     fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+     fclose(ptr_bhavcopy_file);
+     return;
+  }
+
+	fn_userlog(c_ServiceName,"After truncate from BHAVCOPY_TMP" ); 
+
+  /****** Ver 3.1 ended ****/
+
+  i_trnsctn = tpbegin(BAT_TRAN_LOCAL,0);  /*Ver 1.2*/
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31015",LIBMSG,c_err_msg);
+    return;
+  }
+
+	if( c_run_mode == BHAVCOPY_UPLOAD )
+	{
+			ptr_c_tmp = (char*)getenv("EBALOG_PATH");
+
+			if (ptr_c_tmp == NULL)
+			{
+				tpabort(0);
+				fn_errlog(c_ServiceName, "S31020", UNXMSG, c_err_msg);
+				fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+				return;
+			}
+
+			/*** Open file pointer for bhav copy file ***/
+			fn_userlog( c_ServiceName, "Batch process %s started for %s ", argv[0],c_xchng_cd ); /** Ver 1.8 **/
+      
+			sprintf(c_file_name, "%s/%s/fno/%s", ptr_c_tmp, argv[8],argv[9]);
+
+       fn_userlog(c_ServiceName," c_file_name :%s:",c_file_name);
+			ptr_bhavcopy_file = fopen(c_file_name, "r");
+
+			if ( ptr_bhavcopy_file == NULL )
+			{
+				tpabort(0);
+				fn_errlog(c_ServiceName, "S31025", UNXMSG, c_err_msg);
+				fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+				return;
+			}
+
+			sprintf ( c_msg, "Batch process %s started", argv[0] );
+ 
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+			fn_bat_pst_msg ( c_ServiceName, "Applying BhavCopy details....", c_tag );
+
+			/**Fetch and ignore first header  record **/
+			fgets(c_data, 1024, ptr_bhavcopy_file);
+			if ( c_data == NULL)
+			{
+				tpabort(0);
+				fn_errlog(c_ServiceName, "S31030", UNXMSG, c_err_msg);
+				fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+				return;
+			}
+
+      /* Ver 1.5 Starts */
+      if( DEBUG_MSG_LVL_3 ) {
+				fn_userlog(c_ServiceName,"Before disabling all contracts in FCM" );
+      }
+
+			/*** Commented in Ver 2.5 ***	
+
+      EXEC SQL
+         UPDATE FCM_FO_CNTRCT_MSTR
+         SET    FCM_QT_TRDNG_FLG = 'Q'
+  			 WHERE  FCM_EXPRY_DT
+  			 BETWEEN to_date(:c_from_dt,'dd-Mon-yyyy') AND to_date(:c_to_dt,'dd-Mon-yyyy')
+         AND    FCM_XCHNG_CD  = :c_xchng_cd;  *** Ver 1.8 ****
+
+			if ( SQLCODE != 0)
+			{
+				tpabort(0);
+				fn_errlog(c_ServiceName, "S31035", SQLMSG, c_err_msg);
+				fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+				return;
+			}
+
+			*** Ver 2.5 Comment Ends ***/	
+      /***  Ver 2.9 Starts ***/
+
+      EXEC SQL
+      INSERT INTO FBL_FO_BHAVCP_LOG
+      (
+       FBL_XCHNG_CD,
+       FBL_PRDCT_TYP,
+       FBL_INDSTK,
+       FBL_UNDRLYNG,
+       FBL_EXPRY_DT,
+       FBL_EXER_TYP,
+       FBL_OPT_TYP,
+       FBL_STRK_PRC,
+       FBL_OPEN_INTREST,
+       FBL_VOLUME,
+       FBL_REMARKS,
+       FBL_TIME,
+       FBL_ENBL_DSBL_FLG,
+       FBL_RUN_MODE,
+       FBL_RUN_NO,
+       FBL_PRV_TRDNG_FLG,
+       FBL_MODIFY_TIME,
+       FBL_MODIFY_BY
+      )
+     SELECT FTQ_XCHNG_CD,
+            FTQ_PRDCT_TYP,
+            FTQ_INDSTK,
+            FTQ_UNDRLYNG,
+            FTQ_EXPRY_DT,
+            FTQ_EXER_TYP,
+            FTQ_OPT_TYP,
+            FTQ_STRK_PRC,
+            NVL(FTQ_CRNT_OI,0),
+            NVL(FTQ_TOT_QTY_TRDD,0),
+            'Contract disabled',
+            SYSDATE,
+            'Q',
+            'B',
+            :l_run_no,
+            FTQ_QT_TRDNG_FLG,
+            SYSDATE,
+            'System-EOD BHAV COPY'
+     FROM   FTQ_FO_TRD_QT
+     WHERE  FTQ_QT_TRDNG_FLG = 'T'
+     AND    FTQ_XCHNG_CD  = :c_xchng_cd;
+
+     if ( SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+     {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31040", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        return;
+     }
+     /*** Ver 2.9 Ends ***/
+      /***  Ver 2.5 Starts  ***/
+
+      EXEC SQL
+         UPDATE FTQ_FO_TRD_QT
+         SET    FTQ_QT_TRDNG_FLG = 'Q'
+    /***     WHERE  FTQ_EXPRY_DT
+         BETWEEN to_date(:c_from_dt,'dd-Mon-yyyy') AND to_date(:c_to_dt,'dd-Mon-yyyy')   **** commented in ver 2.9 ***/
+         WHERE  FTQ_QT_TRDNG_FLG = 'T'       /*** Ver 2.9 ***/
+         AND    FTQ_XCHNG_CD  = :c_xchng_cd;
+
+      if ( SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )   /*** Ver 2.9, NO_DATA_FOUND added ***/
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31045", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        return;
+      }
+      /***  Ver 2.5 Ends  ***/
+
+      if( DEBUG_MSG_LVL_3 ) {
+				fn_userlog(c_ServiceName,"After disabling all contracts in FCM" );
+      }
+      /* Ver 1.5 Ends */
+
+     /********* ver 3.3 starts ****/
+
+      EXEC SQL
+         UPDATE FTQ_FO_TRD_QT
+         SET    FTQ_MRKT_ORDR_FLG  = 'Y'
+         WHERE  FTQ_PRDCT_TYP =  'O'
+         AND    FTQ_XCHNG_CD  = :c_xchng_cd;
+
+      if ( SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND ) 
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31050", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        return;
+      }
+
+      if( DEBUG_MSG_LVL_3 ) {
+        fn_userlog(c_ServiceName,"After setting all FTQ_MRKT_ORDR_FLG to Y" );
+      }
+
+     /********* ver 3.3 ends  *****/
+     if( strcmp(c_xchng_cd,"NFO") == 0 )  /*** Ver 1.8, IF condition added ***/ 
+     {
+
+      l_counter = 0; /* Ver 2.8 */
+
+			/********************* Ver 3.1 Comments starts **************************************
+
+      fn_userlog(c_ServiceName," Inside Bhav copy reading for NFO "); ** Ver 1.8 **
+			while( feof(ptr_bhavcopy_file) == 0 )
+			{
+				*** Check for triggers ***
+
+				fn_chk_stts(c_ServiceName);
+
+				MEMSET(st_cntrct_details);
+
+				MEMSET(c_instrument);
+				MEMSET(c_symbol);
+				MEMSET(c_expry_dt);
+				MEMSET(c_time_stamp);
+				MEMSET(c_ex_opt_typ);
+				MEMSET(c_data);
+				MEMSET(c_stck_cd);
+				MEMSET(c_remarks);
+
+				l_strike_prc = 0;
+				d_strike_prc = 0;     *Ver 1.1 *
+				d_opn_prc = 0;
+				d_high_prc = 0;
+				d_low_prc = 0;
+				d_close_prc = 0;
+				d_stlmnt_prc = 0;
+				d_volume  = 0;
+				d_val = 0;
+				d_open_interest = 0;
+				d_chng_in_oi  = 0;
+
+				c_apply_flg = 'N';
+
+				fgets(c_data, 1024, ptr_bhavcopy_file);
+				if ( c_data == NULL)
+				{
+					tpabort(0);
+					fn_errlog(c_ServiceName, "S31055", UNXMSG, c_err_msg);
+					fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+					return;
+				}
+
+				*** Ver 3.0 Starts ***
+        if(errno !=0)
+        {
+          fn_userlog(c_ServiceName , "Error errno is :%d:" ,errno );
+          tpabort(0);
+          fn_errlog( c_ServiceName , "S31060", UNXMSG , c_err_msg );
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          fclose(ptr_bhavcopy_file);
+
+          MEMSET(c_ts_command);
+          MEMSET(c_ts);
+          l_c_ts = 0;
+          sprintf(c_ts_command,"cat %s | wc -l ",c_file_name);
+
+          fn_userlog(c_ServiceName,"c_ts_command :%s:",c_ts_command);
+
+          pf = popen(c_ts_command,"r");
+          if ( pf == NULL )
+          {
+            fn_errlog(c_ServiceName, "S31065", UNXMSG, c_err_msg);
+            fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          }
+
+          fgets(c_ts,20,pf);
+          if ( c_ts == NULL)
+          {
+            fn_errlog(c_ServiceName, "S31070", UNXMSG, c_err_msg);
+            fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          }
+
+          fn_userlog(c_ServiceName,"c_ts :%s:",c_ts);
+
+          l_c_ts = atol(c_ts);
+
+          fn_userlog(c_ServiceName,"l_c_ts :%ld:",l_c_ts);
+          fn_userlog(c_ServiceName,"Actual Record Count :%ld:",l_c_ts-1);
+
+          pclose(pf);
+
+          MEMSET(c_cmd);
+          sprintf(c_cmd,"ksh $HOME/sh_scripts/fo_chk_bhav_copy_file.sh 0 %ld %s",l_c_ts-1,c_xchng_cd );
+          system(c_cmd);
+          return;
+        }
+        *** Ver 3.0 Ends ***
+
+				if( feof(ptr_bhavcopy_file) != 0)
+				{
+					fn_userlog(c_ServiceName , "Error errno inside break is :%d:" ,errno ); *** Added in Ver 3.0 ***
+					break;
+				}
+        
+        l_counter++; * Ver 2.8 *
+
+				i_len = strlen(c_data);
+
+				for (i=0; i < i_len;i++)
+				{
+					if(c_data[i] == ',')
+					{
+						c_o_data[i]= ' ';
+					}
+					else
+					{
+						c_o_data[i]= c_data[i];
+					}
+				}
+
+        c_o_data[i] = '\0'; 
+
+				sscanf(c_o_data,"%s %s %s %lf %s %lf %lf %lf %lf %lf %lf %lf %lf %lf %s",
+											 c_instrument,
+											 c_symbol,
+											 c_expry_dt,
+											 *&l_strike_prc,*
+											 &d_strike_prc,     *Ver 1.1 *
+											 c_ex_opt_typ,
+											 &d_opn_prc,
+											 &d_high_prc,
+											 &d_low_prc,
+											 &d_close_prc,
+											 &d_stlmnt_prc,
+											 &d_volume,
+											 &d_val,
+											 &d_open_interest,
+											 &d_chng_in_oi,
+											 c_time_stamp);
+
+
+				**Convert strike price into paise **
+				*l_strike_prc = l_strike_prc * 100;*
+
+				**Commented for Ver 1.3 
+				l_strike_prc = (long) (d_strike_prc * 100);     Ver 1.1 *
+
+			**Ver 1.3 starts **
+
+				EXEC SQL
+				SELECT :d_strike_prc*100
+				INTO   :l_strike_prc
+				FROM DUAL;
+				if ( SQLCODE != 0 ) 
+      	{
+					tpabort(0);
+					fn_errlog(c_ServiceName, "S31075", SQLMSG, c_err_msg);
+					fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+					fclose(ptr_bhavcopy_file);
+					return;
+				}
+
+			**Ver 1.3 ends **
+
+				if( DEBUG_MSG_LVL_3 ) {
+					fn_userlog(c_ServiceName,"c_instrument:%s:",c_instrument);
+					fn_userlog(c_ServiceName,"c_symbol:%s:",c_symbol);
+					fn_userlog(c_ServiceName,"c_expry_dt:%s:",c_expry_dt);
+					fn_userlog(c_ServiceName,"d_strike_prc:%lf:",d_strike_prc);
+					fn_userlog(c_ServiceName,"l_strike_prc:%ld:",l_strike_prc);
+					fn_userlog(c_ServiceName,"c_ex_opt_typ:%s:",c_ex_opt_typ);
+					fn_userlog(c_ServiceName,"d_opn_prc:%lf:",d_opn_prc);
+					fn_userlog(c_ServiceName,"d_high_prc:%lf:",d_high_prc);
+					fn_userlog(c_ServiceName,"d_low_prc:%lf:",d_low_prc);
+					fn_userlog(c_ServiceName,"d_close_prc:%lf:",d_close_prc);
+					fn_userlog(c_ServiceName,"d_stlmnt_prc:%lf:",d_stlmnt_prc);
+					fn_userlog(c_ServiceName,"d_volume:%lf:",d_volume);
+					fn_userlog(c_ServiceName,"d_val:%lf:",d_val);
+					fn_userlog(c_ServiceName,"d_open_interest:%lf:",d_open_interest);
+					fn_userlog(c_ServiceName,"d_chng_in_oi:%lf:",d_chng_in_oi);
+					fn_userlog(c_ServiceName,"c_time_stamp:%s:",c_time_stamp);
+					fn_userlog(c_ServiceName,"c_time:%s:",c_time);
+				}
+
+        *** start of ver 2.1  (insert into bhav_tmp for options Top20 MIS ******
+
+
+                            EXEC SQL
+                              INSERT INTO BHAV_TMP
+                                (
+                                        INSTUMENT,
+                                        SYMBOL,
+                                        EXPIRY_DT,
+                                        STRIKE_PR,
+                                        OPTION_TYP,
+                                        OPEN,
+                                        HIGH,
+                                        LOW,
+                                        CLOSE,
+                                        SETTLE_PR,
+                                        CONTRACTS,
+                                        VAL_INLAKH,
+                                        OPEN_INT,
+                                        CHG_IN_OI,
+                                        TIMESTAMP
+                                )
+                                values
+                                (
+                                      :c_instrument,
+                                      :c_symbol,
+                                      :c_expry_dt,
+                                      :d_strike_prc,
+                                      :c_ex_opt_typ,
+                                      :d_opn_prc,
+                                      :d_high_prc,
+                                      :d_low_prc,
+                                      :d_close_prc,
+                                      :d_stlmnt_prc,
+                                      :d_volume,
+                                      :d_val,
+                                      :d_open_interest,
+                                      :d_chng_in_oi,
+                                      :c_time_stamp
+                                );
+          if ( SQLCODE != 0 )
+          {
+              tpabort(0);
+              fn_errlog(c_ServiceName, "S31080", SQLMSG, c_err_msg);
+          }
+
+
+          ***  end of ver 2.1 ******
+
+				** c_instrument  :FUTSTK **
+				** c_prdct_typ   :F      **
+				** c_indstk_typ  :S      **
+
+				c_prdct_typ   = c_instrument[0];
+				c_indstk_typ  = c_instrument[3];
+
+				** c_ex_opt_typ:CE **
+				** c_opt_typ   :C  **
+				** c_exer_typ  :E  **
+
+				c_opt_typ   = c_ex_opt_typ[0];
+				c_exer_typ  = c_ex_opt_typ[1];
+
+				if(c_prdct_typ == 'F')
+				{
+					c_exer_typ  = 'E';
+					c_opt_typ   = '*';
+				}
+
+				EXEC SQL
+				SELECT rtrim(SEM_STCK_CD)
+				INTO :c_stck_cd
+				FROM SEM_STCK_MAP
+				WHERE trim(SEM_MAP_VL)= :c_symbol			***	Ver	1.7	***
+				AND SEM_ENTTY = 3;           ** Sem entity is 1 for NSE **			***	Ver	1.7	SEM_ENTTY Changed From 1 To 3	***
+
+				if (SQLCODE !=0 && SQLCODE != NO_DATA_FOUND)
+				{
+					tpabort(0);
+					fn_errlog(c_ServiceName, "S31085", SQLMSG, c_err_msg);
+					fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+					fclose(ptr_bhavcopy_file);
+					return;
+				}
+
+				if(SQLCODE == NO_DATA_FOUND )
+				{
+					sprintf(c_msg,"Apply BhavCopy is failed for:%s: as SEM Mapping not Present",c_symbol);
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+					continue;
+				}	
+
+				rtrim(c_stck_cd);
+
+				if( DEBUG_MSG_LVL_3 ) {
+				fn_userlog(c_ServiceName,"c_stck_cd:%s:",c_stck_cd);
+				fn_userlog(c_ServiceName,"c_prdct_typ:%c:",c_prdct_typ);
+				fn_userlog(c_ServiceName,"c_indstk_typ:%c:",c_indstk_typ);
+				fn_userlog(c_ServiceName,"c_exer_typ:%c:",c_exer_typ);
+				fn_userlog(c_ServiceName,"c_opt_typ:%c:",c_opt_typ);
+				fn_userlog(c_ServiceName,"c_expry_dt:%s:",c_expry_dt);
+				fn_userlog(c_ServiceName,"c_from_dt:%s:",c_from_dt);
+				fn_userlog(c_ServiceName,"c_to_dt:%s:",c_to_dt);
+				}
+			
+				**Fill the structure contract details**
+
+				strcpy( st_cntrct_details.c_xchng_cd,c_xchng_cd);
+				st_cntrct_details.c_prd_typ	= c_prdct_typ;
+				st_cntrct_details.c_ctgry_indstk	= c_indstk_typ;
+				strcpy(st_cntrct_details.c_undrlyng,c_stck_cd);
+				strcpy(st_cntrct_details.c_expry_dt,c_expry_dt);
+				st_cntrct_details.c_exrc_typ	= c_exer_typ;
+				st_cntrct_details.c_opt_typ		= c_opt_typ;
+				st_cntrct_details.l_strike_prc = l_strike_prc;
+				st_cntrct_details.c_rqst_typ = BHAVCOPY_UPLOAD;
+
+
+				**Ver 1.2 ,Call function for enabling or disabling of contract **
+				i_ch_val =	fn_cntrct_enbl_dsbl(c_ServiceName,
+                                        &st_cntrct_details,
+																				d_open_interest,
+																				d_volume,
+																				* c_time,                 commented in Ver 1.4
+                                           As per report requirement we are now storing contract date from file in bhavcopy
+                                           log in place of previous sysdate *
+																				c_time_stamp,                        * Ver 1.4 *
+																				c_from_dt,
+																				c_to_dt,
+                                        l_run_no,            * run no added in Ver 1.4 *
+																				&st_err_msg);
+			 if(i_ch_val == -1)
+			 {
+					tpabort(0);
+					fn_errlog(c_ServiceName, "S31090", LIBMSG, st_err_msg.c_err_msg);
+					fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+					fclose(ptr_bhavcopy_file);
+					return;
+			 }
+			}
+
+			**************************** Ver 3.1 comments ends here *******************************/
+
+      /***************************************** Ver 3.1 started ******************************************/
+
+      /*********************************************************************/
+      /* SQLLoader Code 1. Inserting data from external file to BHAVCOPY_TMP */
+      /*********************************************************************/
+
+      FILE    *fp_ctl_upl;
+			MEMSET(c_loader_upl);   
+      MEMSET(c_ctl_file_nm);
+
+      EXEC SQL
+        SELECT to_char(sysdate,'yyyymmdd')
+        INTO :c_tmp_date
+        from dual;
+
+      rtrim(c_tmp_date);
+
+      sprintf(c_ctl_file_nm,"%s/%s/fno/bhavcopy_%s.ctl",tuxgetenv("EBALOG_PATH"),argv[8],c_tmp_date);
+      sprintf(c_bad_file_nm,"%s/%s/fno/bhavcopy_%s.bad",tuxgetenv("EBALOG_PATH"),argv[8],c_tmp_date);
+      sprintf(c_log_file_nm,"%s/%s/fno/bhavcopy_%s.log",tuxgetenv("EBALOG_PATH"),argv[8],c_tmp_date);
+
+      fp_ctl_upl=fopen(c_ctl_file_nm,"w");
+
+      fprintf(fp_ctl_upl," LOAD DATA\n \
+INFILE \"%s\"\n \
+BADFILE \"%s\"\n \
+INSERT INTO TABLE BHAVCOPY_TMP\n \
+FIELDS TERMINATED by ',' OPTIONALLY ENCLOSED BY '\"'\n \
+(INSTUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,OPEN_INT,CHG_IN_OI,TIMESTAMP)\n",c_file_name,c_bad_file_nm);
+
+      fclose( fp_ctl_upl );
+
+      if(fn_read_db_para_ini() == -1)
+      {
+        fn_userlog(c_ServiceName,"Unable to read data from ini file.");
+        errlog(c_ServiceName, "S31095", TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+        return ;
+      }
+
+      MEMSET(c_ora_upl);
+      strcpy(c_ora_upl,tuxgetenv("ORACLE_HOME"));
+
+			fn_userlog(c_ServiceName,"*******c_ora_upl : |%s|********",c_ora_upl);
+
+			fn_userlog(c_ServiceName,"*******c_ctl_file_nm : |%s|********",c_ctl_file_nm);
+		
+			fn_userlog(c_ServiceName,"*******c_log_file_nm : |%s|********",c_log_file_nm);
+	
+			fn_userlog(c_ServiceName,"*******c_err_skip : |%s|********",c_err_skip);
+
+
+      sprintf(c_loader_upl,"%s/bin/sqlldr userid=%s/%s control=%s log=%s skip=1 errors=%s",c_ora_upl,c_oracle_uid,c_oracle_pwd,c_ctl_file_nm,c_log_file_nm,c_err_skip);
+	
+			fn_userlog(c_ServiceName,"Size of c_loader_upl : |%d|******",strlen(c_loader_upl));
+
+      fn_userlog(c_ServiceName,"sql*Loader command is |%s|",c_loader_upl); 
+
+      i_ret = system(c_loader_upl);
+
+			fn_userlog(c_ServiceName,"************ on system fail returns |%d| ************", i_ret); 
+
+      if (i_ret != 0)
+      {
+        fn_userlog( c_ServiceName,"Error in sqlldr command execution" );
+        return ;
+      }
+
+      fn_userlog(c_ServiceName,"sqlldr command done.....");
+      fn_userlog(c_ServiceName,"Records inserted into BHAVCOPY_TMP table from file ...");
+
+      fn_userlog(c_ServiceName,"Before inserting into BHAV_TMP" );
+
+      EXEC SQL
+        INSERT INTO BHAV_TMP 
+					(
+						INSTUMENT,
+						SYMBOL,
+						EXPIRY_DT,
+						STRIKE_PR,
+						OPTION_TYP,
+						OPEN,
+						HIGH,
+						LOW,
+						CLOSE,
+						SETTLE_PR,
+						CONTRACTS,
+						VAL_INLAKH,
+						OPEN_INT,
+						CHG_IN_OI,
+						TIMESTAMP
+					)
+					SELECT 
+						INSTUMENT,
+            SYMBOL,
+            EXPIRY_DT,
+            STRIKE_PR*100,
+            OPTION_TYP,
+            OPEN,
+            HIGH,
+            LOW,
+            CLOSE,
+            SETTLE_PR,
+            CONTRACTS,
+            VAL_INLAKH,
+            OPEN_INT,
+            CHG_IN_OI,
+            TIMESTAMP	
+					FROM BHAVCOPY_TMP;
+
+      if ( SQLCODE != 0)
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31100", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        return;
+      }
+
+      fn_userlog(c_ServiceName,"After inserting into BHAV_TMP" );
+
+			EXEC SQL
+				UPDATE BHAVCOPY_TMP 
+				SET STRIKE_PR = STRIKE_PR*100;
+				
+			if ( SQLCODE != 0)
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31105", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        return;
+      }
+
+			EXEC SQL
+				SELECT max(TIMESTAMP)
+				INTO   :c_max_dt
+				FROM   BHAVCOPY_TMP;
+	
+      if ( SQLCODE != 0 )
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31110", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        fclose(ptr_bhavcopy_file);
+        return;
+      }
+
+      EXEC SQL
+        SELECT COUNT(1)
+        INTO :l_counter
+        FROM  BHAV_TMP
+        WHERE TIMESTAMP = :c_max_dt;
+
+      if ( SQLCODE != 0 )
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31115", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        fclose(ptr_bhavcopy_file);
+        return;
+      }
+
+			fn_userlog(c_ServiceName,"Before Update open interest");
+
+      EXEC SQL
+        UPDATE FTQ_FO_TRD_QT
+        SET FTQ_CRNT_OI =
+        (
+          SELECT OPEN_INT
+          FROM BHAVCOPY_TMP, SEM_STCK_MAP
+          WHERE FTQ_XCHNG_CD = 'NFO'
+          AND FTQ_PRDCT_TYP  = substr(INSTUMENT,1,1)
+          AND FTQ_INDSTK     = substr(INSTUMENT,4,1)
+          AND FTQ_UNDRLYNG   = SEM_STCK_CD
+          AND FTQ_EXPRY_DT   = EXPIRY_DT
+          AND FTQ_EXER_TYP   = decode(OPTION_TYP,'XX','E',substr(OPTION_TYP,2,1))
+          AND FTQ_OPT_TYP    = decode(OPTION_TYP,'XX','*',substr(OPTION_TYP,1,1))
+          AND FTQ_STRK_PRC   = STRIKE_PR
+          AND SEM_MAP_VL = SYMBOL
+          AND SEM_ENTTY  = 3
+					AND TIMESTAMP  = :c_max_dt 
+        )
+				WHERE EXISTS
+				(
+					SELECT 1
+  				FROM BHAVCOPY_TMP, SEM_STCK_MAP
+  				WHERE FTQ_XCHNG_CD = 'NFO'
+  				AND FTQ_PRDCT_TYP  = substr(INSTUMENT,1,1)
+  				AND FTQ_INDSTK     = substr(INSTUMENT,4,1)
+  				AND FTQ_UNDRLYNG   = SEM_STCK_CD
+  				AND FTQ_EXPRY_DT   = EXPIRY_DT
+  				AND FTQ_EXER_TYP   = decode(OPTION_TYP,'XX','E',substr(OPTION_TYP,2,1))
+  				AND FTQ_OPT_TYP    = decode(OPTION_TYP,'XX','*',substr(OPTION_TYP,1,1))
+  				AND FTQ_STRK_PRC   = STRIKE_PR
+  				AND SEM_MAP_VL = SYMBOL
+  				AND SEM_ENTTY  = 3
+  				AND TIMESTAMP  = :c_max_dt 
+				);
+
+      if ( SQLCODE != 0 )
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31120", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        fclose(ptr_bhavcopy_file);
+        return;
+      }
+
+      fn_userlog(c_ServiceName,"After Update open interest");
+
+      fn_userlog(c_ServiceName,"from date |%s|" , c_from_dt );
+      fn_userlog(c_ServiceName,"To date |%s|", c_to_dt);
+
+      /** Ver 3.4 started **/
+
+      EXEC SQL
+        SELECT 1
+        INTO :i_longdate_check
+        FROM DUAL
+        WHERE to_date(:c_to_dt,'dd-Mon-yyyy') > (to_date(:c_from_dt,'dd-Mon-yyyy') + 93);
+
+      if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31125", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        fclose(ptr_bhavcopy_file);
+        return;
+      }
+
+      if( DEBUG_MSG_LVL_3 )
+      {
+        fn_userlog(c_ServiceName,"*** i_longdate_check |%d|***",i_longdate_check);
+      }
+
+      MEMSET(c_to_dt_tmp);
+
+      if ( i_longdate_check == 1 )
+      {
+        EXEC SQL
+            SELECT TO_CHAR((to_date(:c_from_dt,'dd-Mon-yyyy') + 93))
+            INTO :c_to_dt_tmp
+            FROM DUAL;     
+				
+				if ( SQLCODE != 0 )
+      	{
+        	tpabort(0);
+        	fn_errlog(c_ServiceName, "S31130", SQLMSG, c_err_msg);
+        	fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        	fclose(ptr_bhavcopy_file);
+        	return;
+      	}
+      }
+      else
+      {
+        strcpy(c_to_dt_tmp,c_to_dt);      
+      }
+
+      if( DEBUG_MSG_LVL_3 )
+      {
+        fn_userlog(c_ServiceName,"*** c_to_dt_tmp |%s|***",c_to_dt_tmp);
+      }
+
+      /** Ver 3.4 Ends **/
+
+      EXEC SQL
+        UPDATE FTQ_FO_TRD_QT
+        SET   FTQ_QT_TRDNG_FLG = 'T'
+        WHERE EXISTS (SELECT 1
+        FROM  FUM_FO_UNDRLYNG_MSTR, BHAVCOPY_TMP, SEM_STCK_MAP
+        WHERE FUM_PRDCT_TYP = substr(INSTUMENT,1,1)
+        AND   FUM_UNDRLYNG  = SEM_STCK_CD
+        AND   SEM_MAP_VL    = SYMBOL
+        AND   SEM_ENTTY     = 3
+        AND   FUM_XCHNG_CD  = 'NFO'
+        AND   FTQ_UNDRLYNG  = SEM_STCK_CD
+        AND   FTQ_PRDCT_TYP = FUM_PRDCT_TYP
+        AND   FTQ_EXPRY_DT = EXPIRY_DT
+        AND   FTQ_OPT_TYP  = decode(OPTION_TYP,'XX','*',substr(OPTION_TYP,1,1))
+        AND   FTQ_STRK_PRC = STRIKE_PR
+        AND   FTQ_CRNT_OI  > NVL(FUM_OPEN_INTEREST,0)
+        AND   FTQ_XCHNG_CD = FUM_XCHNG_CD
+        AND   FTQ_EXER_TYP = 'E'
+        AND   CONTRACTS * FTQ_MIN_LOT_QTY > NVL(FUM_VOLUME,0)
+				AND   TIMESTAMP = :c_max_dt)
+        /** AND   FTQ_EXPRY_DT BETWEEN to_date(:c_from_dt,'dd-Mon-yyyy') AND to_date(:c_to_dt,'dd-Mon-yyyy') commented in Ver 3.4 **/
+        AND   FTQ_EXPRY_DT BETWEEN to_date(:c_from_dt,'dd-Mon-yyyy') AND to_date(:c_to_dt_tmp,'dd-Mon-yyyy') /** Added in Ver 3.4 **/ 
+        AND   NOT EXISTS
+        (
+          SELECT 1
+          FROM   FEM_FO_EXCEPTION_MSTR
+          WHERE  FEM_XCHNG_CD  = 'NFO'
+          AND    FEM_XCHNG_CD  = FTQ_XCHNG_CD
+          AND    FEM_PRDCT_TYP = FTQ_PRDCT_TYP
+          AND    FEM_INDSTK    = FTQ_INDSTK
+          AND    FEM_UNDRLYNG  = FTQ_UNDRLYNG
+          AND    FEM_EXPRY_DT  = FTQ_EXPRY_DT
+          AND    FEM_EXER_TYP  = FTQ_EXER_TYP
+          AND    FEM_OPT_TYP   = FTQ_OPT_TYP
+          AND    FEM_STRK_PRC  = FTQ_STRK_PRC
+        );
+
+      if ( SQLCODE != 0)
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31135", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        fclose(ptr_bhavcopy_file);
+        return;
+      }
+
+      fn_userlog(c_ServiceName,"===========After Update========" );
+
+      /*** Ver 3.4 Starts ***/
+
+      if( DEBUG_MSG_LVL_3 )
+      {
+        fn_userlog(c_ServiceName,"*** Enablement of long dated expiry i_longdate_check |%d|***",i_longdate_check);
+      }
+ 
+      if( i_longdate_check == 1 )
+      {
+        EXEC SQL
+          UPDATE FTQ_FO_TRD_QT
+          SET   FTQ_QT_TRDNG_FLG = 'T'
+          WHERE EXISTS (SELECT 1
+          FROM  FUM_FO_UNDRLYNG_MSTR, BHAVCOPY_TMP, SEM_STCK_MAP
+          WHERE FUM_PRDCT_TYP = substr(INSTUMENT,1,1)
+          AND   FUM_UNDRLYNG  = SEM_STCK_CD
+          AND   SEM_MAP_VL    = SYMBOL
+          AND   SEM_ENTTY     = 3
+          AND   FUM_XCHNG_CD  = 'NFO'
+          AND   FTQ_UNDRLYNG  = SEM_STCK_CD
+          AND   FTQ_PRDCT_TYP = FUM_PRDCT_TYP
+          AND   FTQ_EXPRY_DT = EXPIRY_DT
+          AND   FTQ_OPT_TYP  = decode(OPTION_TYP,'XX','*',substr(OPTION_TYP,1,1))
+          AND   FTQ_STRK_PRC = STRIKE_PR
+          AND   FTQ_CRNT_OI  > NVL(FUM_OPEN_INTEREST_LONG,0)
+          AND   FTQ_XCHNG_CD = FUM_XCHNG_CD
+          AND   FTQ_EXER_TYP = 'E'
+          AND   CONTRACTS * FTQ_MIN_LOT_QTY > NVL(FUM_VOLUME_LONG,0)
+          AND   TIMESTAMP = :c_max_dt)
+          AND   FTQ_EXPRY_DT BETWEEN to_date(:c_to_dt_tmp,'dd-Mon-yyyy') AND to_date(:c_to_dt,'dd-Mon-yyyy') 
+          AND   NOT EXISTS
+          (
+            SELECT 1
+            FROM   FEM_FO_EXCEPTION_MSTR
+            WHERE  FEM_XCHNG_CD  = 'NFO'
+            AND    FEM_XCHNG_CD  = FTQ_XCHNG_CD
+            AND    FEM_PRDCT_TYP = FTQ_PRDCT_TYP
+            AND    FEM_INDSTK    = FTQ_INDSTK
+            AND    FEM_UNDRLYNG  = FTQ_UNDRLYNG
+            AND    FEM_EXPRY_DT  = FTQ_EXPRY_DT
+            AND    FEM_EXER_TYP  = FTQ_EXER_TYP
+            AND    FEM_OPT_TYP   = FTQ_OPT_TYP
+            AND    FEM_STRK_PRC  = FTQ_STRK_PRC
+          );
+
+        if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+        {
+          tpabort(0);
+          fn_errlog(c_ServiceName, "S31140", SQLMSG, c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          fclose(ptr_bhavcopy_file);
+          return;
+        }
+      }
+      else
+      {
+        if( DEBUG_MSG_LVL_3 )
+        {
+          fn_userlog(c_ServiceName,"*** No Long date range has been selected ***");
+        }
+      }      
+      /*** Ver 3.4 Ends ***/
+
+      /****** ver 3.3 starts *****/
+      fn_userlog(c_ServiceName,"Before Updating FTQ_MRKT_ORDR_FLG");
+      EXEC SQL
+        UPDATE FTQ_FO_TRD_QT
+        SET   FTQ_MRKT_ORDR_FLG = 'N'
+        WHERE EXISTS (SELECT 1
+        FROM  FUM_FO_UNDRLYNG_MSTR, BHAVCOPY_TMP, SEM_STCK_MAP
+        WHERE FUM_PRDCT_TYP = substr(INSTUMENT,1,1)
+        AND   FUM_UNDRLYNG  = SEM_STCK_CD
+        AND   SEM_MAP_VL    = SYMBOL
+        AND   SEM_ENTTY     = 3
+        AND   FUM_XCHNG_CD  = 'NFO'
+        AND   FTQ_PRDCT_TYP =  'O'
+        AND   FTQ_UNDRLYNG  = SEM_STCK_CD
+        AND   FTQ_PRDCT_TYP = FUM_PRDCT_TYP
+        AND   FTQ_EXPRY_DT = EXPIRY_DT
+        AND   FTQ_OPT_TYP  = decode(OPTION_TYP,'XX','*',substr(OPTION_TYP,1,1))
+        AND   FTQ_STRK_PRC = STRIKE_PR
+        AND   FTQ_XCHNG_CD = FUM_XCHNG_CD
+        AND   FTQ_EXER_TYP = 'E'
+        AND   CONTRACTS * FTQ_MIN_LOT_QTY <=  NVL(FUM_MRKT_FLG_VOL ,0)
+        AND   TIMESTAMP = :c_max_dt)
+        AND   FTQ_EXPRY_DT BETWEEN to_date(:c_from_dt,'dd-Mon-yyyy') AND to_date(:c_to_dt,'dd-Mon-yyyy')
+        AND   NOT EXISTS
+        (
+          SELECT 1
+          FROM   FEM_FO_EXCEPTION_MSTR
+          WHERE  FEM_XCHNG_CD  = 'NFO'
+          AND    FTQ_PRDCT_TYP = 'O'
+          AND    FEM_XCHNG_CD  = FTQ_XCHNG_CD
+          AND    FEM_PRDCT_TYP = FTQ_PRDCT_TYP
+          AND    FEM_INDSTK    = FTQ_INDSTK
+          AND    FEM_UNDRLYNG  = FTQ_UNDRLYNG
+          AND    FEM_EXPRY_DT  = FTQ_EXPRY_DT
+          AND    FEM_EXER_TYP  = FTQ_EXER_TYP
+          AND    FEM_OPT_TYP   = FTQ_OPT_TYP
+          AND    FEM_STRK_PRC  = FTQ_STRK_PRC
+        );
+
+      if ( SQLCODE != 0)
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31145", SQLMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        fclose(ptr_bhavcopy_file);
+        return;
+      }
+      fn_userlog(c_ServiceName,"After Updating FTQ_MRKT_ORDR_FLG");
+      /****** ver 3.3 ends *******/
+
+      strcpy(c_remarks,"Contract enabled");
+
+
+      EXEC SQL
+        INSERT INTO FBL_FO_BHAVCP_LOG
+        (
+          FBL_XCHNG_CD,
+          FBL_PRDCT_TYP,
+          FBL_INDSTK,
+          FBL_UNDRLYNG,
+          FBL_EXPRY_DT,
+          FBL_EXER_TYP,
+          FBL_OPT_TYP,
+          FBL_STRK_PRC,
+          FBL_OPEN_INTREST,
+          FBL_VOLUME,
+          FBL_REMARKS,
+          FBL_TIME,
+          FBL_ENBL_DSBL_FLG,
+          FBL_RUN_MODE,
+          FBL_RUN_NO,
+					FBL_PRV_TRDNG_FLG,
+				  FBL_MODIFY_TIME,
+ 				  FBL_MODIFY_BY
+        )
+        (
+          SELECT
+            FTQ_XCHNG_CD,
+            FTQ_PRDCT_TYP,
+            FTQ_INDSTK,
+            FTQ_UNDRLYNG,
+            FTQ_EXPRY_DT,
+            FTQ_EXER_TYP,
+            FTQ_OPT_TYP,
+            FTQ_STRK_PRC,
+            FTQ_CRNT_OI,
+            CONTRACTS,
+            :c_remarks,
+            to_date(:c_time,'DD-MON-YYYY HH24:MI:SS'),
+            'T',
+            'B',
+            :l_run_no,
+            'Q',
+            SYSDATE,
+            'System-EOD BHAV COPY'
+          FROM FTQ_FO_TRD_QT,
+               BHAVCOPY_TMP,
+               SEM_STCK_MAP
+          WHERE FTQ_QT_TRDNG_FLG = 'T'
+          AND FTQ_XCHNG_CD  = 'NFO'
+          AND FTQ_PRDCT_TYP = substr(INSTUMENT,1,1)
+          AND FTQ_INDSTK    = substr(INSTUMENT,4,1)
+          AND FTQ_UNDRLYNG  = SEM_STCK_CD
+          AND FTQ_EXPRY_DT  = EXPIRY_DT
+          AND FTQ_EXER_TYP  = decode(OPTION_TYP,'XX','E',substr(OPTION_TYP,2,1))
+          AND FTQ_OPT_TYP   = decode(OPTION_TYP,'XX','*',substr(OPTION_TYP,1,1))
+          AND FTQ_STRK_PRC  = STRIKE_PR
+          AND SEM_MAP_VL    = SYMBOL
+          AND SEM_ENTTY = 3
+        );
+
+        if ( SQLCODE != 0 )
+        {
+          tpabort(0);
+          fn_errlog(c_ServiceName, "S31150", SQLMSG, c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          fclose(ptr_bhavcopy_file);
+          return;
+        }
+
+        fn_userlog(c_ServiceName,"After insert into FBL_FO_BHAVCP_LOG" );
+
+      /******************************************** Ver 3.1 ends here *****************************************/
+
+     } /*** NSE Block Ends ***/
+       /*** Ver 1.8 Starts Here ****/
+     else if( strcmp(c_xchng_cd,"BFO") == 0 )    /*** Exchange code BFO ****/ 
+     {
+
+      l_counter = 0;  /*** Ver 2.8 ***/
+      fn_userlog(c_ServiceName," Inside Bhav copy reading for BFO ");
+      
+      /**Fetch and ignore 2nd header  record of BSE **/
+      fgets(c_data, 1024, ptr_bhavcopy_file);
+      if ( c_data == NULL)
+      {
+        tpabort(0);
+        fn_errlog(c_ServiceName, "S31155", UNXMSG, c_err_msg);
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        return;
+      }
+
+      while( feof(ptr_bhavcopy_file) == 0 )
+      {
+        fn_chk_stts(c_ServiceName);
+
+        MEMSET(st_cntrct_details);
+
+        MEMSET(c_instrument);
+        MEMSET(c_symbol);
+        MEMSET(c_expry_dt);
+        MEMSET(c_time_stamp);
+        MEMSET(c_bse_ex_opt_typ);
+        MEMSET(c_data);
+        MEMSET(c_stck_cd);
+        MEMSET(c_remarks);
+        MEMSET(c_last_trade_dt);
+        MEMSET(c_contrct_trd_dt);
+        MEMSET(c_strike_prc);
+        MEMSET(c_opn_prc);
+        MEMSET(c_high_prc); 
+        MEMSET(c_low_prc);
+        MEMSET(c_close_prc);
+        MEMSET(c_wt_avg_price);
+        MEMSET(c_prem_disc);
+        MEMSET(c_prem_disc_prcnt);
+        MEMSET(c_volume);
+        MEMSET(c_val);
+        MEMSET(c_open_interest);
+        MEMSET(c_chng_in_oi);
+        MEMSET(c_prcnt_chng_in_oi);
+        MEMSET(c_cost_carry_prcnt_pa);
+        MEMSET(c_margin_prcnt);
+        MEMSET(c_margin_value);
+        MEMSET(c_temp_data);   /*** Ver 1.9 ***/
+ 
+        l_strike_prc = 0;
+        d_strike_prc = 0; 
+        d_opn_prc = 0;
+        d_high_prc = 0;
+        d_low_prc = 0;
+        d_close_prc = 0;
+        d_stlmnt_prc = 0;
+        d_volume  = 0;
+        d_val = 0;
+        d_open_interest = 0;
+        d_chng_in_oi  = 0;
+				d_wt_avg_price = 0;
+				d_prem_disc    =0;
+				d_prem_disc_prcnt = 0;
+				d_prcnt_chng_in_oi =0;
+				d_cost_carry_prcnt_pa=0;
+				d_margin_prcnt=0;
+				d_margin_value=0;
+        
+
+        c_apply_flg = 'N';
+        
+        fgets(c_data, 1024, ptr_bhavcopy_file);
+        if ( c_data == NULL)
+        {
+          tpabort(0);
+          fn_errlog(c_ServiceName, "S31160", UNXMSG, c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          return;
+        }
+        
+        if( feof(ptr_bhavcopy_file) != 0)
+        {
+          break;
+        }
+  
+        l_counter++; /* Ver 2.8 */
+
+        /******* Ver 1.9, Commented *************
+        strcpy(c_temp_data,c_data);
+        strcpy(c_instrument,strtok(c_data,","));
+        strcpy(c_symbol,strtok(null_ptr,","));
+        strcpy(c_expry_dt,strtok(null_ptr,","));
+        strcpy(c_strike_prc,strtok(null_ptr,","));
+        d_strike_prc = atof(c_strike_prc);
+        if( d_strike_prc != 0 )
+        { 
+         strcpy(c_bse_ex_opt_typ,strtok(null_ptr,",")); 
+        }
+        strcpy(c_opn_prc,strtok(null_ptr,","));
+        strcpy(c_high_prc,strtok(null_ptr,","));
+        strcpy(c_low_prc,strtok(null_ptr,","));
+        strcpy(c_close_prc,strtok(null_ptr,","));
+        strcpy(c_last_trade_dt,strtok(null_ptr,","));
+        strcpy(c_wt_avg_price,strtok(null_ptr,","));
+        strcpy(c_prem_disc,strtok(null_ptr,","));
+        strcpy(c_prem_disc_prcnt,strtok(null_ptr,","));
+        strcpy(c_volume,strtok(null_ptr,","));
+        strcpy(c_val,strtok(null_ptr,","));
+        strcpy(c_open_interest,strtok(null_ptr,","));
+        strcpy(c_chng_in_oi,strtok(null_ptr,","));
+        strcpy(c_prcnt_chng_in_oi,strtok(null_ptr,","));
+        strcpy(c_cost_carry_prcnt_pa,strtok(null_ptr,",")); 
+        strcpy(c_margin_prcnt,strtok(null_ptr,","));
+        strcpy(c_margin_value,strtok(null_ptr,","));
+        strcpy(c_traded_flag,strtok(null_ptr,","));
+
+        ********* Ver 1.9 **************************/
+
+        /************* Ver 1.9 Starts Here *********/
+
+        c_temp_data = strdup(c_data);
+
+        strcpy(c_instrument,strsep(&c_temp_data,","));
+        strcpy(c_symbol,strsep(&c_temp_data,","));
+        strcpy(c_expry_dt,strsep(&c_temp_data,","));
+        strcpy(c_strike_prc,strsep(&c_temp_data,","));
+        strcpy(c_bse_ex_opt_typ,strsep(&c_temp_data,","));
+        strcpy(c_opn_prc,strsep(&c_temp_data,","));
+        strcpy(c_high_prc,strsep(&c_temp_data,","));
+        strcpy(c_low_prc,strsep(&c_temp_data,","));
+        strcpy(c_close_prc,strsep(&c_temp_data,","));
+        strcpy(c_last_trade_dt,strsep(&c_temp_data,","));
+        strcpy(c_wt_avg_price,strsep(&c_temp_data,","));
+        strcpy(c_prem_disc,strsep(&c_temp_data,","));
+        strcpy(c_prem_disc_prcnt,strsep(&c_temp_data,","));
+        strcpy(c_volume,strsep(&c_temp_data,","));
+        strcpy(c_val,strsep(&c_temp_data,","));
+        strcpy(c_open_interest,strsep(&c_temp_data,","));
+        strcpy(c_chng_in_oi,strsep(&c_temp_data,","));
+        strcpy(c_prcnt_chng_in_oi,strsep(&c_temp_data,","));
+        strcpy(c_cost_carry_prcnt_pa,strsep(&c_temp_data,","));
+        strcpy(c_margin_prcnt,strsep(&c_temp_data,","));
+        strcpy(c_margin_value,strsep(&c_temp_data,","));
+        strcpy(c_traded_flag,strsep(&c_temp_data,",")); 
+
+        rtrim(c_wt_avg_price);
+        rtrim(c_prem_disc);
+        rtrim(c_prem_disc_prcnt);
+        rtrim(c_cost_carry_prcnt_pa);
+        rtrim(c_margin_prcnt);
+        rtrim(c_margin_value);
+        /************* Ver 1.9 Ends Here   *********/
+
+        c_traded_flg = c_traded_flag[0];
+       /* d_strike_prc = atof(c_strike_prc); */
+        d_strike_prc = atof(c_strike_prc);    /*** Ver 1.9 ***/
+        d_opn_prc    = atof(c_opn_prc);
+        d_high_prc   = atof(c_high_prc); 
+        d_low_prc    = atof(c_low_prc); 
+        d_close_prc  = atof(c_close_prc);
+        if(strcmp(c_wt_avg_price,"-") == 0)
+        {
+         d_wt_avg_price = 0.0;
+        }
+        else
+        {
+         d_wt_avg_price = atof(c_wt_avg_price);
+        }
+
+        if(strcmp(c_prem_disc,"-") == 0)
+        {
+         d_prem_disc = 0.0;
+        } 
+        else
+        {
+         d_prem_disc    = atof(c_prem_disc);
+        }
+        if( strcmp(c_prem_disc_prcnt,"-") == 0 )
+        {
+         d_prem_disc_prcnt = 0.0;
+        }
+        else
+        {
+         d_prem_disc_prcnt = atof(c_prem_disc_prcnt);
+        }
+        d_volume       = atof(c_volume);
+        d_val          = atof(c_val);
+        d_open_interest = atof(c_open_interest); 
+        d_chng_in_oi    = atof(c_chng_in_oi);
+        d_prcnt_chng_in_oi = atof(c_prcnt_chng_in_oi);
+     
+        if( strcmp(c_cost_carry_prcnt_pa,"-") == 0 )
+        {
+         d_cost_carry_prcnt_pa = 0.0;
+        }
+        else 
+        {
+         d_cost_carry_prcnt_pa = atof(c_cost_carry_prcnt_pa);
+        }
+        
+        if( strcmp(c_margin_prcnt,"-") == 0 )
+        {
+         d_margin_prcnt = 0.0;
+        }
+        else
+        {
+          d_margin_prcnt        = atof(c_margin_prcnt);
+        }
+        
+        if( strcmp(c_margin_value,"-") == 0)
+        { 
+         d_margin_value = 0.0; 
+        }
+        else
+        {
+         d_margin_value = atof(c_margin_value);
+        }
+
+        EXEC SQL
+        SELECT :d_strike_prc*100
+        INTO   :l_strike_prc
+        FROM DUAL;
+        if ( SQLCODE != 0 )
+        {
+          tpabort(0);
+          fn_errlog(c_ServiceName, "S31165", SQLMSG, c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          fclose(ptr_bhavcopy_file);
+          return;
+        }
+
+        rtrim(c_bse_ex_opt_typ);
+
+        if( DEBUG_MSG_LVL_3 ) {
+          fn_userlog(c_ServiceName,"c_instrument:%s:",c_instrument);
+          fn_userlog(c_ServiceName,"c_symbol:%s:",c_symbol);
+          fn_userlog(c_ServiceName,"c_expry_dt:%s:",c_expry_dt);
+          fn_userlog(c_ServiceName,"d_strike_prc:%lf:",d_strike_prc);
+          fn_userlog(c_ServiceName,"l_strike_prc:%ld:",l_strike_prc);
+          fn_userlog(c_ServiceName,"c_bse_ex_opt_typ:%s:",c_bse_ex_opt_typ);
+          fn_userlog(c_ServiceName,"d_opn_prc:%lf:",d_opn_prc);
+          fn_userlog(c_ServiceName,"d_high_prc:%lf:",d_high_prc);
+          fn_userlog(c_ServiceName,"d_low_prc:%lf:",d_low_prc);
+          fn_userlog(c_ServiceName,"d_close_prc:%lf:",d_close_prc); 
+          fn_userlog(c_ServiceName,"c_last_trade_dt :%s:",c_last_trade_dt);
+          fn_userlog(c_ServiceName,"d_wt_avg_price :%lf:",d_wt_avg_price);
+          fn_userlog(c_ServiceName,"d_prem_disc :%lf:",d_prem_disc);
+          fn_userlog(c_ServiceName,"d_prem_disc_prcnt :%lf:",d_prem_disc_prcnt);
+          fn_userlog(c_ServiceName,"d_volume :%lf:",d_volume);
+          fn_userlog(c_ServiceName,"d_val    :%lf:",d_val);
+          fn_userlog(c_ServiceName,"d_open_interest :%lf:",d_open_interest);
+          fn_userlog(c_ServiceName,"d_chng_in_oi  :%lf:",d_chng_in_oi);
+          fn_userlog(c_ServiceName,"d_prcnt_chng_in_oi :%lf:",d_prcnt_chng_in_oi);
+          fn_userlog(c_ServiceName,"d_cost_carry_prcnt_pa :%lf:",d_cost_carry_prcnt_pa);
+          fn_userlog(c_ServiceName,"d_margin_prcnt  :%lf:",d_margin_prcnt);
+          fn_userlog(c_ServiceName,"d_margin_value  :%lf:",d_margin_value);
+          fn_userlog(c_ServiceName," c_traded_flg   :%c:",c_traded_flg);
+        }
+
+        c_prdct_typ   = c_instrument[1];
+        c_indstk_typ  = c_instrument[0];
+
+        if( strcmp(c_bse_ex_opt_typ,"CALL") == 0 )
+        {
+         c_opt_typ = 'C';
+         c_exer_typ = 'E';   /*** Since in BSE Bhav Copy, No exercise type is given ***/
+        }
+        else if( strcmp(c_bse_ex_opt_typ,"PUT") == 0 )
+        {
+          c_opt_typ = 'P';
+          c_exer_typ = 'E';  /*** Since in BSE Bhav Copy, No exercise type is given ***/
+        }
+ 
+        if(c_prdct_typ == 'F')
+        {
+          c_exer_typ  = 'E';
+          c_opt_typ   = '*';
+        }
+
+
+         memset(c_scrip_cd,'\0',sizeof(c_scrip_cd));
+         rtrim(c_symbol);
+ 
+         EXEC SQL 
+          SELECT fbm_scrip_cd
+            INTO :c_scrip_cd 
+            FROM FBM_FO_BSE_CO_MSTR
+           WHERE fbm_series_cd = :c_symbol;
+         if (SQLCODE !=0 && SQLCODE != NO_DATA_FOUND)
+         {
+          tpabort(0);
+          fn_errlog(c_ServiceName, "S31170", SQLMSG, c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          fclose(ptr_bhavcopy_file);
+          return;
+         }
+         rtrim(c_scrip_cd);
+         fn_userlog(c_ServiceName," c_scrip_cd AFTER FBM Select :%s:",c_scrip_cd); 
+       
+         EXEC SQL
+         SELECT rtrim(SEM_STCK_CD)
+         INTO :c_stck_cd
+         FROM SEM_STCK_MAP
+         WHERE trim(SEM_MAP_VL)= :c_scrip_cd    
+         AND SEM_ENTTY = 13;
+
+         if (SQLCODE !=0 && SQLCODE != NO_DATA_FOUND)
+         {
+          tpabort(0);
+          fn_errlog(c_ServiceName, "S31175", SQLMSG, c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          fclose(ptr_bhavcopy_file);
+          return;
+         }
+ 
+         if(SQLCODE == NO_DATA_FOUND )
+         {
+          sprintf(c_msg,"Apply BhavCopy is failed for:%s: as SEM Mapping not Present",c_symbol);
+          fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          continue;
+         }
+
+         rtrim(c_stck_cd);
+
+        if( DEBUG_MSG_LVL_3 ) {
+        fn_userlog(c_ServiceName,"c_stck_cd:%s:",c_stck_cd);
+        fn_userlog(c_ServiceName,"c_prdct_typ:%c:",c_prdct_typ);
+        fn_userlog(c_ServiceName,"c_indstk_typ:%c:",c_indstk_typ);
+        fn_userlog(c_ServiceName,"c_exer_typ:%c:",c_exer_typ);
+        fn_userlog(c_ServiceName,"c_opt_typ:%c:",c_opt_typ);
+        fn_userlog(c_ServiceName,"c_expry_dt:%s:",c_expry_dt);
+        fn_userlog(c_ServiceName,"c_from_dt:%s:",c_from_dt);
+        fn_userlog(c_ServiceName,"c_to_dt:%s:",c_to_dt);
+        }
+
+        /**Fill the structure contract details**/
+
+        strcpy( st_cntrct_details.c_xchng_cd,c_xchng_cd);
+        st_cntrct_details.c_prd_typ = c_prdct_typ;
+        st_cntrct_details.c_ctgry_indstk  = c_indstk_typ;
+        strcpy(st_cntrct_details.c_undrlyng,c_stck_cd);
+        strcpy(st_cntrct_details.c_expry_dt,c_expry_dt);
+        st_cntrct_details.c_exrc_typ  = c_exer_typ;
+        st_cntrct_details.c_opt_typ   = c_opt_typ;
+        st_cntrct_details.l_strike_prc = l_strike_prc;
+        st_cntrct_details.c_rqst_typ = BHAVCOPY_UPLOAD;
+      
+        /** Call function for enabling or disabling of contract **/
+        i_ch_val =  fn_cntrct_enbl_dsbl(c_ServiceName,
+                                        &st_cntrct_details,
+                                        d_open_interest,
+                                        d_volume,
+                                        c_last_trade_dt,                     
+                                        c_from_dt,
+                                        c_to_dt,
+                                        l_run_no,          
+                                        &st_err_msg);
+       if(i_ch_val == -1)
+       {
+          tpabort(0);
+          fn_errlog(c_ServiceName, "S31180", LIBMSG, st_err_msg.c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+          fclose(ptr_bhavcopy_file);
+          return;
+       }
+     }
+
+    } /*** BSE Block Ends ***/
+    /*** Ver 1.8 Ends here ***/
+
+	}
+	else 										/**Ver 1.2 starts **/
+	if (c_run_mode == ONLINE_BROADCAST)
+  {
+	/*** Commented in Ver 2.5 ***
+
+		EXEC SQL 
+		DECLARE cur_online_brd CURSOR FOR
+		SELECT FTQ_XCHNG_CD,
+						 FTQ_PRDCT_TYP,
+						 FTQ_INDSTK,
+						 FTQ_UNDRLYNG,
+						 FTQ_EXPRY_DT,
+						 FTQ_EXER_TYP,
+						 FTQ_OPT_TYP,
+						 FTQ_STRK_PRC,
+					   NVL(FTQ_TOT_QTY_TRDD,0),
+						 NVL(FTQ_CRNT_OI,0)
+			FROM	FTQ_FO_TRD_QT, FCM_FO_CNTRCT_MSTR
+			WHERE FTQ_XCHNG_CD = FCM_XCHNG_CD
+			AND   FTQ_PRDCT_TYP = FCM_PRDCT_TYP
+			AND   FTQ_INDSTK    = FCM_INDSTK
+			AND   FTQ_UNDRLYNG  = FCM_UNDRLYNG
+			AND   FTQ_EXPRY_DT  = FCM_EXPRY_DT
+			AND 	FTQ_EXER_TYP  = FCM_EXER_TYP
+			AND		FTQ_OPT_TYP   = FCM_OPT_TYP
+			AND   FTQ_STRK_PRC  = FCM_STRK_PRC 
+			AND   FCM_QT_TRDNG_FLG = 'Q'
+      AND   trunc(FTQ_LST_TRD_TM) = trunc(sysdate)                * added in Ver 1.5 *
+      AND   FCM_XCHNG_CD = :c_xchng_cd      *** Ver 1.8 ***
+			ORDER BY FTQ_XCHNG_CD,
+							 FTQ_PRDCT_TYP,
+							 FTQ_INDSTK,
+							 FTQ_UNDRLYNG,
+							 FTQ_EXPRY_DT,
+						 	 FTQ_STRK_PRC,
+							 FTQ_EXER_TYP,
+							 FTQ_OPT_TYP;
+
+	*** Ver 2.5 Comment Ends ***/
+
+	/*** Ver 2.5 Starts ***/
+
+    EXEC SQL
+    DECLARE cur_online_brd CURSOR FOR
+      SELECT FTQ_XCHNG_CD,
+             FTQ_PRDCT_TYP,
+             FTQ_INDSTK,
+             FTQ_UNDRLYNG,
+             FTQ_EXPRY_DT,
+             FTQ_EXER_TYP,
+             FTQ_OPT_TYP,
+             FTQ_STRK_PRC,
+             NVL(FTQ_TOT_QTY_TRDD,0),
+             NVL(FTQ_CRNT_OI,0)
+      FROM  FTQ_FO_TRD_QT
+      WHERE   FTQ_QT_TRDNG_FLG = 'Q'
+      AND   trunc(FTQ_LST_TRD_TM) = trunc(sysdate)
+      AND   FTQ_XCHNG_CD = :c_xchng_cd
+      ORDER BY FTQ_XCHNG_CD,
+               FTQ_PRDCT_TYP,
+               FTQ_INDSTK,
+               FTQ_UNDRLYNG,
+               FTQ_EXPRY_DT,
+               FTQ_STRK_PRC,
+               FTQ_EXER_TYP,
+               FTQ_OPT_TYP;
+
+    /*** ver 2.5 Ends ***/	
+
+	EXEC SQL
+			OPEN cur_online_brd;
+
+	if ( SQLCODE != 0 )
+  {
+		tpabort(0);
+    fn_errlog ( c_ServiceName, "S31185", SQLMSG, c_err_msg );
+		fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+    return ;
+  }
+	
+	while(1)
+	{
+		MEMSET(st_cntrct_details);
+		MEMSET(c_expry_dt);
+		d_volume	= 0;
+		d_open_interest	= 0;
+
+		EXEC SQL  FETCH   cur_online_brd
+							INTO    :st_cntrct_details.c_xchng_cd,
+											:st_cntrct_details.c_prd_typ, 
+											:st_cntrct_details.c_ctgry_indstk, 
+											:st_cntrct_details.c_undrlyng,
+											:c_expry_dt,
+											:st_cntrct_details.c_exrc_typ,  
+											:st_cntrct_details.c_opt_typ,
+											:st_cntrct_details.l_strike_prc,
+											:d_volume,
+											:d_open_interest;
+	 		if ( SQLCODE != 0 )
+      {
+        if ( SQLCODE == NO_DATA_FOUND )
+        {
+          break;
+        }
+				tpabort(0);
+        EXEC SQL CLOSE cur_online_brd;
+        fn_errlog ( c_ServiceName, "S31190", SQLMSG, c_err_msg );
+				fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+        return ;
+      }
+
+			/**Fill the structure contract details**/
+				rtrim(st_cntrct_details.c_undrlyng);
+			
+				strcpy(st_cntrct_details.c_expry_dt,c_expry_dt);
+
+				st_cntrct_details.c_rqst_typ = ONLINE_BROADCAST ;
+
+				/**Call function for enabling or disabling of contract **/
+				i_ch_val =	fn_cntrct_enbl_dsbl(c_ServiceName,
+                                        &st_cntrct_details,
+																				d_open_interest,
+																				d_volume,
+																				c_time,
+																				c_from_dt,
+																				c_to_dt,
+                                        l_run_no,                 /* run no added in Ver 1.4 */
+																				&st_err_msg);
+			 if(i_ch_val == -1)
+			 {
+					tpabort(0);
+					EXEC SQL CLOSE cur_online_brd;
+					fn_errlog(c_ServiceName, "S31195", LIBMSG, st_err_msg.c_err_msg);
+					fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+					return;
+			 }
+	 }
+
+        EXEC SQL CLOSE cur_online_brd;
+
+  }
+	else
+	{
+			tpabort(0);
+			fn_userlog(c_ServiceName,"Invalid Run Mode entered, Please enter correct Run Mode");
+			strcpy(c_err_msg,"Invalid Run Mode entered, Please enter correct Run Mode");
+			fn_bat_pst_msg ( c_ServiceName, c_err_msg,c_tag );
+			return;
+	}	
+
+	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+	{
+		tpabort(0);
+		fn_errlog ( c_ServiceName,"S31200",LIBMSG,c_err_msg);
+		return ;
+	}
+
+		/**Ver 1.2 ends **/		
+
+  /*** Ver 2.7 Starts ***/ 
+	if( c_run_mode == BHAVCOPY_UPLOAD )
+	{
+  	MEMSET(c_valid_dt);
+  
+  	EXEC SQL
+    	SELECT GREATEST(EXG_NXT_TRD_DT,EXG_TMP_TRD_DT)
+      INTO :c_valid_dt
+			FROM EXG_XCHNG_MSTR
+		 	WHERE EXG_XCHNG_CD = 'NFO';
+ 
+    if (SQLCODE != 0)
+    {
+    	fn_errlog ( c_ServiceName,"S31205",SQLMSG,c_err_msg);
+     	return ;   
+    }
+
+  	SETNULL(c_valid_dt); 
+ 
+  	i_trnsctn = tpbegin(BAT_TRAN_LOCAL,0);
+
+  	if ( i_trnsctn == -1 )
+  	{
+    	fn_errlog(c_ServiceName,"S31210",LIBMSG,c_err_msg);
+    	return;
+  	}
+
+    fn_userlog(c_ServiceName,"Max Trade Date Is :%s:",c_valid_dt.arr);
+
+   	EXEC SQL
+    	UPDATE	FTQ_FO_TRD_QT
+      SET 		FTQ_QT_TRDNG_FLG = 'Q'
+      WHERE 	FTQ_QT_TRDNG_FLG = 'T'
+        AND 	FTQ_EXPRY_DT <  to_date(:c_valid_dt,'DD-Mon-YYYY');
+ 
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+    	tpabort(0);
+      fn_errlog(c_ServiceName, "S31215", SQLMSG, c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+      return;
+    } 
+ 
+  	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  	{
+    	tpabort(0);
+    	fn_errlog ( c_ServiceName,"S31220",LIBMSG,c_err_msg);
+    	return ;
+  	}
+	}
+  /*** Ver 2.7 Ends ***/
+
+	 /*** Ver 2.1 starts ***/
+
+if( strcmp(c_xchng_cd,"NFO") == 0 )     /** Ver 2.3 starts **/
+{
+   fn_userlog(c_ServiceName," Calling Script for NFO-OPT-TOP20");    /** Ver 2.3 **/
+
+	 if(c_run_mode == BHAVCOPY_UPLOAD )
+	 {
+   		MEMSET(c_command1);   
+
+    	sprintf(c_command1, "ksh live_Options_top20.sh");
+    	fn_userlog("Mail send command :%s",c_command1);
+    	system(c_command1);
+		
+    	fn_bat_pst_msg ( c_ServiceName,"OPTIONS 20 MIS completed successfully",c_tag );
+	 }
+}   /*** ver 2.3 ends ***/
+	 /*** Ver 2.1 ends ***/
+
+   /*** Ver 2.8 Starts ***/
+
+	 if( c_run_mode == BHAVCOPY_UPLOAD )
+    {
+      fn_userlog(c_ServiceName,"l_counter :%ld:",l_counter); 
+		  sprintf(c_ts_command,"cat %s | wc -l ",c_file_name);
+
+      fn_userlog(c_ServiceName,"c_ts_command :%s:",c_ts_command);
+
+    pf = popen(c_ts_command,"r");
+    if ( pf == NULL )
+     {
+      fn_errlog(c_ServiceName, "S31225", UNXMSG, c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+     }
+
+    fgets(c_ts,20,pf);
+    if ( c_ts == NULL)
+     {
+      fn_errlog(c_ServiceName, "S31230", UNXMSG, c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+     }
+
+    fn_userlog(c_ServiceName,"c_ts :%s:",c_ts);
+
+    l_c_ts = atol(c_ts);
+
+    fn_userlog(c_ServiceName,"l_c_ts :%ld:",l_c_ts);
+    fn_userlog(c_ServiceName,"Actual Record Count :%ld:",l_c_ts-1);
+
+    pclose(pf);
+
+		/*** Commented in Ver 3.0 ***
+    if ( l_counter != (l_c_ts - 1) )  *** To exclude header record count ***
+    {
+     MEMSET(c_cmd);
+     sprintf(c_cmd,"ksh $HOME/sh_scripts/fo_chk_bhav_copy_file.sh %ld %ld",l_counter,l_c_ts-1 );
+     system(c_cmd);
+     fn_userlog(c_ServiceName, " %s - Error.. All records from file not read... Please Verify..!",argv[0]);
+    }
+		*** Ver 3.0 ***/
+
+		/*** Ver 3.0 Starts ***/
+
+    if( strcmp(c_xchng_cd,"NFO") == 0 )
+    {
+      if ( l_counter != (l_c_ts - 1) )  /*** To exclude header record count ***/
+      {
+        fn_userlog(c_ServiceName, " %s - Error.. All records from file not read... Please Verify..!",argv[0]);
+      }
+      MEMSET(c_cmd);
+      sprintf(c_cmd,"ksh $HOME/sh_scripts/fo_chk_bhav_copy_file.sh %ld %ld %s",l_counter,l_c_ts-1,c_xchng_cd );
+      system(c_cmd);
+    }
+    else if( strcmp(c_xchng_cd,"BFO") == 0 )
+    {
+      if ( l_counter != (l_c_ts - 2) )  /*** To exclude header record count ***/
+      {
+        fn_userlog(c_ServiceName, " %s - Error.. All records from file not read... Please Verify..!",argv[0]);
+      }
+      MEMSET(c_cmd);
+      sprintf(c_cmd,"ksh $HOME/sh_scripts/fo_chk_bhav_copy_file.sh %ld %ld %s",l_counter,l_c_ts-2,c_xchng_cd );
+      system(c_cmd);
+    }
+    /*** Ver 3.0 Ends ***/
+
+  }
+
+  /*** Ver 2.8 Ends ***/
+  /*** ver 3.2 starts ***/
+    if( (strcmp(c_xchng_cd,"NFO") == 0) && (c_run_mode == BHAVCOPY_UPLOAD) )
+    {
+      EXEC SQL
+        SELECT to_char(sysdate,'dd-Mon-yyyy')
+        INTO :c_tmp_mail_date
+        from dual;
+ 
+      if ( SQLCODE != 0 ) 
+      {
+       fn_errlog(c_ServiceName, "S31235", SQLMSG, c_err_msg);
+       return;
+      }
+
+      rtrim(c_tmp_mail_date);
+      MEMSET(c_cmd);
+      fn_userlog(c_ServiceName, "bat_sprdcntrct_dwld through bhavcopy :%s: :%s:",c_xchng_cd,c_tmp_mail_date); 
+      sprintf(c_cmd,"nohup bat_sprdcntrct_dwld %s %s NA %s &",c_xchng_cd,c_xchng_cd,c_tmp_mail_date);
+      system(c_cmd); 
+    }
+   /*** ver 3.2 ends ***/
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+
+  fn_var = BAT_FO_APPLY_BHAV;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  char c_msg[256];
+
+  sprintf ( c_msg, "Batch process %s ended", argv[0] ); fn_bat_pst_msg (  argv[0], c_msg, c_tag );
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}
+
+/********************** Ver 3.1 starts *************************/
+
+int fn_read_db_para_ini()
+{
+  char *ptr;
+  char c_filepath[200];
+
+  ptr = NULL;
+
+  MEMSET(c_filepath);
+
+  sprintf(c_filepath,"%s/%s",tuxgetenv("BIN"),EQ_CONTRACT);
+
+  /*if(DEBUG_MSG_LVL_3)*/
+  {
+    fn_userlog(c_ServiceName,"File Path is :%s:", c_filepath);
+  }
+
+  if(fn_init_prcs_spc(c_ServiceName, c_filepath , "CONTRACT") == -1 )
+  {
+    fn_userlog(c_ServiceName,"Error in Reading the ini File for Bhavcopy Insert");
+    return -1;
+  }
+  ptr = fn_get_prcs_spc(c_ServiceName,"UID");
+
+  if(ptr == NULL)
+  {
+    fn_userlog(c_ServiceName,"Unable to read User id from ini file.");
+    return -1;
+  }
+
+  MEMSET(c_oracle_uid);
+  strcpy(c_oracle_uid,ptr);
+
+  ptr = NULL;
+  ptr = fn_get_prcs_spc(c_ServiceName,"PWD");
+
+  if(ptr == NULL)
+  {
+    fn_userlog(c_ServiceName,"Unable to read c_oracle_pwd from ini file.");
+    return -1;
+  }
+
+  MEMSET(c_oracle_pwd);
+  strcpy(c_oracle_pwd,ptr);
+
+  ptr = NULL;
+  ptr = fn_get_prcs_spc(c_ServiceName,"MF_ERR_SKIP");   /*Parameter for no. of records to be skipped in case of error in file reading*/
+
+  if(ptr == NULL)
+  {
+    fn_userlog(c_ServiceName,"Unable to read err_skip value from ini file.");
+    return -1;
+  }
+
+  MEMSET(c_err_skip);
+  strcpy(c_err_skip,ptr);
+
+  return 0;
+}
+
+/********************** Ver 3.1 ends *************************/
+
+/**Ver 1.2 starts **/
+int fn_cntrct_enbl_dsbl(char *c_ServiceName,
+												struct vw_contract *ptr_cntrct_details,
+												double	d_open_interest,	
+												double	d_volume,	
+												char    *c_time,
+												char    *c_frm_dt,
+												char    *c_to_dt,
+                        long l_runno,                                   /* run no added in Ver 1.4 */
+												struct vw_err_msg *ptr_st_err_msg)
+{
+int i_trnsctn;
+char c_msg[256];
+
+EXEC SQL BEGIN DECLARE SECTION;
+int i_rec_exists;
+int i_date_check;
+double d_fum_open_interest;
+double d_fum_volume;
+char c_remarks[200];
+char c_lst_thrsday[12];			/***	Ver	1.8	***/
+char c_bse_expdt[12];				/***	Ver	1.8	***/
+char c_mnth_year[9];				/***  Ver 1.8 ***/
+char *null_ptr  = 0;				/***  Ver 1.8 ***/
+double d_lot_sz = 0;            /***  Ver 2.6 ***/
+
+EXEC SQL END DECLARE SECTION;
+
+if( DEBUG_MSG_LVL_3 ) {
+fn_userlog(c_ServiceName,"Request Type:%c:",ptr_cntrct_details->c_rqst_typ);
+fn_userlog(c_ServiceName,"The inputed contract is:%s:%c:%s:%s:%c:%c:%ld:",ptr_cntrct_details->c_xchng_cd,
+													ptr_cntrct_details->c_prd_typ,ptr_cntrct_details->c_undrlyng,ptr_cntrct_details->c_expry_dt,
+													ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ,ptr_cntrct_details->l_strike_prc);
+}
+
+/**Ver 1.6 starts **/
+	if( ptr_cntrct_details->c_rqst_typ == BHAVCOPY_UPLOAD )
+	{
+
+		EXEC SQL
+		UPDATE FTQ_FO_TRD_QT 
+		SET FTQ_CRNT_OI= :d_open_interest 
+		WHERE FTQ_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+		AND FTQ_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+		AND FTQ_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+		AND FTQ_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+		AND FTQ_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+		AND FTQ_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+		AND FTQ_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+		AND FTQ_STRK_PRC   = :ptr_cntrct_details->l_strike_prc;
+		if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+		{
+			fn_errlog ( c_ServiceName,"S31240",SQLMSG,ptr_st_err_msg->c_err_msg);
+			return FAILURE;
+		}
+	}
+/**Ver 1.6 ends **/
+
+  /*** Ver 2.6 Starts ***/
+  if( ptr_cntrct_details->c_rqst_typ == BHAVCOPY_UPLOAD )
+  {
+
+		/*** Commened in Ver 2.5 ***
+
+    EXEC SQL
+    SELECT FCM_LOT_SZ
+    INTO  :d_lot_sz
+    FROM   FCM_FO_CNTRCT_MSTR
+    WHERE FCM_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+    AND FCM_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+    AND FCM_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+    AND FCM_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+    AND FCM_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+    AND FCM_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+    AND FCM_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+    AND FCM_STRK_PRC   = :ptr_cntrct_details->l_strike_prc;
+
+		*** Ver 2.5 Comment Ends ***/
+
+		/*** Ver 2.5 Starts ***/
+
+		EXEC SQL
+    SELECT FTQ_MIN_LOT_QTY
+    INTO  :d_lot_sz
+    FROM   FTQ_FO_TRD_QT
+    WHERE FTQ_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+    AND FTQ_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+    AND FTQ_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+    AND FTQ_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+    AND FTQ_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+    AND FTQ_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+    AND FTQ_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+    AND FTQ_STRK_PRC   = :ptr_cntrct_details->l_strike_prc;	
+
+		/*** Ver 2.5 Ends ***/
+
+		if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+    {
+      fn_errlog ( c_ServiceName,"S31245",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+		
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      sprintf(ptr_st_err_msg->c_err_msg,"UPdate BhavCopy is failed for :%s:%s:%ld:%c:%c:  \
+      as Contract Master Entry not Present",ptr_cntrct_details->c_undrlyng,ptr_cntrct_details->c_expry_dt, \
+      ptr_cntrct_details->l_strike_prc,ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ);
+      return SUCCESS;
+    }
+
+		d_volume = d_volume * d_lot_sz;
+
+		if( DEBUG_MSG_LVL_3 ) 
+		{
+			fn_userlog(c_ServiceName,"Lot Size					:%lf:",d_lot_sz);
+			fn_userlog(c_ServiceName,"Volume Calculated :%lf:",d_volume);
+		}
+
+  }
+  /**Ver 2.6 ends **/
+
+	/**Date check added in Ver 1.2 **/
+	i_date_check = 0;
+
+	EXEC SQL
+	SELECT 1
+	INTO :i_date_check
+	FROM DUAL
+	WHERE to_date(:ptr_cntrct_details->c_expry_dt,'dd-Mon-yyyy') 
+	BETWEEN to_date(:c_frm_dt,'dd-Mon-yyyy') AND to_date(:c_to_dt,'dd-Mon-yyyy');
+	if (SQLCODE !=0 && SQLCODE != NO_DATA_FOUND)
+	{
+		fn_errlog(c_ServiceName, "S31250", SQLMSG, ptr_st_err_msg->c_err_msg);
+		return -1;
+	}
+
+	if(SQLCODE == NO_DATA_FOUND)
+	{
+		i_date_check = 0;
+	}
+
+	fn_userlog(c_ServiceName,"i_date_check:%d:",i_date_check);
+
+	if( i_date_check == 0 )
+	{
+		sprintf(c_msg,"Program will not consider contract :%s:%c:%s:%s:%c:%c:%ld: as it is not satisfying from and to date criteria",  \
+    ptr_cntrct_details->c_xchng_cd, ptr_cntrct_details->c_prd_typ,ptr_cntrct_details->c_undrlyng,       \
+    ptr_cntrct_details->c_expry_dt, \
+    ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ,ptr_cntrct_details->l_strike_prc);
+
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return SUCCESS;
+	}
+
+	/***	Ver	1.8	Starts	***/
+
+	if ( (strcmp (ptr_cntrct_details->c_xchng_cd,"BFO"))	==	0	)
+	{
+		fn_userlog(c_ServiceName,"Inside Weekly Contract Check.");
+		fn_userlog(c_ServiceName,"Expiry Date Is :%s: ",ptr_cntrct_details->c_expry_dt);
+
+		strcpy(c_bse_expdt,ptr_cntrct_details->c_expry_dt);
+
+		fn_userlog(c_ServiceName,"BSE Expiry Date Is :%s: ",c_bse_expdt);
+		
+		strtok(c_bse_expdt,"-");	
+		strcpy(c_mnth_year,strtok(null_ptr,"\0"));
+
+		fn_userlog(c_ServiceName,"BSE Contract Month & Year Is :%s:",c_mnth_year);   
+
+		rtrim(c_mnth_year);
+
+		/*** Commented in Ver 2.5 ***
+
+		EXEC SQL
+			SELECT	MAX(FCM_EXPRY_DT)
+			INTO		:c_lst_thrsday
+			FROM		FCM_FO_CNTRCT_MSTR
+			WHERE to_char(FCM_EXPRY_DT,'Mon-YYYY')	= :c_mnth_year
+			**		FCM_EXPRY_DT	LIKE :c_mnth_year	***
+			AND			FCM_XCHNG_CD	=	'NFO'
+			AND			FCM_PRDCT_TYP	=	'F';
+	
+		*** Ver 2.5 Comment Ends ***/
+
+		/*** Ver 2.5 Starts ***/
+
+    EXEC SQL
+      SELECT  MAX(FTQ_EXPRY_DT)
+      INTO    :c_lst_thrsday
+      FROM    FTQ_FO_TRD_QT
+      WHERE to_char(FTQ_EXPRY_DT,'Mon-YYYY')  = :c_mnth_year
+      AND     FTQ_XCHNG_CD  = 'NFO'
+      AND     FTQ_PRDCT_TYP = 'F';
+
+    /*** Ver 2.5 Ends ***/
+
+		if ( SQLCODE != 0 )
+		{
+			fn_errlog(c_ServiceName,"S31255", SQLMSG, ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+		}
+
+	  if(DEBUG_MSG_LVL_0)
+		{	
+    	fn_userlog(c_ServiceName," c_lst_thrsday :%s:",c_lst_thrsday); /*** Added in Ver 2.5 ***/ 
+		}
+		if ( (strcmp(c_lst_thrsday,ptr_cntrct_details->c_expry_dt) ) != 0 )
+		{
+			fn_userlog(c_ServiceName,"Inside Weekly Contract Disabled Case :%s:%c:%s:%s:%c:%c:%ld:",  \
+    	ptr_cntrct_details->c_xchng_cd, ptr_cntrct_details->c_prd_typ,ptr_cntrct_details->c_undrlyng,       \
+    	ptr_cntrct_details->c_expry_dt, \
+    	ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ,ptr_cntrct_details->l_strike_prc);
+
+    	sprintf(c_msg,"Inside Weekly Contract Disabled Case :%s:%c:%s:%s:%c:%c:%ld:",  \
+    	ptr_cntrct_details->c_xchng_cd, ptr_cntrct_details->c_prd_typ,ptr_cntrct_details->c_undrlyng,       \
+    	ptr_cntrct_details->c_expry_dt, \
+    	ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ,ptr_cntrct_details->l_strike_prc);
+
+    	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    	return SUCCESS;		
+		}
+
+	}
+
+	/***	Ver	1.8	Ends	***/
+
+	i_rec_exists = 0;
+	
+	EXEC SQL
+	SELECT 1
+	INTO   :i_rec_exists
+	FROM DUAL
+	WHERE EXISTS
+	( SELECT FEM_XCHNG_CD
+		FROM   FEM_FO_EXCEPTION_MSTR
+		WHERE  FEM_XCHNG_CD 	= :ptr_cntrct_details->c_xchng_cd
+		AND		 FEM_PRDCT_TYP 	= :ptr_cntrct_details->c_prd_typ
+		AND		 FEM_INDSTK			= :ptr_cntrct_details->c_ctgry_indstk
+		AND		 FEM_UNDRLYNG		= :ptr_cntrct_details->c_undrlyng
+		AND		 FEM_EXPRY_DT		= :ptr_cntrct_details->c_expry_dt
+		AND		 FEM_EXER_TYP		= :ptr_cntrct_details->c_exrc_typ
+		AND		 FEM_OPT_TYP		= :ptr_cntrct_details->c_opt_typ
+		AND		 FEM_STRK_PRC		= :ptr_cntrct_details->l_strike_prc
+	);
+	if(SQLCODE !=0 && SQLCODE != NO_DATA_FOUND)
+	{
+			fn_errlog(c_ServiceName,"S31260", SQLMSG, ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+  }
+  else if ( SQLCODE == NO_DATA_FOUND )
+  {
+   	 i_rec_exists	= 0;
+  }
+	
+	if( i_rec_exists == 1)		/**Contract is present in exception list, to be skipped **/
+	{
+		fn_userlog(c_ServiceName,"The inputed contract Present in Exception Master :%s:%c:%s:%s:%c:%c:%ld:",	\
+		ptr_cntrct_details->c_xchng_cd, ptr_cntrct_details->c_prd_typ,ptr_cntrct_details->c_undrlyng,				\
+		ptr_cntrct_details->c_expry_dt,	\
+		ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ,ptr_cntrct_details->l_strike_prc);
+
+		sprintf(c_msg,"The inputed contract Present in Exception Master :%s:%c:%s:%s:%c:%c:%ld:",  \
+    ptr_cntrct_details->c_xchng_cd, ptr_cntrct_details->c_prd_typ,ptr_cntrct_details->c_undrlyng,       \
+    ptr_cntrct_details->c_expry_dt, \
+    ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ,ptr_cntrct_details->l_strike_prc);
+
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return SUCCESS;
+	}
+
+  /* commented in Ver 1.5
+	if( ptr_cntrct_details->c_rqst_typ == BHAVCOPY_UPLOAD )
+	{
+		EXEC SQL
+    UPDATE FCM_FO_CNTRCT_MSTR
+    SET FCM_QT_TRDNG_FLG = 'Q' 
+    WHERE FCM_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+    AND FCM_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+    AND FCM_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+    AND FCM_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+    AND FCM_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+    AND FCM_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+    AND FCM_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+    AND FCM_STRK_PRC   = :ptr_cntrct_details->l_strike_prc;
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+    {
+      fn_errlog ( c_ServiceName,"S31265",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      sprintf(ptr_st_err_msg->c_err_msg,"UPdate BhavCopy is failed for :%s:%s:%ld:%c:%c: 	\
+			as Contract Master Entry not Present",ptr_cntrct_details->c_undrlyng,ptr_cntrct_details->c_expry_dt,	\
+			ptr_cntrct_details->l_strike_prc,ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ);
+			return SUCCESS;
+    }
+
+	} */ 
+
+	EXEC SQL
+	SELECT NVL(FUM_OPEN_INTEREST,0),
+				 NVL(FUM_VOLUME,0)
+	INTO   :d_fum_open_interest,
+				 :d_fum_volume
+	FROM FUM_FO_UNDRLYNG_MSTR
+	WHERE FUM_PRDCT_TYP	= :ptr_cntrct_details->c_prd_typ
+	AND		FUM_UNDRLYNG 	= :ptr_cntrct_details->c_undrlyng
+  AND   FUM_XCHNG_CD  = :ptr_cntrct_details->c_xchng_cd;  /*** Ver 1.8 ***/
+	if(SQLCODE!=0 && SQLCODE!=NO_DATA_FOUND)
+	{
+		fn_errlog(c_ServiceName,"S31270",SQLMSG,ptr_st_err_msg->c_err_msg);
+		return FAILURE;
+	}
+
+	if(SQLCODE == NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName," Inside NO DATA FOUND FOR FUM");
+    sprintf(ptr_st_err_msg->c_err_msg,"Apply BhavCopy is failed for:%s:%c: as Underlyng Master Entry not Present",ptr_cntrct_details->c_undrlyng,ptr_cntrct_details->c_prd_typ);
+		return SUCCESS;
+  }
+
+if( DEBUG_MSG_LVL_3 ) {
+fn_userlog(c_ServiceName,"Fum Open Interest:%lf:Fum Volume:%lf:",d_fum_open_interest,d_fum_volume);
+fn_userlog(c_ServiceName,"FTQ Open Interest:%lf:FTQ Volume:%lf:",d_open_interest,d_volume); /*** Ver 2.6 ***/
+}
+   
+	if( (d_open_interest > d_fum_open_interest) && (d_volume > d_fum_volume) )			/*Ver 1.3, >= to be Added afterwards */
+	{
+
+		/*** Commented in Ver 2.5 ***
+
+		EXEC SQL
+    UPDATE FCM_FO_CNTRCT_MSTR
+    SET FCM_QT_TRDNG_FLG = 'T' 
+    WHERE FCM_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+    AND FCM_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+    AND FCM_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+    AND FCM_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+    AND FCM_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+    AND FCM_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+    AND FCM_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+    AND FCM_STRK_PRC   = :ptr_cntrct_details->l_strike_prc;
+
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+    {
+      fn_errlog ( c_ServiceName,"S31275",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      sprintf(ptr_st_err_msg->c_err_msg,"UPdate BhavCopy is failed for :%s:%s:%ld:%c:%c: 	\
+			as Contract Master Entry not Present",ptr_cntrct_details->c_undrlyng,ptr_cntrct_details->c_expry_dt,	\
+			ptr_cntrct_details->l_strike_prc,ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ);
+			return SUCCESS;
+    }
+
+		*** Ver 2.5 Comment Ends ***/
+
+    /***  Ver 2.5 Starts  ***/
+
+    EXEC SQL
+    UPDATE FTQ_FO_TRD_QT
+    SET FTQ_QT_TRDNG_FLG = 'T'
+    WHERE FTQ_XCHNG_CD = :ptr_cntrct_details->c_xchng_cd
+    AND FTQ_PRDCT_TYP  = :ptr_cntrct_details->c_prd_typ
+    AND FTQ_INDSTK     = :ptr_cntrct_details->c_ctgry_indstk
+    AND FTQ_UNDRLYNG   = :ptr_cntrct_details->c_undrlyng
+    AND FTQ_EXPRY_DT   = :ptr_cntrct_details->c_expry_dt
+    AND FTQ_EXER_TYP   = :ptr_cntrct_details->c_exrc_typ
+    AND FTQ_OPT_TYP    = :ptr_cntrct_details->c_opt_typ
+    AND FTQ_STRK_PRC   = :ptr_cntrct_details->l_strike_prc;
+
+    if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+    {
+      fn_errlog ( c_ServiceName,"S31280",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      sprintf(ptr_st_err_msg->c_err_msg,"Update BhavCopy is failed for :%s:%s:%ld:%c:%c:  \
+      as Contract Master Entry not Present",ptr_cntrct_details->c_undrlyng,ptr_cntrct_details->c_expry_dt,  \
+      ptr_cntrct_details->l_strike_prc,ptr_cntrct_details->c_exrc_typ,ptr_cntrct_details->c_opt_typ);
+      return SUCCESS;
+    }
+
+    /***  Ver 2.5 Ends  ***/
+
+		strcpy(c_remarks,"Contract enabled");
+
+    EXEC SQL
+    INSERT INTO FBL_FO_BHAVCP_LOG
+    (
+      FBL_XCHNG_CD,
+      FBL_PRDCT_TYP,
+      FBL_INDSTK,
+      FBL_UNDRLYNG,
+      FBL_EXPRY_DT,
+      FBL_EXER_TYP,
+      FBL_OPT_TYP,
+      FBL_STRK_PRC,
+      FBL_OPEN_INTREST,
+      FBL_VOLUME,
+      FBL_REMARKS,
+      FBL_TIME,
+      FBL_ENBL_DSBL_FLG,
+			FBL_RUN_MODE,
+      FBL_RUN_NO,                                                             /* run no added in Ver 1.4 */
+      FBL_PRV_TRDNG_FLG,         /*** Ver 2.9 ***/
+      FBL_MODIFY_TIME,           /*** Ver 2.9 ***/     
+      FBL_MODIFY_BY              /*** Ver 2.9 ***/      
+    )
+    VALUES
+    (:ptr_cntrct_details->c_xchng_cd,
+     :ptr_cntrct_details->c_prd_typ,
+     :ptr_cntrct_details->c_ctgry_indstk,
+     :ptr_cntrct_details->c_undrlyng,
+     :ptr_cntrct_details->c_expry_dt,
+     :ptr_cntrct_details->c_exrc_typ,
+     :ptr_cntrct_details->c_opt_typ,
+     :ptr_cntrct_details->l_strike_prc,
+     :d_open_interest,
+     :d_volume,
+     :c_remarks,
+     to_date(:c_time,'DD-MON-YYYY HH24:MI:SS'),
+     'T',
+		 :ptr_cntrct_details->c_rqst_typ,
+     :l_runno,
+     'Q',                                    /*** Ver 2.9 ***/
+     sysdate,                                /*** Ver 2.9 ***/
+     DECODE(:ptr_cntrct_details->c_rqst_typ,'B','System-EOD BHAV COPY','O','System-ONLINE Broadcast feed')  /** Ver 2.9 **/
+    );
+    if(SQLCODE != 0 )
+    {
+      fn_errlog ( c_ServiceName,"S31285",SQLMSG,ptr_st_err_msg->c_err_msg);
+      return FAILURE;
+    }
+	}
+
+ return SUCCESS;
+
+}
+/**Ver 1.2 ends **/

@@ -1,0 +1,534 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_GT_EXT_CNT                                        */
+/*                                                                            */
+/*  Input             : vw_contract                                           */
+/*                                                                            */
+/*  Output            : vw_nse_cntrct,                                        */
+/*											vw_mtch_cntrct,                                       */
+/*                      vw_contract,                                          */
+/*                      vw_err_msg                                            */
+/*                                                                            */
+/*  Description       : This service is used to get an external object by     */
+/*                      which the contract is represented in IWTL related     */
+/*                      business units ( e.g.NSE, MATCH, EBA ID ) given the   */
+/*                      EBA contract.                                         */
+/*                                                                            */
+/*  Log               : 1.0		26-Sep-2001  Ramesh Reddy.V                     */
+/*                    : 1.1		15-Dec-2003  CR 1274 changes for T2T (SN) 			*/
+/*										:	1.2		20-Dec-2007	 IBM Migration	Ranjit							*/
+/*										:	1.3		20-Aug-2010	 SEM Mapping Changes  Sandeep	  		*/
+/*                    : 1.4   08-Jun-2012  Changes to allow trading in sub    */
+/*																				 series in exchanges(Vishnu)        */
+/*                    : 1.5   28-Feb-2014  Mahesh Shinde											*/
+/*                    : 1.7   13-Jul-2015  Anand Dhopte                       */
+/******************************************************************************/
+/* 1.0		-		New Release                                                     */
+/* 1.2		-   IBM Migration																										*/
+/* 1.3		-		SEM Mapping Changes                                             */  	
+/* 1.4    -   Changes to allow trading in sub series in exchanges			  			*/
+/* 1.5    -   CR_ISEC14_48665 INDIA VIX changes																*/
+/* 1.7    -   Contract Master and Trade Quote Table Merger Changes            */
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fo.h>
+#include <fo_view_def.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>     /* ver 1.2 */
+#include <fml_rout.h>		/* ver 1.2 */
+#include <fn_read_debug_lvl.h>	/* ver 1.2 */
+
+
+void SFO_GT_EXT_CNT( TPSVCINFO *rqst )
+{
+	FBFR32  *ptr_fml_Ibuf;
+  FBFR32  *ptr_fml_Obuf;
+
+	char  c_ServiceName[33];
+  char  c_errmsg[256];
+	char  c_symbl[21];
+	
+	int		i_sem_entty = 0;
+	int		i_returncode = 0;
+
+	long	li_recvbuf = 0;
+	long	li_session_id = DEF_SSSN;
+
+	double d_strk_prc = 0.0;
+
+  EXEC SQL BEGIN DECLARE SECTION;
+    struct vw_contract *ptr_st_contract;
+    struct vw_nse_cntrct *ptr_st_nse_cntrct;
+    struct vw_mtch_cntrct *ptr_st_mtch_cntrct;
+		varchar c_expiry_dt [ LEN_DATE ];
+		char c_eq_xchng_cd [ 4 ];
+  EXEC SQL END DECLARE SECTION;
+
+  struct vw_err_msg *ptr_st_err_msg;
+
+	ptr_st_contract = ( struct vw_contract * )rqst->data;
+  strcpy( c_ServiceName, "SFO_GT_EXT_CNT" );
+	INITDBGLVL(c_ServiceName);	/* ver 1.2 */	
+
+	strcpy ( ( char * )c_expiry_dt.arr, ptr_st_contract->c_expry_dt );
+  SETLEN ( c_expiry_dt );
+
+	if(DEBUG_MSG_LVL_3)
+	{	
+  	fn_userlog ( c_ServiceName, "c_xchng_cd  :%s:", ptr_st_contract->c_xchng_cd );
+  	fn_userlog ( c_ServiceName, "c_prd_typ   :%c:", ptr_st_contract->c_prd_typ );
+  	fn_userlog ( c_ServiceName, "c_undrlyng  :%s:", ptr_st_contract->c_undrlyng );
+ 	 	fn_userlog ( c_ServiceName, "c_expiry_dt :%s:", c_expiry_dt.arr );
+  	fn_userlog ( c_ServiceName, "c_exrc_typ  :%c:", ptr_st_contract->c_exrc_typ );
+  	fn_userlog ( c_ServiceName, "c_opt_typ   :%c:", ptr_st_contract->c_opt_typ );
+  	fn_userlog ( c_ServiceName, "l_strike_prc:%ld:",ptr_st_contract->l_strike_prc );
+	}
+
+  ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32",
+                                                     "vw_err_msg",
+                                                sizeof ( struct vw_err_msg ) );
+  if ( ptr_st_err_msg ==  NULL )
+  {
+    fn_errlog ( c_ServiceName, "S31005", TPMSG, c_errmsg );
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+  }
+
+  memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) );
+
+	/*** Added for Order Routing ***/
+ 	fn_init_ddr_val ( ptr_st_contract->c_rout_crt );
+
+	if ( ( ptr_st_contract->c_rqst_typ == CONTRACT_TO_MATCH_ID ) ||
+			 ( ptr_st_contract->c_rqst_typ == CONTRACT_TO_NSE_ID ) )
+	{
+		ptr_fml_Ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+ 		if ( ptr_fml_Ibuf == NULL )
+ 		{
+   		fn_errlog( c_ServiceName, "S31010", TPMSG, ptr_st_err_msg->c_err_msg  );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+ 		}
+
+		ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+ 		if ( ptr_fml_Obuf == NULL )
+ 		{
+   		fn_errlog( c_ServiceName, "S31015", TPMSG, ptr_st_err_msg->c_err_msg  );
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+ 		}
+
+		if ( Fadd32 ( ptr_fml_Ibuf, FML_USR_ID, (char *)DEF_USR, 0 ) == -1 )
+  	{
+   		fn_errlog( c_ServiceName, "S31020", FMLMSG, ptr_st_err_msg->c_err_msg  );
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpfree ( ( char * ) ptr_fml_Obuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+		if ( Fadd32 ( ptr_fml_Ibuf, FML_SSSN_ID, (char *)&li_session_id, 0 ) == -1 )
+  	{
+   		fn_errlog( c_ServiceName, "S31025", FMLMSG, ptr_st_err_msg->c_err_msg  );
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpfree ( ( char * ) ptr_fml_Obuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+		if ( Fadd32 ( ptr_fml_Ibuf, FML_SEM_STCK_CD, 
+															(char *)ptr_st_contract->c_undrlyng, 0 ) == -1 )
+  	{
+   		fn_errlog( c_ServiceName, "S31030", FMLMSG, ptr_st_err_msg->c_err_msg  );
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpfree ( ( char * ) ptr_fml_Obuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+		if ( strcmp( ptr_st_contract->c_xchng_cd, "NFO" ) == 0 )
+		{
+			if ( ptr_st_contract->c_rqst_typ == CONTRACT_TO_MATCH_ID )      /***  Ver 1.3 ***/
+			{
+  			i_sem_entty = 3;
+			}
+			else if (  ptr_st_contract->c_rqst_typ == CONTRACT_TO_NSE_ID  )
+			{
+				i_sem_entty = NFO_ENTTY;
+			}
+		}
+		else if ( strcmp( ptr_st_contract->c_xchng_cd, "BFO" ) == 0 )
+		{
+			i_sem_entty = BFO_ENTTY;
+		} 
+
+		if ( Fadd32 ( ptr_fml_Ibuf, FML_SEM_ENTTY, (char *)&i_sem_entty, 0 ) == -1 )
+  	{
+   		fn_errlog( c_ServiceName, "S31035", FMLMSG, ptr_st_err_msg->c_err_msg  );
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpfree ( ( char * ) ptr_fml_Obuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+		fn_cpy_ddr ( ptr_st_contract->c_rout_crt );
+
+		if ( Fadd32 ( ptr_fml_Ibuf, FFO_ROUT_CRT, 
+															(char *)ptr_st_contract->c_rout_crt, 0 ) == -1 )
+  	{
+   		fn_errlog( c_ServiceName, "S31040", FMLMSG, ptr_st_err_msg->c_err_msg  );
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpfree ( ( char * ) ptr_fml_Obuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+		i_returncode = tpcall ( "SVC_EBA_MAP",
+														( char * ) ptr_fml_Ibuf,
+														0,
+														( char ** ) &ptr_fml_Obuf,
+														&li_recvbuf,
+														0 );
+		if ( i_returncode == -1 )
+		{
+			if ( TPCODE != TPESVCFAIL )
+			{
+   			fn_errlog( c_ServiceName, "S31045", TPMSG, 
+																	ptr_st_err_msg->c_err_msg  );
+			}
+			else
+			{
+				Fget32(ptr_fml_Obuf, FML_ERR_MSG, 0, ptr_st_err_msg->c_err_msg,0);
+			}
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpfree ( ( char * ) ptr_fml_Obuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		if ( Fget32 ( ptr_fml_Obuf, FML_SEM_MAP_VL, 0, (char *)c_symbl, 0 ) == -1 )
+  	{
+   		fn_errlog( c_ServiceName, "S31050", FMLMSG, ptr_st_err_msg->c_err_msg  );
+   		tpfree ( ( char * ) ptr_fml_Ibuf );
+   		tpfree ( ( char * ) ptr_fml_Obuf );
+   		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog ( c_ServiceName, "c_symbl  :%s:", c_symbl );
+	}
+
+   	tpfree ( ( char * ) ptr_fml_Ibuf );
+   	tpfree ( ( char * ) ptr_fml_Obuf );
+	}
+
+	if ( ptr_st_contract->c_rqst_typ == CONTRACT_TO_MATCH_ID )
+	{
+
+  	ptr_st_mtch_cntrct = ( struct vw_mtch_cntrct * ) tpalloc ( "VIEW32",
+                                                               "vw_mtch_cntrct",
+                                            sizeof ( struct vw_mtch_cntrct ) );
+  	if ( ptr_st_mtch_cntrct ==  NULL )
+  	{
+    	fn_errlog ( c_ServiceName, "S31055", TPMSG, ptr_st_err_msg->c_err_msg );
+			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+  	memset ( ptr_st_mtch_cntrct, 0, sizeof ( struct vw_mtch_cntrct ) );
+
+
+		if ( ( ptr_st_contract->c_prd_typ == FUTURES ) &&
+				 ( ptr_st_contract->c_ctgry_indstk == INDEX ) )
+		{
+			if ( strcmp ( ptr_st_contract->c_undrlyng,"INDVIX") == 0)   /*** Ver 1.5 ****/
+			{
+				strcpy( ptr_st_mtch_cntrct->c_instrmnt_typ, "FUTIVX" );			/*** Ver 1.5 ****/	
+			}
+			else
+			{
+				strcpy( ptr_st_mtch_cntrct->c_instrmnt_typ, "FUTIDX" );
+			}
+		}
+		else if ( ( ptr_st_contract->c_prd_typ == FUTURES ) &&
+				      ( ptr_st_contract->c_ctgry_indstk == STOCK ) )
+		{
+			strcpy( ptr_st_mtch_cntrct->c_instrmnt_typ, "FUTSTK" );
+		}
+		else if ( ( ptr_st_contract->c_prd_typ == OPTIONS ) &&
+				      ( ptr_st_contract->c_ctgry_indstk == INDEX ) )
+		{
+			strcpy( ptr_st_mtch_cntrct->c_instrmnt_typ, "OPTIDX" );
+		}
+		else if ( ( ptr_st_contract->c_prd_typ == OPTIONS ) &&
+				      ( ptr_st_contract->c_ctgry_indstk == STOCK ) )
+		{
+			strcpy( ptr_st_mtch_cntrct->c_instrmnt_typ, "OPTSTK" );
+		} 
+	  	
+		if ( ptr_st_contract->c_prd_typ == OPTIONS ) 
+    {
+			sprintf( ptr_st_mtch_cntrct->c_opt_typ, "%c%c", 
+             ptr_st_contract->c_opt_typ, ptr_st_contract->c_exrc_typ );
+		}
+    else if ( ptr_st_contract->c_prd_typ == FUTURES )
+		{
+			strcpy( ptr_st_mtch_cntrct->c_opt_typ, "F");
+		}
+
+		strcpy ( ptr_st_mtch_cntrct->c_symbol, c_symbl );
+	
+		strcpy ( ptr_st_mtch_cntrct->c_xchng_cd,
+						 ptr_st_contract->c_xchng_cd );
+
+		strcpy ( ptr_st_mtch_cntrct->c_expry_dt, ( char * )c_expiry_dt.arr ); 
+
+		ptr_st_mtch_cntrct->c_rqst_typ = ptr_st_contract->c_rqst_typ;
+
+		d_strk_prc = ( ptr_st_contract->l_strike_prc ) / 100.00;
+		ptr_st_mtch_cntrct->d_strike_prc = d_strk_prc; 
+
+    /*** Commented in Ver 1.7 ***
+
+		EXEC SQL
+				SELECT			NVL( fcm_ca_lvl, 0 )
+					INTO			:ptr_st_mtch_cntrct->l_ca_lvl
+				  FROM			fcm_fo_cntrct_mstr
+				 WHERE			fcm_xchng_cd 	=	:ptr_st_contract->c_xchng_cd
+					 AND			fcm_prdct_typ	=	:ptr_st_contract->c_prd_typ
+					 AND			fcm_undrlyng 	=	:ptr_st_contract->c_undrlyng
+					 AND			fcm_expry_dt 	= to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+					 AND			fcm_exer_typ 	=	:ptr_st_contract->c_exrc_typ
+					 AND			fcm_opt_typ 	=	:ptr_st_contract->c_opt_typ
+					 AND			fcm_strk_prc	= :ptr_st_contract->l_strike_prc;			 
+    ***/
+    /*** Ver 1.7 Starts ***/
+
+    EXEC SQL
+        SELECT      NVL( ftq_ca_lvl, 0 )
+          INTO      :ptr_st_mtch_cntrct->l_ca_lvl
+          FROM      ftq_fo_trd_qt     
+         WHERE      ftq_xchng_cd  = :ptr_st_contract->c_xchng_cd
+           AND      ftq_prdct_typ = :ptr_st_contract->c_prd_typ
+           AND      ftq_undrlyng  = :ptr_st_contract->c_undrlyng
+           AND      ftq_expry_dt  = to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+           AND      ftq_exer_typ  = :ptr_st_contract->c_exrc_typ
+           AND      ftq_opt_typ   = :ptr_st_contract->c_opt_typ
+           AND      ftq_strk_prc  = :ptr_st_contract->l_strike_prc;
+
+    /*** Ver 1.7 Ends   ***/ 
+
+		if ( SQLCODE != 0 )  
+  	{
+    	fn_errlog ( c_ServiceName, "S31060", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	tpfree ( ( char * ) ptr_st_mtch_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+		if(DEBUG_MSG_LVL_3)
+		{
+  		fn_userlog ( c_ServiceName, "c_xchng_cd :%s:",ptr_st_mtch_cntrct->c_xchng_cd );
+  		fn_userlog ( c_ServiceName, "c_instrmnt_typ :%s:",ptr_st_mtch_cntrct->c_instrmnt_typ );
+  		fn_userlog ( c_ServiceName, "c_symbol :%s:",ptr_st_mtch_cntrct->c_symbol );
+  		fn_userlog ( c_ServiceName, "c_expry_dt :%s:",ptr_st_mtch_cntrct->c_expry_dt );
+  		fn_userlog ( c_ServiceName, "c_opt_typ :%s:",ptr_st_mtch_cntrct->c_opt_typ );
+  		fn_userlog ( c_ServiceName, "d_strike_prc :%lf:",ptr_st_mtch_cntrct->d_strike_prc );
+ 			fn_userlog ( c_ServiceName, "l_ca_lvl :%ld:",ptr_st_mtch_cntrct->l_ca_lvl );
+  		fn_userlog ( c_ServiceName, "c_rqst_typ :%c:",ptr_st_mtch_cntrct->c_rqst_typ );
+  		fn_userlog ( c_ServiceName, "iptr_st_mtch_cntrct->l_ca_lvl :%c:",ptr_st_mtch_cntrct->l_ca_lvl);
+		}
+
+   	tpfree ( ( char * ) ptr_st_err_msg );
+		tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_st_mtch_cntrct, 0, 0 );
+	}
+	else if ( ptr_st_contract->c_rqst_typ == CONTRACT_TO_NSE_ID )
+	{
+  	ptr_st_nse_cntrct = ( struct vw_nse_cntrct * ) tpalloc ( "VIEW32",
+                                                             "vw_nse_cntrct",
+                                              sizeof ( struct vw_nse_cntrct ) );
+  	if ( ptr_st_nse_cntrct ==  NULL )
+  	{
+    	fn_errlog ( c_ServiceName, "S31065", TPMSG, ptr_st_err_msg->c_err_msg );
+			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+  	memset ( ptr_st_nse_cntrct, 0, sizeof ( struct vw_nse_cntrct ) );
+
+		strcpy ( ptr_st_nse_cntrct->c_xchng_cd, ptr_st_contract->c_xchng_cd );
+		
+		ptr_st_nse_cntrct->c_prd_typ = ptr_st_contract->c_prd_typ;
+
+		strcpy ( ptr_st_nse_cntrct->c_expry_dt, ( char * )c_expiry_dt.arr );
+
+		ptr_st_nse_cntrct->c_exrc_typ = ptr_st_contract->c_exrc_typ;
+
+		ptr_st_nse_cntrct->c_opt_typ = ptr_st_contract->c_opt_typ;
+		
+		ptr_st_nse_cntrct->l_strike_prc = ptr_st_contract->l_strike_prc;
+
+		strcpy ( ptr_st_nse_cntrct->c_symbol, c_symbl );
+
+		ptr_st_nse_cntrct->c_rqst_typ = ptr_st_contract->c_rqst_typ;
+
+		ptr_st_nse_cntrct->c_ctgry_indstk = ptr_st_contract->c_ctgry_indstk;
+
+		if ( strcmp ( ptr_st_nse_cntrct->c_xchng_cd, "NFO" ) == 0 )
+		{
+			strcpy ( c_eq_xchng_cd, "NSE" );
+		}
+		else if ( strcmp ( ptr_st_nse_cntrct->c_xchng_cd, "BFO" ) == 0 )
+		{
+			strcpy ( c_eq_xchng_cd, "BSE" );
+		}
+		else
+		{
+    	fn_errlog ( c_ServiceName, "S31070", "Invalid option", 
+                  ptr_st_err_msg->c_err_msg );
+    	tpfree ( ( char * ) ptr_st_nse_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+		}
+
+		/***Ver 1.1 comment &  add 
+		EXEC SQL
+				SELECT			ess_xchng_sgmnt_cd
+					INTO			:ptr_st_nse_cntrct->c_series
+					FROM			ess_sgmnt_stck
+				 WHERE			ess_stck_cd	 = :ptr_st_contract->c_undrlyng
+					 AND			ess_xchng_cd = :c_eq_xchng_cd;
+		****/
+     
+		/*** Commented in 1.4  
+		EXEC SQL
+			SELECT			nvl(ESS_XCHNG_SERIES,' ')                      
+      INTO      :ptr_st_nse_cntrct->c_series
+      FROM      ESS_SGMNT_STCK ,ESM_XCHNG_SGMNT_MSTR 
+     WHERE      esm_sgmnt_cd=ess_xchng_sgmnt_cd 
+			 AND    	esm_xchng_cd=ess_xchng_cd                           
+			    			ess_stck_cd  = :ptr_st_contract->c_undrlyng
+       AND      ess_xchng_cd = :c_eq_xchng_cd; 
+		***/
+		
+		/*** Ver 1.4 starts ***/
+
+		EXEC SQL
+      SELECT    nvl(ESS_XCHNG_SUB_SERIES,' ')
+     		INTO    :ptr_st_nse_cntrct->c_series
+      FROM      ESS_SGMNT_STCK 
+     	WHERE     ess_stck_cd  = :ptr_st_contract->c_undrlyng
+				AND     ess_xchng_cd = :c_eq_xchng_cd;
+	
+		/*** Ver 1.4 Ends ***/
+
+		if ( SQLCODE != 0 )  
+  	{
+    	fn_errlog ( c_ServiceName, "S31075", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	tpfree ( ( char * ) ptr_st_nse_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+    /*** Commented in Ver 1.7  ***
+		EXEC SQL
+				SELECT			NVL ( fcm_token_no, 0 ),
+										NVL( fcm_ca_lvl, 0 )
+					INTO			:ptr_st_nse_cntrct->l_token_id,
+										:ptr_st_nse_cntrct->l_ca_lvl
+					FROM			fcm_fo_cntrct_mstr 
+				 WHERE			fcm_xchng_cd 	= :ptr_st_contract->c_xchng_cd
+				   AND			fcm_prdct_typ = :ptr_st_contract->c_prd_typ
+ 					 AND			fcm_undrlyng  = :ptr_st_contract->c_undrlyng
+				   AND			fcm_expry_dt  =  to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+				   AND			fcm_exer_typ  = :ptr_st_contract->c_exrc_typ
+           AND			fcm_opt_typ   = :ptr_st_contract->c_opt_typ
+           AND      fcm_strk_prc  = :ptr_st_contract->l_strike_prc;
+     ***/
+     /*** Ver 1.7 Starts ***/ 
+
+     EXEC SQL
+        SELECT      NVL ( ftq_token_no, 0 ),
+                    NVL( ftq_ca_lvl, 0 )
+          INTO      :ptr_st_nse_cntrct->l_token_id,
+                    :ptr_st_nse_cntrct->l_ca_lvl
+          FROM      ftq_fo_trd_qt     
+         WHERE      ftq_xchng_cd  = :ptr_st_contract->c_xchng_cd
+           AND      ftq_prdct_typ = :ptr_st_contract->c_prd_typ
+           AND      ftq_undrlyng  = :ptr_st_contract->c_undrlyng
+           AND      ftq_expry_dt  =  to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+           AND      ftq_exer_typ  = :ptr_st_contract->c_exrc_typ
+           AND      ftq_opt_typ   = :ptr_st_contract->c_opt_typ
+           AND      ftq_strk_prc  = :ptr_st_contract->l_strike_prc;
+
+     /*** Ver 1.7 Ends   ***/
+		if ( SQLCODE != 0 )  
+  	{
+    	fn_errlog ( c_ServiceName, "S31080", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	tpfree ( ( char * ) ptr_st_nse_cntrct );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog ( c_ServiceName, "c_xchng_cd  :%s:",ptr_st_nse_cntrct->c_xchng_cd );
+  	fn_userlog ( c_ServiceName, "c_prd_typ     :%c:",ptr_st_nse_cntrct->c_prd_typ );
+  	fn_userlog ( c_ServiceName, "c_expry_dt    :%s:",ptr_st_nse_cntrct->c_expry_dt );
+  	fn_userlog ( c_ServiceName, "c_exrc_typ    :%c:",ptr_st_nse_cntrct->c_exrc_typ );
+  	fn_userlog ( c_ServiceName, "c_opt_typ     :%c:",ptr_st_nse_cntrct->c_opt_typ );
+  	fn_userlog ( c_ServiceName, "l_strike_prc  :%ld:",ptr_st_nse_cntrct->l_strike_prc );
+  	fn_userlog ( c_ServiceName, "c_ctgry_indstk:%c:",ptr_st_nse_cntrct->c_ctgry_indstk );
+  	fn_userlog ( c_ServiceName, "c_symbol      :%s:",ptr_st_nse_cntrct->c_symbol );
+  	fn_userlog ( c_ServiceName, "c_series      :%s:",ptr_st_nse_cntrct->c_series );
+  	fn_userlog ( c_ServiceName, "l_token_id    :%ld:",ptr_st_nse_cntrct->l_token_id );
+  	fn_userlog ( c_ServiceName, "l_ca_lvl      :%ld:",ptr_st_nse_cntrct->l_ca_lvl );
+  	fn_userlog ( c_ServiceName, "c_rqst_typ    :%c:",ptr_st_nse_cntrct->c_rqst_typ );
+	}
+
+   	tpfree ( ( char * ) ptr_st_err_msg );
+		tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_st_nse_cntrct, 0, 0 );
+	}
+	else if ( ptr_st_contract->c_rqst_typ == CONTRACT_TO_EBA_ID )
+	{
+    /*** Commented in Ver 1.7 ***
+		EXEC SQL
+				SELECT			fcm_eba_cntrct_id
+					INTO			:ptr_st_contract->l_eba_cntrct_id
+					FROM			fcm_fo_cntrct_mstr
+				 WHERE			fcm_xchng_cd 	= :ptr_st_contract->c_xchng_cd
+				   AND			fcm_prdct_typ = :ptr_st_contract->c_prd_typ
+ 					 AND			fcm_undrlyng  = :ptr_st_contract->c_undrlyng
+				   AND			fcm_expry_dt  =  to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+				   AND			fcm_exer_typ  = :ptr_st_contract->c_exrc_typ
+           AND			fcm_opt_typ   = :ptr_st_contract->c_opt_typ
+           AND      fcm_strk_prc  = :ptr_st_contract->l_strike_prc;
+    ***/
+    /*** Ver 1.7 Starts ***/
+
+    EXEC SQL
+        SELECT      ftq_eba_cntrct_id
+          INTO      :ptr_st_contract->l_eba_cntrct_id
+          FROM      ftq_fo_trd_qt     
+         WHERE      ftq_xchng_cd  = :ptr_st_contract->c_xchng_cd
+           AND      ftq_prdct_typ = :ptr_st_contract->c_prd_typ
+           AND      ftq_undrlyng  = :ptr_st_contract->c_undrlyng
+           AND      ftq_expry_dt  =  to_date ( :c_expiry_dt, 'dd-Mon-yyyy' )
+           AND      ftq_exer_typ  = :ptr_st_contract->c_exrc_typ
+           AND      ftq_opt_typ   = :ptr_st_contract->c_opt_typ
+           AND      ftq_strk_prc  = :ptr_st_contract->l_strike_prc;
+     
+    /*** Ver 1.7 Ends   ***/
+    
+		if ( SQLCODE != 0 )  
+  	{
+    	fn_errlog ( c_ServiceName, "S31085", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  	}
+
+		if(DEBUG_MSG_LVL_0)
+	  {
+			fn_userlog ( c_ServiceName, "ptr_st_contract->l_eba_cntrct_id :%c:",ptr_st_contract->l_eba_cntrct_id );	
+		}
+
+   	tpfree ( ( char * ) ptr_st_err_msg );
+		tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_st_contract, 0, 0 );
+	}
+}
+

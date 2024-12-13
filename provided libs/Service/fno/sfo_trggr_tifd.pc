@@ -1,0 +1,525 @@
+/* File : SFO_TRGGR_TIFD.PC
+*
+*  Description: This service unblocks the required quantity before passing the TIFD instruction.
+*								On successful TIFD processing updates EBA with the same.
+*
+*  Input Parameters:
+*				FML_USR_ID					- User Id
+*				FML_DPID						- Debit DP ID
+*				FML_ORD_DP_CLNT_ID	- Debit DP Account
+*				FML_DPQTY						- TIFD Qty
+*				FML_LOCK_CD					- Lock Code	
+*				FML_ISIN						- ISIN Number
+*				FML_BLOCK_UNBLOCK		- Block/Unblock Flag
+*				FML_MATCH_ACCNT			- Match Account
+*				FML_XCHNG_CD				- Exchange Code
+*				FML_XCHNG_SGMNT_CD	- Segment Code
+*				FML_STTLMNT_NMBR		-	Settlement  No
+*				FML_STCK_CD					- Stock Code
+*				FML_DEBIT_DT				- Debit Date
+*				FML_CREDIT_DPID			- Credit DP Id
+*				FML_CH_DPACC				- Credit DP Account
+*				FML_ON_MARKET_FLAG	- On Market flag
+*				FML_MRKT_TYP				- Market Type
+*				FML_CC_ID						- CC Id
+*				FML_STATLIN					- Row Id
+*
+* Output Parameters:
+*				Success/Failure
+*
+* Called by:
+*				bat_fo_trigger_tifd
+*
+*  Calling Programs/Sub-routines:
+*				svc_dp_bkubk
+*				svc_tifd_instru
+*
+*  Author : EDS
+*
+*  Created on: 18/01/2000
+*
+****************************************************************************/
+
+/* Standards include files*/
+
+#include <stdio.h>      /* C Header File								*/
+#include <stdlib.h>			/* C Header File								*/
+#include <sqlca.h>			/* Oracle header file						*/
+#include <atmi.h>       /* TUXEDO Header File           */
+#include <userlog.h>    /* TUXEDO Header File           */
+#include <fml32.h>      /* TUXEDO Header File           */
+#include <Usysflds.h>   /* TUXEDO Field Definitions     */ 
+#include <string.h>			
+#include <fml_rout.h>			
+#include <fn_read_debug_lvl.h>  
+#include <fn_ddr.h>
+#include <fn_log.h>
+
+/* User defined h files */
+#include <fml_def.h>		/* created for FML handling     */
+#include <eba.h>
+#include <fn_read_debug_lvl.h>  
+
+	
+#define TOTAL_FML 25
+#define	LEN_OF_ERROR_MSG 256
+#define	TIFD_OKAY_STATUS	'P'
+#define ICICI_DP 'I' 
+#define OTHER_DP 'O'
+
+/** GLobal Variables **/
+char c_ServiceName[33]; /* Name of called service */
+char c_ServiceName1[33]; /* Name of called service */
+char c_tag[32];
+char c_event[256];
+char c_rowid[20];
+char c_errmsg[LEN_OF_ERROR_MSG];
+
+void fn_update_ffd(void);
+
+void SFO_TRGGR_TIFD(TPSVCINFO *rqst )
+{
+	EXEC SQL INCLUDE "table/stb_stck_blck.h";
+	EXEC SQL INCLUDE "table/tud_tifd_upld_dtls.h"; 
+
+	/* Tuxedo specific variables	*/
+	FBFR32	*ptr_fml_Ibuffer;			/* Pointer to FML input buffer	*/
+	FBFR32  *ptr_fml_Obuffer;     /* Pointer to output FML buffer */
+	FBFR32  *ptr_fml_Rbuffer;     /* Pointer to FML Recv buffer */
+
+	char c_temp[20];              
+	char c_block_unblock;
+	char c_tifd_status;
+	char c_sttlmnt_nmbr[9+1];
+	char c_trgt_sttlmnt_no[13+1]; 
+	char c_bnk_typ; 
+
+  int  i_err[TOTAL_FML];
+	int  i_return_code = 0;
+	int  i;
+	int  i_prdct_nm = BACKOFFICE;
+	long l_recvlength;
+
+	
+	double	d_tifd_qty;
+
+  char c_in_edis_flg;
+  double d_mndt_shrtg_qty;
+  char c_ptr_vldt_dt[23];
+
+  c_in_edis_flg='N';
+  d_mndt_shrtg_qty=0;
+  MEMSET(c_ptr_vldt_dt);
+	MEMSET(sql_stb_edis_ref);
+	MEMSET(sql_stb_off_tifd_ref);
+	c_bnk_typ=ICICI_DP; 
+	
+	/* set up defaults	*/
+	strcpy(c_ServiceName, rqst->name);
+	strcpy(c_ServiceName1, "bat_trigger_tifd");
+
+	INITDBGLVL(c_ServiceName);	
+  INIT(i_err,TOTAL_FML);
+
+	MEMSET(c_sttlmnt_nmbr); 	
+	MEMSET(c_trgt_sttlmnt_no);
+	MEMSET(sql_stb_xchng_sgmnt_cd);	
+	MEMSET(sql_stb_dp_exectn_dt);  
+	MEMSET(c_rowid);  
+	MEMSET(c_temp);  
+
+  /* Retrieve the FML buffer from the input request. */
+	ptr_fml_Ibuffer = (FBFR32 *)rqst->data;
+
+	i_err[0] = Fget32(ptr_fml_Ibuffer, FML_DPID, 0, sql_stb_dp_id, 0);
+
+	i_err[1] = Fget32(ptr_fml_Ibuffer, FML_ORD_DP_CLNT_ID, 0, (char *)sql_stb_dp_clnt_id,0); 
+  i_err[2] = Fget32(ptr_fml_Ibuffer, FML_ISIN, 0, sql_stb_isin_nmbr, 0);
+  i_err[3] = Fget32(ptr_fml_Ibuffer, FML_DPQTY, 0, (char *)&d_tifd_qty, 0);
+  i_err[4] = Fget32(ptr_fml_Ibuffer, FML_MATCH_ACCNT, 0, sql_stb_clm_mtch_accnt, 0);
+  i_err[5] = Fget32(ptr_fml_Ibuffer, FML_STTLMNT_NMBR,0, (char *)&sql_stb_sttlmnt_nmbr,0);
+  i_err[6] = Fget32(ptr_fml_Ibuffer, FML_XCHNG_SGMNT_CD,0, (char *)sql_stb_xchng_sgmnt_cd,0);
+  i_err[7] = Fget32(ptr_fml_Ibuffer, FML_STCK_CD, 0, sql_stb_stck_cd, 0);
+  i_err[8] = Fget32(ptr_fml_Ibuffer, FML_XCHNG_CD, 0, sql_stb_xchng_cd, 0);
+  i_err[9] = Fget32(ptr_fml_Ibuffer, FML_STATLIN, 0, c_rowid, 0);
+	i_err[10] = Fget32(ptr_fml_Ibuffer, FML_DEBIT_DT, 0, (char *)sql_stb_dp_exectn_dt.arr, 0);
+
+	for(i = 0; i < TOTAL_FML; i++)
+  {
+    if (i_err[i] == -1)
+    {
+      fn_userlog(c_ServiceName,"Fget failed in field :%d:", i);
+      errlog(c_ServiceName, "S31005", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+      Fadd32(ptr_fml_Ibuffer,FML_ERR_MSG, c_errmsg, 0);
+			fn_update_ffd();
+      tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+    }
+  }
+	
+	rtrim(c_rowid);
+	SETLEN(sql_stb_dp_exectn_dt); 
+
+	
+	if(Fget32(ptr_fml_Ibuffer, FML_STTLMNT_NO,0, (char *)c_sttlmnt_nmbr,0) == -1) 
+	{
+		errlog(c_ServiceName, "S31010", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		Fadd32(ptr_fml_Ibuffer,FML_ERR_MSG, c_errmsg, 0);
+		fn_update_ffd();
+		tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+	}
+
+	if(Fget32(ptr_fml_Ibuffer, FML_PARAM_DESC,0, (char *)sql_stb_off_tifd_ref.arr,0) == -1)
+  {
+		if(Ferror32 != FNOTPRES)
+		{
+    	errlog(c_ServiceName, "S31015", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    	Fadd32(ptr_fml_Ibuffer,FML_ERR_MSG, c_errmsg, 0);
+    	fn_update_ffd();
+    	tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+		}
+  }
+	else
+	{
+		c_bnk_typ=OTHER_DP;
+	}
+	
+	SETLEN(sql_stb_off_tifd_ref);
+	SETNULL(sql_stb_off_tifd_ref);
+	
+  c_sttlmnt_nmbr[strlen(c_sttlmnt_nmbr)]='\0';
+	
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Input of SFO_TRGGR_TIFD.............");
+		fn_userlog(c_ServiceName,"DpId is :%s:", sql_stb_dp_id);
+		fn_userlog(c_ServiceName,"Dp account is :%s:", sql_stb_dp_clnt_id);
+		fn_userlog(c_ServiceName,"Isin is :%s:", sql_stb_isin_nmbr);
+		fn_userlog(c_ServiceName,"TIFD Qty is :%lf:", d_tifd_qty);
+		fn_userlog(c_ServiceName,"Match Account is :%s:", sql_stb_clm_mtch_accnt);
+		fn_userlog(c_ServiceName,"Settlement Nmbr is :%ld:", sql_stb_sttlmnt_nmbr);
+		fn_userlog(c_ServiceName,"Settlement Nmbr (String) :%s:",c_sttlmnt_nmbr);
+		fn_userlog(c_ServiceName,"Exchange Code  is :%s:", sql_stb_xchng_cd);
+		fn_userlog(c_ServiceName,"Stock Code  is :%s:", sql_stb_stck_cd);
+		fn_userlog(c_ServiceName,"Row Id is :%s:", c_rowid);
+		fn_userlog(c_ServiceName,"Execution Date	:%s:", sql_stb_dp_exectn_dt.arr);	
+		fn_userlog(c_ServiceName,"sql_stb_off_tifd_ref:%s:",sql_stb_off_tifd_ref.arr); 
+	}
+
+	sprintf(c_tag, "%s_%s", c_ServiceName1, sql_stb_xchng_cd);
+	sprintf(c_event, "Failed in processing for :%s:,:%s:,:%lf:", sql_stb_clm_mtch_accnt, 
+																						sql_stb_stck_cd, d_tifd_qty);
+	
+	ptr_fml_Rbuffer = (FBFR32 *)tpalloc("FML32", NULL, MIN_FML_BUF_LEN);
+  if(ptr_fml_Rbuffer == NULL)
+  {
+    errlog(c_ServiceName, "S31020", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+		fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+		fn_update_ffd();
+    tpreturn(TPFAIL, i_return_code, (char *)ptr_fml_Ibuffer, 0L, 0);
+  }
+
+	if((tpbegin(TRAN_TIMEOUT,0)) == -1)
+	{
+		errlog(c_ServiceName, "S31025", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+		fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    tpfree((char *)ptr_fml_Rbuffer);
+		fn_update_ffd();
+		tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+	}	
+
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Calling SVC_DP_BKUBK to reduce allocation in EBA and DP");
+	}
+
+	c_block_unblock = 'T';
+  if(Fchg32(ptr_fml_Ibuffer, FML_BLOCK_UNBLOCK, 0, (char *)&c_block_unblock, 0) == -1)
+	{
+		errlog(c_ServiceName, "S31030", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+		tpabort(0);
+		fn_update_ffd();
+		fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    tpfree((char *)ptr_fml_Rbuffer);
+		tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+	}
+
+  if(Fchg32(ptr_fml_Ibuffer, FML_GMS_ID, 0, (char *)&i_prdct_nm, 0) == -1)
+	{
+		errlog(c_ServiceName, "S31035", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+		tpabort(0);
+		fn_update_ffd();
+		fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    tpfree((char *)ptr_fml_Rbuffer);
+		tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+	}
+
+	i_return_code = tpcall("SVC_DP_BKUBK", (char *)ptr_fml_Ibuffer, 0,
+                    (char **)&ptr_fml_Rbuffer, &l_recvlength, 0L);
+  if(i_return_code == -1)
+  {
+		if(TPCODE != TPESVCFAIL)
+		{
+			errlog(c_ServiceName, "S31040", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		}
+		else
+		{
+			Fget32(ptr_fml_Rbuffer, FML_ERR_MSG, 0, c_errmsg, 0);
+		}
+		tpabort(0);
+		fn_update_ffd();
+		Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+		fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    tpfree((char *)ptr_fml_Rbuffer);
+		tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+	}
+
+	if(c_bnk_typ == ICICI_DP) 
+	{
+		EXEC SQL
+			SELECT FSP_STLMNT_DT 
+			INTO   :c_ptr_vldt_dt
+			FROM   FPS_FO_PHYDLVRY_STLMNTMSTR 
+			WHERE  FSP_STLMNT_NO= :sql_stb_sttlmnt_nmbr;
+	
+		if(SQLCODE != 0)
+		{
+    	errlog(c_ServiceName, "S31045", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+			Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+    	tpabort(0);
+    	fn_update_ffd();
+    	fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpfree((char *)ptr_fml_Rbuffer);
+    	tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+		}
+			
+		rtrim(c_ptr_vldt_dt);
+	
+		i_return_code=fn_upd_mndt_bkubk_dtls(c_ServiceName,DEF_USR,DEF_SSSN,sql_stb_clm_mtch_accnt, UNBLOCK, sql_stb_dp_id, 
+	sql_stb_dp_clnt_id, d_tifd_qty, sql_stb_isin_nmbr, sql_stb_stck_cd, &c_in_edis_flg, (char *)NULL, &d_mndt_shrtg_qty, 
+	sql_stb_edis_ref.arr, c_ptr_vldt_dt, TIFD_Y, "SYS", c_errmsg);
+	
+		if(i_return_code == -1)
+		{
+    	Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+			errlog(c_ServiceName, "S31050", " ", DEF_USR, DEF_SSSN, c_errmsg);
+			tpabort(0);
+    	fn_update_ffd();
+    	fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpfree((char *)ptr_fml_Rbuffer);
+    	tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+		}
+	
+		SETLEN(sql_stb_edis_ref);
+		SETNULL(sql_stb_edis_ref);
+	
+		fn_userlog(c_ServiceName,"c_in_edis_flg:%c: sql_stb_edis_ref:%s:",c_in_edis_flg,sql_stb_edis_ref.arr);
+	
+		if(Fadd32(ptr_fml_Ibuffer, FML_INSTR_NO, (char *)sql_stb_edis_ref.arr, 0) == -1)
+		{
+    	errlog(c_ServiceName, "S31055", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+			Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+    	tpabort(0);
+    	fn_update_ffd();
+    	fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpfree((char *)ptr_fml_Rbuffer);
+    	tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+		}
+	
+		if(Fadd32(ptr_fml_Ibuffer, FML_FRM_ALLWD, (char *)&c_in_edis_flg, 0) == -1)
+  	{
+    	errlog(c_ServiceName, "S31060", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    	Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+    	tpabort(0);
+    	fn_update_ffd();
+    	fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpfree((char *)ptr_fml_Rbuffer);
+    	tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+  	}
+	
+		if(strncmp(sql_stb_dp_id,CDSL_ID , 1) != 0) 
+		{
+			fn_userlog(c_ServiceName,"Tpcall to SVC_TIFD_INSTRU from SFO_TRGGR_TIFD");
+			i_return_code = tpcall("SVC_TIFD_INSTRU", (char *)ptr_fml_Ibuffer, 0,(char **)&ptr_fml_Rbuffer, &l_recvlength, 0L);
+		}
+		else
+		{
+			if(strcmp(sql_stb_xchng_cd,"NSE") == 0 )  
+			{
+				if(strcmp(sql_stb_xchng_sgmnt_cd,"N") == 0)
+				{
+					strcpy(c_trgt_sttlmnt_no,CDSL_STTMNT_NSE_N);
+					strcat(c_trgt_sttlmnt_no,c_sttlmnt_nmbr);
+				}
+			}
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName,"Target Settlement No:%s:",c_trgt_sttlmnt_no);
+			}
+
+			if(Fchg32(ptr_fml_Ibuffer,FML_STTLMNT_NO,0,(char *)c_trgt_sttlmnt_no,0) == -1)
+  		{
+				userlog("Unable to change FML_STTLMNT_NO");
+    		errlog(c_ServiceName, "S31065", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    		Fadd32(ptr_fml_Ibuffer,FML_ERR_MSG, c_errmsg, 0);
+    		fn_update_ffd();
+    		tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+  		}	
+		
+			fn_userlog(c_ServiceName,"Tpcall to SVC_TIFD_INSTRC from SFO_TRGGR_TIFD");
+			i_return_code = tpcall("SVC_TIFD_INSTRC", (char *)ptr_fml_Ibuffer, 0, (char **)&ptr_fml_Rbuffer, &l_recvlength, 0L); 
+		}
+		
+  	if(i_return_code== -1)
+  	{
+			if(TPCODE != TPESVCFAIL)
+			{
+				errlog(c_ServiceName, "S31070", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+			}
+			else
+			{
+				Fget32(ptr_fml_Rbuffer, FML_ERR_MSG, 0, c_errmsg, 0);
+			}
+			tpabort(0);
+			fn_update_ffd();
+			Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+			fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpfree((char *)ptr_fml_Rbuffer);
+			tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+		}
+
+		if(Fget32(ptr_fml_Rbuffer, FML_TIFD_REFERENCE, 0, (char *)&sql_stb_tifd_ack_rfrnc, 0) == -1)
+  	{
+    	errlog(c_ServiceName, "S31075", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    	Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+			fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpabort(0);
+			fn_update_ffd();
+    	tpfree((char *)ptr_fml_Rbuffer);
+    	tpreturn( TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0 );
+  	}
+
+  	tpfree((char *)ptr_fml_Rbuffer);
+
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"TIFD NO :%ld:", sql_stb_tifd_ack_rfrnc);
+		}
+	
+		c_tifd_status=TIFD_OKAY_STATUS;
+		sprintf(c_temp, "%lf", d_tifd_qty);
+		sscanf(c_temp, "%d", &sql_stb_qty_blckd);
+
+		fn_userlog(c_ServiceName,"The tifd status is :%c: length of sql_stb_dp_exectn_dt:%d:", c_tifd_status,sql_stb_dp_exectn_dt.len);
+	}
+	else
+	{
+   /************************************************
+		MEMSET(sql_tud_ord_stts);
+		sql_stb_tifd_ack_rfrnc=0;
+
+		EXEC SQL
+			SELECT TUD_ORD_STTS,
+						 TO_NUMBER(TUD_TRN_ID)
+			INTO	:sql_tud_ord_stts,
+						:sql_stb_tifd_ack_rfrnc
+			FROM TUD_TIFD_UPLD_DTLS
+			WHERE TUD_OFF_TIFD_REF = :sql_stb_off_tifd_ref
+			AND TUD_TIFD_TYPE='C';
+
+		if(SQLCODE != 0)
+		{
+			errlog(c_ServiceName, "S31080", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    	Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+    	fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpabort(0);
+    	fn_update_ffd();
+    	tpfree((char *)ptr_fml_Rbuffer);
+    	tpreturn( TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0 );
+		}
+
+		SETNULL(sql_tud_ord_stts);
+	
+		fn_userlog(c_ServiceName,"sql_tud_ord_stts:%s:",sql_tud_ord_stts.arr);
+
+		if(strcmp(sql_tud_ord_stts.arr,"51") != 0)
+		{
+			errlog(c_ServiceName, "S31085", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    	Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+    	fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+    	tpabort(0);
+    	fn_update_ffd();
+    	tpfree((char *)ptr_fml_Rbuffer);
+    	tpreturn( TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0 );
+		}
+    *************************/
+	}
+	
+	EXEC SQL UPDATE FFD_FOEXG_FOBG02_DTLS
+						SET   FFD_TIFD_ACK_RFRNC  =	:sql_stb_tifd_ack_rfrnc,
+                  FFD_PRCS_FLG        = SYSDATE,
+                  FFD_TIFD_STTS       =	'P',
+									FFD_SELL_QTYTIFD    = FFD_SELL_QTYTIFD + :sql_stb_qty_blckd,
+									FFD_SELL_QTYBLKD    = FFD_SELL_QTYBLKD - :sql_stb_qty_blckd,
+									FFD_DP_EXECTN_DT    =	:sql_stb_dp_exectn_dt,
+									FFD_EDIS_REF        = DECODE(:c_bnk_typ,'I',:sql_stb_edis_ref,FFD_EDIS_REF) 
+           WHERE	ROWID								= :c_rowid;
+
+	if(SQLCODE != 0)
+  {
+		errlog(c_ServiceName, "S31090", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		Fadd32(ptr_fml_Ibuffer, FML_ERR_MSG, c_errmsg, 0);
+		fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+		tpabort(0);
+		fn_update_ffd();
+		tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+  }
+
+	if((tpcommit(0)) == -1)
+  {
+		errlog(c_ServiceName, "S31095", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		fn_bat_pst_msg(c_ServiceName1, c_event, c_tag);
+		tpabort(0);
+		fn_update_ffd();
+		Fadd32(ptr_fml_Ibuffer,FML_ERR_MSG, c_errmsg, 0);
+		tpreturn(TPFAIL, 0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+	}
+		
+	fn_userlog(c_ServiceName,"Service %s executed successfully.",c_ServiceName);
+  tpreturn(TPSUCCESS, 0, (char *)ptr_fml_Ibuffer, 0L, 0);
+}
+
+void fn_update_ffd()
+{
+  if((tpbegin(TRAN_TIMEOUT,0)) == -1)
+  {
+    errlog(c_ServiceName, "S31100", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    return ;
+  }
+
+	userlog("In failed the tifd status is N");
+
+  EXEC SQL
+       UPDATE     FFD_FOEXG_FOBG02_DTLS 
+       SET        FFD_TIFD_STTS = 'N'
+       WHERE      ROWID = :c_rowid;
+
+  if(SQLCODE != 0)
+  {
+    errlog(c_ServiceName, "S31105", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    tpabort(0);
+    return;
+  }
+
+  if((tpcommit(0)) == -1)
+  {
+    errlog(c_ServiceName, "S31110", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    tpabort(0);
+    return;
+  }
+}

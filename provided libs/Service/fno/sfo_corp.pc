@@ -1,0 +1,1778 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_CORP	    		                                    */
+/*                                                                            */
+/*  Input             : Offline order record from the batch prog              */
+/*                                                                            */
+/*  Output            : err/success message                                   */
+/*                                                                            */
+/*  Description       : To place an corp order based on the input and      		*/
+/*                      put a tconf							                              */
+/*                                                                            */
+/*  Log               : 1.0   28-Jun-2004   sangeet                           */
+/*  Log               : 1.1   Changes for ctcl by Vikas|Vidya                 */
+/*  Log               : 1.2   Changes for IBM by Vidyayini Krish							*/
+/*	Log								:	1.3		07-May-2010		Sandeep Patil											*/
+/*  Log               : 1.4   13-Dec-2011   Swati B                           */
+/*  Log               : 1.6   27-Jul-2016   Tanmay Warkhade                   */
+/*  Log								: VQC   20-Jun-2019   Parag K.                          */
+/******************************************************************************/
+/*  1.0  -  New release                                                       */
+/*	1.3  -	NNF DownLoad Changes																							*/
+/*	1.4  -	SPAN Changes																											*/
+/*	1.6  -	Average price calculation fix for corporate 											*/
+/*					action trades on portfolio computation 														*/
+/*	VQC	 -	Version Quality Control																						*/
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <eba_to_ors.h>
+#include <fn_log.h> /* Ver 1.2 */
+#include <fml_rout.h> /* Ver 1.2 */
+#include <fn_read_debug_lvl.h> /* Ver 1.2 */
+#include <fn_span_lib.h> /*** Ver 1.4 ***/
+
+#define DONT_ABORT	'N'
+#define ABORT_TRN		'Y'
+#define RETURN			'R'
+#define DONT_RETURN 'N'
+
+/*** EXEC SQL INCLUDE "table/exg_xchng_mstr.h"; *** Commented in VQC ***/
+EXEC SQL INCLUDE "table/fco_fo_corp_orders.h";
+EXEC SQL INCLUDE "table/fct_fo_corp_trades.h";
+
+int fn_plc_ord(char* c_svc_err_msg, char* eba_ordr_ref); 
+
+int fn_ord_ack(char* c_svc_err_msg, char* eba_ordr_ref); 
+
+int fn_tconf(char* c_svc_err_msg, char* eba_trd_ref);  
+
+void fn_on_err( char *c_ServiceName, char* c_err_msg, char abort_trn_flg, char return_flg );
+
+int fn_spnord_ack(char* c_svc_err_msg, char* eba_ordr_ref);   /*** Ver 1.4 ***/  
+
+int fn_spn_tconf(char* c_svc_err_msg, char* eba_trd_ref);     /*** Ver 1.4 ***/  
+
+/* global variables */
+
+/*** Commented in VQC and made it local ***
+char lm_mkt_flg;
+char ord_typ = 'T';
+char svc_name[20];
+char c_channel[4];
+char c_user_id[10];
+long session_id;
+***/
+
+/*** long li_len_tobuf; *** Commented in VQC ***/
+
+/*** Commented in VQC and made it local ***
+char c_err_msg[256]; 
+char c_svc_err_msg[256];
+***/
+
+int  i_err[27];      /*** Ver 1.4  - subscript changed from 26 to 27 ***/
+
+/*** Commented in VQC and made it local ***
+long stop_loss_trp_prc = 0L;
+long disclosed_qty = 0L;
+***/ 
+
+char c_ServiceName[33];
+/*** char c_errmsg[256]; 
+char c_msg[256];*** Commented in VQC ***/
+
+char c_pipe_id[4]="\0";  /*** Initialized in VQC ***/
+
+/*** char c_ddr[5]; *** Commented in VQC and made it local ***/
+
+EXEC SQL BEGIN DECLARE SECTION;
+  varchar c_trd_dt[11 + 1];
+  varchar c_trd_ref[10];
+EXEC SQL END DECLARE SECTION;
+
+FBFR32* ptr_fml_Ibuf;
+/*** FBFR32* ptr_fml_Obuf; Commented in VQC and made it local ***/
+/** FBFR32* ptr_fml_Sbuf; ** Commented in VQC **/
+FBFR32* ptr_fml_Rbuf;
+
+void SFO_CORP( TPSVCINFO *rqst )
+{
+	char eba_ordr_ref[20] = "\0"; /*** Initialized in VQC ***/
+	char eba_trd_ref[20] = "\0"; /*** Initialized in VQC ***/
+	int i_trnsctn=0;
+	int i;
+	int i_trnsctn_main = 0;
+	int ord_val =0;
+	int ret_val = 0;
+	int ret_trd  = 0;
+	varchar ret_msg[256]; /*** char to varchar in VQC ***/
+	int trd_cnt=0;
+	long tot_trd_qty=0;
+	int match_exist  = 0;
+
+	/*** long  l_sizeof = 0; ***Ver 1.1*** ** Commented in VQC **/
+  /*** int   i_out=0;  ***Ver 1.1*** ** Commented in VQC **/
+	char c_spn_flg = 'N';    /*** Ver 1.4 ***/
+
+	/*** Global variables to local variables in VQC and initialized ***/
+	char lm_mkt_flg = '\0';
+	char ord_typ = 'T';
+	char svc_name[20] = "\0";
+	char c_channel[4] = "\0";
+	char c_user_id[10] = "\0";
+	long session_id = 0L;
+	varchar c_err_msg[256];			/*** char to varchar in VQC ***/
+	varchar c_svc_err_msg[256]; /*** char to varchar in VQC ***/
+	long stop_loss_trp_prc = 0L;
+	long disclosed_qty = 0L;
+	char c_ddr[5] = "\0";
+	FBFR32* ptr_fml_Obuf;
+
+	MEMSET(c_err_msg);
+	MEMSET(c_svc_err_msg);
+	MEMSET(c_trd_dt); 
+	MEMSET(c_trd_ref);
+	MEMSET(ret_msg);
+	/****************VQC ends *****************/
+
+	ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+	strcpy( c_ServiceName, rqst->name );
+  INITDBGLVL(c_ServiceName);	
+
+	ptr_fml_Obuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+/*** 	ptr_fml_Sbuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN); ** Commented in VQC **/
+/*** 	ptr_fml_Rbuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN); *** Commenetd and taken below in VQC ***/
+
+  if(ptr_fml_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31005", TPMSG, c_err_msg.arr  );  /*** c_err_msg.arr added in VQC ***/
+		fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN);  /*** c_err_msg.arr added in VQC ***/
+  }
+
+	/*** Commented in VQC ***
+  if( ptr_fml_Sbuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31010", TPMSG, c_err_msg  );
+		tpfree((char*)ptr_fml_Obuf);
+		fn_on_err( c_ServiceName, c_err_msg,DONT_ABORT, RETURN);
+  } ***/
+
+	ptr_fml_Rbuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN); /*** taken below in VQC ***/
+  if(ptr_fml_Rbuf == NULL)
+  {
+    fn_errlog( c_ServiceName, "S31015", TPMSG, c_err_msg.arr  );  /*** c_err_msg.arr added in VQC ***/
+		tpfree((char*)ptr_fml_Obuf);
+		/** tpfree((char*)ptr_fml_Sbuf); ** Commented in VQC **/
+		fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN);  /*** c_err_msg.arr added in VQC ***/
+  }
+
+	i_err[0] = Fget32(ptr_fml_Ibuf,FFO_USR_ID,0,(char *)c_user_id,0) ;
+  i_err[1] = Fget32(ptr_fml_Ibuf,FFO_SSSN_ID,0,(char *)&session_id,0) ;
+  i_err[2] = Fget32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO,0,(char *)sql_fco_clm_mtch_accnt,0) ;
+  i_err[3] = Fget32(ptr_fml_Ibuf,FFO_XCHNG_CD,0,(char *)sql_fco_xchng_cd,0) ;
+  i_err[4] = Fget32(ptr_fml_Ibuf,FFO_PRDCT_TYP,0,(char *)&sql_fco_prdct_typ,0) ;
+  i_err[5] = Fget32(ptr_fml_Ibuf,FFO_UNDRLYNG,0,(char *)sql_fco_undrlyng,0) ;
+  i_err[6] = Fget32(ptr_fml_Ibuf,FFO_EXPRY_DT,0,(char *)sql_fco_expry_dt.arr,0) ;
+  i_err[7] = Fget32(ptr_fml_Ibuf,FFO_EXER_TYP,0,(char *)&sql_fco_exer_typ,0) ;
+  i_err[8] = Fget32(ptr_fml_Ibuf,FFO_OPT_TYP,0,(char *)&sql_fco_opt_typ,0) ;
+  i_err[9] = Fget32(ptr_fml_Ibuf,FFO_STRK_PRC,0,(char *)&sql_fco_strike_prc,0) ;
+  i_err[10] = Fget32(ptr_fml_Ibuf,FFO_CTGRY_INDSTK,0,(char *)&sql_fco_indstk,0) ;
+  i_err[11] = Fget32(ptr_fml_Ibuf,FFO_ORDR_FLW,0,(char *)&sql_fco_ordr_flw,0) ;
+  i_err[12] = Fget32(ptr_fml_Ibuf,FFO_LMT_MKT_SL_FLG,0,(char *)&lm_mkt_flg,0) ;
+  i_err[13] = Fget32(ptr_fml_Ibuf,FFO_LMT_RT,0,(char *)&sql_fco_exec_rate,0) ;
+  i_err[14] = Fget32(ptr_fml_Ibuf,FFO_ORD_TYP,0,(char *)&ord_typ,0) ;
+  i_err[15] = Fget32(ptr_fml_Ibuf,FFO_ORD_TOT_QTY,0,(char *)&sql_fco_exec_qty,0) ;
+  i_err[16] = Fget32(ptr_fml_Ibuf,FFO_ORD_VALID_DT,0,(char *)sql_fco_ordr_dt.arr,0) ;
+  i_err[17] = Fget32(ptr_fml_Ibuf,FFO_SVC_NAME,0,(char *)svc_name,0) ;
+  i_err[18] = Fget32(ptr_fml_Ibuf,FFO_CHANNEL,0,(char *)c_channel,0) ;
+  i_err[19] = Fget32(ptr_fml_Ibuf,FFO_STP_LSS_TGR,0,(char *)&stop_loss_trp_prc,0) ;
+  i_err[20] = Fget32(ptr_fml_Ibuf,FFO_DSCLSD_QTY,0,(char *)&disclosed_qty,0) ;
+  i_err[21] = Fget32(ptr_fml_Ibuf,FFO_ACK_NMBR,0,(char *)sql_fco_xchng_ack,0) ;
+  i_err[22] = Fget32(ptr_fml_Ibuf,FFO_REMARKS,0,(char *)sql_fco_xchng_remarks.arr,0) ;
+  i_err[23] = Fget32(ptr_fml_Ibuf,FFO_ACK_TM,0,(char *)sql_fco_exchng_ack_tm.arr,0) ;
+  i_err[24] = Fget32(ptr_fml_Ibuf,FFO_PIPE_ID,0,(char *)c_pipe_id,0) ;
+  i_err[25] = Fget32(ptr_fml_Ibuf,FFO_DPID,0,(char *)c_ddr,0) ;
+	i_err[26] = Fget32(ptr_fml_Ibuf,FFO_SOURCE_FLG,0,(char *)&c_spn_flg,0) ; /*** Ver 1.4 ***/
+	
+	
+	for(i=0;i<27;i++)       /*** Ver 1.4 - subscript changed from 26 to 27 ***/
+	{
+		if(i_err[i] == -1)
+		{
+			fn_userlog(c_ServiceName,"Error in Fget for i [%d]",i);
+			fn_errlog( c_ServiceName, "S31020", FMLMSG, c_err_msg.arr  );  /*** c_err_msg.arr added in VQC ***/
+			tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+			tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN);  /*** c_err_msg.arr added in VQC ***/
+  	}
+	}
+
+	SETLEN(sql_fco_expry_dt);
+	SETLEN(sql_fco_ordr_dt);
+	SETLEN(sql_fco_xchng_remarks);
+	SETLEN(sql_fco_exchng_ack_tm);
+
+	if(DEBUG_MSG_LVL_0) /*** debug level changed from 3 to 0 ***/
+	{
+	fn_userlog(c_ServiceName,"INPUT for SFO_CORP..for sql_fco_xchng_ack [%s]",sql_fco_xchng_ack);
+	fn_userlog(c_ServiceName,"c_user_id [%s]",c_user_id);
+	fn_userlog(c_ServiceName,"session_id [%ld]",session_id);
+	fn_userlog(c_ServiceName,"sql_fco_clm_mtch_accnt [%s]",sql_fco_clm_mtch_accnt) ;
+	fn_userlog(c_ServiceName,"sql_fco_xchng_cd [%s]",sql_fco_xchng_cd);
+	fn_userlog(c_ServiceName,"sql_fco_prdct_typ [%c]",sql_fco_prdct_typ) ;
+	fn_userlog(c_ServiceName,"sql_fco_undrlyng [%s]",sql_fco_undrlyng);
+	fn_userlog(c_ServiceName,"sql_fco_expry_dt.arr [%s]",sql_fco_expry_dt.arr);
+	fn_userlog(c_ServiceName,"sql_fco_exer_typ [%c]",sql_fco_exer_typ) ;
+	fn_userlog(c_ServiceName,"sql_fco_opt_typ [%c]",sql_fco_opt_typ) ;
+	fn_userlog(c_ServiceName,"sql_fco_strike_prc [%ld]",sql_fco_strike_prc) ;
+	fn_userlog(c_ServiceName,"sql_fco_indstk [%c]",sql_fco_indstk) ;
+	fn_userlog(c_ServiceName,"sql_fco_ordr_flw [%c]",sql_fco_ordr_flw) ;
+	fn_userlog(c_ServiceName,"lm_mkt_flg [%c]",lm_mkt_flg) ;
+	fn_userlog(c_ServiceName,"sql_fco_exec_rate [%ld]",sql_fco_exec_rate) ;
+	fn_userlog(c_ServiceName,"ord_typ [%c]",ord_typ) ;
+	fn_userlog(c_ServiceName,"sql_fco_exec_qty [%ld]",sql_fco_exec_qty) ;
+	fn_userlog(c_ServiceName,"sql_fco_ordr_dt.arr [%s]",sql_fco_ordr_dt.arr) ;
+	fn_userlog(c_ServiceName,"svc_name [%s]",svc_name) ;
+	fn_userlog(c_ServiceName,"c_channel [%s]",c_channel) ;
+	fn_userlog(c_ServiceName,"stop_loss_trp_prc [%ld]",stop_loss_trp_prc) ;
+	fn_userlog(c_ServiceName,"disclosed_qty [%ld]",disclosed_qty) ;
+	fn_userlog(c_ServiceName,"sql_fco_xchng_remarks [%s]",sql_fco_xchng_remarks.arr) ;
+	fn_userlog(c_ServiceName,"sql_fco_exchng_ack_tm [%s]",sql_fco_exchng_ack_tm.arr) ;
+	fn_userlog(c_ServiceName,"c_pipe_id [%s]",c_pipe_id) ;
+	fn_userlog(c_ServiceName,"c_ddr [%s]",c_ddr) ;
+	fn_userlog(c_ServiceName,"c_spn_flg Is [%c]",c_spn_flg) ;  /*** Ver 1.4 ***/
+	}
+
+	/*** Applied Hard parsing in VQC ***/
+	EXEC SQL
+  SELECT TO_CHAR ( EXG_NXT_TRD_DT, 'yyyymmdd' ),
+         TO_CHAR ( EXG_NXT_TRD_DT, 'DD-Mon-yyyy' )
+  INTO :c_trd_ref,
+       :c_trd_dt
+  FROM EXG_XCHNG_MSTR, OPM_ORD_PIPE_MSTR
+  WHERE OPM_PIPE_ID =  :c_pipe_id
+  AND EXG_XCHNG_CD = OPM_XCHNG_CD;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31025", SQLMSG, c_err_msg.arr);  /*** c_err_msg.arr added in VQC ***/
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+    fn_on_err(c_ServiceName,"Database Error exiting..",DONT_ABORT, RETURN);
+  }
+  SETNULL ( c_trd_ref );
+  SETNULL ( c_trd_dt );
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+	  fn_userlog( c_ServiceName, "c_trd_ref = [%s]",c_trd_ref.arr);
+		fn_userlog( c_ServiceName, "c_trd_dt = [%s]",c_trd_dt.arr);
+	}
+	if(sql_fco_prdct_typ == 'F')
+		fn_init_ddr_pop ( c_pipe_id,TRADING_SECTION,F_CS);
+
+	if(sql_fco_prdct_typ == 'O')
+		fn_init_ddr_pop ( c_pipe_id,TRADING_SECTION,O_CS);
+
+	/* perform order level validations before placing the order */
+
+	/* check the validity of the user */
+  match_exist = 0;
+
+
+  EXEC SQL
+  SELECT  1
+  INTO    :match_exist
+  FROM
+  CLM_CLNT_MSTR
+  WHERE
+  /*** trim(CLM_MTCH_ACCNT) = trim(:sql_fco_clm_mtch_accnt); *** commented in VQC ***/
+	CLM_MTCH_ACCNT = trim(:sql_fco_clm_mtch_accnt); /*** trim removed in VQC ***/
+
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog(c_ServiceName,"S31030",SQLMSG,c_err_msg.arr);  /*** c_err_msg.arr added in VQC ***/
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN);  /*** c_err_msg.arr added in VQC ***/
+  }
+
+	if(match_exist == 0)
+  {
+    sprintf(ret_msg.arr,"Match Account [%s] not found in EBA for Exg ack [%s]",sql_fco_clm_mtch_accnt,sql_fco_xchng_ack); /*** ret_msg to ret_msg.arr in VQC ***/
+    i_trnsctn = fn_begintran( c_ServiceName, c_err_msg.arr ); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    if(i_trnsctn == -1)
+    {
+			fn_errlog(c_ServiceName,"S31035",LIBMSG,c_err_msg.arr);  /** SQLMSG replaced by LIBMSG and c_err_msg.arr added in VQC **/
+      fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the SFO_CORP process...",c_err_msg.arr); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN);  /*** c_err_msg.arr added in VQC ***/
+    }
+
+		SETLEN(ret_msg);		/*** Added in VQC ***/
+
+    EXEC SQL
+    UPDATE FCO_FO_CORP_ORDERS
+    SET FCO_PLCD_STTS = 'J',              /* reject the order as match does not exist */
+       FCO_REMARKS   = :ret_msg
+    WHERE
+       FCO_XCHNG_ACK = :sql_fco_xchng_ack;
+
+		if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31040",SQLMSG,c_err_msg.arr);  /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN);  /*** c_err_msg.arr added in VQC ***/
+    }
+
+		EXEC SQL
+    UPDATE FCT_FO_CORP_TRADES
+    SET FCT_PLCD_STTS = 'J',              /* reject the trades as match does not exist */
+       FCT_REMARKS   = :ret_msg
+    WHERE
+       FCT_XCHNG_ACK = :sql_fco_xchng_ack;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31045",SQLMSG,c_err_msg.arr);  /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+      fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN);  /*** c_err_msg.arr added in VQC ***/
+    }
+
+    if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg.arr ) == -1 ) /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    {
+			fn_errlog(c_ServiceName,"S31050",LIBMSG,c_err_msg.arr); /** SQLMSG replced by LIBMSG and .arr added in VQC **/
+      fn_userlog(c_ServiceName,"Error in commit [%s] exiting the SFO_CORP process...",c_err_msg.arr); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+      fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+    strcat(ret_msg.arr,"...continuing with another record");  /*** ret_msg to ret_msg.arr in VQC ***/
+		tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, ret_msg.arr,DONT_ABORT, RETURN);  /*** ret_msg to ret_msg.arr in VQC ***/
+  }
+
+	/* check if any trades are available in the offline trade table */
+
+  trd_cnt = 0;
+
+	/*** Applied Hard parsing in VQC ***/
+  EXEC SQL
+  SELECT COUNT(*)
+  INTO   :trd_cnt
+  FROM   FCT_FO_CORP_TRADES
+  WHERE  FCT_XCHNG_ACK = :sql_fco_xchng_ack
+  /*** AND    TRUNC(FCT_TRD_DT) = TRUNC(TO_DATE(:sql_fco_ordr_dt,'dd-Mon-yyyy'))  *** Commented in VQC ***/
+	AND    FCT_TRD_DT = TO_DATE(:sql_fco_ordr_dt,'dd-Mon-yyyy') /*** VQC ***/
+  AND    FCT_PLCD_STTS <> 'U';         
+
+  if ( SQLCODE != 0 )
+  {
+  	fn_errlog(c_ServiceName,"S31055",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN); /*** c_err_msg.arr added in VQC ***/
+  }
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "trade count=[%ld]",trd_cnt);
+  }
+	if(trd_cnt == 0)    /* No trades found in the offline trade table */
+  {
+    sprintf(ret_msg.arr,"No trades found for Exg Ack [%s]",sql_fco_xchng_ack);  /*** ret_msg to ret_msg.arr in VQC ***/
+		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg.arr ); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    if(i_trnsctn == -1)
+    {
+			fn_errlog(c_ServiceName,"S31060",LIBMSG,c_err_msg.arr); /** SQLMSG replaced by LIBMSG and .arr added in VQC **/
+     	fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the BAT_UPLD_CORP process...",c_err_msg.arr); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    }
+
+		SETLEN(ret_msg);		/*** Added in VQC ***/
+
+    EXEC SQL
+    UPDATE FCO_FO_CORP_ORDERS
+    SET FCO_PLCD_STTS = 'F',
+        FCO_REMARKS   = :ret_msg
+    WHERE
+        FCO_XCHNG_ACK = :sql_fco_xchng_ack;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31065",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+    	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    }
+
+		if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg.arr ) == -1 ) /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    {
+      fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the BAT_UPLD_CORP process...",c_err_msg.arr); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+  /***fn_on_err( c_ServiceName, c_errmsg,ABORT_TRN, RETURN);** commented in VQC and moved below **/
+      fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg.arr  ); /** FML MSG replaced by LIBMSG and .arr added in VQC **/
+			tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** CHECK added in VQC and c_errmsg to c_err_msg.arr in VQC ***/
+    }
+    strcat(ret_msg.arr,"...continue with another record");  /*** ret_msg to ret_msg.arr in VQC ***/
+		tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, ret_msg.arr,DONT_ABORT, RETURN); /*** ret_msg to ret_msg.arr in VQC ***/
+  }
+
+  /* trades exist ..compare the sum of trades with the order executed qty for a xchng ack */
+
+	/*** Applied Hard parsing in VQC ***/
+  EXEC SQL
+  SELECT SUM(FCT_EXCTD_QTY)
+  INTO   :tot_trd_qty
+  FROM   FCT_FO_CORP_TRADES
+  WHERE  FCT_XCHNG_ACK = :sql_fco_xchng_ack
+  /*** AND    TRUNC(FCT_TRD_DT) = TRUNC(TO_DATE(:sql_fco_ordr_dt,'dd-Mon-yyyy')) *** Commented in VQC ***/
+	AND    FCT_TRD_DT = TO_DATE(:sql_fco_ordr_dt,'dd-Mon-yyyy') /*** VQC ***/ 
+  AND    FCT_PLCD_STTS <> 'U'
+  GROUP BY FCT_XCHNG_ACK,FCT_TRD_DT; /*** trunc removed in VQC ***/
+
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog(c_ServiceName,"S31075",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN); /*** c_err_msg.arr added in VQC ***/
+  }
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "Tot_Trd_Qty = %ld",tot_trd_qty);
+	}
+  if(sql_fco_exec_qty != tot_trd_qty)
+  {
+    sprintf(ret_msg.arr,"sum of trades not equal to exec qty ..Cannnot upload Order for Exg Ack [%s]..",sql_fco_xchng_ack);  /*** ret_msg to ret_msg.arr in VQC ***/
+		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg.arr ); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    if(i_trnsctn == -1)
+    {
+      fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the BAT_UPLD_CORP process...",c_err_msg.arr); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+      fn_errlog( c_ServiceName, "S31080", LIBMSG, c_err_msg.arr  ); /** FMLMSG replaced by LIBMSG and .arr added in VQC **/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    }
+
+		SETLEN(ret_msg);		/*** Added in VQC ***/
+
+    EXEC SQL
+    UPDATE FCO_FO_CORP_ORDERS
+    SET FCO_PLCD_STTS = 'F',    /* not uploaded */
+   	    FCO_REMARKS   = :ret_msg
+    WHERE
+        FCO_XCHNG_ACK = :sql_fco_xchng_ack;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31085",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+
+		EXEC SQL
+    UPDATE FCT_FO_CORP_TRADES
+    SET FCT_PLCD_STTS = 'F',    /* upload failed */
+        FCT_REMARKS   = 'Sum of trades does not match the executed qty for the order ack'
+    WHERE
+        FCT_XCHNG_ACK = :sql_fco_xchng_ack;
+
+    if ( SQLCODE != 0 )
+    {
+   	  fn_errlog(c_ServiceName,"S31090",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+
+    if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg.arr ) == -1 ) /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    {
+      fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the BAT_UPLD_CORP process...",c_err_msg.arr); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+      fn_errlog( c_ServiceName, "S31095", LIBMSG, c_err_msg.arr  ); /** FMLMSG replaced by LIBMSG **/ /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+    strcat(ret_msg.arr,"..continuing with next record.");  /*** ret_msg to ret_msg.arr in VQC ***/
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, ret_msg.arr,DONT_ABORT, RETURN);  /*** ret_msg to ret_msg.arr in VQC ***/
+  }
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "All validations done..place the order ");
+	}
+	/**** order level transactions begins here ****/
+  i_trnsctn_main = fn_begintran( c_ServiceName, c_err_msg.arr ); /*** c_err_msg.arr added in VQC ***/
+  if(i_trnsctn_main == -1)
+  {
+		fn_errlog(c_ServiceName,"S31100",LIBMSG,c_err_msg.arr); /** TPMSG replace by LIBMSG and Changed from c_errmsg to c_err_msg.arr in VQC **/
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN); /*** c_err_msg.arr added in VQC ***/
+  }
+
+	ord_val = fn_plc_ord(c_svc_err_msg.arr,eba_ordr_ref);				 /*** .arr added in VQC ***/
+	
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "Return val from fn_plc_ord = %d c_svc_err_msg.arr[%s]",ord_val,c_svc_err_msg.arr); /*** c_svc_err_msg.arr added in VQC ***/
+	}
+  if(ord_val == -1) /* order upload failed */
+ 	{ 
+		fn_on_err( c_ServiceName, (char*)0, ABORT_TRN, DONT_RETURN);
+		strcpy(ret_msg.arr,"Place order failed ..ERROR");  /*** .arr added in VQC ***/
+		sprintf(ret_msg.arr,"%s[%s]",ret_msg.arr,c_svc_err_msg.arr); /*** .arr Added in VQC ***/
+   	/*** fn_userlog( c_ServiceName, "inside ord_val= -1"); *** Commented in VQC ***/
+    i_trnsctn = fn_begintran( c_ServiceName, c_err_msg.arr ); /*** c_err_msg.arr added in VQC ***/
+    if(i_trnsctn == -1)
+    {
+			fn_errlog(c_ServiceName,"S31105",LIBMSG,c_err_msg.arr);/** TPMSG reaplced by LIBMSG **/ /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,DONT_ABORT, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+
+		SETLEN(ret_msg);		/*** Added in VQC ***/
+		SETLEN(c_svc_err_msg);		/*** Added in VQC ***/
+
+    EXEC SQL
+    UPDATE FCO_FO_CORP_ORDERS
+    SET FCO_PLCD_STTS = 'F',
+      FCO_REMARKS   = :ret_msg
+    WHERE
+      FCO_XCHNG_ACK = :sql_fco_xchng_ack;
+		
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31110",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+    	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+
+		/* update the corresponding orders for this order ack */
+
+		SETLEN(c_svc_err_msg);		/*** Added in VQC ***/
+
+		EXEC SQL
+    UPDATE FCT_FO_CORP_TRADES
+    SET FCT_PLCD_STTS = 'F',
+      FCT_REMARKS   = :c_svc_err_msg
+    WHERE
+      FCT_XCHNG_ACK = :sql_fco_xchng_ack;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31115",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+    	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+      fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+
+    if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg.arr ) == -1 ) /*** c_err_msg.arr added in VQC ***/
+    {
+			fn_errlog(c_ServiceName,"S31120",LIBMSG,c_err_msg.arr); /** TPMSG replaced by LIBMSG **/ /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+			tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+		tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, ret_msg.arr, DONT_ABORT, RETURN);  /*** ret_msg to ret_msg.arr in VQC ***/
+  }
+	else    /* order upload successful */
+  {
+    eba_ordr_ref[strlen(eba_ordr_ref)] = '\0';
+		if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+		{
+			fn_userlog(c_ServiceName,"Ord ref being updt [%s] ",eba_ordr_ref);
+		}
+
+    EXEC SQL
+    UPDATE FCO_FO_CORP_ORDERS
+      SET FCO_PLCD_STTS = 'U',		/* uploaded */
+    	    FCO_ORDR_RFRNC   = :eba_ordr_ref
+      WHERE
+          FCO_XCHNG_ACK = :sql_fco_xchng_ack;
+
+		if ( SQLCODE != 0 )
+    {
+			fn_errlog(c_ServiceName,"S31125",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr,ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+	}
+
+	/* order placed ...get the ack */
+	if(  c_spn_flg == 'N')  /*** Ver 1.4 check Aded ***/
+	{
+		ret_val = fn_ord_ack(c_svc_err_msg.arr,eba_ordr_ref);  /*** .arr added in VQC ***/
+	}
+	else if ( c_spn_flg == 'Y')  /*** Ver 1.4 ***/
+  {
+    ret_val = fn_spnord_ack(c_svc_err_msg.arr,eba_ordr_ref);  /*** .arr added in VQC ***/
+  }
+
+  if(ret_val == -1)
+  {
+		fn_on_err( c_ServiceName, (char*)0, ABORT_TRN, DONT_RETURN);
+		strcpy(ret_msg.arr,"Order acpt failed..ERROR");   /*** .arr added in VQC ***/
+		sprintf(ret_msg.arr,"%s[%s]",ret_msg.arr,c_svc_err_msg.arr); /*** .arr added in VQC ***/
+    i_trnsctn = fn_begintran( c_ServiceName, c_err_msg.arr ); /*** c_err_msg.arr added in VQC ***/
+    if(i_trnsctn == -1)
+    {
+			fn_errlog(c_ServiceName,"S31130",LIBMSG,c_err_msg.arr); /** TPMSG replaced by LIBMSG and Changed from c_errmsg to c_err_msg.arr in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr, DONT_ABORT, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+
+		SETLEN(c_svc_err_msg);		/*** Added in VQC ***/
+
+    EXEC SQL
+    UPDATE FCO_FO_CORP_ORDERS
+      SET FCO_PLCD_STTS = 'F',
+         FCO_REMARKS   = :c_svc_err_msg
+      WHERE
+         FCO_XCHNG_ACK = :sql_fco_xchng_ack;
+
+    if ( SQLCODE != 0 )
+    {
+			fn_errlog(c_ServiceName,"S31135",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    } 
+
+		SETLEN(ret_msg);		/*** Added in VQC ***/
+
+		EXEC SQL
+    UPDATE FCT_FO_CORP_TRADES
+      SET FCT_PLCD_STTS = 'F',
+         FCT_REMARKS   = :ret_msg
+      WHERE
+         FCT_XCHNG_ACK = :sql_fco_xchng_ack;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31140",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+      fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+		
+
+		if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg.arr ) == -1 ) /*** c_err_msg.arr added in VQC ***/
+    {
+			fn_errlog(c_ServiceName,"S31145",LIBMSG,c_err_msg.arr); /** TPMSG replaced by LIBMSG and Changed from c_errmsg to c_err_msg.arr in VQC ***/
+			tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+    }
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+		fn_on_err( c_ServiceName, ret_msg.arr, DONT_ABORT, RETURN);  /*** ret_msg to ret_msg.arr in VQC ***/
+	}
+	else
+	{
+		/* select the trades against this order ack */
+		/*** Hard parsing applied in VQC ***/
+    EXEC SQL
+    DECLARE trd_cur CURSOR FOR
+    SELECT
+       FCT_XCHNG_TRD_RFRNC,
+       FCT_XCHNG_ACK,
+       FCT_CLM_MTCH_ACCNT,
+       FCT_EXCTD_RT,
+       FCT_EXCTD_QTY,
+       TO_CHAR(FCT_TRD_DT,'dd-mon-yyyy hh24:mi:ss'),
+       FCT_PLCD_STTS
+    FROM
+       FCT_FO_CORP_TRADES
+    WHERE
+       FCT_XCHNG_ACK = :sql_fco_xchng_ack  AND
+       FCT_PLCD_STTS <>'U' ;
+
+    EXEC SQL
+       OPEN trd_cur;
+	
+   	for( ; ; )
+   	{
+     	EXEC SQL
+     	FETCH trd_cur
+     	INTO
+        :sql_fct_xchng_trd_rfrnc, 
+        :sql_fct_xchng_ack,
+        :sql_fct_clm_mtch_accnt,
+        :sql_fct_exctd_rt,
+        :sql_fct_exctd_qty,
+        :sql_fct_trd_dt,
+        :sql_fct_plcd_stts;
+
+     	if( SQLCODE == NO_DATA_FOUND )
+     	{
+       	EXEC SQL CLOSE trd_cur;
+       	break;
+      }
+
+			if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        EXEC SQL CLOSE trd_cur;
+				fn_errlog(c_ServiceName,"S31150",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+				fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+      }
+
+			SETNULL(sql_fct_trd_dt);
+
+			if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+			{
+	      fn_userlog(c_ServiceName,"sql_fct_xchng_trd_rfrnc = [%ld],sql_fct_xchng_ack = [%s]",sql_fct_xchng_trd_rfrnc,sql_fct_xchng_ack); /* Ver 1.2 */ /*** %d to %ld in VQC ***/
+			}
+			ret_trd = 0;
+			
+	
+			if ( c_spn_flg == 'N')   /*** Ver 1.4 - check added ***/
+			{
+      	ret_trd = fn_tconf(c_svc_err_msg.arr,eba_trd_ref);  /*** .arr added in VQC ***/
+			}
+			else if ( c_spn_flg == 'Y')  /*** Ver 1.4 ***/
+			{
+				ret_trd = fn_spn_tconf(c_svc_err_msg.arr,eba_trd_ref); /*** .arr added in VQC ***/
+			}
+
+      if(ret_trd == -1)
+      {
+				EXEC SQL CLOSE trd_cur;
+				break;
+			}
+			else
+			{
+				eba_trd_ref[strlen(eba_trd_ref)] = '\0';
+				if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+				{
+      		fn_userlog(c_ServiceName,"EBA trd ref [%s] ",eba_trd_ref);
+				}
+      	EXEC SQL
+      	UPDATE FCT_FO_CORP_TRADES
+        	SET FCT_PLCD_STTS = 'U',
+        	FCT_EBA_TRD_REF   = :eba_trd_ref,
+        	FCT_ORDR_RFRNC    = :eba_ordr_ref,
+        	FCT_REMARKS       = 'Trade uploaded'
+      	WHERE
+        	FCT_XCHNG_ACK = :sql_fco_xchng_ack AND
+					FCT_XCHNG_TRD_RFRNC = :sql_fct_xchng_trd_rfrnc; 
+
+      	if ( SQLCODE != 0 )
+      	{
+        	fn_errlog(c_ServiceName,"S31155",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      		tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      		tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+        	fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+      	}
+			}
+		}
+
+		if(ret_trd == -1)
+		{
+			strcpy(ret_msg.arr,"Trade confirmation failed..ERROR"); /*** .arr added in VQC ***/
+			sprintf(ret_msg.arr,"%s[%s]",ret_msg.arr,c_svc_err_msg.arr);  /*** .arr added in VQC ***/
+			fn_on_err( c_ServiceName, (char*)0, ABORT_TRN, DONT_RETURN);
+      i_trnsctn = fn_begintran( c_ServiceName, c_err_msg.arr ); /*** c_err_msg.arr added in VQC ***/
+      if(i_trnsctn == -1)
+      {
+				fn_errlog(c_ServiceName,"S31160",LIBMSG,c_err_msg.arr); /** TPMSG replace by LIBMSG and Changed from c_errmsg to c_err_msg.arr in VQC ***/
+      	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+				fn_on_err( c_ServiceName, c_err_msg.arr, DONT_ABORT, RETURN); /*** c_err_msg.arr added in VQC ***/
+      }
+
+			SETLEN(ret_msg);		/*** Added in VQC ***/
+			SETLEN(c_svc_err_msg);	/*** Added in VQC ***/
+			/* change */
+			EXEC SQL
+      UPDATE FCO_FO_CORP_ORDERS
+     	SET FCO_PLCD_STTS = 'F',
+          FCO_REMARKS   = :ret_msg	
+      WHERE
+          FCO_XCHNG_ACK = :sql_fco_xchng_ack;
+
+      if ( SQLCODE != 0 )
+      {
+				fn_errlog(c_ServiceName,"S31165",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+				tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+				fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+      }
+
+      EXEC SQL
+      UPDATE FCT_FO_CORP_TRADES
+      SET FCT_PLCD_STTS = 'F',
+        FCT_REMARKS   = :c_svc_err_msg
+      WHERE
+        FCT_XCHNG_ACK = :sql_fco_xchng_ack  AND
+        FCT_XCHNG_TRD_RFRNC = :sql_fct_xchng_trd_rfrnc; 
+
+			if ( SQLCODE != 0 )
+      {
+				fn_errlog(c_ServiceName,"S31170",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+      	tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+				fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+      } 
+
+      if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg.arr ) == -1 ) /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+      {
+				fn_errlog(c_ServiceName,"S31175",LIBMSG,c_err_msg.arr); /** TPMSG replaced by LIBMSG and Changed from c_errmsg to c_err_msg.arr in VQC ***/
+				tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      	tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+				fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+      }
+			tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+      tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+			fn_on_err( c_ServiceName, ret_msg.arr, DONT_ABORT, RETURN);  /*** ret_msg to ret_msg.arr in VQC ***/
+    }
+		else    
+    {
+			EXEC SQL
+  			UPDATE FCO_FO_CORP_ORDERS
+  		SET FCO_PLCD_STTS = 'U',
+				FCO_REMARKS   = 'Order & trades uploaded'
+  		WHERE
+      	FCO_XCHNG_ACK = :sql_fco_xchng_ack	AND
+				FCO_ORDR_RFRNC = :eba_ordr_ref; 
+
+  		if ( SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName,"S31180",SQLMSG,c_err_msg.arr); /*** c_err_msg.arr added in VQC ***/
+        tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+        tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+    		fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** c_err_msg.arr added in VQC ***/
+  		}
+		}
+	}		/* close of the else */
+
+	if( fn_committran( c_ServiceName, i_trnsctn_main, c_err_msg.arr ) == -1 )	/* commit the main trn */ /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+  {
+		fn_errlog(c_ServiceName,"S31185",LIBMSG,c_err_msg.arr); /** TPMSG replaced by LIBMSG and Changed from c_errmsg to c_err_msg.arr in VQC ***/
+    tpfree((char*)ptr_fml_Obuf); /** added in VQC **/
+    tpfree((char*)ptr_fml_Rbuf); /** added in VQC **/
+    fn_on_err( c_ServiceName, c_err_msg.arr, ABORT_TRN, RETURN); /*** Changed from c_errmsg to c_err_msg.arr in VQC ***/
+  }
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"****Order and trade upload successful for Exchange Ack [%s]****",sql_fco_xchng_ack);
+	}
+	ret_val = 1;
+  Fadd32( ptr_fml_Obuf, FFO_ACTN_ID ,(char*)&ret_val, 0 );
+  Fadd32( ptr_fml_Obuf, FFO_ORDR_RFRNC ,(char*)eba_ordr_ref, 0 );
+  tpreturn(TPSUCCESS, SUCC_BFR, (char *)ptr_fml_Obuf, 0, 0 );
+	/* success */
+}
+
+int fn_plc_ord(char* c_err_msg, char* eba_ordr_ref) 
+{
+	int ret_val = 0;       /** Variable initialized in VQC **/
+	long li_len_tobuf = 0; /** Variable initialized in VQC **/
+	varchar err_msg[256]; /*** Char to varchar in VQC ***/
+	MEMSET(err_msg); /*** VQC ***/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "Inside fn_plc_ord");
+	}
+
+	/* call the place order service */
+	ret_val = tpcall("SFO_ORD_ROUT",(char*)ptr_fml_Ibuf,0,(char **)&ptr_fml_Rbuf,&li_len_tobuf,0);
+
+  if(ret_val == -1) /* error in placing the order */
+  {
+    if(Fget32(ptr_fml_Rbuf,FFO_ERR_MSG,0,(char *)err_msg.arr,0) == -1) /*** .arr added in VQC ***/
+    {
+      fn_errlog( c_ServiceName, "S31190", FMLMSG, err_msg.arr  );  /*** c_err_msg changed to err_msg.arr added in VQC ***/
+      sprintf(c_err_msg,"Place order failed for Exc_ack:[%s] ..,Please Contact Customer Support",sql_fco_xchng_ack);
+			return -1;
+    }
+    else
+    {
+      /*** sprintf(c_err_msg,"Place order failed for Exc_ack:[%s]..ERR MSG:[%s]",sql_fco_xchng_ack,err_msg.arr); commented in VQC ***/
+			strcpy(c_err_msg,err_msg.arr); /*** Added in VQC ***/
+			fn_userlog(c_ServiceName,"[Error msg from SFO_ORD_ROUT [%s]",err_msg.arr);  /*** .arr added in VQC ***/
+			fn_userlog(c_ServiceName,"[Error msg created  [%s]",c_err_msg); 
+      return -1;
+    }
+  }
+	else  /* order placed successfully..get the order reference */
+	{
+    if(Fget32(ptr_fml_Rbuf,FFO_ORDR_RFRNC,0,(char *)eba_ordr_ref,0) == -1)
+    {
+      fn_errlog( c_ServiceName, "S31195", FMLMSG, c_err_msg  ); 
+      sprintf(c_err_msg,"Unable to get order ref..Upload for Exc_ack:[%s] failed..,Please Contact Customer Support",sql_fco_xchng_ack);
+      return -1;
+    }
+    else
+    {
+			fn_userlog(c_ServiceName,"The eba_ordr_ref is [%s]",eba_ordr_ref);
+			/* update the request placed time */
+			/*** Hard parsing applied in VQC ***/
+			EXEC SQL
+			UPDATE 	FXB_FO_XCHNG_BOOK
+			SET 		FXB_RQST_TM = TO_DATE(SYSDATE,'dd-mon-yyyy hh24:mi:ss')
+			WHERE 	FXB_ORDR_RFRNC = :eba_ordr_ref
+			AND			FXB_MDFCTN_CNTR= 1;
+
+			if ( SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName,"S31200",SQLMSG,c_err_msg); 
+    		return -1;
+  		}
+
+			if(DEBUG_MSG_LVL_0) /*** Debug level set in VQC ***/
+			{
+				fn_userlog(c_ServiceName,"Order upload success..ordr ref from EBA recd...[%s]",eba_ordr_ref);
+			}
+    }
+
+		if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+		{
+  		fn_userlog( c_ServiceName, "going out of  fn_plc_ord");
+		}
+    return 1;
+  }
+}
+
+int fn_ord_ack(char* c_err_msg,char* eba_ordr_ref)
+{
+	struct vw_xchngbook st_i_xchngbk;
+  struct vw_orderbook st_i_ordrbk;
+
+  char c_svc_name [15+1]= "\0"; /*** initialized in VQC **/
+
+  int i_ch_val = 0;  /** Variable initialized in VQC **/
+  int i_trnsctn = 0; /** Variable initialized in VQC **/
+
+	MEMSET(st_i_xchngbk); /*** VQC ***/
+	MEMSET(st_i_ordrbk); /*** VQC ***/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "inside fn_ord_ack");
+	}
+
+  strcpy ( st_i_ordrbk.c_ordr_rfrnc , eba_ordr_ref);
+	fn_cpy_ddr(st_i_ordrbk.c_rout_crt);
+  st_i_ordrbk.c_oprn_typ = FOR_VIEW;
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                              c_err_msg, 
+                             &st_i_ordrbk,
+                             &st_i_ordrbk,
+                             "vw_orderbook",
+                             "vw_orderbook",
+                             sizeof ( st_i_ordrbk ),
+                             sizeof ( st_i_ordrbk ),
+                             0,
+                             "SFO_REF_TO_ORD" );
+  if ( i_ch_val != SUCC_BFR )
+  {
+    fn_errlog(c_ServiceName,"S31205", LIBMSG, c_err_msg); 
+    return -1;
+  }
+	strcpy ( st_i_xchngbk.c_ordr_rfrnc, st_i_ordrbk.c_ordr_rfrnc );
+  st_i_xchngbk.l_mdfctn_cntr = st_i_ordrbk.l_mdfctn_cntr;
+  strcpy ( st_i_xchngbk.c_xchng_cd, st_i_ordrbk.c_xchng_cd );
+  strcpy ( st_i_xchngbk.c_pipe_id, st_i_ordrbk.c_pipe_id );
+
+  if ( st_i_ordrbk.c_prd_typ == FUTURES )
+  {
+    strcpy( c_svc_name , "SFO_FUT_ACK" );
+  }
+  else
+  {
+    strcpy( c_svc_name , "SFO_OPT_ACK" );
+  }
+
+  st_i_xchngbk.c_plcd_stts = ACCEPT;
+  st_i_xchngbk.c_rms_prcsd_flg = NOT_PROCESSED;
+  st_i_xchngbk.l_ors_msg_typ = ORS_NEW_ORD_ACPT;
+	strcpy ( st_i_xchngbk.c_ack_tm , (char*) sql_fco_exchng_ack_tm.arr );
+
+  strcpy ( st_i_xchngbk.c_xchng_rmrks ,(char*) sql_fco_xchng_remarks.arr );
+  st_i_xchngbk.d_jiffy = (double)0;
+  st_i_xchngbk.l_dwnld_flg = NOT_DOWNLOAD;
+  strcpy ( st_i_xchngbk.c_entry_dt_tm, (char*) sql_fco_exchng_ack_tm.arr ); /* same as exg ack time */
+	fn_cpy_ddr(st_i_xchngbk.c_rout_crt);
+  st_i_xchngbk.c_oprn_typ = UPDATION_ON_EXCHANGE_RESPONSE;
+	st_i_xchngbk.l_bit_flg	=	99;			/***	Ver	1.3	***/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Inputs to exchange book...");
+		fn_userlog(c_ServiceName,"c_plcd_stts[%c]",st_i_xchngbk.c_plcd_stts); /*** %ld changed to %c in VQC ***/
+		fn_userlog(c_ServiceName,"c_rms_prcsd_flg[%c]",st_i_xchngbk.c_rms_prcsd_flg);
+		fn_userlog(c_ServiceName,"l_ors_msg_typ[%ld]",st_i_xchngbk.l_ors_msg_typ);
+		fn_userlog(c_ServiceName,"c_ack_tm[%s]",st_i_xchngbk.c_ack_tm);
+		fn_userlog(c_ServiceName,"c_xchng_rmrks[%s]",st_i_xchngbk.c_xchng_rmrks);
+		fn_userlog(c_ServiceName,"d_jiffy[%lf]",st_i_xchngbk.d_jiffy);	
+	}
+
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                            c_err_msg, 
+                            &st_i_xchngbk,
+                            &st_i_xchngbk,
+                            "vw_xchngbook",
+                            "vw_xchngbook",
+                            sizeof ( st_i_xchngbk ),
+                            sizeof ( st_i_xchngbk ),
+                            0,
+                            "SFO_UPD_XCHNGBK" );
+  if(( i_ch_val != SUCC_BFR ) &&
+       ( i_ch_val != RECORD_ALREADY_PRCSD ) )
+  {
+    fn_errlog(c_ServiceName,"S31210", LIBMSG, c_err_msg); 
+    return -1;
+  }
+	else if ( i_ch_val == RECORD_ALREADY_PRCSD )
+  {
+    fn_userlog ( c_ServiceName, "Record already processed" );
+    strcpy(c_err_msg,"Record already processed"); 
+    return -1;
+  }
+
+  strcpy ( st_i_ordrbk.c_xchng_ack, sql_fco_xchng_ack );
+	if(DEBUG_MSG_LVL_0) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Exc Ack to be updated in ordr bk[%s]Ref[%s]",st_i_ordrbk.c_xchng_ack,st_i_ordrbk.c_ordr_rfrnc);
+	}
+	fn_cpy_ddr(st_i_ordrbk.c_rout_crt);
+  st_i_ordrbk.c_oprn_typ = UPDATE_XCHNG_RESPONSE;
+
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                             c_err_msg, 
+                             &st_i_ordrbk,
+                             &st_i_ordrbk,
+                             "vw_orderbook",
+                             "vw_orderbook",
+                             sizeof ( st_i_ordrbk ),
+                             sizeof ( st_i_ordrbk ),
+                             0,
+                             "SFO_UPD_ORDRBK" );
+  if ( i_ch_val != SUCC_BFR )
+  {
+    fn_errlog(c_ServiceName,"S31215", LIBMSG, c_err_msg);
+    return -1;
+  }
+	EXEC SQL
+  UPDATE FOD_FO_ORDR_DTLS
+  SET FOD_ORDR_STTS = 'Q'
+  WHERE FOD_ORDR_RFRNC = :eba_ordr_ref;
+
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog(c_ServiceName,"S31220",SQLMSG,c_err_msg);
+    return -1;
+  }
+
+	fn_cpy_ddr(st_i_xchngbk.c_rout_crt);
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Before call to SFO_FUT_ACK or SFO_OPT_ACK...st_i_xchngbk.c_rout_crt[%s]",st_i_xchngbk.c_rout_crt);
+	}
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                             c_err_msg, 
+                             &st_i_xchngbk,
+                             &st_i_xchngbk,
+                             "vw_xchngbook",
+                             "vw_xchngbook",
+                             sizeof ( st_i_xchngbk ),
+                             sizeof ( st_i_xchngbk ),
+                             0,
+                             c_svc_name );
+	if ( i_ch_val != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31225", LIBMSG, c_err_msg);
+    return -1;
+  }
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "going out of fn_ord_ack");
+  }
+	return 1;
+}
+
+
+int fn_tconf (char* c_err_msg,char* eba_trd_ref) 
+{
+	/*** int i_trnsctn; *** commented in VQC ***/
+  int i_ch_val = 0 ; /*** Initialized in VQC ***/
+  varchar c_crr_dt[25 + 1];  /** Ver 1.6 **/
+
+  struct vw_orderbook st_i_ordbk;
+  struct vw_tradebook st_i_trdbk;
+  struct vw_sequence st_seq;
+  /*** struct vw_contract st_cntrct; *** commented in VQC ***/
+
+  char c_svc_name [ 16 ] = "\0";  /*** Initialized in VQC ***/
+
+	/*** Initialized in VQC ***/
+	MEMSET(st_i_ordbk);
+  MEMSET(st_i_trdbk);
+  MEMSET(st_seq);
+	/**** VQC ends ***/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "inside fn_tconf....");
+  }
+	strcpy ( st_i_ordbk.c_xchng_ack , sql_fco_xchng_ack );
+  strcpy ( st_i_ordbk.c_pipe_id , c_pipe_id );	/*check */
+
+  i_err[0] = Fget32(ptr_fml_Rbuf,FFO_PIPE_ID,0,(char *)st_i_ordbk.c_pipe_id,0); /*1.1*/
+  if ( i_err[0] == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31230",FMLMSG,c_err_msg);
+    return -1;
+  }
+
+	fn_cpy_ddr(st_i_ordbk.c_rout_crt);
+  st_i_ordbk.c_oprn_typ = FOR_VIEW;
+
+	/*** Hard parsing applied in VQC ***/
+	EXEC SQL
+  	SELECT  FOD_CLM_MTCH_ACCNT,
+            FOD_CLNT_CTGRY,
+            FOD_ORDR_RFRNC,
+   	        FOD_XCHNG_CD,
+            FOD_PRDCT_TYP,
+            FOD_UNDRLYNG,
+            TO_CHAR ( FOD_EXPRY_DT, 'dd-Mon-yyyy' ),
+            FOD_EXER_TYP,
+            FOD_OPT_TYP,
+            FOD_STRK_PRC,
+            FOD_ORDR_FLW,
+            FOD_LMT_MRKT_SL_FLG,
+            NVL( FOD_DSCLSD_QTY, 0 ),
+            NVL ( FOD_ORDR_TOT_QTY, 0 ),
+            NVL( FOD_LMT_RT, 0 ),
+            FOD_STP_LSS_TGR,
+            FOD_ORDR_TYPE,
+            TO_CHAR ( FOD_ORDR_VALID_DT, 'dd-Mon-yyyy' ),
+            TO_CHAR ( FOD_TRD_DT, 'dd-Mon-yyyy' ),
+            FOD_ORDR_STTS,
+            NVL( FOD_EXEC_QTY, 0 ),
+            NVL( FOD_EXEC_QTY_DAY, 0 ),
+            NVL( FOD_CNCL_QTY, 0 ),
+            NVL( FOD_EXPRD_QTY, 0 ),
+            NVL(FOD_SPRD_ORDR_REF,' '),
+            FOD_MDFCTN_CNTR,
+            NVL(FOD_SETTLOR,' '),
+						FOD_SPL_FLAG,
+            FOD_INDSTK,
+            NVL(TO_CHAR ( FOD_ORD_ACK_TM, 'dd-Mon-yyyy hh24:mi:ss' ),' '),
+            NVL(TO_CHAR ( FOD_LST_RQST_ACK_TM, 'dd-Mon-yyyy hh24:mi:ss' ),' ')
+   	INTO    :st_i_ordbk.c_cln_mtch_accnt,
+            :st_i_ordbk.l_clnt_ctgry,
+            :st_i_ordbk.c_ordr_rfrnc,
+            :st_i_ordbk.c_xchng_cd,
+            :st_i_ordbk.c_prd_typ,
+            :st_i_ordbk.c_undrlyng,
+            :st_i_ordbk.c_expry_dt,
+            :st_i_ordbk.c_exrc_typ,
+            :st_i_ordbk.c_opt_typ,
+            :st_i_ordbk.l_strike_prc,
+            :st_i_ordbk.c_ordr_flw,
+            :st_i_ordbk.c_slm_flg,
+            :st_i_ordbk.l_dsclsd_qty,
+            :st_i_ordbk.l_ord_tot_qty,
+            :st_i_ordbk.l_ord_lmt_rt,
+            :st_i_ordbk.l_stp_lss_tgr,
+            :st_i_ordbk.c_ord_typ,
+            :st_i_ordbk.c_valid_dt,
+            :st_i_ordbk.c_trd_dt,
+            :st_i_ordbk.c_ordr_stts,
+            :st_i_ordbk.l_exctd_qty,
+            :st_i_ordbk.l_exctd_qty_day,
+        	  :st_i_ordbk.l_can_qty,
+            :st_i_ordbk.l_exprd_qty,
+            :st_i_ordbk.c_sprd_ord_rfrnc,
+						:st_i_ordbk.l_mdfctn_cntr,
+            :st_i_ordbk.c_settlor ,
+            :st_i_ordbk.c_req_typ,
+            :st_i_ordbk.c_ctgry_indstk,
+            :st_i_ordbk.c_ack_tm ,
+            :st_i_ordbk.c_prev_ack_tm 
+   	FROM FOD_FO_ORDR_DTLS
+    WHERE   FOD_ACK_NMBR = :st_i_ordbk.c_xchng_ack
+    AND     FOD_PIPE_ID  = :st_i_ordbk.c_pipe_id;
+	
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+ 	{
+ 		fn_errlog(c_ServiceName,"S31235",SQLMSG,c_err_msg); 
+   	return -1;
+ 	}
+
+	strcpy ( st_seq.c_pipe_id, st_i_ordbk.c_pipe_id );
+  strcpy ( st_seq.c_trd_dt, ( char * )c_trd_dt.arr );
+	fn_cpy_ddr(st_seq.c_rout_crt);
+  st_seq.c_rqst_typ = GET_TRD_SEQ;
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg, 
+                           &st_seq,
+                           &st_seq,
+                           "vw_sequence",
+                           "vw_sequence",
+                           sizeof ( st_seq ),
+                           sizeof ( st_seq ),
+                           0,
+                           "SFO_GET_SEQ" );
+
+  if ( i_ch_val != SUCC_BFR )
+  {
+    fn_errlog(c_ServiceName,"S31240", LIBMSG, c_err_msg);
+    return -1;
+  }
+	
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Testing st_seq.l_seq_num Is :%ld:",st_seq.l_seq_num);
+		fn_userlog(c_ServiceName,"Testing c_trd_ref.arr Is :%s:",c_trd_ref.arr);
+		fn_userlog(c_ServiceName,"Testing c_pipe_id Is :%s:",c_pipe_id);
+	}
+
+	sprintf ( st_i_trdbk.c_trd_rfrnc, "%s%s%08ld",
+            ( char * )c_trd_ref.arr, c_pipe_id, st_seq.l_seq_num );
+  strcpy ( st_i_trdbk.c_cln_mtch_accnt , st_i_ordbk.c_cln_mtch_accnt );
+  strcpy ( st_i_trdbk.c_xchng_cd , st_i_ordbk.c_xchng_cd );
+  st_i_trdbk.c_prd_typ = st_i_ordbk.c_prd_typ;
+  strcpy ( st_i_trdbk.c_undrlyng , st_i_ordbk.c_undrlyng );
+  strcpy ( st_i_trdbk.c_expry_dt , st_i_ordbk.c_expry_dt );
+  st_i_trdbk.c_exrc_typ = st_i_ordbk.c_exrc_typ;
+  st_i_trdbk.c_opt_typ = st_i_ordbk.c_opt_typ;
+  st_i_trdbk.l_strike_prc = st_i_ordbk.l_strike_prc;
+  st_i_trdbk.c_ctgry_indstk = st_i_ordbk.c_ctgry_indstk;
+  strcpy ( st_i_trdbk.c_ordr_rfrnc , st_i_ordbk.c_ordr_rfrnc );
+  strcpy ( st_i_trdbk.c_xchng_ack , st_i_ordbk.c_xchng_ack );
+  st_i_trdbk.l_xchng_trd_no = ( long )sql_fct_xchng_trd_rfrnc; 
+  /** strcpy ( st_i_trdbk.c_trd_dt ,(char*)sql_fct_trd_dt.arr ); ** Commented in ver 1.6 **/
+	/** Ver  1.6  starts **/
+  MEMSET(c_crr_dt);
+
+	/*** Hard parsing applied in VQC ***/
+	EXEC SQL 
+	SELECT  TO_CHAR( SYSDATE , 'DD-Mon-yyyy HH24:Mi:SS' )
+	INTO :c_crr_dt
+	FROM DUAL;
+
+  SETNULL( c_crr_dt ) ;
+	strcpy ( st_i_trdbk.c_trd_dt , c_crr_dt.arr ) ;
+	/** Ver 1.6 ends **/
+	if(DEBUG_MSG_LVL_3)/** Ver 1.6 **/
+	{
+		fn_userlog(c_ServiceName,"before insert trade sql_fct_trd_dt.arr [%s]",sql_fct_trd_dt.arr);  
+	}
+  st_i_trdbk.c_trd_flw = st_i_ordbk.c_ordr_flw;
+  st_i_trdbk.l_exctd_qty = sql_fct_exctd_qty;
+  st_i_trdbk.l_exctd_rt = sql_fct_exctd_rt;
+  st_i_trdbk.d_jiffy = (double)0 ;
+  st_i_trdbk.l_dwnld_flg = NOT_DOWNLOAD;
+	st_i_trdbk.l_ca_lvl	=	99;			/***	Ver	1.3	***/
+  strcpy(st_i_trdbk.c_user_id,"system");     /** Ver 1.6 ***/
+	fn_cpy_ddr(st_i_trdbk.c_rout_crt);
+  st_i_trdbk.c_oprn_typ = INSERT_TRADE_CONF;
+	i_ch_val = fn_call_svc ( c_ServiceName,
+                            c_err_msg, 
+                            &st_i_trdbk,
+                            &st_i_trdbk,
+                            "vw_tradebook",
+                            "vw_tradebook",
+                            sizeof ( st_i_trdbk ),
+                            sizeof ( st_i_trdbk ),
+                            0,
+                            "SFO_UPD_TRDBK" );
+  if ( ( i_ch_val != SUCC_BFR ) &&
+       ( i_ch_val != RECORD_ALREADY_PRCSD ) )
+  {
+    fn_errlog(c_ServiceName,"S31245", LIBMSG, c_err_msg);
+    return -1;
+  }
+  else if ( i_ch_val == RECORD_ALREADY_PRCSD )
+  {
+    fn_userlog ( c_ServiceName, "Record already processed" );
+    return -1;
+  }
+	
+  if ( st_i_trdbk.c_prd_typ == OPTIONS )
+  {
+    strcpy ( c_svc_name , "SFO_OPT_TCONF" );
+  }
+  else if ( st_i_trdbk.c_prd_typ == FUTURES )
+  {
+    strcpy ( c_svc_name , "SFO_FUT_TCONF" );
+  }
+	fn_cpy_ddr(st_i_trdbk.c_rout_crt);
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                            c_err_msg, 
+                            &st_i_trdbk,
+                            &st_i_trdbk,
+                            "vw_tradebook",
+                            "vw_tradebook",
+                            sizeof ( st_i_trdbk ),
+                            sizeof ( st_i_trdbk ),
+                            0,
+                            c_svc_name );
+
+  if ( i_ch_val != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31250", LIBMSG, c_err_msg);
+    return -1;
+  }
+	strcpy(eba_trd_ref,(char*)st_i_trdbk.c_trd_rfrnc);
+
+	if(DEBUG_MSG_LVL_0) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "Eba_trd_ref generated [%s]...going out of fn_tconf",eba_trd_ref);
+  }
+	return 1;
+}
+
+
+void fn_on_err( char *c_ServiceName, char* c_err_msg, char abort_trn_flg, char return_flg )
+{
+		int ret_val=0;
+    if( abort_trn_flg == ABORT_TRN )
+      tpabort(0);
+		
+		if(return_flg == RETURN)
+		{
+			fn_userlog(c_ServiceName,"Error Msg returned [%s]",c_err_msg);
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 ); 
+    	ret_val = -1;
+    	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID ,(char*)&ret_val, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+    return;
+}
+
+/*** Ver 1.4 Starts ***/
+
+int fn_spnord_ack(char* c_err_msg,char* eba_ordr_ref)
+{	
+
+	struct st_orderbook st_ip_orderbook;
+  struct st_xchngbook st_ip_xchngbk;
+  struct st_err_msg *ptr_st_err_msg;
+  int i_ch_val = 0;  /*** Initialized in VQC ***/
+
+	MEMSET(st_ip_orderbook);  /*** Initialized in VQC ***/
+	MEMSET(st_ip_xchngbk);		/*** Initialized in VQC ***/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "Inside fn_spnord_ack ");
+	}
+
+  strcpy ( st_ip_orderbook.c_ordr_rfrnc , eba_ordr_ref);
+  fn_cpy_ddr(st_ip_orderbook.c_rout_crt);
+  st_ip_orderbook.c_oprn_typ = FOR_VIEW;
+
+  i_ch_val = fn_spnref_to_ord ( &st_ip_orderbook ,&st_ip_orderbook,c_ServiceName,c_err_msg);
+
+  if ( i_ch_val != 0 )
+  {
+  	fn_errlog(c_ServiceName,"S31255", LIBMSG, c_err_msg); 
+  	return -1;
+  }
+
+  strcpy ( st_ip_xchngbk.c_ordr_rfrnc, st_ip_orderbook.c_ordr_rfrnc );
+  st_ip_xchngbk.l_mdfctn_cntr = st_ip_orderbook.l_mdfctn_cntr;
+  strcpy ( st_ip_xchngbk.c_xchng_cd, st_ip_orderbook.c_xchng_cd );
+  strcpy ( st_ip_xchngbk.c_pipe_id, st_ip_orderbook.c_pipe_id );
+
+
+  st_ip_xchngbk.c_plcd_stts = ACCEPT;
+  st_ip_xchngbk.c_rms_prcsd_flg = NOT_PROCESSED;
+  st_ip_xchngbk.l_ors_msg_typ = ORS_NEW_ORD_ACPT;
+  strcpy ( st_ip_xchngbk.c_ack_tm , (char*) sql_fco_exchng_ack_tm.arr );
+
+  strcpy ( st_ip_xchngbk.c_xchng_rmrks ,(char*) sql_fco_xchng_remarks.arr );
+  st_ip_xchngbk.d_jiffy = (double)0;
+  st_ip_xchngbk.l_dwnld_flg = NOT_DOWNLOAD;
+  strcpy ( st_ip_xchngbk.c_entry_dt_tm, (char*) sql_fco_exchng_ack_tm.arr ); /* same as exg ack time */
+  fn_cpy_ddr(st_ip_xchngbk.c_rout_crt);
+  st_ip_xchngbk.c_oprn_typ = UPDATION_ON_EXCHANGE_RESPONSE;
+  st_ip_xchngbk.l_bit_flg  = 99;     /***  Ver 1.3 ***/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Inputs to exchange book...");
+		fn_userlog(c_ServiceName,"c_plcd_stts[%c]",st_ip_xchngbk.c_plcd_stts); /*** %ld changed to %c in VQC ***/
+		fn_userlog(c_ServiceName,"c_rms_prcsd_flg[%c]",st_ip_xchngbk.c_rms_prcsd_flg);
+		fn_userlog(c_ServiceName,"l_ors_msg_typ[%ld]",st_ip_xchngbk.l_ors_msg_typ);
+		fn_userlog(c_ServiceName,"c_ack_tm[%s]",st_ip_xchngbk.c_ack_tm);
+		fn_userlog(c_ServiceName,"c_xchng_rmrks[%s]",st_ip_xchngbk.c_xchng_rmrks);
+		fn_userlog(c_ServiceName,"d_jiffy[%lf]",st_ip_xchngbk.d_jiffy);
+	}
+
+  i_ch_val = fn_spnupd_xchngbk( c_ServiceName,
+  															&st_ip_xchngbk ,
+  															c_err_msg); 
+  if(( i_ch_val != 0 ) && ( i_ch_val != RECORD_ALREADY_PRCSD ) )
+  {
+  	fn_errlog(c_ServiceName,"S31260", LIBMSG, c_err_msg); 
+  	return -1;
+  }
+  else if ( i_ch_val == RECORD_ALREADY_PRCSD )
+  {
+  	fn_userlog ( c_ServiceName, "Record already processed" );
+  	strcpy(c_err_msg,"Record already processed");
+  	return -1;
+  }
+
+  strcpy ( st_ip_orderbook.c_xchng_ack, sql_fco_xchng_ack );
+	if(DEBUG_MSG_LVL_0) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Exc Ack to be updated in ordr bk[%s]Ref[%s]",st_ip_orderbook.c_xchng_ack,st_ip_orderbook.c_ordr_rfrnc);
+  }
+	fn_cpy_ddr(st_ip_orderbook.c_rout_crt);
+  st_ip_orderbook.c_oprn_typ = UPDATE_XCHNG_RESPONSE;
+
+  i_ch_val =  fn_spnupd_ordrbook( c_ServiceName ,
+  																&st_ip_orderbook,
+  																ptr_st_err_msg);
+  if ( i_ch_val != 0 )
+  {
+  	fn_errlog(c_ServiceName,"S31265", LIBMSG, ptr_st_err_msg->c_err_msg);  /*** c_err_msg changed to ptr_st_err_msg->c_err_msg in VQC ***/
+  	return -1;
+  }
+
+  EXEC SQL
+  UPDATE FOD_FO_ORDR_DTLS
+  SET FOD_ORDR_STTS = 'Q'
+  WHERE FOD_ORDR_RFRNC = :eba_ordr_ref;
+
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog(c_ServiceName,"S31270",SQLMSG,c_err_msg); 
+    return -1;
+  }
+
+  fn_cpy_ddr(st_ip_xchngbk.c_rout_crt);
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName, " Inside SPAN Customer ");
+  }
+	i_ch_val = fn_call_svc_fml ( c_ServiceName,
+                               c_err_msg, 
+                               "SFO_PRCS_RSP",
+                               0,
+                               6,
+                               0,
+                               FFO_ROUT_CRT, (char *)st_ip_xchngbk.c_rout_crt,
+                               FFO_ORDR_RFRNC, (char *)st_ip_xchngbk.c_ordr_rfrnc,
+                               FFO_ORS_MSG_TYP, (char *)&st_ip_xchngbk.l_ors_msg_typ,
+                               FFO_MDFCTN_CNTR, (char *)&st_ip_xchngbk.l_mdfctn_cntr,
+                               FFO_ACK_TM, (char *)st_ip_xchngbk.c_ack_tm,
+                               FFO_PREV_ACK_TM, (char *)st_ip_xchngbk.c_entry_dt_tm
+                             );
+
+  if ( i_ch_val != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31275", LIBMSG, c_err_msg); 
+    return -1;
+  }
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "going out of fn_spnord_ack ");
+  }
+	return 1;
+}
+
+int fn_spn_tconf (char* c_err_msg,char* eba_trd_ref) 
+{
+  int i_ch_val = 0;  /*** Initialized in VQC ***/
+  varchar c_crr_dt[25 + 1];  /** Ver 1.6 **/
+
+  struct st_orderbook st_i_ordbk;
+  struct st_tradebook st_i_trdbk;
+  struct st_sequence  st_seq;
+	struct st_err_msg st_errmsg;
+
+  /*** char c_svc_name [ 16 ]; *** Commented in VQC ***/
+
+	MEMSET(st_i_trdbk);
+	MEMSET(st_i_ordbk);	/*** Initialized in VQC ***/
+	MEMSET(st_seq);			/*** Initialized in VQC ***/
+	MEMSET(st_errmsg);	/*** Initialized in VQC ***/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "inside fn_tconf....");
+  }
+	strcpy ( st_i_ordbk.c_xchng_ack , sql_fco_xchng_ack );
+  strcpy ( st_i_ordbk.c_pipe_id , c_pipe_id );	/*check */
+
+  i_err[0] = Fget32(ptr_fml_Rbuf,FFO_PIPE_ID,0,(char *)st_i_ordbk.c_pipe_id,0); /*1.1*/
+  if ( i_err[0] == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31280",FMLMSG,c_err_msg);
+    return -1;
+  }
+
+	fn_cpy_ddr(st_i_ordbk.c_rout_crt);
+  st_i_ordbk.c_oprn_typ = FOR_VIEW;
+
+	/*** Hard parsing applied in VQC ***/
+	EXEC SQL
+  	SELECT  FOD_CLM_MTCH_ACCNT,
+            FOD_CLNT_CTGRY,
+            FOD_ORDR_RFRNC,
+   	        FOD_XCHNG_CD,
+            FOD_PRDCT_TYP,
+            FOD_UNDRLYNG,
+            TO_CHAR ( FOD_EXPRY_DT, 'dd-Mon-yyyy' ),
+            FOD_EXER_TYP,
+            FOD_OPT_TYP,
+            FOD_STRK_PRC,
+            FOD_ORDR_FLW,
+            FOD_LMT_MRKT_SL_FLG,
+            NVL( FOD_DSCLSD_QTY, 0 ),
+            NVL ( FOD_ORDR_TOT_QTY, 0 ),
+            NVL( FOD_LMT_RT, 0 ),
+            FOD_STP_LSS_TGR,
+            FOD_ORDR_TYPE,
+            TO_CHAR ( FOD_ORDR_VALID_DT, 'dd-Mon-yyyy' ),
+            TO_CHAR ( FOD_TRD_DT, 'dd-Mon-yyyy' ),
+            FOD_ORDR_STTS,
+            NVL( FOD_EXEC_QTY, 0 ),
+            NVL( FOD_EXEC_QTY_DAY, 0 ),
+            NVL( FOD_CNCL_QTY, 0 ),
+            NVL( FOD_EXPRD_QTY, 0 ),
+            NVL(FOD_SPRD_ORDR_REF,' '),
+            FOD_MDFCTN_CNTR,
+            NVL(FOD_SETTLOR,' '),
+						FOD_SPL_FLAG,
+            FOD_INDSTK,
+            NVL(TO_CHAR ( FOD_ORD_ACK_TM, 'dd-Mon-yyyy hh24:mi:ss' ),' '),
+            NVL(TO_CHAR ( FOD_LST_RQST_ACK_TM, 'dd-Mon-yyyy hh24:mi:ss' ),' ')
+   	INTO    :st_i_ordbk.c_cln_mtch_accnt,
+            :st_i_ordbk.l_clnt_ctgry,
+            :st_i_ordbk.c_ordr_rfrnc,
+            :st_i_ordbk.c_xchng_cd,
+            :st_i_ordbk.c_prd_typ,
+            :st_i_ordbk.c_undrlyng,
+            :st_i_ordbk.c_expry_dt,
+            :st_i_ordbk.c_exrc_typ,
+            :st_i_ordbk.c_opt_typ,
+            :st_i_ordbk.l_strike_prc,
+            :st_i_ordbk.c_ordr_flw,
+            :st_i_ordbk.c_slm_flg,
+            :st_i_ordbk.l_dsclsd_qty,
+            :st_i_ordbk.l_ord_tot_qty,
+            :st_i_ordbk.l_ord_lmt_rt,
+            :st_i_ordbk.l_stp_lss_tgr,
+            :st_i_ordbk.c_ord_typ,
+            :st_i_ordbk.c_valid_dt,
+            :st_i_ordbk.c_trd_dt,
+            :st_i_ordbk.c_ordr_stts,
+            :st_i_ordbk.l_exctd_qty,
+            :st_i_ordbk.l_exctd_qty_day,
+        	  :st_i_ordbk.l_can_qty,
+            :st_i_ordbk.l_exprd_qty,
+            :st_i_ordbk.c_sprd_ord_rfrnc,
+						:st_i_ordbk.l_mdfctn_cntr,
+            :st_i_ordbk.c_settlor ,
+            :st_i_ordbk.c_req_typ,
+            :st_i_ordbk.c_ctgry_indstk,
+            :st_i_ordbk.c_ack_tm ,
+            :st_i_ordbk.c_prev_ack_tm 
+   	FROM FOD_FO_ORDR_DTLS
+    WHERE   FOD_ACK_NMBR = :st_i_ordbk.c_xchng_ack
+    AND     FOD_PIPE_ID  = :st_i_ordbk.c_pipe_id;
+	
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+ 	{
+ 		fn_errlog(c_ServiceName,"S31285",SQLMSG,c_err_msg);
+   	return -1;
+ 	}
+
+	strcpy ( st_seq.c_pipe_id, st_i_ordbk.c_pipe_id );
+  strcpy ( st_seq.c_trd_dt, ( char * )c_trd_dt.arr );
+	fn_cpy_ddr(st_seq.c_rout_crt);
+  st_seq.c_rqst_typ = GET_TRD_SEQ;
+	
+	i_ch_val = fn_get_fno_seq ( c_ServiceName,
+                              &st_seq,
+                              c_err_msg); 
+
+  if ( i_ch_val != SUCC_BFR )
+  {
+    fn_errlog(c_ServiceName,"S31290", LIBMSG, c_err_msg); 
+    return -1;
+  }
+
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Testing st_seq.l_seq_num Is :%ld:",st_seq.l_seq_num);
+		fn_userlog(c_ServiceName,"Testing c_trd_ref.arr Is :%s:",c_trd_ref.arr);
+		fn_userlog(c_ServiceName,"Testing c_pipe_id Is :%s:",c_pipe_id);
+	}
+	/****
+	sprintf ( st_i_trdbk.c_trd_rfrnc, "%s%s%08ld",
+            ( char * )c_trd_ref.arr, c_pipe_id, st_seq.l_seq_num );
+	*****/
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Testing st_i_trdbk.c_trd_rfrnc Is :%s:",st_i_trdbk.c_trd_rfrnc);
+	}
+
+  strcpy ( st_i_trdbk.c_cln_mtch_accnt , st_i_ordbk.c_cln_mtch_accnt );
+  strcpy ( st_i_trdbk.c_xchng_cd , st_i_ordbk.c_xchng_cd );
+  st_i_trdbk.c_prd_typ = st_i_ordbk.c_prd_typ;
+  strcpy ( st_i_trdbk.c_undrlyng , st_i_ordbk.c_undrlyng );
+  strcpy ( st_i_trdbk.c_expry_dt , st_i_ordbk.c_expry_dt );
+	
+	rtrim(st_i_trdbk.c_expry_dt);
+	rtrim(st_i_trdbk.c_undrlyng);
+
+  st_i_trdbk.c_exrc_typ = st_i_ordbk.c_exrc_typ;
+  st_i_trdbk.c_opt_typ = st_i_ordbk.c_opt_typ;
+  st_i_trdbk.l_strike_prc = st_i_ordbk.l_strike_prc;
+  st_i_trdbk.c_ctgry_indstk = st_i_ordbk.c_ctgry_indstk;
+  strcpy ( st_i_trdbk.c_ordr_rfrnc , st_i_ordbk.c_ordr_rfrnc );
+	
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Testing st_i_trdbk.c_ordr_rfrnc Is :%s:",st_i_trdbk.c_ordr_rfrnc);
+	}
+	sprintf ( st_i_trdbk.c_trd_rfrnc, "%s%s%08ld",
+            ( char * )c_trd_ref.arr, c_pipe_id, st_seq.l_seq_num );
+	
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog(c_ServiceName,"Testing st_i_trdbk.c_trd_rfrnc Is :%s:",st_i_trdbk.c_trd_rfrnc);
+		fn_userlog(c_ServiceName,"Testing st_i_trdbk.c_ordr_rfrnc Is :%s:",st_i_trdbk.c_ordr_rfrnc);
+	}
+  strcpy ( st_i_trdbk.c_xchng_ack , st_i_ordbk.c_xchng_ack );
+  st_i_trdbk.l_xchng_trd_no = ( long )sql_fct_xchng_trd_rfrnc; 
+  /** strcpy ( st_i_trdbk.c_trd_dt ,(char*)sql_fct_trd_dt.arr ); ** Commented in ver 1.6 **/
+  /** Ver  1.6  starts **/
+	
+	MEMSET(c_crr_dt);
+	/*** Hard parsing applied in VQC ***/
+  EXEC SQL
+  SELECT  TO_CHAR( SYSDATE , 'DD-Mon-yyyy HH24:Mi:SS' )
+  INTO :c_crr_dt
+  FROM DUAL;
+	
+	SETNULL( c_crr_dt ) ;
+  strcpy ( st_i_trdbk.c_trd_dt , c_crr_dt.arr ) ;
+  if(DEBUG_MSG_LVL_3)  /** Ver 1.6 **/
+  {
+		fn_userlog(c_ServiceName,"before insert trade sql_fct_trd_dt.arr [%s]",sql_fct_trd_dt.arr);
+		fn_userlog(c_ServiceName,"before insert trade st_i_trdbk.c_trd_rfrnc [%s]",st_i_trdbk.c_trd_rfrnc);
+	}	
+	/** ver 1.6 ** ends **/
+	
+  st_i_trdbk.c_trd_flw = st_i_ordbk.c_ordr_flw;
+  st_i_trdbk.l_exctd_qty = sql_fct_exctd_qty;
+  st_i_trdbk.l_exctd_rt = sql_fct_exctd_rt;
+  st_i_trdbk.d_jiffy = (double)0 ;
+  st_i_trdbk.l_dwnld_flg = NOT_DOWNLOAD;
+	st_i_trdbk.l_ca_lvl	=	99;			/***	Ver	1.3	***/
+	fn_cpy_ddr(st_i_trdbk.c_rout_crt);
+	strcpy(st_i_trdbk.c_user_id,"system");
+  st_i_trdbk.c_oprn_typ = INSERT_TRADE_CONF;
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog ( c_ServiceName, "*************** calling fn_spnupd_trdbook*************");
+	}
+  i_ch_val = fn_spnupd_trdbook ( c_ServiceName,
+                                 st_i_trdbk.c_user_id, /*** Changed from c_user_id to st_i_trdbk.c_user_id in VQC ***/
+                                 &st_i_trdbk,
+                                 &st_errmsg);
+  if ( ( i_ch_val != SUCC_BFR ) && ( i_ch_val != RECORD_ALREADY_PRCSD ) )
+  {
+    fn_errlog(c_ServiceName,"S31295", LIBMSG, st_errmsg.c_err_msg); /*** c_err_msg changed to st_errmsg.st_errmsg in VQC ***/
+    return -1;
+  }
+  else if ( i_ch_val == RECORD_ALREADY_PRCSD )
+  {
+    fn_userlog ( c_ServiceName, "Record already processed" );
+    return -1;
+  }
+	
+	fn_cpy_ddr(st_i_trdbk.c_rout_crt);
+
+	i_ch_val = fn_call_svc_fml ( c_ServiceName,
+                                 c_err_msg, 
+                                 "SFO_PRCS_TRD",
+                                 0,
+                                 18,
+                                 0,
+                                 FFO_ROUT_CRT, (char *)st_i_trdbk.c_rout_crt,
+                                 FFO_ORDR_RFRNC, (char *)st_i_trdbk.c_ordr_rfrnc,
+                                 FFO_TRD_RFRNC, (char *)st_i_trdbk.c_trd_rfrnc,
+                                 FFO_EBA_MTCH_ACT_NO, (char *)st_i_trdbk.c_cln_mtch_accnt,
+                                 FFO_EBA_CNTRCT_ID, (char *)&st_i_trdbk.l_eba_cntrct_id,
+                                 FFO_XCHNG_CD, (char *)st_i_trdbk.c_xchng_cd,
+                                 FFO_PRDCT_TYP, (char *)&st_i_trdbk.c_prd_typ,
+                                 FFO_UNDRLYNG, (char *)st_i_trdbk.c_undrlyng,
+                                 FFO_EXPRY_DT, (char *)st_i_trdbk.c_expry_dt,
+                                 FFO_EXER_TYP, (char *)&st_i_trdbk.c_exrc_typ,
+                                 FFO_OPT_TYP, (char *)&st_i_trdbk.c_opt_typ,
+                                 FFO_STRK_PRC, (char *)&st_i_trdbk.l_strike_prc,
+                                 FFO_CTGRY_INDSTK, (char *)&st_i_trdbk.c_ctgry_indstk,
+                                 FFO_CA_LVL, (char *)&st_i_trdbk.l_ca_lvl,
+                                 FFO_TRD_FLW, (char *)&st_i_trdbk.c_trd_flw,
+                                 FFO_EXEC_QTY, (char *)&st_i_trdbk.l_exctd_qty,
+                                 FFO_EXCTD_RT, (char *)&st_i_trdbk.l_exctd_rt,
+                                 FFO_TRD_DT, (char *)st_i_trdbk.c_trd_dt
+                               );
+
+	if(DEBUG_MSG_LVL_3) /*** Debug level set in VQC ***/
+	{
+		fn_userlog ( c_ServiceName, "i_ch_val Returned is = :%d:",i_ch_val );
+  }
+	if ( i_ch_val != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31300", LIBMSG, c_err_msg);
+    return -1;
+  }
+	strcpy(eba_trd_ref,(char*)st_i_trdbk.c_trd_rfrnc);
+
+	if(DEBUG_MSG_LVL_0) /*** Debug level set in VQC ***/
+	{
+		fn_userlog( c_ServiceName, "Eba_trd_ref generated [%s]...going out of fn_tconf",eba_trd_ref);
+  }
+	return 1;
+}
+/*** Ver 1.4 Ends ***/

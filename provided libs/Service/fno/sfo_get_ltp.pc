@@ -1,0 +1,278 @@
+/***********************************************************************************/
+/* Program           : SFO_GET_LTP                                                 */
+/*                                                                                 */
+/* Input             : FFO_USR_ID                                                  */
+/*                     FFO_SSSN_ID                                                 */
+/*                     FFO_EBA_MTCH_ACT_NO                                         */
+/*                     FFO_ROUT_CRT                                                */
+/*                     FFO_UNDRLYNG                                                */
+/*                     FFO_EXPRY_DT                                                */
+/*                     FFO_STRK_PRC                                                */
+/*                     FFO_OPT_TYP                                                 */
+/*                     FFO_XCHNG_CD                                                */
+/*                     FFO_PRDCT_TYP                                               */
+/*                                                                                 */
+/*                                                                                 */
+/*                                                                                 */
+/* Output            : FFO_EBA_MTCH_ACT_NO                                         */
+/*                     FFO_UNDRLYNG                                                */
+/*                     FFO_EXPRY_DT                                                */
+/*                     FFO_STRK_PRC                                                */
+/*                     FFO_OPT_TYP                                                 */
+/*                     FFO_XCHNG_CD                                                */
+/*                     FFO_PRDCT_TYP                                               */
+/*                     FFO_LST_TRD_PRC                                             */
+/*                                                                                 */
+/*                                                                                 */
+/* Description       : This service inputs contract details and returns            */
+/*                     LTP of the inputted contracts                               */
+/*                                                                                 */
+/* Log               : 1.0   Edwin Thomas | ISEC | 25-Aug-2022                     */
+/***********************************************************************************/
+/* 1.0     -      Initial release                                                  */
+/***********************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo_view_def.h>
+#include <sqlca.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_session.h>
+#include <fn_pos.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+
+void SFO_GET_LTP(TPSVCINFO * rqst)
+{
+    struct vw_usr_prfl st_usr_prfl;
+    struct vw_err_msg st_err_msg;
+
+    char  c_undrlyng[7];          /*      underlying      */
+    char  c_xchng_cd[4];          /*      exchange code   */
+    char  c_expry_dt[22];         /*      expiry date of contract */
+    char  c_opt_typ = '\0';               /*      type of option contract */
+    char  c_prd_typ = '\0';               /*      product type F for futures and O for options    */
+    char c_service_name[33];
+    char c_err_msg[256];
+    char c_user_id[20];
+
+    int i_err[7];
+    int i_ferr[7];
+    int i_reccount = 0;
+    int i_counter = 0;
+    int i_returncode = 0;
+    int i_total_contracts = 0;
+
+    long  l_strk_prc = 0;           /*      strike price of required contract               */
+    long  l_ltp = 0;           /*      ltp of required contract               */
+
+    /* tuxedo variables */
+    FBFR32 *ptr_fml_Ibuf; /* pointer to FML input */
+    FBFR32 *ptr_fml_Obuf; /* pointer to FML output */
+
+
+    ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+    strcpy(c_service_name, rqst->name);
+
+    INITDBGLVL(c_service_name);
+
+    if( DEBUG_MSG_LVL_3 )
+        fn_userlog(c_service_name, "----------------- service %s starts here --------------------",c_service_name);
+
+    /* user authentication */
+    i_returncode = fn_unpack_fmltovar_dflt ( c_service_name,
+                                        c_err_msg,
+                                        ptr_fml_Ibuf,
+                                        4,
+                                        FFO_EBA_MTCH_ACT_NO, (char*)st_usr_prfl.c_cln_mtch_accnt, "*",
+                                        FFO_USR_ID, (char*)st_usr_prfl.c_user_id, "NULL",
+                                        FFO_SSSN_ID, (char*)&st_usr_prfl.l_session_id, "0",
+                                        FFO_ROUT_CRT, (char *)st_usr_prfl.c_rout_crt,"*");
+    if ( i_returncode != 0  )
+    {
+        fn_errlog( c_service_name, "S31005", FMLMSG, c_err_msg  );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    if ( strcmp(st_usr_prfl.c_user_id,"system") != 0 && st_usr_prfl.l_session_id != 0)
+    {
+        i_returncode = fn_chk_sssn( c_service_name, &st_usr_prfl, &st_err_msg );
+
+        if ( i_returncode == -1 )
+        {
+            fn_errlog( c_service_name,"S31010", LIBMSG, st_err_msg.c_err_msg );
+            fn_userlog( c_service_name," Failed to Authenticate the user and user session");
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+    }
+
+    if( DEBUG_MSG_LVL_1 )
+    {
+        fn_userlog(c_service_name, "Client Match ID is :%s:",st_usr_prfl.c_cln_mtch_accnt);
+        fn_userlog(c_service_name, "User ID is :%s:",st_usr_prfl.c_user_id);
+        fn_userlog(c_service_name, "Session ID is :%ld:",st_usr_prfl.l_session_id);
+    }
+
+    /* checking occurences of any FFO_UNDERLYING in input buffer to check the number of contracts inputted */
+    i_total_contracts = Foccur32((FBFR32 *)ptr_fml_Ibuf, FFO_UNDRLYNG);
+    if( DEBUG_MSG_LVL_3 )
+        fn_userlog(c_service_name, "total number of contracts :%d:", i_total_contracts);
+
+
+    ptr_fml_Obuf = ( FBFR32 *)NULL;
+
+/* commented because not required
+    ptr_fml_Obuf = (FBFR32*)tpalloc("FML32",NULL, Fsizeof32(ptr_fml_Ibuf));
+
+    if ( ptr_fml_Obuf  == NULL )
+    {
+      fn_errlog( c_service_name, "S31015", TPMSG, c_err_msg);
+      fn_userlog( c_service_name, "Error while allocating memory to Buffer.");
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+    
+*/
+
+    for (i_reccount = 0; i_reccount < i_total_contracts; i_reccount++)
+    {
+        /* Fget the constract details */
+        i_err[0] = Fget32(ptr_fml_Ibuf, FFO_UNDRLYNG, i_reccount, c_undrlyng, 0);
+        i_ferr[0] = Ferror32;
+        i_err[1] = Fget32(ptr_fml_Ibuf, FFO_EXPRY_DT, i_reccount, c_expry_dt, 0);
+        i_ferr[1] = Ferror32;
+        i_err[2] = Fget32(ptr_fml_Ibuf, FFO_STRK_PRC, i_reccount, (char *)&l_strk_prc, 0);
+        i_ferr[2] = Ferror32;
+        i_err[3] = Fget32(ptr_fml_Ibuf, FFO_OPT_TYP, i_reccount, (char *)&c_opt_typ, 0);
+        i_ferr[3] = Ferror32;
+        i_err[4] = Fget32(ptr_fml_Ibuf, FFO_XCHNG_CD, i_reccount, c_xchng_cd, 0);
+        i_ferr[4] = Ferror32;
+        i_err[6] = Fget32(ptr_fml_Ibuf, FFO_PRDCT_TYP, i_reccount, (char *)&c_prd_typ, 0);
+        i_ferr[6] = Ferror32;
+
+        for (i_counter = 0; i_counter < 7; i_counter++)
+        {
+            if (i_err[i_counter] == -1)
+            {
+                fn_errlog(c_service_name, "S31020", Fstrerror32(i_ferr[i_counter]), c_err_msg);
+                Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+                tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+                fn_userlog(c_service_name, "Unable to fget :%d:", i_counter);
+            }
+        }
+
+        if(DEBUG_MSG_LVL_4)
+        {
+            fn_userlog(c_service_name,"Underlying :%s:", c_undrlyng);
+            fn_userlog(c_service_name,"Expiry Date :%s:", c_expry_dt);
+            fn_userlog(c_service_name,"Strike Price :%ld:", l_strk_prc);
+            fn_userlog(c_service_name,"Option Type :%c:", c_opt_typ);
+            fn_userlog(c_service_name,"Exchange Code :%s:", c_xchng_cd);
+            fn_userlog(c_service_name,"Product Type :%c:", c_prd_typ );
+        }
+
+        /* Fetch LTP from database */
+        EXEC SQL
+        SELECT NVL(FTQ_LST_TRD_PRC, 0)
+        INTO :l_ltp
+        FROM FTQ_FO_TRD_QT
+        WHERE FTQ_UNDRLYNG = :c_undrlyng
+        AND FTQ_EXPRY_DT = :c_expry_dt
+        AND FTQ_STRK_PRC = :l_strk_prc
+        AND FTQ_OPT_TYP = :c_opt_typ
+        AND FTQ_XCHNG_CD = :c_xchng_cd
+        AND FTQ_PRDCT_TYP = :c_prd_typ;
+
+
+        if ( SQLCODE != 0)
+        {
+            if(SQLCODE == NO_DATA_FOUND)
+            {
+                l_ltp = 0;
+            }
+            
+            else
+            {
+                fn_errlog( c_service_name, "S31025", SQLMSG, c_err_msg  );
+                tpfree((char * ) ptr_fml_Obuf);
+                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+                tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            }
+        }
+
+        if(DEBUG_MSG_LVL_4)
+        {
+            fn_userlog(c_service_name,"LTP :%ld:", l_ltp);
+        }
+
+        /* pack values to output buffer */
+        i_returncode = fn_pack_vartofml(c_service_name,
+                                        c_err_msg,
+                                        &ptr_fml_Obuf,
+                                        7,
+                                        FFO_UNDRLYNG, (char *)c_undrlyng,
+                                        FFO_EXPRY_DT, (char *)c_expry_dt,
+                                        FFO_STRK_PRC, (char *)&l_strk_prc,
+                                        FFO_PRDCT_TYP, (char *)&c_prd_typ,
+                                        FFO_OPT_TYP, (char *)&c_opt_typ,
+                                        FFO_LST_TRD_PRC, (char *)&l_ltp,
+                                        FFO_XCHNG_CD, (char *)c_xchng_cd
+                                        );
+
+
+        if ( i_returncode != 0 )
+        {
+            fn_errlog( c_service_name, "S31030", LIBMSG, c_err_msg);
+            fn_userlog( c_service_name, "Error while packing variable to fml.");
+            tpfree((char * ) ptr_fml_Obuf);
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+
+        /* commnted because not required
+        if(Fneeded32(1,MIN_FML_BUF_LEN) > Funused32(ptr_fml_Obuf))
+        {
+            ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf, Fsizeof32(ptr_fml_Obuf) + MIN_FML_BUF_LEN * 5 );
+            if ( ptr_fml_Obuf == NULL )
+            {
+                fn_errlog( c_service_name, "S31035", TPMSG, c_err_msg  );
+                tpfree ( ( char * ) ptr_fml_Obuf );
+                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+                tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            }
+        }
+         */
+    }
+/*** commented becausee not required
+    i_returncode = fn_pack_vartofml(c_service_name,
+                                    c_err_msg,
+                                    &ptr_fml_Obuf,
+                                    1,
+                                    FFO_EBA_MTCH_ACT_NO, (char*)st_usr_prfl.c_cln_mtch_accnt
+                                    );
+
+    if ( i_returncode != 0 )
+    {
+        fn_errlog( c_service_name, "S31040", LIBMSG, c_err_msg);
+        fn_userlog( c_service_name, "Error while packing variable to fml.");
+        tpfree((char * ) ptr_fml_Obuf);
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+***/
+
+    if( DEBUG_MSG_LVL_3 )
+        fn_userlog(c_service_name, "----------------- service %s ends here --------------------",c_service_name);
+    
+    tpreturn(TPSUCCESS, SUCC_BFR, (char *)ptr_fml_Obuf, 0, 0 );
+}

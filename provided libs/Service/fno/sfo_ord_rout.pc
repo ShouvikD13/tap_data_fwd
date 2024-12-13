@@ -1,0 +1,763 @@
+/**************************************************************************/
+/* Service name : SFO_ORD_ROUT                                   					*/
+/*                                                                				*/
+/* Description  : This service receives input as service name,    				*/
+/*								exchange code and match account number and      				*/
+/*								routes to service after identifying the pipe id 				*/
+/*                                                                				*/
+/* Input        : FFO_SVC_NAME                                    				*/
+/*								FFO_XCHNG_CD    																				*/
+/*								FFO_EBA_MTCH_ACT_NO    																	*/
+/*                FFO_PIPE_ID                                     				*/
+/*                                                                				*/
+/* Output       : FFO_PIPE_ID                                     				*/
+/*                                                                				*/
+/* Log          : 19-Oct-2001  1.0  New Release                   				*/
+/*                13-Jun-2002  1.4  Logic added to update         				*/
+/*                pcm_cln_grp_id field in pcm_pipe_clm_map.	      				*/
+/*                pcm_cln_grp_id field in pcm_pipe_clm_map.	      				*/
+/*                      																									*/
+/*								19-Sep-2005  1.5  DBC Compliance|Himanshu   	  				*/ 
+/*                      			 1.6  DLrevamp		  |Vikash									*/
+/*								22-Jun-2007	 1.7	PCM Updation - CRCSN06303							*/
+/*																	Diwakar																*/
+/*								19-Dec-2007	 1.8	IBM Migration	|Sushil									*/
+/*                13-Mar-2009  1.9  Added CSE ID CRCNT22353|Vidya 				*/
+/*                22-Nov-2010  2.0  CTCL activation status check |Shailesh*/
+/*                02-Nov-2011  2.1  FNO BSE Changes                       */
+/*								29-Feb-2012	 2.2  CTCL id for Mobile and LBS						*/ 
+/*								13-Mar-2014	 2.3  CTCL activation status check for      */
+/*																	Super-user | Swati A.B 								*/ 
+/*                05-Jan-2015  2.5  IDirect Lite channel                  */
+/*                                  handling - Anand Dhopte               */
+/*                02-Aug-2016  2.7  Get Channel change - Samip M					*/
+/*                07-Feb-2018  2.8  Detailed channel tracking for LBS/Site*/
+/*                                  customers                             */  
+/*                08-Jan-2022  2.9  CR-ISEC10-162594-Click to Buy Journey */
+/*                                  (Sachin Birje)                        */
+/*                26-May-2023  3.0  RQ:#2629-Error code for the message   */
+/*                                  (Dipin)                               */  
+/**************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h>             /*  Ver 1.8 : Added 	*/
+#include <fml_rout.h>						/*  Ver 1.8 : Added 	*/
+#include <fn_read_debug_lvl.h>  /*  Ver 1.8 : Added   */
+
+int fn_ins_pcm( char * c_match_accnt_nmbr, char *c_xchng_cd, char *c_err_msg );
+char c_ServiceName[ 33 ];
+char c_rqst_service[ 33 ];
+
+void SFO_ORD_ROUT( TPSVCINFO *rqst )
+{
+		EXEC SQL INCLUDE "table/pcm_pipe_clm_map.h";
+
+		FBFR32  *ptr_fml_Ibuffer;
+
+		char c_err_msg[ 256 ];
+    char err_code[7] = "B56036" ;  /** ver 3.0 **/
+
+		/*** 1.5  DBC Compliance Start ***/
+
+		char c_user_id[9];  
+		char c_channel[4]; 
+		varchar c_ctcl_id[17];
+		char c_sup_usr_typ;
+    char c_uac_fno_allwd_flg;    /** 1.6 **/
+    char c_dbc_bp_fno_allwd_flg; /** 1.6 **/
+		long l_cse_id = 0;
+		long l_acnt_id;
+		int i_ferr[ 6 ];
+		int flag=0;				
+		int find_pipe=0;				
+		long l_sssn_id;
+
+		/*** 1.5  DBC Compliance End ***/
+
+		EXEC SQL BEGIN DECLARE SECTION;
+		struct vw_orderbook st_ordbook;
+		EXEC SQL END DECLARE SECTION;
+		
+
+		int i_returncode;
+		int i;
+		int i_err[ 6 ];
+
+		strcpy( c_ServiceName, rqst->name );
+		INITDBGLVL(c_ServiceName);            /*  Ver 1.8 : Added   */
+
+		ptr_fml_Ibuffer = ( FBFR32 * )rqst->data;
+
+    if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+    fn_userlog(c_ServiceName,"Vikash new DLrevamp starts for uac_fno_allwd_flg : ");
+    }
+
+		i_err[0] = Fget32 ( ptr_fml_Ibuffer,
+							FFO_SVC_NAME,
+							0,
+							(char *) c_rqst_service,
+							0 );
+
+		i_err[1] = Fget32 ( ptr_fml_Ibuffer,
+							FFO_XCHNG_CD,
+							0,
+							(char *) sql_pcm_xchng_cd,
+							0 );
+
+		i_err[2] = Fget32 ( ptr_fml_Ibuffer,
+							FFO_EBA_MTCH_ACT_NO,
+							0,
+							(char *) sql_pcm_clm_mtch_accnt,
+							0 );
+
+		for ( i = 0; i < 3; i++ )
+		{
+				if ( i_err[i] == -1 )
+				{
+						if ( i == 0 )
+						{
+								fn_userlog( c_ServiceName, "Error while getting the input id :%d:",i);
+						}
+						else
+						{
+								fn_userlog( c_ServiceName, "Error while getting the input |%d|%s|",
+																				i,c_rqst_service);
+						}
+
+						fn_errlog( c_ServiceName, "S31005", Fstrerror32(i_ferr[i]),c_err_msg);
+						Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+						tpreturn( TPFAIL, 0L, ( char * )ptr_fml_Ibuffer, 0L, 0 );
+				}
+		}
+
+		/*** 1.5  DBC Compliance  Start ***/
+
+		flag = 0;
+
+		memset(c_channel,0,sizeof(c_channel));
+		memset(c_user_id,0,sizeof(c_user_id)); 
+		l_sssn_id = 0;
+
+		i_err [0] = Fget32 ( ptr_fml_Ibuffer, FFO_USR_ID, 0, (char *) c_user_id, 0 );
+		i_ferr[0]= Ferror32;
+		i_err [1] = Fget32 ( ptr_fml_Ibuffer, FFO_CHANNEL, 0, (char *) c_channel, 0 );
+		i_ferr[1] = Ferror32;
+		i_err [2] = Fget32 ( ptr_fml_Ibuffer, FFO_SSSN_ID, 0, (char *)&l_sssn_id, 0 );
+		i_ferr[2]= Ferror32;
+
+		for ( i = 0; i < 3; i++ )
+		{
+				if ( i_err[i] == -1 )
+				{
+						if(i_ferr[i] == FNOTPRES)
+						{
+								if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+									fn_userlog(c_ServiceName,":%d: Field Not Present",i);
+								}
+								flag = 1;
+						}
+						else
+						{
+								fn_errlog( c_ServiceName, "S31010", Fstrerror32(i_ferr[i]),c_err_msg);
+								Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+								tpreturn( TPFAIL, 0L, ( char * )ptr_fml_Ibuffer, 0L, 0 );
+						}
+				}
+		}
+
+   /**** 1.6 DLRevamp  start *****/
+   if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+   fn_userlog(c_ServiceName, "Checking fno allowed flag for match[%s]",sql_pcm_clm_mtch_accnt);
+   }
+ 	 EXEC SQL
+   SELECT nvl(UAC_FNO_ALLWD,'N') INTO
+	 :c_uac_fno_allwd_flg
+	 FROM UAC_USR_ACCNTS
+	 WHERE UAC_CLM_MTCH_ACCNT = :sql_pcm_clm_mtch_accnt;
+
+	 if(SQLCODE != 0)
+	 {
+		 fn_errlog( c_ServiceName, "S31015", SQLMSG, c_err_msg  );
+		 Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+   }
+
+   if( DEBUG_MSG_LVL_3 )
+	 {          
+   	fn_userlog(c_ServiceName,"c_uac_fno_allwd_flg = :%c:",c_uac_fno_allwd_flg);
+   	fn_userlog(c_ServiceName,"Exchange Code :%s:", sql_pcm_xchng_cd);      /*** Ver 2.1 ***/ 
+	 }
+
+   if (c_user_id[0] == BPID) 
+   {
+     EXEC SQL
+     SELECT nvl(BBM_FNO_ALLWD,'N') INTO
+            :c_dbc_bp_fno_allwd_flg
+     FROM BP_BRKR_MSTR
+     WHERE BBM_BP_ID = :c_user_id
+     AND BBM_ACT_DEACT_FLG = 'A';
+
+     if(SQLCODE != 0)
+     {
+       fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg  );
+       Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+     }
+     fn_userlog(c_ServiceName,"c_dbc_bp_fno_allwd_flg = :%c:",c_uac_fno_allwd_flg);
+  
+     if(!(c_uac_fno_allwd_flg == 'Y' && c_dbc_bp_fno_allwd_flg == 'Y'))
+     {
+       if( c_dbc_bp_fno_allwd_flg != 'Y')
+       {
+         fn_errlog( c_ServiceName, "B56035", SQLMSG, c_err_msg  );  
+         Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+         tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+       }
+       else if (c_uac_fno_allwd_flg != 'Y')
+       {
+         fn_errlog( c_ServiceName, "B56036", SQLMSG, c_err_msg  );
+         Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );    
+         Fadd32(ptr_fml_Ibuffer,FFO_ERR_CD,err_code,0);               /** ver 3.0 **/
+         tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+        
+       }
+     } 
+   }
+   else 
+   {
+     if(c_uac_fno_allwd_flg != 'Y')
+     {
+       fn_errlog( c_ServiceName, "B56036", SQLMSG, c_err_msg  );
+       Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );       
+       Fadd32(ptr_fml_Ibuffer,FFO_ERR_CD,err_code,0);               /** ver 3.0 **/
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+     }  
+   }
+
+   /****** 1.6 DLRevamp ends *****/
+
+		if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+			fn_userlog(c_ServiceName,"userid :%s:",c_user_id);
+			fn_userlog(c_ServiceName,"Channel:%s:",c_channel);
+		}
+
+		memset(c_ctcl_id.arr,0,sizeof(c_ctcl_id.arr));
+
+		if(flag == 0 ) /*** we have Userid and Channel ****/
+		{
+				find_pipe = 0;
+				if( strcmp(c_channel,"SYS") != 0 ) /*** if user is not system ***/
+				{
+						fn_userlog(c_ServiceName," l_sssn_id Is :%ld: ", l_sssn_id);
+						EXEC SQL
+						SELECT 	NVL(USM_CSE_ID,0),
+										NVL(USM_SUP_USR_TYP,'*')
+						INTO		:l_cse_id,
+										:c_sup_usr_typ
+						FROM		USM_SSSN_MNGR
+						WHERE   USM_USR_ID  = :c_user_id
+						AND   	USM_SSSN_ID = :l_sssn_id;
+
+						if(SQLCODE != 0)
+						{
+								fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg  );
+								Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+								tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+						}
+
+						
+						if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+							fn_userlog(c_ServiceName,"CSE ID :%ld:",l_cse_id);
+							fn_userlog(c_ServiceName,"Super User Type :%c:",c_sup_usr_typ);
+						}
+					
+/****						if(c_sup_usr_typ == 'S')
+						{
+									  strcpy((char*)c_ctcl_id.arr, "1111111111111");
+										SETLEN(c_ctcl_id);
+        						strcpy(c_channel, "CN1");
+										find_pipe = 1; *** dont have pipe need to find  ****
+						}
+commented in ver 1.6 ****/  
+						/** Sequence of check for Super user and then DBC to be maintained **/
+
+						if ( c_sup_usr_typ == 'C' || c_sup_usr_typ == 'S' || c_sup_usr_typ == 'Z' ) /* Ver 2.3 'Z' added */
+						{
+										EXEC SQL
+										SELECT  CIM_PIPE_ID,
+														CIM_CTCL_ID
+										INTO    :sql_pcm_crnt_pipe_id,
+														:c_ctcl_id
+										FROM    CIM_CTCL_ID_MSTR
+										WHERE   CIM_DBC_CSE_ID = to_char(:l_cse_id)
+										AND     CIM_XCHNG_CD   = :sql_pcm_xchng_cd
+										AND     CIM_INDCTR     = 'C'
+                    AND     NVL(CIM_CTCL_DEACT_FLG,' ') = 'A';  /*Ver 2.0*/
+
+										if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND) /*Added No data found in Ver 2.0*/
+										{
+												fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+												Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+												tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+										}
+
+										if(SQLCODE == NO_DATA_FOUND) /*Ver 2.0*/
+										{
+											fn_errlog( c_ServiceName,"B56067",DEFMSG, c_err_msg );
+											Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+											tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+										}
+
+										SETLEN(c_ctcl_id);	
+                    if ( c_sup_usr_typ == 'C')
+                      strcpy(c_channel,"CNT");
+                    if(c_sup_usr_typ == 'S')
+                      strcpy(c_channel,"CN1");
+										/*** Ver 2.3 Starts ***/
+                    if(c_sup_usr_typ == 'Z')
+                      strcpy(c_channel,"CN2");
+										/*** Ver 2.3 Ends ***/
+						}
+						else if ( c_user_id[0] == BPID)	
+						{
+
+										EXEC SQL
+										SELECT  CIM_PIPE_ID,
+														CIM_CTCL_ID
+										INTO    :sql_pcm_crnt_pipe_id,
+														:c_ctcl_id
+										FROM    CIM_CTCL_ID_MSTR
+										WHERE   CIM_DBC_CSE_ID = :c_user_id 
+										AND     CIM_XCHNG_CD   = :sql_pcm_xchng_cd
+										AND     CIM_INDCTR     = 'D'
+                    AND     NVL(CIM_CTCL_DEACT_FLG,' ')  = 'A';  /*Ver 2.0*/
+
+										if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND) /*Added No data found in Ver 2.0*/
+										{
+												fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+												Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+												tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+										}
+
+										if(SQLCODE == NO_DATA_FOUND) /*Ver 2.0*/
+										{
+											fn_errlog( c_ServiceName,"B56067",DEFMSG, c_err_msg );
+											Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+											tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+										}
+
+										SETLEN(c_ctcl_id);
+						}
+						/***********  Ver 2.2 Starts ***********/
+						else if ( c_sup_usr_typ == 'M' || c_sup_usr_typ == 'X' || /* c_sup_usr_typ == 'N' || Commented in Ver 2.8 */
+                      c_sup_usr_typ == 'O' || c_sup_usr_typ == 'P' || c_sup_usr_typ == 'D' || 
+                      c_sup_usr_typ == 'I' || c_sup_usr_typ == 'W' || c_sup_usr_typ == 'T' ||
+                      c_sup_usr_typ == 'B' || c_sup_usr_typ == 'R' || c_sup_usr_typ == 'U' ||
+                      c_sup_usr_typ == 'V' )	
+                  		/***	Ver 2.5	 N,O,P added	***/  /*** Ve 2.8 D,I,W,T,B,R,U and V added ***/
+						{
+                
+                /*** Ver 2.5 Starts ***/
+
+                /*** Commented in Ver 2.8 *** 
+    
+                if ( c_sup_usr_typ == 'N')
+                    strcpy(c_channel,"WEN");
+                ***/
+                
+                if(c_sup_usr_typ == 'O')
+                    strcpy(c_channel,"WEO");
+                if(c_sup_usr_typ == 'P')
+                    strcpy(c_channel,"WEP"); 
+               
+                /*** Ver 2.5 Ends ***/
+
+								/****** M : Mobile , L :LBS *********/
+
+								if( DEBUG_MSG_LVL_3 ) {          
+                    fn_userlog(c_ServiceName,"Mobile Or LBS user '");
+                }
+
+
+								if(strcmp(sql_pcm_xchng_cd,"BFO") == 0)
+								{
+									strcpy((char *)c_ctcl_id.arr, "5555555555555");
+								}
+								else
+								{
+									strcpy((char *)c_ctcl_id.arr, "333333333333");
+								}
+
+
+								SETLEN(c_ctcl_id);
+								find_pipe = 1;
+
+
+						}
+						/***********  Ver 2.2 Ends ************/
+						else
+						{
+								if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+										fn_userlog(c_ServiceName,"Normal User");
+								}
+                /*** Ver 2.1 starts ***/
+                if(strcmp(sql_pcm_xchng_cd,"NFO") == 0)
+                {
+								  strcpy((char*)c_ctcl_id.arr,"111111111111");
+                }
+                else if( strcmp(sql_pcm_xchng_cd,"BFO") == 0 )
+                {
+                  strcpy((char*)c_ctcl_id.arr,"1111111111111");
+                }    
+                /*** Ver 2.1 Ends ***/
+								SETLEN(c_ctcl_id);
+								find_pipe = 1;  /*** dont have pipe need to find  ****/      
+						}
+
+						fn_get_channel(c_sup_usr_typ, c_channel);	/* Added in Ver 2.7 for getting channel */
+ 
+            /********* Ver 2.9 starts ************/
+            if (c_sup_usr_typ == '8' || c_sup_usr_typ == '9')
+            {
+              fn_errlog( c_ServiceName,"B56071",DEFMSG, c_err_msg );
+              Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+            }
+            /********* Ver 2.9 ends ************/
+				} 
+				else /*** channel is SYS ***/
+				{
+								l_cse_id  = 0;
+								find_pipe = 1;  /*** dont have pipe need to find  ****/       
+				}
+
+
+		} /*** END of  Userid and Channel Found ****/
+		else
+		{
+								if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+										fn_userlog(c_ServiceName,"Field Not Present");
+								}
+                find_pipe = 1;
+                /*** Ver 2.1 Starts ***/
+                if(strcmp(sql_pcm_xchng_cd,"NFO") == 0)
+                {
+								 strcpy((char*)c_ctcl_id.arr,"111111111111");
+                }
+                else if( strcmp(sql_pcm_xchng_cd,"BFO") == 0 )
+                {
+                  strcpy((char*)c_ctcl_id.arr,"1111111111111");
+                }
+                /*** Ver 2.1 Ends ***/
+
+								SETLEN(c_ctcl_id);
+
+		}
+
+		/*** 1.5  DBC Compliance  End ***/
+
+		if(find_pipe == 1 ) 
+		{
+				EXEC SQL
+				SELECT	pcm_crnt_pipe_id
+				INTO    :sql_pcm_crnt_pipe_id
+				FROM		pcm_pipe_clm_map
+				WHERE		pcm_xchng_cd	     = :sql_pcm_xchng_cd
+				AND		pcm_clm_mtch_accnt	 = :sql_pcm_clm_mtch_accnt;
+
+				if (( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ))
+				{
+						fn_userlog( c_ServiceName, "|%s|%s|%s|",
+						 c_rqst_service, sql_pcm_xchng_cd,sql_pcm_clm_mtch_accnt );
+						fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg  );
+						Fadd32 ( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+						tpreturn ( TPFAIL, 0, ( char * )ptr_fml_Ibuffer, 0, 0 );
+				}
+				else if ( SQLCODE == NO_DATA_FOUND )
+				{
+						i_returncode =  fn_ins_pcm ( sql_pcm_clm_mtch_accnt, 
+																sql_pcm_xchng_cd, c_err_msg );
+						if ( i_returncode == -1 )
+						{
+								fn_userlog( c_ServiceName, "|%s|%s|%s|",
+								 c_rqst_service, sql_pcm_xchng_cd,sql_pcm_clm_mtch_accnt );
+								fn_errlog( c_ServiceName, "S31045", SQLMSG, c_err_msg  );
+								Fadd32 ( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+								tpreturn ( TPFAIL, 0, ( char * )ptr_fml_Ibuffer, 0, 0 );
+						}
+
+						EXEC SQL
+						SELECT		pcm_crnt_pipe_id
+						INTO    :sql_pcm_crnt_pipe_id
+						FROM		pcm_pipe_clm_map
+						WHERE		pcm_xchng_cd	       = :sql_pcm_xchng_cd
+						AND		pcm_clm_mtch_accnt	 = :sql_pcm_clm_mtch_accnt;
+
+						if (( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ))
+						{
+								fn_userlog( c_ServiceName, "|%s|%s|%s|",
+								c_rqst_service, sql_pcm_xchng_cd,sql_pcm_clm_mtch_accnt );
+								fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg  );
+								Fadd32 ( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+								tpreturn ( TPFAIL, 0, ( char * )ptr_fml_Ibuffer, 0, 0 );
+						}
+
+				}
+
+				if( strcmp(c_channel,"SYS") == 0)
+				{
+						if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+							fn_userlog(c_ServiceName,":%ld:",l_cse_id);
+							fn_userlog(c_ServiceName,":%s:",sql_pcm_xchng_cd);
+							fn_userlog(c_ServiceName,":%s:",sql_pcm_crnt_pipe_id);
+						}
+
+						EXEC SQL
+						SELECT  CIM_CTCL_ID
+						INTO    :c_ctcl_id
+						FROM    CIM_CTCL_ID_MSTR
+						WHERE   CIM_DBC_CSE_ID = to_char(:l_cse_id)
+						AND     CIM_XCHNG_CD   = :sql_pcm_xchng_cd
+						AND     CIM_INDCTR     = 'S'
+						AND     CIM_PIPE_ID    = :sql_pcm_crnt_pipe_id
+            AND     NVL(CIM_CTCL_DEACT_FLG,' ') = 'A';  /*Ver 2.0*/
+
+						if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND ) /*Added No data found in Ver 2.0*/
+						{
+								fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+								Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+								tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+						}
+
+						if(SQLCODE == NO_DATA_FOUND) /*Ver 2.0*/
+						{
+							fn_errlog( c_ServiceName,"B56067",DEFMSG, c_err_msg );
+							Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+						}
+
+						SETLEN(c_ctcl_id);
+				}
+		}
+
+		i_err [0]= Fadd32(ptr_fml_Ibuffer,FFO_CSE_ID,(char *)&l_cse_id,0);
+    i_ferr[0]= Ferror32;
+
+		if ( i_err[0] == -1 )
+    {
+        fn_userlog( c_ServiceName, "|%s|%s|%s|",
+        c_rqst_service, sql_pcm_xchng_cd,sql_pcm_clm_mtch_accnt );
+        fn_errlog( c_ServiceName, "S31060", FMLMSG, c_err_msg  );
+        Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn( TPFAIL, 0L, ( char * )ptr_fml_Ibuffer, 0L, 0 );
+    }
+
+		if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.8 : Debug level Change  */
+				fn_userlog(c_ServiceName,"Pipe ID :%s:",sql_pcm_crnt_pipe_id);
+				fn_userlog(c_ServiceName,"CTCL ID :%s:",(char*)c_ctcl_id.arr);
+				fn_userlog(c_ServiceName,"Channel :%s:",c_channel);
+		}
+
+		i_err [0]= Fchg32(ptr_fml_Ibuffer,FFO_PIPE_ID,0,sql_pcm_crnt_pipe_id,0);
+		i_ferr[0]= Ferror32;
+		i_err [1]= Fchg32(ptr_fml_Ibuffer,FFO_CTCL_ID,0,(char*)c_ctcl_id.arr,0);
+		i_ferr[1]= Ferror32;
+		i_err [2]= Fchg32(ptr_fml_Ibuffer,FFO_CHANNEL,0,c_channel,0);
+		i_ferr[2]= Ferror32;
+		/* i_err [3]= Fadd32(ptr_fml_Ibuffer,FFO_CSE_ID,(char *)&l_cse_id,0);  Ver 1.9 
+		i_ferr [3] = Ferror32; */
+
+		for ( i = 0; i < 3; i++ )
+		{
+				if ( i_err[i] == -1 )
+				{
+								fn_userlog( c_ServiceName, "|%s|%s|%s|",
+								c_rqst_service, sql_pcm_xchng_cd,sql_pcm_clm_mtch_accnt );
+								fn_errlog( c_ServiceName, "S31065", Fstrerror32(i_ferr[i]),c_err_msg);
+								Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+								tpreturn( TPFAIL, 0L, ( char * )ptr_fml_Ibuffer, 0L, 0 );
+				}
+		}
+
+		/*********** 1.5
+		i_err[0] = Fadd32 ( ptr_fml_Ibuffer, FFO_PIPE_ID, (char *) sql_pcm_crnt_pipe_id, 0 );
+
+		if ( i_err[0] == -1 )
+		{
+				fn_userlog( c_ServiceName, "|%s|%s|%s|",
+				c_rqst_service, sql_pcm_xchng_cd,sql_pcm_clm_mtch_accnt );
+				fn_errlog( c_ServiceName, "S31070", FMLMSG, c_err_msg  );
+				Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0 );
+				tpreturn( TPFAIL, 0L, ( char * )ptr_fml_Ibuffer, 0L, 0 );
+		}
+		***********/
+
+		fn_userlog(c_ServiceName,"Order FWDING");
+		/* Fprint32(ptr_fml_Ibuffer);			*** Temporarily added	****/
+    fn_userlog(c_ServiceName,"Calling the service :%s:",c_rqst_service);
+		tpforward ( c_rqst_service, ( char * )ptr_fml_Ibuffer, 0, 0 );
+    fn_userlog(c_ServiceName,"Returning from the service :%s:",c_rqst_service);
+
+}
+
+int fn_ins_pcm( char *c_match_accnt_nmbr, char *c_xchng_cd, char *c_err_msg )
+{
+	EXEC SQL INCLUDE "table/opm_ord_pipe_mstr.h";
+	EXEC SQL INCLUDE "table/cam_cln_acc_map.h";
+	char c_pipe_flag;
+	char c_pipe[ 2 + 1 ];
+	int  i_pipe_cnt=0;
+  int i_trnsctn;
+  int  i_pipe_cnt_min;
+
+	strcpy( sql_cam_clm_mtch_accnt, c_match_accnt_nmbr );
+	strcpy( sql_cam_xchng_cd, c_xchng_cd );
+
+	EXEC SQL
+			SELECT		cam_pipe_ctgry_id,
+								cam_cln_grp_id
+        INTO    :sql_cam_pipe_ctgry_id,
+								:sql_cam_cln_grp_id
+        FROM    cam_cln_acc_map
+       WHERE    cam_clm_mtch_accnt = :sql_cam_clm_mtch_accnt
+         AND    cam_xchng_cd       = :sql_cam_xchng_cd;
+
+	if ( SQLCODE != 0 )
+	{
+    fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg  );
+		return (-1);
+	}
+
+	EXEC SQL
+			DECLARE  pipe_list_cur CURSOR FOR
+			 SELECT  opm_pipe_id
+				 FROM	 opm_ord_pipe_mstr
+				WHERE	 opm_xchng_cd 	    = :sql_cam_xchng_cd
+					AND	 opm_pipe_ctgry_id  = :sql_cam_pipe_ctgry_id;
+
+	EXEC SQL
+			OPEN		pipe_list_cur;
+
+	if ( SQLCODE != 0 )
+	{
+    fn_errlog( c_ServiceName, "S31080", SQLMSG, c_err_msg  );
+		return (-1);
+	}
+
+	c_pipe_flag = TRUE;
+	strcpy ( c_pipe, "*" );
+
+	while (1)
+	{
+		EXEC SQL
+				FETCH		pipe_list_cur
+				 INTO		:sql_opm_pipe_id;
+
+		if ( SQLCODE != 0 )
+		{
+			if ( SQLCODE == NO_DATA_FOUND )
+			{
+				break;
+			}
+			else
+			{
+    		fn_errlog( c_ServiceName, "S31085", SQLMSG, c_err_msg  );
+				EXEC SQL
+						CLOSE	pipe_list_cur;
+				return (-1);
+			}
+		}
+
+		EXEC SQL
+				SELECT 		count(pcm_mkd_pipe_id)
+	 			  INTO		:i_pipe_cnt
+					FROM		pcm_pipe_clm_map
+			   WHERE 		pcm_mkd_pipe_id = :sql_opm_pipe_id
+	         AND		pcm_xchng_cd    = :sql_cam_xchng_cd;
+
+		if ( SQLCODE != 0 )
+		{
+    		fn_errlog( c_ServiceName, "S31090", SQLMSG, c_err_msg  );
+				EXEC SQL
+						CLOSE pipe_list_cur;	
+			  return (-1);
+		}
+
+		if ( c_pipe_flag == TRUE )
+		{
+			i_pipe_cnt_min = i_pipe_cnt;
+			strcpy(c_pipe, sql_opm_pipe_id );
+			c_pipe_flag = FALSE;
+		}
+		else if ( i_pipe_cnt <= i_pipe_cnt_min )
+		{
+			i_pipe_cnt_min = i_pipe_cnt;
+			strcpy(c_pipe, sql_opm_pipe_id );
+		}
+	}
+	
+	EXEC SQL
+			CLOSE pipe_list_cur;
+
+	if ( strcmp ( c_pipe, "*" ) == 0 )
+	{
+ 		fn_userlog( c_ServiceName, "Fatal error : Pipe id mismatch" );
+    fn_errlog( c_ServiceName, "S31095", SQLMSG, c_err_msg  );
+	  return (-1);
+	}
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+ 		fn_userlog( c_ServiceName, "Fatal error : Pipe id mismatch" );
+    fn_errlog( c_ServiceName, "S31100", DEFMSG, c_err_msg  );
+	  return (-1);
+  }
+	
+	EXEC SQL
+			INSERT INTO		pcm_pipe_clm_map
+										( pcm_clm_mtch_accnt,
+											pcm_xchng_cd,
+											pcm_mkd_pipe_id,
+											pcm_crnt_pipe_id,
+											pcm_mrng_pipe_id,								/* Ver 1.7 PCM Updation */
+											pcm_day_pipe_id,								/* Ver 1.7 PCM Updation */
+											pcm_cln_grp_id
+										)
+										VALUES
+										( :sql_cam_clm_mtch_accnt,
+											:sql_cam_xchng_cd,
+											:c_pipe,
+											:c_pipe,
+											:c_pipe,												/* Ver 1.7 PCM Updation */
+											:c_pipe,												/* Ver 1.7 PCM Updation */
+											:sql_cam_cln_grp_id
+										);
+	if ( SQLCODE != 0 )
+	{
+ 		fn_userlog( c_ServiceName, "Unable to insert record with pipe id [%s]",
+																																			c_pipe );
+    fn_errlog( c_ServiceName, "S31105", SQLMSG, c_err_msg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+	  return (-1);
+	}
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+ 		fn_userlog( c_ServiceName, "Unable to commit record with pipe id [%s]",
+																																			c_pipe );
+    fn_errlog( c_ServiceName, "S31110", TPMSG, c_err_msg  );
+	  return (-1);
+  }
+
+	
+	return (1);
+}

@@ -1,0 +1,316 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fml_def.h>
+#include <fo_fml_def.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fml_rout.h>
+#include <fn_ddr.h>
+#include <eba.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>
+
+#define LOCAL_TRAN_TIMEOUT 600
+
+void BAT_UNBLK_REJ (int argc, char* argv[] )
+{
+ char  c_ServiceName[33];
+ char  c_err_msg[256];
+ char  c_trd_dt[12];
+ char c_opr_typ ='P';
+ char c_force_flag ='F';
+
+ varchar c_channel[4];
+ varchar sql_clm_mtch_accnt[11];
+ varchar sql_stck_cd[7];
+ varchar sql_dp_id[9];
+ varchar sql_dp_clnt_id[9];
+ varchar c_tmp_rowid[19];
+ varchar c_usr_id[7];
+
+ int i = 0;
+ int j = 0;
+ int i_returncode =0;
+ int i_err[10];
+ int i_trnsctn=0;
+ 
+ long l_tifp_qty =0;
+ long sql_sssn_id =0;
+ long l_recvbuff = 0;
+ long l_rec_cnt= 0;
+
+ FBFR32 *ptr_fml_Sbuffer = (FBFR32 *)NULL;
+ FBFR32 *ptr_fml_Rbuffer = (FBFR32 *)NULL;
+
+ strcpy(c_ServiceName, "bat_unblock_rej");
+
+ fn_userlog(c_ServiceName, "Batch process %s started", argv[0] );
+
+ if(argc != 4)
+ {
+   fn_userlog (c_ServiceName,"Usage : <bat_unblock_rej> <NFO> <NFO> <NA> <TRD_DT>");
+   return;
+ }
+
+ INITBATDBGLVL(argv[0]);
+
+ i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+ if ( i_trnsctn == -1 )
+ {
+   fn_errlog(c_ServiceName,"S31005",SQLMSG,c_err_msg);
+   return;
+ }
+
+ EXEC SQL
+ DELETE FROM TEMP_PLG_REJ_RECORDS;
+
+ if(SQLCODE != 0 && (SQLCODE!= NO_DATA_FOUND) )
+ {
+   fn_userlog(c_ServiceName,"Error in DELETE TMP Table.");
+   fn_errlog(c_ServiceName,"S31010",SQLMSG,c_err_msg );
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   return;
+ }
+        
+ EXEC SQL 
+ INSERT INTO 
+ TEMP_PLG_REJ_RECORDS
+ ( TMP_CLM_MTCH_ACCNT,
+   TMP_STCK_CD,
+   TMP_TIFP_QTY,
+   TMP_DP_ID,
+   TMP_DP_CLNT_ID
+ ) 
+ (
+   SELECT DISTINCT A.PTD_CLM_MTCH_ACCNT,
+          A.PTD_STCK_CD,
+          A.PTD_TIFP_QTY,
+          A.PTD_DP_ID,
+          A.PTD_DP_CLNT_ID
+   FROM   PTD_TIFP_DTLS_CNV A,
+          DBD_DP_BLCK_DTLS, 
+          ( SELECT  DISTINCT POD_CLNT_MTCH_ACCNT,
+                    PTD_DP_ID,
+                    PTD_DP_CLNT_ID
+                    FROM    POD_PLG_ORDR_DTLS,PTD_TIFP_DTLS
+                    WHERE   POD_ORDR_STTS   = 'C'
+                    AND     POD_PLG_REV_TYP = 'P'
+                    AND     PTD_PLG_REV_TYP = 'P'
+                    --AND     TRUNC(PTD_TIFP_RUN_DT) = :c_trd_dt
+                    AND     POD_STCK_CD = PTD_STCK_CD
+                    AND     POD_ORDR_NO = PTD_POD_REF_NO
+                    AND     POD_CLNT_MTCH_ACCNT=PTD_CLM_MTCH_ACCNT
+          ) B
+   WHERE  A.PTD_CLM_MTCH_ACCNT=B.POD_CLNT_MTCH_ACCNT
+   AND    A.PTD_DP_ID=B.PTD_DP_ID
+   AND    A.PTD_DP_CLNT_ID=B.PTD_DP_CLNT_ID
+   AND    A.PTD_TIFP_STTS = 'J'
+   AND    DBD_PLG_MODE ='B'
+   AND    A.PTD_CLM_MTCH_ACCNT = DBD_CLM_MTCH_ACCNT
+   AND    A.PTD_DP_ID=DBD_DP_ID
+   AND    A.PTD_DP_CLNT_ID = DBD_DP_CLNT_ID
+   AND    A.PTD_STCK_CD = DBD_STCK_CD
+ );
+
+ if(SQLCODE != 0 )
+ {
+   fn_userlog(c_ServiceName,"Error in Selecting Data.");
+   fn_errlog(c_ServiceName,"S31015",SQLMSG, c_err_msg);
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   return ;
+ }
+
+ if ( tpcommit(0) == -1 )
+ {
+   fn_errlog(c_ServiceName, "S31020",SQLMSG, c_err_msg );
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   return;
+ }
+
+ EXEC SQL
+ SELECT COUNT(1)
+ INTO   :l_rec_cnt
+ FROM   TEMP_PLG_REJ_RECORDS;
+
+ if(SQLCODE != 0 )
+ {
+   fn_userlog(c_ServiceName,"Error in Selecting Data.");
+   fn_errlog(c_ServiceName,"S31025",SQLMSG, c_err_msg);
+   return ;
+ }
+
+ if( l_rec_cnt == 0 )
+ {
+   fn_userlog(c_ServiceName, "No records for process...");
+   return;
+ }
+
+ for (i = 0; i < l_rec_cnt; i++)
+ {
+
+    MEMSET(sql_clm_mtch_accnt);
+    MEMSET(sql_stck_cd);
+    MEMSET(sql_dp_id);
+    MEMSET(sql_dp_clnt_id);
+    MEMSET(c_tmp_rowid);
+    l_tifp_qty=0;
+
+    EXEC SQL
+    SELECT TMP_CLM_MTCH_ACCNT,
+           TMP_STCK_CD,
+           TMP_TIFP_QTY,
+           TMP_DP_ID,
+           TMP_DP_CLNT_ID,
+           rowid
+    INTO   :sql_clm_mtch_accnt,   
+           :sql_stck_cd,
+           :l_tifp_qty, 
+           :sql_dp_id,
+           :sql_dp_clnt_id,
+           :c_tmp_rowid
+    FROM   TEMP_PLG_REJ_RECORDS
+    WHERE  ROWNUM < 2;
+
+    if(SQLCODE != 0 )
+    {
+       fn_userlog(c_ServiceName,"Error in Selecting Data.");
+       fn_errlog(c_ServiceName,"S31030",SQLMSG, c_err_msg);
+       return ;
+    }
+
+    SETLEN(c_tmp_rowid);
+    SETNULL(c_tmp_rowid);
+
+    i_trnsctn = tpbegin(LOCAL_TRAN_TIMEOUT, 0);
+
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog(c_ServiceName,"S31035",SQLMSG,c_err_msg);
+      return;
+    }
+
+    EXEC SQL
+    DELETE FROM TEMP_PLG_REJ_RECORDS
+    WHERE  rowid = :c_tmp_rowid;
+
+    if(SQLCODE != 0 )
+    {
+      fn_userlog(c_ServiceName,"Error in Selecting Data.");
+      fn_errlog(c_ServiceName,"S31040",SQLMSG, c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return ;
+    }
+
+    if ( tpcommit(0) == -1 )
+    {
+      fn_errlog(c_ServiceName, "S31045",SQLMSG, c_err_msg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+
+    ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+    if (ptr_fml_Sbuffer == NULL)
+    {
+      fn_errlog(c_ServiceName, "S31050", TPMSG, c_err_msg);
+      return;
+    }
+
+    ptr_fml_Rbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+    if (ptr_fml_Rbuffer == NULL)
+    {
+      fn_errlog(c_ServiceName, "S31055", TPMSG, c_err_msg);
+      return;
+    }
+
+    SETLEN(sql_clm_mtch_accnt);
+    SETLEN(sql_stck_cd);
+    SETLEN(sql_dp_id);
+    SETLEN(sql_dp_clnt_id);
+    SETNULL(sql_clm_mtch_accnt);
+    SETNULL(sql_stck_cd);
+    SETNULL(sql_dp_id);
+    SETNULL(sql_dp_clnt_id);
+
+    MEMSET(c_channel);
+    strcpy(c_usr_id.arr,"system");
+    strcpy(c_channel.arr,"sys");
+    SETLEN(c_usr_id);
+    SETLEN(c_channel);
+    SETNULL(c_usr_id);
+    SETNULL(c_channel);
+    c_opr_typ ='W';
+
+    i_err [0] = Fadd32(ptr_fml_Sbuffer,FFO_USR_ID          ,(char*)c_usr_id.arr,0);
+    i_err [1] = Fadd32(ptr_fml_Sbuffer,FFO_EBA_MTCH_ACT_NO ,(char*)sql_clm_mtch_accnt.arr,0);
+    i_err [2] = Fadd32(ptr_fml_Sbuffer,FFO_SSSN_ID         ,(char*)&sql_sssn_id,0);
+    i_err [3] = Fadd32(ptr_fml_Sbuffer,FFO_OPT_TYP         ,(char*)&c_opr_typ,0);
+    i_err [4] = Fadd32(ptr_fml_Sbuffer,FFO_STCK_CD         ,(char *)sql_stck_cd.arr ,0);
+    i_err [5] = Fadd32(ptr_fml_Sbuffer,FFO_DP_CLNT_ID      ,(char *)sql_dp_clnt_id.arr,0);
+    i_err [6] = Fadd32(ptr_fml_Sbuffer,FFO_DPID            ,(char *)sql_dp_id.arr,0);
+    i_err [7] = Fadd32(ptr_fml_Sbuffer,FFO_ORD_TOT_QTY     ,(char*)&l_tifp_qty,0);
+    i_err [8] = Fadd32(ptr_fml_Sbuffer,FFO_CHANNEL         ,(char*)c_channel.arr,0);
+    i_err [9] = Fadd32(ptr_fml_Sbuffer,FML_PLG_FLG         ,(char*)&c_force_flag,0);
+
+    for(j=0;j <= 10;j++)
+    {
+      if(i_err[j] == -1)
+      {
+        fn_errlog( c_ServiceName, "S31060", FMLMSG, c_err_msg  );
+        fn_userlog(c_ServiceName, "The Fget32 error at [%d]",j);
+        tpfree ( ( char * )ptr_fml_Rbuffer);
+        tpfree ( ( char * )ptr_fml_Sbuffer);
+        return;
+      }
+    }
+
+    fn_userlog(c_ServiceName,"Calling SFO_PLC_PLG ");
+
+    i_returncode=tpcall("SFO_PLC_PLG",(char *)ptr_fml_Sbuffer,0,(char **)&ptr_fml_Rbuffer,&l_recvbuff,0);
+
+    fn_userlog(c_ServiceName,"After Call i_returncode : %d ",i_returncode);
+
+    if (i_returncode == -1)
+    {
+      if (tperrno == TPESVCFAIL)
+      {
+        if(Fget32(ptr_fml_Rbuffer, FFO_ERR_MSG, 0, c_err_msg, 0 ) == -1)
+        {
+          fn_errlog(c_ServiceName, "S31065", TPMSG, c_err_msg);
+          tpfree((char *)ptr_fml_Sbuffer);
+          tpfree((char *)ptr_fml_Rbuffer);
+          return;
+        }
+      }
+      else
+      {
+        fn_errlog(c_ServiceName, "S31070", TPMSG, c_err_msg);
+        tpfree((char *)ptr_fml_Sbuffer);
+        tpfree((char *)ptr_fml_Rbuffer);
+        return;
+      }
+    }
+
+  }
+  fn_userlog(c_ServiceName," ALL DONE ");
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_UNBLK_REJ;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}

@@ -1,0 +1,354 @@
+/************************************************************************************/
+/* Program Name : bat_gm_dlyoblg.pc                                                 */
+/* Description  : Program to generate the daily obligations in game simulator       */
+/* Ver 1.0      : Sachin Birje.                                                     */
+/* Ver 1.1      : Change in the obligation generation logic | Sachin Birje          */ 
+/* Ver 1.2      : Column specific FBD table insert | Mrinal Kishore          */ 
+/************************************************************************************/
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <stdio.h>
+#include <sqlca.h>    
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <string.h>	
+#include <userlog.h>
+#include <stdlib.h>	
+#include <fn_read_debug_lvl.h>	
+#include <fn_pos.h>
+
+int i;
+#define INIT(x,y) for(i=0 ;i<y;i++)x[i] = 0
+
+void BAT_GM_DLYOBLG ( int argc, char *argv[] )
+{
+  int i_ch_val=0;
+  int i_trnsctn=0;
+
+  long int li_cnt;
+  long int li_run_no;
+  long l_inner_counter=0;
+  long l_pipo_count=0;
+  long l_recd_cnt=0;
+
+  char c_msg[256];
+  char c_ServiceName [ 33 ];
+  char c_err_msg [ 256 ];
+  char c_cln_mtch_accnt[ 11 ];
+  char c_dc_flg;
+
+  char c_program_nm[33];
+  char c_xchng_cd_tmp[4];
+  char c_match_id[11];
+  char c_error_txt[256];
+
+  memset(c_program_nm,'\0',sizeof(c_program_nm));
+  memset(c_xchng_cd_tmp,'\0',sizeof(c_xchng_cd_tmp));
+  memset(c_match_id,'\0',sizeof(c_match_id));
+  memset(c_error_txt,'\0',sizeof(c_error_txt));
+ 
+  EXEC SQL BEGIN DECLARE SECTION;
+  varchar c_trd_dt [LEN_DATE];
+  varchar c_bill_no[16];
+  double d_amount;
+  char c_xchng_cd[4];
+  int i_grp_id;
+
+  typedef struct ___list
+  {
+    char   c_cln_mtch_accnt1[ 11 ];
+    double d_amount1;
+    char   c_xchng_cd1[4];
+    int    i_grp_id1; 
+  } st_pipo_list;
+
+  st_pipo_list * ptr_pipo_list = NULL;
+
+  EXEC SQL END DECLARE SECTION;
+	INIT(c_msg,256);
+	INIT(c_ServiceName,33);
+	INIT(c_err_msg,256);
+  
+  strcpy ( c_ServiceName, argv[0] );
+
+  strcpy(c_program_nm,c_ServiceName);
+  strcpy(c_xchng_cd_tmp,argv[2]);
+
+	INITBATDBGLVL(argv[0]);		
+
+	sprintf ( c_msg, "Batch process %s started", argv[0] );
+
+	strcpy ( c_msg, "Creating data. Please wait ... " );
+
+  MEMSET(c_trd_dt);
+
+  fn_userlog(c_ServiceName," bat_gm_dlyoblg Started ");
+
+  EXEC SQL
+    SELECT to_date(exg_nxt_trd_dt,'dd-Mon-yyyy')
+      INTO :c_trd_dt
+      FROM EXG_XCHNG_MSTR
+     WHERE EXG_XCHNG_CD='NFO'; 
+
+  if(SQLCODE  != 0)
+  {
+   fn_errlog(c_ServiceName, "S31005",SQLMSG,c_err_msg);
+   strcpy(c_error_txt,"System error. Contact System Support");
+   fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg); 
+   return;
+  }
+
+  SETNULL(c_trd_dt);
+
+  fn_userlog(c_ServiceName," Trade Date :%s:",c_trd_dt.arr);
+
+  EXEC SQL
+    SELECT count(c_match_id )
+      INTO  :l_pipo_count
+      FROM
+     (
+      SELECT fll.FLL_CLM_MTCH_ACCNT c_match_id
+      FROM FLL_FO_LMTUPD_LOG fll,
+            FNM_FO_NARRATION_MSTR fnm
+      WHERE fll.FLL_NARRATION_ID = fnm.FNM_NARRATION_ID
+       /**  AND fnm.FNM_LMT_PRJ_FLG in ( 'P','A','B')  *** Ver 1.1 ***/
+        AND fnm.FNM_LMT_PRJ_FLG in ( 'P','A')         /*** Ver 1.1 ***/
+        AND   fll.FLL_TRD_DT = to_date( :c_trd_dt, 'DD-Mon-YYYY' )
+      GROUP BY fll.FLL_CLM_MTCH_ACCNT,
+               fll.FLL_XCHNG_CD,
+               fll.FLL_GRP_ID
+     );
+
+  if(SQLCODE  != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+   fn_errlog(c_ServiceName, "S31010",SQLMSG,c_err_msg);
+   strcpy(c_error_txt,"System error. Contact System Support");
+   fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+   return;
+  }
+
+  fn_userlog(c_ServiceName," l_pipo_count :%ld:",l_pipo_count);
+  
+  if( l_pipo_count > 0 )
+  {
+
+   ptr_pipo_list=calloc(sizeof(st_pipo_list),l_pipo_count);
+
+   if (ptr_pipo_list == NULL )
+   {
+      fn_errlog ( c_ServiceName, "S31015", LIBMSG, c_err_msg  );
+      fn_userlog(c_ServiceName,"Unable to Allocat Memory ");
+      strcpy(c_error_txt,"System error. Contact System Support");
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+      return ;
+    }
+
+   EXEC SQL
+    DECLARE cur_gm_fll CURSOR FOR
+     SELECT fll.FLL_CLM_MTCH_ACCNT,
+            sum(fll.FLL_DC_AMT),
+            fll.FLL_XCHNG_CD,
+            fll.FLL_GRP_ID
+       FROM FLL_FO_LMTUPD_LOG fll,
+            FNM_FO_NARRATION_MSTR fnm
+      WHERE fll.FLL_NARRATION_ID = fnm.FNM_NARRATION_ID
+        /** AND fnm.FNM_LMT_PRJ_FLG in ( 'P','A','B') *** Ver 1.1 ***/
+        AND fnm.FNM_LMT_PRJ_FLG in ( 'P','A')        /*** Ver 1.1 ***/
+        AND   fll.FLL_TRD_DT >= to_date( :c_trd_dt, 'DD-Mon-YYYY' )
+      GROUP BY fll.FLL_CLM_MTCH_ACCNT,
+               fll.FLL_XCHNG_CD,
+               fll.FLL_GRP_ID;  
+
+   EXEC SQL
+    OPEN cur_gm_fll;  
+
+   if(SQLCODE  != 0)
+   {
+    fn_errlog(c_ServiceName, "S31020",SQLMSG,c_err_msg);
+    EXEC SQL CLOSE cur_gm_fll;
+    strcpy(c_error_txt,"System error. Contact System Support");
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  
+    return;
+   }
+
+  fn_userlog(c_ServiceName," Load data into ptr_pipo_list");
+
+   EXEC SQL
+      FOR :l_pipo_count
+    FETCH cur_gm_fll
+     INTO :ptr_pipo_list;
+
+   if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+   {
+    fn_errlog(c_ServiceName, "S31025",SQLMSG,c_err_msg);
+    EXEC SQL CLOSE cur_gm_fll;
+    strcpy(c_error_txt,"System error. Contact System Support");
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+    return ;
+   }
+
+   fn_userlog(c_ServiceName," After Data Load ");
+ 
+   EXEC SQL CLOSE cur_gm_fll;
+
+   for(l_inner_counter=0;l_inner_counter < l_pipo_count ; l_inner_counter++)
+   {
+
+    MEMSET(c_cln_mtch_accnt);
+    MEMSET(c_xchng_cd);
+    d_amount=0.0;
+    i_grp_id =0;
+
+    strcpy(c_cln_mtch_accnt,ptr_pipo_list[l_inner_counter].c_cln_mtch_accnt1);
+    strcpy(c_xchng_cd,ptr_pipo_list[l_inner_counter].c_xchng_cd1);
+    d_amount = ptr_pipo_list[l_inner_counter].d_amount1;
+    i_grp_id = ptr_pipo_list[l_inner_counter].i_grp_id1;
+
+    fn_userlog(c_ServiceName," match Id :%s:",c_cln_mtch_accnt);
+    fn_userlog(c_ServiceName," Exchg Cd :%s",c_xchng_cd);
+    fn_userlog(c_ServiceName," d_amount :%lf:",d_amount);
+    fn_userlog(c_ServiceName," i_grp_id :%d:",i_grp_id);
+     
+    strcpy(c_match_id,c_cln_mtch_accnt);
+
+    if( d_amount != 0.00 )
+    {
+      MEMSET(c_bill_no);
+      
+      EXEC SQL
+        SELECT to_char(sysdate,'YYYYMMDD')||LPAD(GET_GM_BILL_SEQ.nextval,7,0)       
+          INTO :c_bill_no
+          FROM DUAL;
+
+      if(SQLCODE != 0) 
+      {
+       fn_errlog(c_ServiceName, "S31030",SQLMSG,c_err_msg);
+       strcpy(c_error_txt,"System error. Contact System Support");
+       fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+       return;
+      }
+      SETNULL(c_bill_no);
+
+      i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+      if ( i_trnsctn == -1 )
+      {
+       fn_errlog( c_ServiceName, "S31035", LIBMSG , c_err_msg );
+       sprintf (c_msg, "Failed in the Processing of Bill no :%s:",c_bill_no);
+       strcpy(c_error_txt,"System error. Contact System Support");
+       fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+       return;
+      }
+   
+      if ( d_amount < 0.00 )
+      {
+        c_dc_flg = DEBIT;
+      }
+      else
+      {
+        c_dc_flg = CREDIT;
+      }  
+      
+      l_recd_cnt = 0;
+
+      EXEC SQL
+        SELECT count(1)
+          INTO :l_recd_cnt
+          FROM fbd_fo_bnk_drcr
+         WHERE fbd_clm_mtch_accnt = :c_cln_mtch_accnt
+           AND fbd_trd_dt         = to_date(:c_trd_dt,'dd-Mon-YYYY')
+           AND fbd_xchng_cd       = :c_xchng_cd
+           AND fbd_grp_id         = :i_grp_id;
+ 
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+       fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       fn_errlog( c_ServiceName, "S31040", SQLMSG , c_err_msg );
+       strcpy(c_error_txt,"System error. Contact System Support");
+       fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+       return;   
+      }
+      
+      if( l_recd_cnt > 0 )
+      {
+        fn_userlog(c_ServiceName,"Record Already Exists for match :%s:",c_cln_mtch_accnt);
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        continue;
+      } 
+
+      EXEC SQL
+           INSERT INTO fbd_fo_bnk_drcr(FBD_XCHNG_CD,FBD_TRD_DT,FBD_GRP_ID,FBD_BILL_NO,FBD_CLM_MTCH_ACCNT,
+                                       FBD_PAYIN_DT,FBD_PAYOUT_DT,FBD_DC_FLG,FBD_DC_AMT,FBD_PI_PO_AMT,
+                                       FBD_INT_ADJ_AMT)  /** ver 1.2 , Column specific insert ***/
+          (                  
+           SELECT   fbc_xchng_cd,
+                    fbc_trd_dt,
+                    fbc_grp_id,
+                    :c_bill_no ,
+                    :c_cln_mtch_accnt,
+                    to_char( fbc_cln_pyin_dt, 'DD-Mon-YYYY' ),
+                    to_char( fbc_cln_pyout_dt, 'DD-Mon-YYYY' ),
+                    :c_dc_flg,
+                    :d_amount,
+                    0,
+                    0          
+             FROM   fbc_fo_brnch_cal
+            WHERE   fbc_xchng_cd = :c_xchng_cd
+              AND   fbc_trd_dt = to_date(:c_trd_dt,'dd-Mon-yyyy')
+              AND   fbc_grp_id  = :i_grp_id
+              AND   fbc_branch =  '0004'
+      );
+      
+      if(SQLCODE != 0)
+      {
+       fn_errlog(c_ServiceName, "S31045",SQLMSG,c_err_msg);
+       fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       strcpy(c_error_txt,"System error. Contact System Support");
+       fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+       return;
+      }
+      
+     if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+     {
+      sprintf (c_msg, "Failed in the Processing of Bill no :%s:",c_bill_no);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31050", SQLMSG , c_err_msg );
+      strcpy(c_error_txt,"System error. Contact System Support");
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+      return;
+     }
+ 
+    }
+    else
+    {
+     fn_userlog(c_ServiceName,"Amount is equal to Zero for match id :%s: and exchange :%s:",c_cln_mtch_accnt,c_xchng_cd);
+     continue; 
+    }
+  }  
+
+  /*  Free the List*/
+  free(ptr_pipo_list);
+          
+ } 
+  return;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+	fn_var = BAT_GM_DLYOBLG;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+	return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+	return 0;
+}

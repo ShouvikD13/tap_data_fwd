@@ -1,0 +1,958 @@
+/******************************************************************************/
+/* Service name :  BAT_FAB_HOUSE_KEEP  	                                      */
+/*                                                                            */
+/* Description  :  This Batch Program insert the data into Allocation history */
+/*                 table from its parent Table.                               */
+/*                                                                            */
+/* Input        :  Trade Date                                                 */
+/*                                                                            */
+/*                                                                            */
+/* Output      :                                                              */
+/*                                                                            */
+/* Log         :	1.0	11-Apr-2008 Initial Release  		- 	Sandeep					    */
+/*						 :	1.1	03-Mar-2009	Transaction Changes	-		Sandeep							*/
+/*             :  1.2 19-May-2011 CRCON44062 (ADM)    -   Sachin              */
+/*						 :  1.3 10-Aug-2011	Delete 1 week old data from FAB dump & FMD  */
+/*						 :  1.4 15-May-2012 FNO- BSE Changes    -   Sandip							*/
+/*						 :  1.5 14-Sep-2012 FNO- Optimization   -   Sandip							*/
+/*						 :  1.6 24-Mar-2014 taking date from FBC   -   Shashi K					*/
+/*						 :  1.7 26-Mar-2014 FDR Module   				-   Samip M							*/
+/*						 :  1.8 22-Sep-2015 Comment FMD ,FAB data deletion  - Sandip		*/
+/*						 :  1.9 01-Oct-2015 History table introduced for FMD,FAB-Sandip */
+/*						 :  2.0 23-May-2016 Trasaction Time Increased 	-	Sandeep Patil	*/
+/*             :  2.1 15-Sep-2016 Margin reporting with Eod Mtm - Bhupendra Malik */
+/*             :  2.2 24-Oct-2016 Restirct user from running FAB house keep       */
+/*                                process multiple times for same trade date      */
+/*                                - Ritesh Deolekar                               */
+/*             :  2.3 28-Feb-2017 Trasaction Time Increased - Bhupendra Malik     */
+/*						 :	2.4 03-Mar-2017 Optimization - Samip M											    */
+/*						 :	2.5 28-Jun-2017 GST Changes - Samip M												    */
+/*						 :	2.6 28-Jun-2017 Real Estate Sequence reset - Samip M				    */
+/*             :  2.7 24-Jul-2017 Margin statement changes for Equity Allocation - Tanmay Patel   */
+/*             :  2.8 04-Jul-2018 Margin Statement Rerun  - Tanmay Patel                          */
+/*             :  2.9 07-Feb-2019 T Day changes for Margin Statement Generation  - Tanmay Patel   */ 
+/*             :  3.0 25-Jun-2018 Margin Statement Changes from Exchange         - Tanmay Patel   */  
+/*             :  3.1 16-Oct-2018 Changes in Logic for Client Haircut Percentage - Tanmay Patel   */
+/*             :  3.2 26-Jul-2020 CR-ISEC14-138293 Changes for Margin Pledge	- Samip M						*/
+/*             :  3.3 19-Nov-2020 CR-ISEC04-145019_Peak_Margin_Reporting_FnO  - Tanmay Patel      */ 
+/**************************************************************************************************/
+#include <string.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+/*#include <fo.h>*/	/*Ver 1.1 */
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <eba.h>				/*Ver 1.1*/
+#include <fn_read_debug_lvl.h>
+#define TRAN_TIME 2000      /** Ver 2.0 chnage from 600 to 1200 to 2000 **/
+
+int fn_delete_olddata( char *c_ServiceName, char *c_errmsg,char *c_date); /*** Ver 1.3 ***/ /** Ver 1.9 date added **/
+int fn_reset_seq_real_estate( char *c_ServiceName, char *c_errmsg); /** Ver 2.6 **/
+
+
+void BAT_FAB_HOUSE_KEEP(int argc, char *argv[] )
+{
+
+	EXEC SQL INCLUDE "table/exg_xchng_mstr.h";
+	char c_ServiceName[33];
+	char c_msg [ 100 ];
+  char c_errmsg [ 256 ];
+  int i_trnsctn=0;
+	int i_rec_exst = 0;
+
+  EXEC SQL BEGIN DECLARE SECTION;
+    char c_date [ 12 ];
+		char c_nxt_trd_dt [ 12 ];
+    int i_rec_cnt;
+    int i_exrec_cnt;
+    int i_count;
+		int i_rerun_cnt = 0;            /*** Ver 2.2 ***/
+		char c_xchng_cd [ 4 ];
+  EXEC SQL END DECLARE SECTION;
+
+	if(argc<4)
+  {
+    fn_userlog(c_ServiceName,"In argc < 4 ");
+    sprintf(c_msg,"Usage:bat_fab_house_keep <ini> <Exchange Code> <Pipe ID> <Date>");
+    fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+    exit(0);
+  }
+
+	strcpy ( c_ServiceName, argv[0] );
+	INITBATDBGLVL(argv[0]);
+
+  strcpy ( sql_exg_xchng_cd, argv[2] );
+
+	 EXEC SQL
+ 		 /** SELECT  exg_nxt_trd_dt ** Commented for Ver 2.9 **/
+ 		 SELECT  GREATEST(exg_nxt_trd_dt,EXG_TMP_TRD_DT)			/** changed for Ver 2.9 **/
+     INTO    :sql_exg_nxt_trd_dt
+     FROM    exg_xchng_mstr
+     WHERE   exg_xchng_cd = :sql_exg_xchng_cd;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31005",SQLMSG,c_errmsg);
+    return;
+  }
+
+/******* Commnet in Ver 1.6 ****
+	EXEC SQL
+		SELECT	(sysdate-1)
+		INTO    :c_date
+		FROM 		DUAL;
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31010",SQLMSG,c_errmsg);
+    return;
+  }
+*******************************/
+
+/********* Start Ver 1.6 ***************************/
+
+		EXEC SQL
+    SELECT MAX(fbc_trd_dt)
+    INTO   :c_date
+    FROM   fbc_fo_brnch_cal
+    WHERE  fbc_trd_dt < :sql_exg_nxt_trd_dt   /*** Ver 2.9 ***/
+    AND    fbc_xchng_cd = :sql_exg_xchng_cd;  /*** Ver 3.0 ***/ 
+ /**   WHERE  fbc_trd_dt <trunc(sysdate); ** Ver 2.9 ***/
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+    fn_userlog(c_ServiceName,"Failed To Get Current Trade Date");
+    fn_errlog( c_ServiceName, "S31015",SQLMSG, c_err_msg);
+    return;
+  }
+
+/********* End Ver 1.6 ***************************/
+
+
+  SETNULL(sql_exg_nxt_trd_dt);
+
+	if (DEBUG_MSG_LVL_3)
+	{
+		fn_userlog( c_ServiceName, "Exchange Code :%s:", sql_exg_xchng_cd );
+  	fn_userlog( c_ServiceName, "c_date :%s:", c_date );
+  	fn_userlog( c_ServiceName, "sql_exg_nxt_trd_dt :%s:", sql_exg_nxt_trd_dt.arr );
+  }
+
+	EXEC SQL
+		SELECT	1
+		INTO		:i_rec_exst
+		FROM		DUAL
+		WHERE		to_date( :c_date, 'DD-Mon-YYYY' ) > to_date(:sql_exg_nxt_trd_dt,'DD-Mon-YYYY');
+
+	if(i_rec_exst == 1)
+	{
+		fn_bat_pst_msg(c_ServiceName,"Check The Date ",c_tag);
+		return;
+	}
+	
+	fn_bat_pst_msg ( c_ServiceName, " ***** House Keeping Process For FAB Started *****", c_tag );
+
+	
+	EXEC SQL
+    SELECT	count(*)
+    INTO		:i_rec_cnt
+		/*FROM	fab_fo_alc_bft_smry;*/										/*** Ver 1.3 ***/
+	  FROM		FAB_FO_ALC_BFT_SMRY,UAC_USR_ACCNTS				/*** Ver 1.3 ***/
+		WHERE   fab_clm_mtch_accnt = uac_clm_mtch_accnt		/*** Ver 1.3 ***/
+		AND     uac_fno_allwd ='Y';												/*** Ver 1.3 ***/
+			
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31020",SQLMSG,c_errmsg);
+    return;
+  }
+
+	if( i_rec_cnt == 0 )
+  {
+    return;
+  }
+
+	else
+  {
+    sprintf( c_errmsg, "No. of Allocation updating in History Table :%ld:",
+                                                             i_rec_cnt );
+    fn_bat_pst_msg ( c_ServiceName, c_errmsg, c_tag );
+  }
+
+	 /*** Ver 2.2  started ***/
+
+  EXEC SQL
+    SELECT 1
+    INTO  :i_rerun_cnt
+    FROM  DUAL
+    WHERE EXISTS
+                (
+                  SELECT  1
+                  FROM    FAB_FO_ALC_BFT_SMRY_DUMP
+                  WHERE   FAB_TRD_DT  = :c_date  /*** trunc remove in Ver 2.8 ***/
+                );
+
+  if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog(c_ServiceName,"S31025",SQLMSG,c_errmsg);
+    return;
+  }
+
+  if (DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName," i_rerun_cnt :%d: ",i_rerun_cnt);
+  }
+
+  if ( i_rerun_cnt == 1 )
+  {
+    fn_errlog(c_ServiceName,"S31030",LIBMSG,c_errmsg);
+    fn_userlog(c_ServiceName," Proccess Already run for date :%s: ",c_date);
+    return;
+  }
+
+  /*** Ver 2.2 Ended ***/
+
+  /*** i_trnsctn = tpbegin(BAT_TRAN_TIMEOUT,0);	*Ver 1.1*   Commented in Ver 2.3 ***/
+	i_trnsctn = tpbegin(TRAN_TIME,0); /** Added in Ver 2.3 **/
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31035",LIBMSG,c_errmsg);
+    return;
+  }
+
+	EXEC SQL
+    INSERT INTO fab_fo_alc_bft_smry_dump
+    (
+			fab_clm_mtch_accnt,
+ 			fab_bnk_accnt,
+ 			fab_alctd_amt,
+ 			fab_bft_amt,
+ 			fab_plg_amt,
+ 			fab_trd_dt,
+      fab_isec_mrgn_amt,            /*** Ver 1.2 ***/
+			fab_isec_mrgn_amt_bse,					/*** Ver 1.4 ***/
+			fab_fdr_amt,								/** Ver 1.7 **/
+			FAB_NWB_AMT               /*** Ver 2.1 ***/
+		)
+		(
+			SELECT	fab_clm_mtch_accnt,
+      				fab_bnk_accnt,
+      				fab_alctd_amt,
+      				fab_bft_amt,
+      				fab_plg_amt,
+							:c_date,
+              nvl(fab_isec_mrgn_amt,0),									/*** Ver 1.2 ***/
+							nvl(fab_isec_mrgn_amt_bse,0),							/*** Ver 1.4 ***/
+							NVL(fab_fdr_amt,0),															/*** Ver 1.7 ***/
+							NVL(FAB_NWB_AMT,0)                   /*** Ver 2.1 ***/
+			/*FROM	FAB_FO_ALC_BFT_SMRY*/											/*** Ver 1.3 ***/
+			FROM		FAB_FO_ALC_BFT_SMRY,UAC_USR_ACCNTS				/*** Ver 1.3 ***/
+			WHERE   fab_clm_mtch_accnt = uac_clm_mtch_accnt		/*** Ver 1.3 ***/
+			AND     uac_fno_allwd ='Y'												/*** Ver 1.3 ***/
+		);
+
+	if( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31040",SQLMSG,c_errmsg);
+    tpabort(0);
+		return;
+  }
+
+	/****** Ver 2.1 Starts *************/
+	EXEC SQL
+		INSERT INTO DBD_DP_BLCK_DTLS_DUMP
+			(
+								DBD_CLM_MTCH_ACCNT,    
+								DBD_DP_ID,
+								DBD_DP_CLNT_ID,
+								DBD_ISIN_NMBR,   
+								DBD_STCK_CD,    
+								DBD_SAM_BLCKD_QTY, 
+								DBD_PLG_RT,
+								DBD_HAIRCUT,	
+								DBD_MKT_VALUE,
+								DBD_PLG_VALUE,     
+								DBD_TRD_DT
+		   )
+			 (
+				/** Rev columns added for Ver 3.2 in the query **/
+				SELECT	DBD_CLM_MTCH_ACCNT,
+								DBD_DP_ID,
+							  DBD_DP_CLNT_ID,
+								DBD_ISIN_NMBR,
+								DBD_STCK_CD,
+								DBD_SAM_BLCKD_QTY+DBD_BLOCK_FOR_SALE - DBD_REV_REQ_QTY - DBD_REV_COV_QTY,	
+								LTQ_PLG_RT,
+	/****         STK_PLG_HAIRCUT,   Commented in ver 2.7 *******/						
+  /****         NVL(CHM_HAIRCUT,NVL(STK_PLG_HAIRCUT,0)),   **  ver 2.7  **   *** Commented in Ver 3.1 ***/
+                GREATEST(NVL(CHM_HAIRCUT,0),NVL(STK_PLG_HAIRCUT,0)),  /*** Ver 3.1 ***/
+              	(LTQ_PLG_RT*(DBD_SAM_BLCKD_QTY+DBD_BLOCK_FOR_SALE - DBD_REV_REQ_QTY - DBD_REV_COV_QTY)), 
+/****           (LTQ_PLG_RT*(DBD_SAM_BLCKD_QTY+DBD_BLOCK_FOR_SALE))*(1-STK_PLG_HAIRCUT/100),  Commented in ver 2.7 *******/
+/***   (LTQ_PLG_RT*(DBD_SAM_BLCKD_QTY+DBD_BLOCK_FOR_SALE))*(1- NVL(CHM_HAIRCUT,NVL(STK_PLG_HAIRCUT,0))/100),  **  ver 2.7  *8*  *** commented in Ver 3.1 ***/
+       (LTQ_PLG_RT*(DBD_SAM_BLCKD_QTY+DBD_BLOCK_FOR_SALE - DBD_REV_REQ_QTY - DBD_REV_COV_QTY ))*(1-GREATEST(NVL(CHM_HAIRCUT,0),NVL(STK_PLG_HAIRCUT,0))/100),  /*** Ver 3.1 ***/ 
+                :c_date
+		    FROM    DBD_DP_BLCK_DTLS,LTQ_TRD_QT,STK_STK_MSTR,CHM_CLNT_HAIRCUT_MSTR /** CHM_CLNT_HAIRCUT_MSTR addded in Ver 2.7 **/
+				WHERE   LTQ_XCHNG_CD='BSE'
+        AND      DBD_STCK_CD=CHM_STCK_CD(+)                   /**  ver 2.7  **/
+        AND      CHM_CLM_MTCH_ACCNT(+) = DBD_CLM_MTCH_ACCNT   /**  ver 2.7  **/
+				AND     TRIM(LTQ_STCK_CD)=TRIM(DBD_STCK_CD)
+				AND     TRIM(STK_STCK_CD)=TRIM(DBD_STCK_CD)
+				AND     ( DBD_SAM_BLCKD_QTY + DBD_BLOCK_FOR_SALE - DBD_REV_REQ_QTY - DBD_REV_COV_QTY )!=0
+			);
+
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog(c_ServiceName,"S31045",SQLMSG,c_errmsg);
+		tpabort(0);
+		return;
+	}
+		
+	EXEC SQL
+	INSERT INTO FAB_FO_ALC_BFT_SMRY_DUMP
+			  (
+					FAB_CLM_MTCH_ACCNT,
+					FAB_BNK_ACCNT,
+					FAB_ALCTD_AMT,
+					FAB_BFT_AMT,
+					FAB_PLG_AMT,
+					FAB_TRD_DT,
+					FAB_ISEC_MRGN_AMT,
+					FAB_ISEC_MRGN_AMT_BSE,
+					FAB_FDR_AMT,
+					FAB_NWB_AMT,
+					FAB_EQ_PLG_AMT,
+					FAB_TOT_COLL_AMT,
+          FAB_EQ_NSE_PLG_AMT,  /**  ver 2.7  **/
+          FAB_EQ_BSE_PLG_AMT,  /**  ver 2.7  **/
+          FAB_EQ_FREE_PLG_AMT   /**  ver 2.7  **/
+				)
+			(
+			SELECT DISTINCT DBD_CLM_MTCH_ACCNT,
+						 CLB_BNK_ACCT_NMBR,
+						 FAB_ALCTD_AMT,
+						 FAB_BFT_AMT,
+						 FAB_PLG_AMT,
+						 DBD_TRD_DT,
+						 FAB_ISEC_MRGN_AMT,
+						 FAB_ISEC_MRGN_AMT_BSE,
+						 FAB_FDR_AMT,
+						 FAB_NWB_AMT,
+						 0,
+						 0,
+             0,      /**  ver 2.7  **/
+             0,      /**  ver 2.7  **/
+             0       /**  ver 2.7  **/
+			FROM   DBD_DP_BLCK_DTLS_DUMP,CLB_BNK_ACCTS,FAB_FO_ALC_BFT_SMRY
+		  WHERE	 DBD_CLM_MTCH_ACCNT=CLB_CLM_MTCH_ACCNT
+			AND    DBD_CLM_MTCH_ACCNT=FAB_CLM_MTCH_ACCNT
+			AND		 DBD_TRD_DT = :c_date
+			AND    NOT EXISTS ( SELECT FAB_CLM_MTCH_ACCNT 
+													FROM   FAB_FO_ALC_BFT_SMRY_DUMP
+				  								WHERE  FAB_TRD_DT=:c_date		/** Trunc added for Ver 2.4 **  *** Trunc removed in Ver 2.8 ***/
+													AND    DBD_DP_BLCK_DTLS_DUMP.DBD_CLM_MTCH_ACCNT=FAB_CLM_MTCH_ACCNT
+					  						 )
+			);
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog(c_ServiceName,"S31050",SQLMSG,c_errmsg);
+		tpabort(0);
+		return;
+	}		
+																						
+	EXEC SQL
+		UPDATE  FAB_FO_ALC_BFT_SMRY_DUMP A
+		/** SET     FAB_TOT_COLL_AMT=(SELECT NVL(SUM(DBD_PLG_VALUE),0)  **/
+		SET     FAB_TOT_COLL_AMT=(SELECT SUM(NVL(DBD_PLG_VALUE,0))
+														  FROM   DBD_DP_BLCK_DTLS_DUMP
+															WHERE  DBD_CLM_MTCH_ACCNT=FAB_CLM_MTCH_ACCNT
+														  AND    DBD_TRD_DT=:c_date
+															GROUP BY DBD_CLM_MTCH_ACCNT),
+					  FAB_EQ_PLG_AMT = (SELECT NVL(EAB_PLG_AMT,0) 
+															FROM   EAB_EQ_ALC_BFT_SMRY
+															WHERE  EAB_CLM_MTCH_ACCNT=FAB_CLM_MTCH_ACCNT ),
+/**********     ver 2.7 start *****************/
+            FAB_EQ_NSE_PLG_AMT=(SELECT  SUM(NVL(SSB_NT_BLNCS,0))
+                               FROM   SSB_STTLMNT_BLNCS
+                               WHERE SSB_DB_CR_FLG = 'D'
+                               AND     SSB_NT_BLNCS > 0
+                               AND    SSB_XCHNG_CD = 'NSE'
+                               AND SSB_CLM_MTCH_ACCNT = FAB_CLM_MTCH_ACCNT),
+           FAB_EQ_BSE_PLG_AMT=(SELECT  SUM(NVL(SSB_NT_BLNCS,0))
+                               FROM   SSB_STTLMNT_BLNCS
+                               WHERE SSB_DB_CR_FLG = 'D'
+                               AND     SSB_NT_BLNCS > 0
+                               AND    SSB_XCHNG_CD = 'BSE'
+                               AND SSB_CLM_MTCH_ACCNT = FAB_CLM_MTCH_ACCNT),
+           FAB_EQ_FREE_PLG_AMT=(SELECT nvl(EAB_PLG_AMT - NVL(ssb_blnc,0),0)
+                                FROM   EAB_EQ_ALC_BFT_SMRY,
+                                (SELECT SUM(SSB_NT_BLNCS) ssb_blnc,SSB_CLM_MTCH_ACCNT
+                                FROM SSB_STTLMNT_BLNCS,FAB_FO_ALC_BFT_SMRY_DUMP B
+                               WHERE SSB_DB_CR_FLG = 'D'
+                               AND   SSB_NT_BLNCS > 0
+                               AND   SSB_CLM_MTCH_ACCNT = B.FAB_CLM_MTCH_ACCNT
+															 AND   B.FAB_TRD_DT=:c_date  /***  trunc Removed in ver 2.8 ***/
+                              GROUP BY SSB_CLM_MTCH_ACCNT)
+                              WHERE  EAB_CLM_MTCH_ACCNT= A.FAB_CLM_MTCH_ACCNT
+                              AND  EAB_CLM_MTCH_ACCNT = SSB_CLM_MTCH_ACCNT(+))
+/************    ver 2.7 end *****************/	
+	WHERE   FAB_TRD_DT=:c_date;		/** trunc added for Ver 2.4 **  ***  trunc Removed in ver 2.8 ***/
+	
+	if( SQLCODE != 0 )
+	{
+		fn_errlog(c_ServiceName,"S31055",SQLMSG,c_errmsg);
+		tpabort(0);
+		return;
+	}
+
+	/****** Ver 2.1 Ends *******/
+	i_trnsctn =  tpcommit(0);			/*Ver 1.1*/
+	if ( i_trnsctn  == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31060",LIBMSG,c_errmsg);
+    tpabort(0);
+		return;
+  }
+
+	/*** Ver 1.3 change starts here ***/
+
+	if ( fn_delete_olddata( c_ServiceName, c_errmsg,c_date ) == -1 ) 		/** ver 1.9 date passed **/
+	{
+		fn_userlog(c_ServiceName,"ERROR while deleting 1 week old data");
+		fn_errlog(c_ServiceName,"S31065",DEFMSG,c_errmsg);
+	}
+	/*** Ver 1.3 change ends here ***/
+
+	/*** Ver 2.6 starts ***/
+
+	if (fn_reset_seq_real_estate(c_ServiceName, c_errmsg) == -1 )
+	{
+		fn_userlog(c_ServiceName,"ERROR while Resetting sequence for Real Estate");
+		fn_errlog(c_ServiceName,"S31070",DEFMSG,c_errmsg);
+	}
+	/*** Ver 2.6 Ends ***/
+	
+	fn_userlog(c_ServiceName," House Keeping Process For Allocation Is Completed");
+
+  return;
+}
+
+
+/*** Ver 1.3 change starts here ***/
+int fn_delete_olddata( char *c_ServiceName, char *c_errmsg,char *c_date)	/** ver 1.9 c_date adeed **/
+{
+  int i_trnsctn=0;
+
+	/*** i_trnsctn = tpbegin(BAT_TRAN_TIMEOUT,0);			Commented In Ver 2.0	***/
+
+	i_trnsctn	=	tpbegin(TRAN_TIME,0);			/***	Ver 2.0	***/
+
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31075",LIBMSG,c_errmsg);
+		fn_userlog(c_ServiceName,"Unable to start transaction - Contact system support");
+    return -1;
+  }
+	/*** Ver 1.9 History Maintainnce ***/
+	EXEC SQL
+		Insert into FAB_FO_ALC_BFT_SMRY_HSTRY 
+	  						(	FAB_CLM_MTCH_ACCNT,
+									FAB_BNK_ACCNT,
+									FAB_ALCTD_AMT,
+									FAB_BFT_AMT,
+									FAB_PLG_AMT,
+									FAB_TRD_DT,
+									FAB_ISEC_MRGN_AMT,
+									FAB_ISEC_MRGN_AMT_BSE,
+									FAB_FDR_AMT,
+                  FAB_NWB_AMT,          /**  ver 2.7  **/
+                  FAB_EQ_PLG_AMT,       /**  ver 2.7  **/
+                  FAB_TOT_COLL_AMT,     /**  ver 2.7  **/
+                  FAB_EQ_NSE_PLG_AMT,   /**  ver 2.7  **/
+                  FAB_EQ_BSE_PLG_AMT,   /**  ver 2.7  **/
+                  FAB_EQ_FREE_PLG_AMT   /**  ver 2.7  **/
+                )
+		SELECT 				FAB_CLM_MTCH_ACCNT,
+									FAB_BNK_ACCNT,
+									FAB_ALCTD_AMT,
+									FAB_BFT_AMT,
+									FAB_PLG_AMT,
+									FAB_TRD_DT,
+									FAB_ISEC_MRGN_AMT,
+									FAB_ISEC_MRGN_AMT_BSE,
+									FAB_FDR_AMT,
+                  FAB_NWB_AMT,          /**  ver 2.7  **/
+                  FAB_EQ_PLG_AMT,       /**  ver 2.7  **/
+                  FAB_TOT_COLL_AMT,     /**  ver 2.7  **/
+                  FAB_EQ_NSE_PLG_AMT,   /**  ver 2.7  **/
+                  FAB_EQ_BSE_PLG_AMT,   /**  ver 2.7  **/
+                  FAB_EQ_FREE_PLG_AMT   /**  ver 2.7  **/ 
+		FROM 	FAB_FO_ALC_BFT_SMRY_DUMP 
+		WHERE FAB_TRD_DT < :c_date ;  /***  trunc Removed in ver 2.8 ***/ 
+
+  if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+	 fn_errlog(c_ServiceName,"S31080",SQLMSG,c_errmsg);
+   fn_userlog(c_ServiceName,"System error - Contact System support");
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+	 return -1;
+  }
+	EXEC SQL 
+		Insert into FMD_FO_MRGN_DTLS_HSTRY
+							( FMD_CLM_MTCH_ACCNT,
+								FMD_CLNT_NM,
+								FMD_TRD_DT,
+								FMD_PLG_AMT,
+								FMD_PL_AMT,
+								FMD_TTL_AMT,
+								FMD_PRVTRD_DT,
+								FMD_PRVPLG_AMT,
+								FMD_PRVPL_AMT,
+								FMD_PRVTTL_AMT,
+								FMD_ALCTD_AMT,
+								FMD_BFT_AMT,
+								FMD_PRVALCTD_AMT,
+								FMD_PRVBFT_AMT,
+								FMD_OPT_MRGN,
+								FMD_FUT_MRGN,
+								FMD_PRVOPT_MRGN,
+								FMD_PRVFUT_MRGN,
+								FMD_OUTSTNDNG,
+								FMD_PRV_OUTSTNDNG,
+								FMD_PAYIO,
+								FMD_PRV_PAYIO,
+								FMD_PRCSNG_TM,
+								FMD_MAIL_SNT_FLG,
+								FMD_ISEC_MRGN_AMT,
+								FMD_PRVISEC_MRGN_AMT,
+								FMD_EXCH_MRGN,
+								FMD_EXCH_PRMUM,
+								FMD_EXCH_TOTAL_MRGN,
+								FMD_EXCH_EXPSR,
+								FMD_EXCH_SHRT_FLL,
+								FMD_ISEC_REQMNT,
+								FMD_BSE_PL_AMT,
+								FMD_BSE_OPT_MRGN,
+								FMD_BSE_FUT_MRGN,
+								FMD_BSE_PAYIO,
+								FMD_BSE_OUTSTNDNG,
+								FMD_BSE_EXCH_MRGN,
+								FMD_BSE_EXCH_PRMUM,
+								FMD_BSE_EXCH_TOTAL_MRGN,
+								FMD_BSE_EXCH_EXPSR,
+								FMD_FDR_AMT,
+                FMD_NWB_AMT,          /**  ver 2.7  **/
+                FMD_EQ_PLG_AMT,       /**  ver 2.7  **/
+                FMD_TOT_COLL_AMT,     /**  ver 2.7  **/
+                FMD_EQ_NSE_PLG_AMT,   /**  ver 2.7  **/
+                FMD_EQ_BSE_PLG_AMT,   /**  ver 2.7  **/
+                FMD_EQ_FREE_PLG_AMT,  /**  ver 2.7  **/
+                FMD_EXCH_DEL_MRGN,          /** Ver 3.0 **/
+                FMD_MTM_LOSS,               /** Ver 3.0 **/
+                FMD_BSE_EXCH_DEL_MRGN,      /** Ver 3.0 **/
+                FMD_BSE_MTM_LOSS)           /** Ver 3.0 **/     
+ 			Select		FMD_CLM_MTCH_ACCNT,
+								FMD_CLNT_NM,
+								FMD_TRD_DT,
+								FMD_PLG_AMT,
+								FMD_PL_AMT,
+								FMD_TTL_AMT,
+								FMD_PRVTRD_DT,
+								FMD_PRVPLG_AMT,
+								FMD_PRVPL_AMT,
+								FMD_PRVTTL_AMT,
+								FMD_ALCTD_AMT,
+								FMD_BFT_AMT,
+								FMD_PRVALCTD_AMT,
+								FMD_PRVBFT_AMT,
+								FMD_OPT_MRGN,
+								FMD_FUT_MRGN,
+								FMD_PRVOPT_MRGN,
+								FMD_PRVFUT_MRGN,
+								FMD_OUTSTNDNG,
+								FMD_PRV_OUTSTNDNG,
+								FMD_PAYIO,
+								FMD_PRV_PAYIO,
+								FMD_PRCSNG_TM,
+								FMD_MAIL_SNT_FLG,
+								FMD_ISEC_MRGN_AMT,
+								FMD_PRVISEC_MRGN_AMT,
+								FMD_EXCH_MRGN,
+								FMD_EXCH_PRMUM,
+								FMD_EXCH_TOTAL_MRGN,
+								FMD_EXCH_EXPSR,
+								FMD_EXCH_SHRT_FLL,
+								FMD_ISEC_REQMNT,
+								FMD_BSE_PL_AMT,
+								FMD_BSE_OPT_MRGN,
+								FMD_BSE_FUT_MRGN,
+								FMD_BSE_PAYIO,
+								FMD_BSE_OUTSTNDNG,
+								FMD_BSE_EXCH_MRGN,
+								FMD_BSE_EXCH_PRMUM,
+								FMD_BSE_EXCH_TOTAL_MRGN,
+								FMD_BSE_EXCH_EXPSR,
+								FMD_FDR_AMT,
+                FMD_NWB_AMT,          /**  ver 2.7  **/
+                FMD_EQ_PLG_AMT,       /**  ver 2.7  **/
+                FMD_TOT_COLL_AMT,     /**  ver 2.7  **/
+                FMD_EQ_NSE_PLG_AMT,   /**  ver 2.7  **/
+                FMD_EQ_BSE_PLG_AMT,   /**  ver 2.7  **/
+                FMD_EQ_FREE_PLG_AMT,  /**  ver 2.7  **/
+                FMD_EXCH_DEL_MRGN,         /** Ver 3.0 **/
+                FMD_MTM_LOSS,              /** Ver 3.0 **/
+                FMD_BSE_EXCH_DEL_MRGN,     /** Ver 3.0 **/
+                FMD_BSE_MTM_LOSS           /** Ver 3.0 **/
+			from FMD_FO_MRGN_DTLS 
+			WHERE fmd_trd_dt < :c_date;  /** Trunc Removed in Ver 2.9 **/
+  if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+	 fn_errlog(c_ServiceName,"S31085",SQLMSG,c_errmsg);
+   fn_userlog(c_ServiceName,"System error - Contact System support");
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+	 return -1;
+  }
+	/*** Ver 1.9 Ends ***/
+	/*** Ver 1.8 Comment     ***/
+
+	fn_userlog(c_ServiceName,"Deleting 1 day old data from FAB...");
+			
+	EXEC SQL
+			DELETE  FROM FAB_FO_ALC_BFT_SMRY_DUMP WHERE FAB_TRD_DT < :c_date; /** Ver 1.9 **/
+
+  if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+	 fn_errlog(c_ServiceName,"S31090",SQLMSG,c_errmsg);
+   fn_userlog(c_ServiceName,"System error - Contact System support");
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+	 return -1;
+  }
+
+	fn_userlog(c_ServiceName,"Deleting 1 day old data from FMD...");
+
+	EXEC SQL
+  DELETE /*+index (FMD_FO_MRGN_DTLS IDX_FMD_TRDT_1)*/ FROM  FMD_FO_MRGN_DTLS WHERE FMD_TRD_DT <:c_date; /** Trunc Removed in Ver 2.9 ***/ 
+	/** Ver 1.9 */
+
+  if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+	 fn_errlog(c_ServiceName,"S31095",SQLMSG,c_errmsg);
+   fn_userlog(c_ServiceName,"System error - Contact System support");
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+	 return -1;
+  }
+	/* Ver 1.8 comment **/ /** Ver 1.9 comment of Ver 1.8 uncommented **/
+
+  /******** Ver 2.8 Starts ************/
+   fn_userlog(c_ServiceName,"Insertinging old data into FMG_MRGN_XCHNG_DTLS_HSTRY...");
+
+   EXEC SQL
+      INSERT INTO FMG_MRGN_XCHNG_DTLS_HSTRY
+                ( FMG_MG_TRDDT,
+                  FMG_MG_MTCH_ACC,
+                  FMG_MG_INITIAL_MRGN,
+                  FMG_MG_PRMUM,
+                  FMG_MG_TOTAL_MRGN,
+                  FMG_MG_EXPSR,
+                  FMG_MG_ENTRD_BY,
+                  FMG_MG_ENTRD_DT,
+                  FMG_MG_MDFD_BY,
+                  FMG_MG_MDFD_DT,
+                  FMG_BSE_INITIAL_MRGN,
+                  FMG_BSE_PRMUM,
+                  FMG_BSE_TOTAL_MRGN,
+                  FMG_BSE_EXPSR,
+                  FMG_MG_DEL_MRGN,      /** Ver 3.0 **/ 
+                  FMG_MG_MTM_LOSS,      /** Ver 3.0 **/ 
+                  FMG_BSE_MG_DEL_MRGN,  /** Ver 3.0 **/
+                  FMG_BSE_MG_MTM_LOSS,  /** Ver 3.0 **/
+                  FMG_MG_PEAK_MRGN,     /** Ver 3.3 **/
+                  FMG_BSE_MG_PEAK_MRGN  /** Ver 3.3 **/
+                 )
+       SELECT     FMG_MG_TRDDT,
+                  FMG_MG_MTCH_ACC,
+                  FMG_MG_INITIAL_MRGN,
+                  FMG_MG_PRMUM,
+                  FMG_MG_TOTAL_MRGN,
+                  FMG_MG_EXPSR,
+                  FMG_MG_ENTRD_BY,
+                  FMG_MG_ENTRD_DT,
+                  FMG_MG_MDFD_BY,
+                  FMG_MG_MDFD_DT,
+                  FMG_BSE_INITIAL_MRGN,
+                  FMG_BSE_PRMUM,
+                  FMG_BSE_TOTAL_MRGN,
+                  FMG_BSE_EXPSR,
+                  FMG_MG_DEL_MRGN,      /** Ver 3.0 **/
+                  FMG_MG_MTM_LOSS,      /** Ver 3.0 **/
+                  FMG_BSE_MG_DEL_MRGN,  /** Ver 3.0 **/
+                  FMG_BSE_MG_MTM_LOSS,  /** Ver 3.0 **/
+                  FMG_MG_PEAK_MRGN,     /** Ver 3.3 **/
+                  FMG_BSE_MG_PEAK_MRGN  /** Ver 3.3 **/
+       FROM  FMG_MRGN_XCHNG_DTLS
+       WHERE FMG_MG_TRDDT < :c_date ;
+
+  /*********** Ver 2.8 Ends ***********/
+
+	/******** Ver 1.5 Starts ************/
+	 fn_userlog(c_ServiceName,"Deleting More than 1 day old data from FMG_MRGN_XCHNG_DTLS...");
+	
+	 EXEC SQL
+
+/*** 			DELETE FROM FMG_MRGN_XCHNG_DTLS where trunc(FMG_MG_TRDDT) <= trunc(SYSDATE-7) ; ***commented in Ver 2.8 ****/
+      
+          DELETE FROM FMG_MRGN_XCHNG_DTLS where FMG_MG_TRDDT <:c_date ;/*** Ver 2.8  ****/
+
+   if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+   {
+	 		fn_errlog(c_ServiceName,"S31100",SQLMSG,c_errmsg);
+   		fn_userlog(c_ServiceName,"System error - Contact System support");
+   		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+	 		return -1;
+   }
+	
+	/******** Ver 1.5 Ends ************/
+
+  /******** Ver 2.8 Starts ************/
+   fn_userlog(c_ServiceName,"Inserting  old data into  DBD_DP_BLCK_DTLS_DUMP_HSTRY...");
+  
+  EXEC SQL
+    INSERT INTO  DBD_DP_BLCK_DTLS_DUMP_HSTRY
+              (  DBD_CLM_MTCH_ACCNT,                                 
+                 DBD_DP_ID,
+                 DBD_DP_CLNT_ID,
+                 DBD_ISIN_NMBR,
+                 DBD_STCK_CD,
+                 DBD_SAM_BLCKD_QTY,
+                 DBD_PLG_RT,
+                 DBD_HAIRCUT,
+                 DBD_PLG_VALUE,
+                 DBD_TRD_DT,
+                 DBD_MKT_VALUE )
+    SELECT       DBD_CLM_MTCH_ACCNT,                                 
+                 DBD_DP_ID,
+                 DBD_DP_CLNT_ID,
+                 DBD_ISIN_NMBR,
+                 DBD_STCK_CD,
+                 DBD_SAM_BLCKD_QTY,
+                 DBD_PLG_RT,
+                 DBD_HAIRCUT,
+                 DBD_PLG_VALUE,
+                 DBD_TRD_DT,
+                 DBD_MKT_VALUE 
+    FROM   DBD_DP_BLCK_DTLS_DUMP
+    WHERE  DBD_TRD_DT < :c_date;     
+
+  /*********** Ver 2.8 Ends ***********/
+
+	/** Ver 2.1 Starts ***/
+
+   fn_userlog(c_ServiceName,"Deleting More than 1 day  old data from DBD_DP_BLCK_DTLS_DUMP...");
+
+	EXEC SQL
+/**		DELETE FROM DBD_DP_BLCK_DTLS_DUMP WHERE DBD_TRD_DT <= trunc(SYSDATE)-7; ** Commented in Ver 2.8 ***/
+      
+      DELETE FROM DBD_DP_BLCK_DTLS_DUMP WHERE DBD_TRD_DT < :c_date;  /** Ver 2.8 **/
+
+   if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+   {
+      fn_errlog(c_ServiceName,"S31105",SQLMSG,c_errmsg);
+      fn_userlog(c_ServiceName,"System error - Contact System support");
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return -1;
+   }
+
+	/** Ver 2.1 Ends **/
+
+	i_trnsctn =  tpcommit(0);
+	
+	if ( i_trnsctn  == -1 )
+	{
+		fn_errlog(c_ServiceName,"S31110",LIBMSG,c_errmsg);
+    fn_userlog(c_ServiceName,"Unable to commit transaction- Contact system support");
+	  fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return -1;
+	}
+
+	/*** Ver 2.5 Starts ***/
+
+	fn_userlog(c_ServiceName,"Deleting GST data from HR...");
+
+	EXEC SQL
+		DELETE FROM HRINT.GSM_GST_STATE_MSTR_FROM_EBA@ISECDB;
+
+   if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+   {
+      fn_errlog(c_ServiceName,"S31115",SQLMSG,c_errmsg);
+      fn_userlog(c_ServiceName,"System error - Contact System support");
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return -1;
+   }
+
+	EXEC SQL
+	 INSERT INTO HRINT.GSM_GST_STATE_MSTR_FROM_EBA@ISECDB 
+		SELECT * FROM GSTM_GST_STATE_MSTR;
+
+   if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+   {
+      fn_errlog(c_ServiceName,"S31120",SQLMSG,c_errmsg);
+      fn_userlog(c_ServiceName,"System error - Contact System support");
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return -1;
+   }
+
+	 fn_userlog(c_ServiceName,"GST data deleted from HR...");
+
+	EXEC SQL COMMIT;
+
+   if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+   {
+      fn_errlog(c_ServiceName,"S31125",SQLMSG,c_errmsg);
+      fn_userlog(c_ServiceName,"System error - Contact System support");
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return -1;
+   }
+
+	/*** Ver 2.5 Ends ***/
+}
+/*** Ver 1.3 change ends here ***/
+
+/** Ver 2.6 starts **/
+int fn_reset_seq_real_estate( char *c_ServiceName, char *c_errmsg)	/** ver 1.9 c_date adeed **/
+{
+		int d_seq_nextval = 0;
+
+    fn_userlog(c_ServiceName,"Restting The Sequences SEQ_RES_BUY");
+
+    EXEC SQL
+     EXECUTE
+       BEGIN
+         reset_sequence( 'SEQ_RES_BUY' );
+       END;
+    END-EXEC;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in resetting SEQ_RES_BUY :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31130", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+		EXEC SQL
+			SELECT SEQ_RES_BUY.NEXTVAL 
+			INTO :d_seq_nextval
+			FROM DUAL;
+
+		if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in selecting SEQ_RES_BUY :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31135", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+    fn_userlog(c_ServiceName,"Restting The Sequences SEQ_RES_SELL");
+
+    EXEC SQL
+     EXECUTE
+       BEGIN
+         reset_sequence( 'SEQ_RES_SELL' );
+       END;
+    END-EXEC;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in resetting SEQ_RES_SELL :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31140", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+		EXEC SQL
+			SELECT SEQ_RES_SELL.NEXTVAL 
+			INTO :d_seq_nextval
+			FROM DUAL;
+
+		if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in selecting SEQ_RES_SELL :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31145", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+    fn_userlog(c_ServiceName,"Restting The Sequences SEQ_RES_LEASEIN");
+
+    EXEC SQL
+     EXECUTE
+       BEGIN
+         reset_sequence( 'SEQ_RES_LEASEIN' );
+       END;
+    END-EXEC;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in resetting SEQ_RES_LEASEIN :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31150", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+		EXEC SQL
+			SELECT SEQ_RES_LEASEIN.NEXTVAL 
+			INTO :d_seq_nextval
+			FROM DUAL;
+
+		if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in selecting SEQ_RES_LEASEIN :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31155", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+    fn_userlog(c_ServiceName,"Restting The Sequences SEQ_RES_LEASEOUT");
+
+    EXEC SQL
+     EXECUTE
+       BEGIN
+         reset_sequence( 'SEQ_RES_LEASEOUT' );
+       END;
+    END-EXEC;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in resetting SEQ_RES_LEASEOUT :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31160", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+		EXEC SQL
+			SELECT SEQ_RES_LEASEOUT.NEXTVAL 
+			INTO :d_seq_nextval
+			FROM DUAL;
+
+		if ( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName, "Error in selecting SEQ_RES_LEASEOUT :%s:", SQLMSG );
+      fn_errlog( c_ServiceName, "S31165", SQLMSG, c_errmsg );
+      return -1;
+    }
+
+		fn_userlog(c_ServiceName,"Restting The Sequences Successful");
+		return 0;
+}
+/** Ver 2.6 Ends **/
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_FAB_HOUSE_KEEP;
+  return 0;
+}
+
+void fn_bat_term (  int argc, char *argv[])
+{
+   return ;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}

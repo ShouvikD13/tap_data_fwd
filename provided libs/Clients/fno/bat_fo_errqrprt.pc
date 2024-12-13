@@ -1,0 +1,958 @@
+/******************************************************************************/
+/*  Program       : bat_fo_errqrprt.pc                                        */
+/*                                                                            */
+/*  Description   : This program inserts relevant details from err-q packets 	*/
+/*									into FO_ERRQ_REPORT                                       */
+/*                                                                            */
+/*  Input         : <configuration file> <Exchange code> <pipe_id>            */
+/*                                                                            */
+/*  Output        : Success/Failure                                           */
+/*                                                                            */
+/*  Log           :                                                           */
+/*                                                                            */
+/*  Ver 1.0   03-Aug-2009   Prakash       Phase-2 Release CRCSN31735 ORS2     */
+/*  Ver 1.1   13-Dec-2016   Tanmay W      Handling error code 16388 and seq zero **/
+/*	Ver 1.2		22-Feb-2019		Parag Kanojia	Fo Direct Connectivity							*/
+/******************************************************************************/
+
+#include <memory.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fo_exch_comnN.h>
+#include <fn_scklib_tap.h>
+#include <eba_to_ors.h>
+
+void fn_re_enqueue( FBFR32 *ptr_fml_tempbuf,
+                    char c_err_qn[],
+                    char c_qspacename[] );
+
+int fn_read_errq_packet( FBFR32 *ptr_fml_tempbuf,
+                        char c_xchng_cd[] );
+
+/* Global variables */
+
+EXEC SQL BEGIN DECLARE SECTION;
+	char sql_fer_pipe_cd[3];		
+	short sql_fer_trans_cd;		
+	varchar sql_fer_ordref_ack[18+1];	
+	long sql_fer_mdfctn_cntr;
+	char sql_fer_spd_ordref1[18+1];
+	char sql_fer_spd_ordref2[18+1];	
+	char sql_fer_spd_ordref3[18+1];	
+	char sql_fer_ack[16+1];
+	varchar sql_fer_acktrd_tm[22+1];
+	long sql_fer_trd_qty;
+	long sql_fer_trd_rt;		
+	long sql_fer_trd_no;		
+	double sql_fer_jiffy;		
+	short sql_fer_err_cd;
+	short sql_fer_reason_cd;	
+	varchar sql_fer_time[22+1];		
+	varchar sql_fer_remarks[256];
+	varchar c_trd_dt[22+1];
+EXEC SQL END DECLARE SECTION;
+
+char c_ServiceName[33];
+char c_err_msg[256];
+int i_trnsctn;
+int i_ch_val;
+
+void BAT_FO_ERRQRPRT( int argc, char *argv[])
+{
+	FBFR32 *ptr_fml_tempbuf;
+	TPQCTL st_deqctl;
+	long int li_len;
+	char c_xchng_cd[3+1]; 
+  char c_qspacename[32];
+  char c_err_qn[32];
+
+  INITBATDBGLVL( argv[0] );
+
+	MEMSET( sql_fer_trans_cd );
+	MEMSET( sql_fer_ordref_ack );
+	MEMSET( sql_fer_spd_ordref1	);
+	MEMSET( sql_fer_spd_ordref2 );
+	MEMSET( sql_fer_spd_ordref3	);
+	MEMSET( sql_fer_ack	);
+	MEMSET( sql_fer_acktrd_tm );
+	MEMSET( sql_fer_time );
+	MEMSET( sql_fer_remarks );
+  MEMSET( c_err_qn );
+	MEMSET( c_qspacename );
+	MEMSET( c_trd_dt );
+	sql_fer_mdfctn_cntr = 0;
+	sql_fer_trd_qty = 0;
+	sql_fer_trd_rt = 0;
+	sql_fer_trd_no = 0;
+	sql_fer_jiffy = 0.0;
+	sql_fer_err_cd = 0;
+	sql_fer_reason_cd = 0;
+
+	strcpy( c_ServiceName, argv[0] );
+	strcpy( c_xchng_cd, argv[2] );
+	strcpy( sql_fer_pipe_cd, argv[3] );
+
+	/* error qname, qspace name */
+  sprintf( c_err_qn, "ERR_%s_Q", sql_fer_pipe_cd );
+  sprintf( c_qspacename, "%s_QSPACE", sql_fer_pipe_cd );
+
+	if( DEBUG_MSG_LVL_3 )  {
+	fn_userlog( c_ServiceName, "c_xchng_cd   |%s|", c_xchng_cd );
+	fn_userlog( c_ServiceName, "sql_fer_pipe_cd   |%s|", sql_fer_pipe_cd );
+  fn_userlog( c_ServiceName, "c_err_qn   |%s|", c_err_qn );
+  fn_userlog( c_ServiceName, "c_qspacename   |%s|", c_qspacename );
+	}
+
+  /* allocating buffers */
+  ptr_fml_tempbuf = (FBFR32 *)tpalloc( "FML32", NULL, 15*MIN_FML_BUF_LEN );
+  if( ptr_fml_tempbuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31005", TPMSG, c_err_msg );
+    return;
+  }
+
+	/* set control parameter to dequeue */
+ 	st_deqctl.flags = TPNOFLAGS;
+
+  /* dequeueing a message from err-q into fml buffer in transaction */
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if( i_trnsctn == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+  }
+
+  i_ch_val = tpdequeue ( c_qspacename, c_err_qn, &st_deqctl,
+                         (char **)&ptr_fml_tempbuf, &li_len, 0 );
+  if ( i_ch_val == -1 )
+  {
+    fn_userlog( c_ServiceName, "ERROR IS %s", tpstrerror(tperrno) );
+    fn_userlog( c_ServiceName, "%d", tperrno );
+    fn_userlog( c_ServiceName, "VALUE OF DIAG is %ld", st_deqctl.diagnostic );
+    if( st_deqctl.diagnostic == QMENOMSG )
+    {
+      fn_userlog( c_ServiceName, "No further message in the queue, BAT_FO_ERRQRES leaving...");
+      return;
+    }
+		else
+		{
+    	fn_errlog( c_ServiceName, "S31015", TPMSG, c_err_msg );
+		}
+
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+  }
+
+  if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31020", LIBMSG, c_err_msg );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpfree( (char *) ptr_fml_tempbuf );
+    return;
+  }
+
+	EXEC SQL
+		SELECT to_char( exg_nxt_trd_dt, 'dd-mon-yyyy' ),
+					 to_char( sysdate, 'dd-mon-yyyy hh24:mi:ss' )
+		INTO	 :c_trd_dt,
+					 :sql_fer_time
+		FROM	 exg_xchng_mstr
+		WHERE  exg_xchng_cd = :c_xchng_cd ;
+
+	if( SQLCODE != 0 )
+	{
+		fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+		fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+	}
+
+	SETLEN( c_trd_dt );
+	SETLEN( sql_fer_time );
+
+	if( DEBUG_MSG_LVL_3 )  {
+	fn_userlog( c_ServiceName, "c_trd_dt |%s|", c_trd_dt.arr );
+	fn_userlog( c_ServiceName, "sql_fer_time |%s|", sql_fer_time.arr );
+	}
+
+	/* data to be inserted is retrieved from buffer */
+
+	i_ch_val = fn_read_errq_packet( ptr_fml_tempbuf,
+																		c_xchng_cd );
+	if( i_ch_val == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31030", LIBMSG, c_err_msg );
+		fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+	}
+
+	/* inserting into err-q report table in transaction */
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if( i_trnsctn == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31035", LIBMSG, c_err_msg );
+		fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+  }
+
+	EXEC SQL
+   	INSERT INTO fo_errq_report
+     	(
+				fer_pipe_cd,
+				fer_trans_cd,
+				fer_ordref_ack,
+				fer_mdfctn_cntr,
+				fer_spd_ordref1,
+				fer_spd_ordref2,
+				fer_spd_ordref3,
+				fer_ack,
+				fer_acktrd_tm,
+				fer_trd_qty,
+				fer_trd_rt,
+				fer_trd_no,
+				fer_jiffy,
+				fer_err_cd,
+				fer_reason_cd,
+				fer_time,
+				fer_remarks
+			)
+		VALUES
+			(
+				:sql_fer_pipe_cd,
+				:sql_fer_trans_cd,
+				:sql_fer_ordref_ack,
+				:sql_fer_mdfctn_cntr,
+				:sql_fer_spd_ordref1,
+				:sql_fer_spd_ordref2,
+				:sql_fer_spd_ordref3,
+				:sql_fer_ack,
+				to_date( :sql_fer_acktrd_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+				:sql_fer_trd_qty,
+				:sql_fer_trd_rt,
+				:sql_fer_trd_no,
+				:sql_fer_jiffy,
+				:sql_fer_err_cd,
+				:sql_fer_reason_cd,
+				to_date( :sql_fer_time, 'dd-Mon-yyyy hh24:mi:ss' ),
+				:sql_fer_remarks
+			);
+
+	if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename);
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+  }
+			
+	if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31045", LIBMSG, c_err_msg );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename);
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+  }
+
+	fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename);
+
+  tpfree( ( char * )ptr_fml_tempbuf );
+  return;
+}
+
+int fn_read_errq_packet( FBFR32 *ptr_fml_tempbuf,
+                    		 char c_xchng_cd[] )
+{
+	FLDLEN32 ud_len;
+/*	struct st_cmn_header st_hdr;	*** Commented in Ver 1.2 ***/
+	struct st_cmn_header_tr st_hdr;
+	struct st_oe_reqres st_oe_reqres_data;
+	struct st_oe_rspn_tr st_oe_rspn_data_tr;			/*** Added in Ver 1.2 ***/
+	struct st_spd_oe_reqres st_spd_reqres_data;
+	struct st_trade_confirm st_trd_conf;
+	struct st_trade_confirm_tr st_trd_conf_tr;
+	struct st_ex_pl_reqres st_expl_reqres_data;
+	struct vw_xchngbook st_i_xchngbk;
+	struct vw_spdordbk st_spd_ordbk;
+  char c_ord_ack_nse[20]="\0" ;    /** 1.1 **/
+
+	char *ptr_car_buf;
+	long long ll_log_tm_stmp;
+	long int li_sbuf_len;
+
+	ptr_car_buf = (char *)tpalloc( "CARRAY", NULL, MIN_FML_BUF_LEN );
+  if( ptr_car_buf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31050", TPMSG, c_err_msg  );
+    return -1;
+  }
+
+	ud_len = ( FLDLEN32 )sizeof( li_sbuf_len );
+
+ 	i_ch_val = Fget32( ptr_fml_tempbuf, FFO_TMPLT, 0, ( char * )&li_sbuf_len, &ud_len );
+  if( i_ch_val == -1 )
+  {
+   	fn_errlog( c_ServiceName, "S31055", FMLMSG, c_err_msg );
+		tpfree ( ( char * )ptr_car_buf );
+    return -1;
+  }
+
+  ud_len = ( FLDLEN32 )li_sbuf_len;
+
+  i_ch_val = Fget32( ptr_fml_tempbuf, FFO_CBUF, 0, ( char * )ptr_car_buf, &ud_len );
+  if( i_ch_val == -1)
+  {
+   	fn_errlog( c_ServiceName, "S31060", FMLMSG, c_err_msg );
+		tpfree ( ( char * )ptr_car_buf );
+    return -1;
+  }
+
+	MEMSET( st_hdr );
+/*	memcpy( &st_hdr, ptr_car_buf, sizeof( struct st_cmn_header ) );	*** Commented in Ver 1.2 ***/
+	memcpy( &st_hdr, ptr_car_buf, sizeof( struct st_cmn_header_tr ) );
+
+	sql_fer_trans_cd = st_hdr.si_transaction_code;
+
+	switch( sql_fer_trans_cd )
+  {
+
+		/* Ordinary order response */
+		case ORDER_CONFIRMATION_OUT :
+    case ORDER_MOD_CONFIRM_OUT :
+    case ORDER_CANCEL_CONFIRM_OUT :
+    case ORDER_ERROR_OUT :
+    case ORDER_MOD_REJ_OUT :
+    case ORDER_CXL_REJ_OUT :
+    case FREEZE_TO_CONTROL :
+    case BATCH_ORDER_CXL_OUT :
+
+			MEMSET( st_oe_reqres_data );
+			memcpy( &st_oe_reqres_data, ptr_car_buf, sizeof( struct st_oe_reqres ) );
+	
+			fn_userlog( c_ServiceName, "Sequence Number Is :%d:", st_oe_reqres_data.i_ordr_sqnc );
+
+			if(sql_fer_trans_cd  == ORDER_CANCEL_CONFIRM_OUT && ( st_oe_reqres_data.st_hdr.si_error_code == 16388 || st_oe_reqres_data.i_ordr_sqnc == 0))   /** ver 1.1 **/	
+			{
+
+        sprintf(c_ord_ack_nse,"%16.0lf",st_oe_reqres_data.d_order_number);
+			
+				if( DEBUG_MSG_LVL_0)
+				{
+        	fn_userlog(c_ServiceName,"c_ord_ack_nse:%s:",c_ord_ack_nse);
+        	fn_userlog(c_ServiceName,"st_oe_reqres_data.l_token_no:%ld:",st_oe_reqres_data.l_token_no);
+				}
+					EXEC SQL
+					SELECT FXB_ORDR_SQNC
+					into :st_oe_reqres_data.i_ordr_sqnc
+					FROM FXB_FO_XCHNG_BOOK, FOD_FO_ORDR_DTLS,FTQ_FO_TRD_QT
+					WHERE FOD_ACK_NMBR =  :c_ord_ack_nse
+					AND   FTQ_TOKEN_NO = :st_oe_reqres_data.l_token_no
+					AND   FOD_ORDR_RFRNC  = FXB_ORDR_RFRNC
+					AND   FOD_MDFCTN_CNTR = FXB_MDFCTN_CNTR
+					AND   FOD_XCHNG_CD = FTQ_XCHNG_CD
+					AND   FXB_XCHNG_CD = FTQ_XCHNG_CD
+					AND		decode(FOD_PRDCT_TYP,'I','O','U','F','P','F',FOD_PRDCT_TYP)= FTQ_PRDCT_TYP
+					AND 	FOD_UNDRLYNG = FTQ_UNDRLYNG
+					AND   FOD_EXPRY_DT = FTQ_EXPRY_DT
+					AND   FOD_EXER_TYP = FTQ_EXER_TYP
+					AND   FOD_OPT_TYP = FTQ_OPT_TYP
+					AND   FOD_STRK_PRC = FTQ_STRK_PRC;
+
+  			if( SQLCODE != 0 )
+  			{
+    			fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg );
+    			tpfree( ( char * )ptr_car_buf );
+    			return -1;
+ 	 			}
+	
+			}
+
+      if( DEBUG_MSG_LVL_0) /** Ver 1.1 **/
+      {
+        fn_userlog(c_ServiceName,"st_oe_reqres_data.i_ordr_sqnc:%d:",st_oe_reqres_data.i_ordr_sqnc);
+			}
+			strcpy( st_i_xchngbk.c_xchng_cd, c_xchng_cd );
+			strcpy( st_i_xchngbk.c_pipe_id, sql_fer_pipe_cd );
+			strcpy( st_i_xchngbk.c_mod_trd_dt, c_trd_dt.arr );
+			st_i_xchngbk.l_ord_seq = st_oe_reqres_data.i_ordr_sqnc;
+			st_i_xchngbk.c_oprn_typ = FOR_RCV;
+
+			i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg,
+                           &st_i_xchngbk,
+                           &st_i_xchngbk,
+                           "vw_xchngbook",
+                           "vw_xchngbook",
+                           sizeof ( st_i_xchngbk ),
+                           sizeof ( st_i_xchngbk ),
+                           0,
+                           "SFO_SEQ_TO_OMD");
+
+  		if ( i_ch_val != SUCC_BFR )
+  		{
+    		fn_errlog( c_ServiceName,"S31070", LIBMSG, c_err_msg );
+				tpfree ( ( char * )ptr_car_buf );
+    		return -1;
+ 			}
+
+			strcpy( sql_fer_ordref_ack.arr, st_i_xchngbk.c_ordr_rfrnc );
+			sql_fer_mdfctn_cntr = st_i_xchngbk.l_mdfctn_cntr;
+
+			switch( sql_fer_trans_cd )
+  		{
+				case ORDER_CONFIRMATION_OUT :  
+				case ORDER_MOD_CONFIRM_OUT :
+				case ORDER_CANCEL_CONFIRM_OUT :
+				case BATCH_ORDER_CXL_OUT :
+					fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_reqres_data.li_last_modified );
+					break;
+
+				case ORDER_ERROR_OUT :
+					fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_reqres_data.li_entry_date_time );
+					sql_fer_err_cd = st_oe_reqres_data.st_hdr.si_error_code;
+					sql_fer_reason_cd = st_oe_reqres_data.si_reason_code;
+					break;
+
+				case ORDER_MOD_REJ_OUT :
+				case ORDER_CXL_REJ_OUT :
+					fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_reqres_data.li_last_modified );
+					sql_fer_err_cd = st_oe_reqres_data.st_hdr.si_error_code;
+					sql_fer_reason_cd = st_oe_reqres_data.si_reason_code;
+					break;
+
+				case FREEZE_TO_CONTROL :
+					fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_reqres_data.st_hdr.li_log_time );
+					sql_fer_reason_cd = st_oe_reqres_data.si_reason_code;
+
+				/* default not required as nested switch */
+			}
+
+			sprintf( sql_fer_ack, "%16.0lf", st_oe_reqres_data.d_order_number );
+			memcpy ( &ll_log_tm_stmp, st_oe_reqres_data.st_hdr.c_time_stamp_1, 8 );
+   		sql_fer_jiffy = (double) ll_log_tm_stmp;
+
+			break;													
+
+		/*** Ver 1.2 Starts ***/
+		case ORDER_CONFIRMATION_OUT_TR :
+    case ORDER_MOD_CONFIRM_OUT_TR :
+    case ORDER_CXL_CONFIRMATION_TR :
+
+      MEMSET( st_oe_rspn_data_tr );
+      memcpy( &st_oe_rspn_data_tr, ptr_car_buf, sizeof( struct st_oe_rspn_tr ) );
+
+      fn_userlog( c_ServiceName, "Sequence Number Is :%d:", st_oe_rspn_data_tr.li_ordr_sqnc );
+
+      if(sql_fer_trans_cd  == ORDER_CXL_CONFIRMATION_TR && ( st_oe_rspn_data_tr.si_error_code == 16388 || st_oe_rspn_data_tr.li_ordr_sqnc == 0))   /** ver 1.1 **/
+      {
+
+        sprintf(c_ord_ack_nse,"%16.0lf",st_oe_rspn_data_tr.d_order_number);
+
+        if( DEBUG_MSG_LVL_0)
+        {
+          fn_userlog(c_ServiceName,"c_ord_ack_nse:%s:",c_ord_ack_nse);
+          fn_userlog(c_ServiceName,"st_oe_rspn_data_tr.l_token_no:%ld:",st_oe_rspn_data_tr.l_token_no)
+;
+        }
+					EXEC SQL
+          SELECT FXB_ORDR_SQNC
+          into :st_oe_rspn_data_tr.li_ordr_sqnc
+          FROM FXB_FO_XCHNG_BOOK, FOD_FO_ORDR_DTLS,FTQ_FO_TRD_QT
+          WHERE FOD_ACK_NMBR =  :c_ord_ack_nse
+          AND   FTQ_TOKEN_NO = :st_oe_rspn_data_tr.l_token_no
+          AND   FOD_ORDR_RFRNC  = FXB_ORDR_RFRNC
+          AND   FOD_MDFCTN_CNTR = FXB_MDFCTN_CNTR
+          AND   FOD_XCHNG_CD = FTQ_XCHNG_CD
+          AND   FXB_XCHNG_CD = FTQ_XCHNG_CD
+          AND   decode(FOD_PRDCT_TYP,'I','O','U','F','P','F',FOD_PRDCT_TYP)= FTQ_PRDCT_TYP
+          AND   FOD_UNDRLYNG = FTQ_UNDRLYNG
+          AND   FOD_EXPRY_DT = FTQ_EXPRY_DT
+          AND   FOD_EXER_TYP = FTQ_EXER_TYP
+          AND   FOD_OPT_TYP = FTQ_OPT_TYP
+          AND   FOD_STRK_PRC = FTQ_STRK_PRC;
+
+        if( SQLCODE != 0 )
+        {
+          fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg );
+          tpfree( ( char * )ptr_car_buf );
+          return -1;
+        }
+
+      }
+
+      if( DEBUG_MSG_LVL_0)
+      {
+        fn_userlog(c_ServiceName,"st_oe_rspn_data_tr.li_ordr_sqnc:%ld:",st_oe_rspn_data_tr.li_ordr_sqnc);
+      }
+      strcpy( st_i_xchngbk.c_xchng_cd, c_xchng_cd );
+      strcpy( st_i_xchngbk.c_pipe_id, sql_fer_pipe_cd );
+      strcpy( st_i_xchngbk.c_mod_trd_dt, c_trd_dt.arr );
+      st_i_xchngbk.l_ord_seq = st_oe_rspn_data_tr.li_ordr_sqnc;
+      st_i_xchngbk.c_oprn_typ = FOR_RCV;
+
+			i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg,
+                           &st_i_xchngbk,
+                           &st_i_xchngbk,
+                           "vw_xchngbook",
+                           "vw_xchngbook",
+                           sizeof ( st_i_xchngbk ),
+                           sizeof ( st_i_xchngbk ),
+                           0,
+                           "SFO_SEQ_TO_OMD");
+
+      if ( i_ch_val != SUCC_BFR )
+      {
+        fn_errlog( c_ServiceName,"S31080", LIBMSG, c_err_msg );
+        tpfree ( ( char * )ptr_car_buf );
+        return -1;
+      }
+
+      strcpy( sql_fer_ordref_ack.arr, st_i_xchngbk.c_ordr_rfrnc );
+      sql_fer_mdfctn_cntr = st_i_xchngbk.l_mdfctn_cntr;
+
+      switch( sql_fer_trans_cd )
+      {
+        case ORDER_CONFIRMATION_OUT_TR :
+        case ORDER_MOD_CONFIRM_OUT_TR :
+        case ORDER_CXL_CONFIRMATION_TR :
+/***        case BATCH_ORDER_CXL_OUT :	Check and delete this cases as they come in non trim ***/
+          fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_rspn_data_tr.li_last_modified );
+					sql_fer_err_cd = st_oe_rspn_data_tr.si_error_code;
+          sql_fer_reason_cd = st_oe_rspn_data_tr.si_reason_code;
+          break;
+
+/***				case ORDER_ERROR_OUT :	*** Check and delete these cases as they come in non trim ***
+          fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_reqres_data.li_entry_date_time );
+          sql_fer_err_cd = st_oe_reqres_data.st_hdr.si_error_code;
+          sql_fer_reason_cd = st_oe_reqres_data.si_reason_code;
+          break;
+
+        case ORDER_MOD_REJ_OUT :
+        case ORDER_CXL_REJ_OUT :
+          fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_reqres_data.li_last_modified );
+          sql_fer_err_cd = st_oe_reqres_data.st_hdr.si_error_code;
+          sql_fer_reason_cd = st_oe_reqres_data.si_reason_code;
+          break;
+
+        case FREEZE_TO_CONTROL :
+          fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_oe_reqres_data.st_hdr.li_log_time );
+          sql_fer_reason_cd = st_oe_reqres_data.si_reason_code;	***/
+
+        /* default not required as nested switch */
+      }
+
+      sprintf( sql_fer_ack, "%16.0lf", st_oe_rspn_data_tr.d_order_number );
+      memcpy ( &ll_log_tm_stmp, st_oe_rspn_data_tr.c_time_stamp_1, 8 );
+      sql_fer_jiffy = (double) ll_log_tm_stmp;
+
+      break;
+		/*** Ver 1.2 Ends ***/
+
+		/* Spread order response */
+		case SP_ORDER_CONFIRMATION :
+    case SP_ORDER_ERROR :
+    case TWOL_ORDER_CONFIRMATION :
+    case TWOL_ORDER_ERROR :
+    case THRL_ORDER_CONFIRMATION :
+    case THRL_ORDER_ERROR :
+
+			MEMSET( st_spd_reqres_data );
+			memcpy( &st_spd_reqres_data, ptr_car_buf, sizeof( struct st_spd_oe_reqres ) );
+
+			if( sql_fer_trans_cd == SP_ORDER_ERROR || sql_fer_trans_cd == TWOL_ORDER_ERROR 
+																									|| sql_fer_trans_cd == THRL_ORDER_ERROR )
+			{
+				sql_fer_err_cd = st_spd_reqres_data.st_hdr.si_error_code;
+				sql_fer_reason_cd = st_spd_reqres_data.si_reason_code;
+			}
+			
+		  fn_nsetoors_char ( st_spd_ordbk.c_sprd_ord_rfrnc[0],
+						             LEN_ORDR_RFRNC,
+			      						 st_spd_reqres_data.c_oe_remarks,
+	                     	 LEN_REMARKS );
+
+			fn_cpy_ddr(st_spd_ordbk.c_rout_crt);
+  		st_spd_ordbk.c_rqst_typ[0] = SPDREF_TO_ORDREF;
+
+  		i_ch_val = fn_call_svc ( c_ServiceName,
+      	                     c_err_msg,
+        	                   &st_spd_ordbk,
+          	                 &st_spd_ordbk,
+            	               "vw_spdordbk",
+              	             "vw_spdordbk",
+                	           sizeof ( st_spd_ordbk ),
+                  	         sizeof ( st_spd_ordbk ),
+                    	       0,
+                      	     "SFO_QRY_SPDBK" );
+  		if ( i_ch_val != SUCC_BFR )
+  		{
+    		fn_errlog(c_ServiceName,"S31085", LIBMSG, c_err_msg);
+				tpfree ( ( char * )ptr_car_buf );
+    		return -1;
+  		}
+
+			strcpy( sql_fer_ordref_ack.arr, st_spd_ordbk.c_sprd_ord_rfrnc[0] );
+			strcpy( sql_fer_spd_ordref1, st_spd_ordbk.c_ordr_rfrnc[0] );
+			strcpy( sql_fer_spd_ordref2, st_spd_ordbk.c_ordr_rfrnc[1] );
+			if( sql_fer_trans_cd == THRL_ORDER_CONFIRMATION || sql_fer_trans_cd == THRL_ORDER_ERROR )
+			{
+				strcpy( sql_fer_spd_ordref3, st_spd_ordbk.c_ordr_rfrnc[2] );
+			}
+
+			fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_spd_reqres_data.li_entry_date_time );
+			sprintf( sql_fer_ack, "%16.0lf", st_spd_reqres_data.d_order_number );
+			memcpy( &ll_log_tm_stmp, st_spd_reqres_data.st_hdr.c_time_stamp_1, 8 );
+			sql_fer_jiffy = (double) ll_log_tm_stmp ;
+	
+			break;													
+
+    case SP_ORDER_CXL_CONFIRM_OUT :
+    case TWOL_ORDER_CXL_CONFIRMATION :
+    case THRL_ORDER_CXL_CONFIRMATION :
+
+			MEMSET( st_spd_reqres_data );
+			memcpy( &st_spd_reqres_data, ptr_car_buf, sizeof( struct st_spd_oe_reqres ) );
+
+			sprintf(st_spd_ordbk.c_xchng_ack[0],"%16.0lf", st_spd_reqres_data.d_order_number );
+  		strcpy ( st_spd_ordbk.c_pipe_id[0], sql_fer_pipe_cd );
+  		fn_cpy_ddr(st_spd_ordbk.c_rout_crt);
+  		st_spd_ordbk.c_rqst_typ[0] = ACK_TO_ORD;
+
+  		i_ch_val = fn_call_svc ( c_ServiceName,
+      	                     c_err_msg,
+        	                   &st_spd_ordbk,
+          	                 &st_spd_ordbk,
+            	               "vw_spdordbk",
+              	             "vw_spdordbk",
+                	           sizeof ( st_spd_ordbk ),
+                  	         sizeof ( st_spd_ordbk ),
+                    	       0,
+                      	     "SFO_QRY_SPDBK" );
+ 	 		if ( i_ch_val != SUCC_BFR )
+  		{
+    		fn_errlog(c_ServiceName,"S31090", LIBMSG, c_err_msg);
+				tpfree ( ( char * )ptr_car_buf );
+    		return -1;
+  		}
+
+			strcpy( sql_fer_spd_ordref1, st_spd_ordbk.c_ordr_rfrnc[0] );
+			strcpy( sql_fer_spd_ordref2, st_spd_ordbk.c_ordr_rfrnc[1] );
+			if( sql_fer_trans_cd == THRL_ORDER_CXL_CONFIRMATION )
+			{
+				strcpy( sql_fer_spd_ordref3, st_spd_ordbk.c_ordr_rfrnc[2] );
+			}
+			
+			fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_spd_reqres_data.li_entry_date_time );
+			sprintf( sql_fer_ordref_ack.arr, "%16.0lf", st_spd_reqres_data.d_order_number );
+			sprintf( sql_fer_ack, "%16.0lf", st_spd_reqres_data.d_order_number );
+			memcpy( &ll_log_tm_stmp, st_spd_reqres_data.st_hdr.c_time_stamp_1, 8 );
+			sql_fer_jiffy = (double) ll_log_tm_stmp ;
+	
+			break;													
+
+		case ON_STOP_NOTIFICATION :
+			MEMSET( st_trd_conf );
+			memcpy( &st_trd_conf, ptr_car_buf, sizeof (struct st_trade_confirm ) );
+
+			sprintf( sql_fer_ordref_ack.arr, "%16.0lf", st_trd_conf.d_response_order_number );
+			sprintf( sql_fer_ack, "%16.0lf", st_trd_conf.d_response_order_number );
+			fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_trd_conf.li_activity_time );
+			memcpy( &ll_log_tm_stmp, st_trd_conf.st_hdr.c_time_stamp_1, 8 );
+			sql_fer_jiffy = (double) ll_log_tm_stmp ;
+
+			break;													
+
+		case TRADE_CONFIRMATION :
+			MEMSET( st_trd_conf );
+			memcpy( &st_trd_conf, ptr_car_buf, sizeof (struct st_trade_confirm ));
+
+			sprintf( sql_fer_ordref_ack.arr, "%16.0lf",st_trd_conf.d_response_order_number );
+			sprintf( sql_fer_ack, "%16.0lf",st_trd_conf.d_response_order_number );
+			fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_trd_conf.li_activity_time );
+			sql_fer_trd_no = st_trd_conf.li_fill_number;
+  		sql_fer_trd_qty = st_trd_conf.li_fill_quantity;
+  		sql_fer_trd_rt = st_trd_conf.li_fill_price;
+			memcpy( &ll_log_tm_stmp, st_trd_conf.st_hdr.c_time_stamp_1, 8 );
+			sql_fer_jiffy = (double) ll_log_tm_stmp ;
+
+			break;
+
+		/*** Ver 1.2 Starts ***/
+		case TRADE_CONFIRMATION_TR :
+			MEMSET( st_trd_conf_tr );
+      memcpy( &st_trd_conf_tr, ptr_car_buf, sizeof (struct st_trade_confirm_tr ));
+
+      sprintf( sql_fer_ordref_ack.arr, "%16.0lf",st_trd_conf_tr.d_response_order_number );
+      sprintf( sql_fer_ack, "%16.0lf",st_trd_conf_tr.d_response_order_number );
+      fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_trd_conf_tr.li_activity_time );
+      sql_fer_trd_no = st_trd_conf_tr.li_fill_number;
+      sql_fer_trd_qty = st_trd_conf_tr.li_fill_quantity;
+      sql_fer_trd_rt = st_trd_conf_tr.li_fill_price;
+      memcpy( &ll_log_tm_stmp, st_trd_conf_tr.c_timestamp1, 8 );
+      sql_fer_jiffy = (double) ll_log_tm_stmp ;
+
+			break;
+		/*** Ver 1.2 Ends ***/
+
+		case EX_PL_ENTRY_OUT :
+    case EX_PL_MOD_OUT :
+    case EX_PL_CXL_OUT :
+			MEMSET( st_expl_reqres_data );
+			memcpy( &st_expl_reqres_data, ptr_car_buf, sizeof (struct st_ex_pl_reqres ));
+
+  		fn_nsetoors_char ( sql_fer_ordref_ack.arr,
+     			               LEN_ORDR_RFRNC,
+          		   	       st_expl_reqres_data.st_ex_pl_data.c_remarks,
+              		       LEN_REMARKS_1 );
+			sprintf( sql_fer_ack, "%16.0lf", st_expl_reqres_data.st_ex_pl_data.d_expl_number);
+			memcpy( &ll_log_tm_stmp, st_trd_conf.st_hdr.c_time_stamp_1, 8 );
+			sql_fer_jiffy = (double) ll_log_tm_stmp ;
+			/* No ack time */
+			
+			break;
+
+		case EX_PL_CXL_CONFIRMATION :
+    case EX_PL_MOD_CONFIRMATION :
+    case EX_PL_CONFIRMATION :
+    case EX_PL_ENTRY_IN :
+			MEMSET( st_expl_reqres_data );
+			memcpy( &st_expl_reqres_data,ptr_car_buf,sizeof (struct st_ex_pl_reqres ));
+
+			sql_fer_err_cd = st_expl_reqres_data.st_hdr.si_error_code;
+
+			if( sql_fer_err_cd != 0 )
+			{
+				sql_fer_reason_cd = st_expl_reqres_data.si_reason_code;
+			}
+
+			sprintf( sql_fer_ordref_ack.arr, "%16.0lf", st_expl_reqres_data.st_ex_pl_data.d_expl_number );
+			sprintf( sql_fer_ack, "%16.0lf", st_expl_reqres_data.st_ex_pl_data.d_expl_number );
+			fn_long_to_timearr( sql_fer_acktrd_tm.arr, st_expl_reqres_data.st_hdr.li_log_time );
+			memcpy( &ll_log_tm_stmp, st_trd_conf.st_hdr.c_time_stamp_1, 8 );
+			sql_fer_jiffy = (double) ll_log_tm_stmp ;
+
+			break;
+
+		default:
+			fn_userlog( c_ServiceName, "In OTHERS" );
+			break;
+	}
+
+	switch( sql_fer_trans_cd )
+  {
+		/* switch for remarks */
+
+		case ORDER_CONFIRMATION_OUT :
+																strcpy( sql_fer_remarks.arr, "ordcon - ORDER_CONFIRMATION_OUT" ); 
+																break;
+    case ORDER_MOD_CONFIRM_OUT :
+																strcpy( sql_fer_remarks.arr, "ordcon - ORDER_MOD_CONFIRM_OUT" ); 
+																break;
+    case ORDER_CANCEL_CONFIRM_OUT :
+																strcpy( sql_fer_remarks.arr, "ordcon - ORDER_CANCEL_CONFIRM_OUT" ); 
+																break;
+
+		/*** Ver 1.2 Starts ***/
+		case ORDER_CONFIRMATION_OUT_TR :
+                                strcpy( sql_fer_remarks.arr, "ordcon - ORDER_CONFIRMATION_OUTI_TR" );
+                                break;
+    case ORDER_MOD_CONFIRM_OUT_TR :
+                                strcpy( sql_fer_remarks.arr, "ordcon - ORDER_MOD_CONFIRM_OUT_TR" );
+                                break;
+    case ORDER_CXL_CONFIRMATION_TR :
+                                strcpy( sql_fer_remarks.arr, "ordcon - ORDER_CXL_CONFIRMATION_TR" );
+                                break;
+		/*** Ver 1.2 Starts ***/
+
+    case ORDER_ERROR_OUT :
+																strcpy( sql_fer_remarks.arr, "ordcon - ORDER_ERROR_OUT" ); 
+																break;
+    case ORDER_MOD_REJ_OUT :
+																strcpy( sql_fer_remarks.arr, "ordcon - ORDER_MOD_REJ_OUT" ); 
+																break;
+    case ORDER_CXL_REJ_OUT :
+																strcpy( sql_fer_remarks.arr, "ordcon - ORDER_CXL_REJ_OUT" ); 
+																break;
+    case FREEZE_TO_CONTROL :
+																strcpy( sql_fer_remarks.arr, "ordcon - FREEZE_TO_CONTROL" ); 
+																break;
+    case BATCH_ORDER_CXL_OUT :
+																strcpy( sql_fer_remarks.arr, "ordcon - BATCH_ORDER_CXL_OUT" ); 
+																break;
+
+    case SP_ORDER_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "spdcon - SP_ORDER_CONFIRMATION" ); 
+																break;
+    case SP_ORDER_ERROR :
+																strcpy( sql_fer_remarks.arr, "spdcon - SP_ORDER_ERROR" ); 
+																break;
+    case TWOL_ORDER_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "spdcon - TWOL_ORDER_CONFIRMATION" ); 
+																break;
+    case TWOL_ORDER_ERROR :
+																strcpy( sql_fer_remarks.arr, "spdcon - TWOL_ORDER_ERROR" ); 
+																break;
+    case THRL_ORDER_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "spdcon - THRL_ORDER_CONFIRMATION" ); 
+																break;
+    case THRL_ORDER_ERROR :
+																strcpy( sql_fer_remarks.arr, "spdcon - THRL_ORDER_ERROR" ); 
+																break;
+
+    case SP_ORDER_CXL_CONFIRM_OUT :
+																strcpy( sql_fer_remarks.arr, "spdcan - SP_ORDER_CXL_CONFIRM_OUT" ); 
+																break;
+    case TWOL_ORDER_CXL_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "spdcan - TWOL_ORDER_CXL_CONFIRMATION" ); 
+																break;
+    case THRL_ORDER_CXL_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "spdcan - THRL_ORDER_CXL_CONFIRMATION" ); 
+																break;
+
+    case ON_STOP_NOTIFICATION :
+																strcpy( sql_fer_remarks.arr, "slptrg - ON_STOP_NOTIFICATION" ); 
+																break;
+
+    case TRADE_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "trdcon - TRADE_CONFIRMATION" ); 
+																break;
+		/*** Ver 1.2 Starts ***/
+		case TRADE_CONFIRMATION_TR :
+                                strcpy( sql_fer_remarks.arr, "trdcon - TRADE_CONFIRMATION_TR" );
+                                break;
+		/*** Ver 1.2 Ends ***/
+
+    case EX_PL_ENTRY_OUT :
+																strcpy( sql_fer_remarks.arr, "exrres - EX_PL_ENTRY_OUT" ); 
+																break;
+    case EX_PL_MOD_OUT :
+																strcpy( sql_fer_remarks.arr, "exrres - EX_PL_MOD_OUT" ); 
+																break;
+    case EX_PL_CXL_OUT :
+																strcpy( sql_fer_remarks.arr, "exrres - EX_PL_CXL_OUT" ); 
+																break;
+
+    case EX_PL_CXL_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "exrcon - EX_PL_CXL_CONFIRMATION" ); 
+																break;
+    case EX_PL_MOD_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "exrcon - EX_PL_MOD_CONFIRMATION" ); 
+																break;
+    case EX_PL_CONFIRMATION :
+																strcpy( sql_fer_remarks.arr, "exrcon - EX_PL_CONFIRMATION" ); 
+																break;
+    case EX_PL_ENTRY_IN :
+																strcpy( sql_fer_remarks.arr, "exrcon - EX_PL_ENTRY_IN" ); 
+																break;
+
+		default :
+																strcpy( sql_fer_remarks.arr, "OTHERS - " ); 
+																break;
+	}
+
+	SETLEN( sql_fer_ordref_ack );
+	SETLEN( sql_fer_acktrd_tm );
+	SETLEN( sql_fer_remarks );
+
+	if( DEBUG_MSG_LVL_3 )  {
+	fn_userlog( c_ServiceName, "sql_fer_pipe_cd     :%s:", sql_fer_pipe_cd );
+	fn_userlog( c_ServiceName, "sql_fer_trans_cd    :%d:", sql_fer_trans_cd );
+	fn_userlog( c_ServiceName, "sql_fer_ordref_ack  :%s:", sql_fer_ordref_ack.arr );
+	fn_userlog( c_ServiceName, "sql_fer_spd_ordref1 :%s:", sql_fer_spd_ordref1 );
+	fn_userlog( c_ServiceName, "sql_fer_spd_ordref2 :%s:", sql_fer_spd_ordref2 );
+	fn_userlog( c_ServiceName, "sql_fer_spd_ordref3 :%s:", sql_fer_spd_ordref3 );
+	fn_userlog( c_ServiceName, "sql_fer_ack         :%s:", sql_fer_ack );
+	fn_userlog( c_ServiceName, "sql_fer_acktrd_tm   :%s:", sql_fer_acktrd_tm.arr );
+	fn_userlog( c_ServiceName, "sql_fer_trd_qty     :%ld:", sql_fer_trd_qty );
+	fn_userlog( c_ServiceName, "sql_fer_trd_rt      :%ld:", sql_fer_trd_rt );
+	fn_userlog( c_ServiceName, "sql_fer_trd_no      :%ld:", sql_fer_trd_no );
+	fn_userlog( c_ServiceName, "sql_fer_jiffy       :%lf:", sql_fer_jiffy );
+	fn_userlog( c_ServiceName, "sql_fer_err_cd      :%d:", sql_fer_err_cd );
+	fn_userlog( c_ServiceName, "sql_fer_reason_cd   :%d:", sql_fer_reason_cd );
+	fn_userlog( c_ServiceName, "sql_fer_time        :%s:", sql_fer_time.arr );
+	fn_userlog( c_ServiceName, "sql_fer_remarks     :%s:", sql_fer_remarks.arr );
+	}
+	
+	tpfree ( ( char * )ptr_car_buf );
+	return 0;
+}
+
+void fn_re_enqueue( FBFR32 *ptr_fml_tempbuf,
+										char c_err_qn[],
+										char c_qspacename[] )
+{
+	TPQCTL st_enqctl;
+
+  /* set control parameter to enqueue */
+  st_enqctl.flags = TPNOFLAGS;
+
+  /* enqueueing a message into errq in transaction */
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if( i_trnsctn == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31095", LIBMSG, c_err_msg );
+    tpfree ( (char *) ptr_fml_tempbuf );
+    return;
+  }
+
+  i_ch_val = tpenqueue ( c_qspacename, c_err_qn, &st_enqctl,
+                                    (char *)ptr_fml_tempbuf, 0, 0 );
+	if( i_ch_val == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31100", TPMSG, c_err_msg );
+    tpfree ( (char *) ptr_fml_tempbuf );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+
+  if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31105", LIBMSG, c_err_msg );
+    tpfree ( (char *) ptr_fml_tempbuf );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  if (argc != 4)
+  {
+    fn_userlog( argv[0],
+                "Invalid number of arguments Usage - %s <configuration file> <Exchange code> <pipe_id>",argv[0] );
+    return -1;
+  }
+
+  fn_var = BAT_FO_ERRQRPRT;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  fn_userlog( argv[0], "Batch process %s ended", argv[0] );
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}

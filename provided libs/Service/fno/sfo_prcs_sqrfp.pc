@@ -1,0 +1,637 @@
+/******************************************************************************/
+/*  Program           : SFO_PRCS_SQRFP                                        */
+/*                                                                            */
+/*  Input             : FFO_XCHNG_CD                                          */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                      FFO_PRDCT_TYP                                         */
+/*                      FFO_UNDRLYNG                                          */
+/*                      FFO_CTGRY_INDSTK                                      */
+/*                      FFO_CNTRCT_TAG                                        */
+/*                      FFO_IMTM_RMRKS                                        */
+/*                      FFO_PIPE_ID                                           */
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       : This program calls the futplus_place service to	    	*/
+/*										  place squareoff order.																*/	
+/*                                                                            */
+/*  Log               :                                                       */
+/*                                                                            */
+/******************************************************************************/
+/*  13-Mar-2008     Ver 1.0        Vidyayini Krish   Initial Release					*/
+/*  13-Jun-2008     Ver 1.1        Shailesh|Sandeep  Revamp										*/
+/*  20-Jun-2008     Ver 1.2        Sandeep           IBM Changes						  */
+/*  12-Jun-2009     Ver 1.3        Vidyayini Krish   CRCO31530 Avoid Freeze   */
+/*  28-Jan-2013     Ver 1.4        Swati A.B	Consolidated Order							*/ 
+/*																						Validation changes							*/
+/*  11-Dec-2013     Ver 1.5        Swati A.B	Consolidated Order Bug Fix      */ 
+/*																            & OptionPLUS Changes  	      	*/ 
+/*  15-Jun-2015     Ver 1.6        Navina D.	Bug Fix                         */ 
+/*  13-Aug-2015     Ver 1.8        Ritesh D.  Contract Master and Trade Quote */
+/*                                            Table Merger Changes            */
+/*  15-Nov-2016     Ver 1.9        Navina D.  Max order qty CR-ISEC04-84771   */
+/*  23-Aug-2022     Ver 2.0        Naveena R. CR-ISEC14-175042_ Pending order */ 
+/*                                            value check for Span Customers  */
+/*  07-Mar-2023     Ver 2.1        Samip M		Changes for Client level lock		*/
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+/*Add header files here */
+#include <fml_def.h>
+/* COMMENTED IN VER TOL : TUX on LINUX (Ravindra) * #include <fo_view_def.h> */
+#include <fn_log.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_tuxlib.h>
+#include <fo.h>
+#include <fn_pos.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_session.h>
+#include <fn_read_debug_lvl.h>			/** Ver 1.2 **/
+EXEC SQL INCLUDE "table/fum_fo_undrlyng_mstr.h"; /* Ver 1.3 */
+EXEC SQL INCLUDE "table/fcm_fo_cntrct_mstr.h"; /*  Ver 1.3 */
+EXEC SQL INCLUDE "table/exg_xchng_mstr.h";      /* Added in Ver 1.4  */
+
+void SFO_PRCS_SQRFP( TPSVCINFO *rqst )
+{
+  FBFR32 *ptr_fml_Ibuf;
+
+  char c_ServiceName [ 33 ];
+  char c_err_msg [ 256 ];
+  char c_fno_dmn_nm [ 16 ];
+  char c_fno_trg_nm [ 16 ];
+  char c_fno_trg_dat [ 256 ];
+	char c_sys_msg[4];
+	char c_svc_nm [ 33 ];
+	char c_spl_flg;
+	char c_exrc_typ;
+	char c_opt_typ;
+	char c_slm_flg;
+	char c_ord_typ;
+	char c_ordr_rfrnc[ 18 + 1];
+  char c_rout_str [4];
+
+	EXEC SQL INCLUDE "table/ffp_fo_futures_pstn.h";
+  EXEC SQL INCLUDE "table/fod_fo_ordr_dtls.h";
+  EXEC SQL INCLUDE "table/usr_user_master.h";
+  EXEC SQL INCLUDE "table/clm_clnt_mstr.h";
+
+  int i_returncode;
+  int i_returnval;
+  int i_ip_len;
+  int i_op_len;
+  int i_trnsctn;
+	int i_order_in_queue_exists=0;
+	int i_max_val_flg =0;  /*** Ver 1.4 ***/
+	int i_cumopn_val_flg =0;  /*** Ver 1.4 ***/
+	
+	long int li_cnt;
+	long int li_dsclsd_qty;
+	long int li_stp_lss_tgr_prc;
+	long int li_lmt_rt;
+	long l_strike_prc;
+	long l_lot_sz				= 0 ; /*** Ver 1.4 ***/
+	long l_new_max_qty	= 0 ; /*** Ver 1.4 ***/
+	long l_new_lots			= 0 ; /*** Ver 1.4 ***/
+  long l_max_allowed_qty = 0 ; /*** Ver 1.9 ***/
+	 
+
+	double	d_lst_trdd_prc = 0.0 ; /*** Ver 1.4 ***/
+	double	d_tot_open_val = 0.0 ; /*** Ver 1.4 ***/
+
+  char c_tag [ 256 ];
+  char c_msg [ 256 ];
+
+  EXEC SQL BEGIN DECLARE SECTION;
+    struct vw_pstn_actn st_pstn_actn;
+    varchar   c_trd_dt[LEN_DATE];
+  EXEC SQL END DECLARE SECTION;
+
+	memset(c_sys_msg,'\0',sizeof(c_sys_msg));
+	memset(sql_fod_xchng_cd,'\0',sizeof(sql_fod_xchng_cd));
+  memset(sql_ffp_clm_mtch_accnt,'\0',sizeof(sql_ffp_clm_mtch_accnt));
+  memset(sql_ffp_undrlyng,'\0',sizeof(sql_ffp_undrlyng));
+  memset(c_tag,'\0',sizeof(c_tag));
+  memset(sql_fod_pipe_id,'\0',sizeof(sql_fod_pipe_id));
+	memset(sql_fod_remarks.arr,'\0',sizeof(sql_fod_remarks.arr));
+	memset(sql_ffp_expry_dt.arr,'\0',sizeof(sql_ffp_expry_dt.arr));
+
+  ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+
+	INITDBGLVL(c_ServiceName);			/** Ver 1.2 **/
+
+  i_returncode = fn_unpack_fmltovar ( c_ServiceName,
+                                    c_err_msg,
+                                    ptr_fml_Ibuf,
+                                    12, /**Ver 1.1 changed from 13 to 12 **/
+                                    FFO_XCHNG_CD, ( char * )sql_fod_xchng_cd, NULL,
+                                    FFO_EBA_MTCH_ACT_NO, ( char * ) sql_ffp_clm_mtch_accnt, NULL,
+																		FFO_PRDCT_TYP, ( char * )&sql_fod_prdct_typ, NULL,
+																		FFO_UNDRLYNG, ( char * )sql_ffp_undrlyng, NULL,
+																		FFO_CTGRY_INDSTK, ( char * )&sql_ffp_indstk, NULL,
+																		FFO_CNTRCT_TAG, ( char * )&sql_ffp_cntrct_tag, NULL,
+																		FFO_IMTM_RMRKS, ( char * )sql_fod_remarks.arr, NULL,
+																		FFO_BAT_TAG, ( char * )c_tag, NULL,
+																		FFO_REC_NO, ( char * )&li_cnt, NULL,
+																		FFO_EXPRY_DT, (char * )sql_ffp_expry_dt.arr, NULL,
+																	/**Commented for Ver 1.1 	FFO_PIPE_ID, ( char * )sql_fod_pipe_id, NULL, **/
+																		FFO_OPNPSTN_FLW, ( char * )&sql_ffp_opnpstn_flw, NULL,
+																		FFO_OPNPSTN_QTY, ( char * )&sql_ffp_opnpstn_qty, NULL );
+
+  if( i_returncode != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	rtrim(sql_fod_xchng_cd);
+	rtrim(sql_ffp_clm_mtch_accnt);
+	rtrim(sql_ffp_undrlyng);
+
+	/**Commented for Ver 1.1 
+	rtrim(sql_fod_pipe_id);
+	****/
+
+	rtrim(c_tag);
+	sql_ffp_expry_dt.len = strlen((char *)sql_ffp_expry_dt.arr);
+	sql_fod_remarks.len = strlen((char *)sql_fod_remarks.arr);
+	
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_pop( sql_fod_pipe_id, TRADING_SECTION, F_CS );	
+	fn_cpy_ddr( c_rout_str );
+
+  if (DEBUG_MSG_LVL_3)      /*** Ver 1.2 ***/
+  {
+    fn_userlog( c_ServiceName, "Match Account :%s:",
+                                  sql_ffp_clm_mtch_accnt );
+    fn_userlog( c_ServiceName, "Exchange code :%s:",
+                                  sql_fod_xchng_cd );
+    fn_userlog( c_ServiceName, "Product Type  :%c:",
+                                  sql_fod_prdct_typ );
+    fn_userlog( c_ServiceName, "Underlyng     :%s:",
+                                  sql_ffp_undrlyng );
+    fn_userlog( c_ServiceName, "Category      :%c:",
+                                 sql_ffp_indstk );
+    fn_userlog( c_ServiceName, "Contract tag  :%c:",
+                                 sql_ffp_cntrct_tag );
+    fn_userlog( c_ServiceName, "IMTM Remarks  :%s:",
+                                  sql_fod_remarks.arr );
+    fn_userlog( c_ServiceName, "Pipe ID :%s:",sql_fod_pipe_id); /* Ver 1.2 */
+  }
+
+  sprintf ( c_msg, "Processing match a/c - [%s], Underlying - [%s], Tag - [%c]",
+        sql_ffp_clm_mtch_accnt,
+        sql_ffp_undrlyng,
+        sql_ffp_cntrct_tag );
+
+	if (DEBUG_MSG_LVL_3)      /*** Ver 1.2 ***/
+  {
+		fn_userlog( c_ServiceName, "C_msg string :%s",c_msg);		
+	}
+
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error I . Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/** Commented and changed for Ver 2.1 ***
+  i_returncode = fn_lock_usr( c_ServiceName,
+                              sql_ffp_clm_mtch_accnt );
+	** Ver 2.1 **/
+  i_returncode = fn_lock_fno( c_ServiceName,
+                              sql_ffp_clm_mtch_accnt );
+  if ( i_returncode == -1 )
+  {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    fn_errlog( c_ServiceName, "S31015", LIBMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error II . Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/**Ver 1.1 starts **/
+	 EXEC SQL
+       SELECT  1
+       INTO    :i_order_in_queue_exists
+       FROM    dual
+       WHERE   exists
+  (
+     SELECT  1
+     FROM    fod_fo_ordr_dtls
+     WHERE   fod_clm_mtch_accnt  = :sql_ffp_clm_mtch_accnt
+     AND     fod_xchng_cd        = :sql_fod_xchng_cd
+     AND     fod_prdct_typ       = :sql_fod_prdct_typ
+     AND     fod_indstk          = :sql_ffp_indstk
+     AND     fod_undrlyng        = :sql_ffp_undrlyng
+     AND     fod_ordr_stts       in ('R','Q','O','P') 
+    /**Commented for Ver 1.1 AND     fod_pipe_id         = :sql_fod_pipe_id ***/
+     AND     fod_expry_dt        = :sql_ffp_expry_dt
+  );
+
+  if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    strcpy ( c_msg, "System error III . Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+
+  fn_userlog ( c_ServiceName," I STATUS of QUEUE is :%d:",i_order_in_queue_exists );
+
+  if ( i_order_in_queue_exists == 1 )
+  {
+		fn_userlog ( c_ServiceName," II STATUS of QUEUE is :%d:",i_order_in_queue_exists );
+		fn_userlog ( c_ServiceName,"Some order is still pending, hence exiting match a/c - [%s], Underlying - [%s], 							 	Expiry Date- [%s]",sql_ffp_clm_mtch_accnt,sql_ffp_undrlyng,sql_ffp_expry_dt.arr);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		sprintf (c_msg,"Some order is still pending, hence exiting match a/c - [%s], Underlying - [%s], Expiry Date - [%s]",sql_ffp_clm_mtch_accnt,sql_ffp_undrlyng,sql_ffp_expry_dt.arr);
+		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )NULL, 0, 0 );
+  }
+
+	/**Ver 1.1 ends **/
+
+	memset(sql_fod_channel.arr,'\0',sizeof(sql_fod_channel.arr));
+	memset(sql_clm_alias_name.arr,'\0',sizeof(sql_clm_alias_name.arr));
+	memset(sql_fod_usr_id.arr,'\0',sizeof(sql_fod_usr_id.arr));
+  strcpy((char *)sql_fod_channel.arr,"SYS");
+  strcpy((char *)sql_clm_alias_name.arr,"*");
+  strcpy((char *)sql_fod_usr_id.arr,"system");
+	sql_fod_channel.len = strlen((char *)sql_fod_channel.arr);
+	sql_clm_alias_name.len = strlen((char *)sql_clm_alias_name.arr);
+	sql_fod_usr_id.len = strlen((char *)sql_fod_usr_id.arr);
+
+  sql_usr_sssn_id = 0;
+	strcpy(c_svc_nm,"SFO_FUT_PLC_ORD");
+	li_dsclsd_qty = 0;
+	li_stp_lss_tgr_prc = 0;
+	li_lmt_rt = 0;
+	c_spl_flg = SYSTEM_SQUAREOFF;
+	memset(sql_fod_remarks.arr,'\0',sizeof(sql_fod_remarks.arr));
+  strcpy((char *)sql_fod_remarks.arr,"EOS System placed Squareoff");
+	sql_fod_remarks.len = strlen((char *)sql_fod_remarks.arr);
+	strcpy(c_sys_msg,"EOS");
+	c_exrc_typ='E';
+	c_opt_typ='*';
+	l_strike_prc=0;
+	c_slm_flg=MARKET;
+  c_ord_typ=GOOD_TILL_TODAY;
+
+	fn_userlog ( c_ServiceName,"SYS MSG IS :%s:",c_sys_msg );
+
+
+	/* Ver 1.3 Begins */
+
+	if( DEBUG_MSG_LVL_3)
+  {
+    fn_userlog( c_ServiceName,"Exchange code is :%s:", sql_fod_xchng_cd );
+    fn_userlog( c_ServiceName,"Product type is :%c:", sql_fod_prdct_typ );
+    fn_userlog( c_ServiceName,"Underlying is :%s:", sql_ffp_undrlyng );
+  }
+	sql_fum_freeze_qty = 0;
+
+  /***  EXEC SQL
+       SELECT fum_freeze_qty
+       INTO   :sql_fum_freeze_qty
+       FROM   fum_fo_undrlyng_mstr
+       WHERE  fum_xchng_cd = :sql_fod_xchng_cd
+       AND    fum_prdct_typ = decode(:sql_fod_prdct_typ,'P','F',:sql_fod_prdct_typ)
+       AND    fum_undrlyng = :sql_ffp_undrlyng; *** Commented in Ver 1.9 ***/
+
+  /*** Ver 1.9 starts ***/
+   EXEC SQL
+       SELECT fum_freeze_qty,trunc(fum_freeze_qty/ftq_min_lot_qty) * ftq_min_lot_qty
+       INTO   :sql_fum_freeze_qty,
+              :l_max_allowed_qty
+       FROM   ftq_fo_trd_qt,fum_fo_undrlyng_mstr
+       WHERE  fum_xchng_cd  =  ftq_xchng_cd
+       AND    fum_prdct_typ =  ftq_prdct_typ
+       AND    fum_undrlyng  =  ftq_undrlyng
+       AND    ftq_xchng_cd  =  :sql_fod_xchng_cd
+       AND    ftq_prdct_typ =  decode(:sql_fod_prdct_typ,'P','F',:sql_fod_prdct_typ)
+       AND    ftq_undrlyng  =  :sql_ffp_undrlyng
+       AND    ftq_expry_dt  =  :sql_ffp_expry_dt;
+  /*** Ver 1.9 ends ***/
+
+  if ( SQLCODE != 0 )
+  {
+     fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+  }
+
+  fn_userlog( c_ServiceName,"sql_fum_freeze_qty is :%ld:", sql_fum_freeze_qty );
+  fn_userlog( c_ServiceName,"sql_ffp_opnpstn_qty is :%ld:", sql_ffp_opnpstn_qty );
+  fn_userlog( c_ServiceName,"l_max_allowed_qty is :%ld:", l_max_allowed_qty );  /*** Ver 1.9 ***/
+
+  if( sql_ffp_opnpstn_qty  > sql_fum_freeze_qty && sql_fum_freeze_qty != 0 )
+  {
+      sql_ffp_opnpstn_qty = l_max_allowed_qty;  /*** Changed from sql_fum_freeze_qty to l_max_allowed_qty in Ver 1.9 ***/
+  }
+
+	/*** Ver 1.4 Starts ***/
+
+	EXEC SQL
+		SELECT 	NVL(EXG_MKT_MAX_VAL,0),
+						NVL(EXG_MAX_CUM_OPNORD_VAL,0) 
+		INTO  	:sql_exg_mkt_max_val,
+						:sql_exg_max_cum_opnord_val
+		FROM  EXG_XCHNG_MSTR
+		WHERE EXG_XCHNG_CD = :sql_fod_xchng_cd ;
+
+	if ( SQLCODE != 0 )
+	{
+		strcpy ( c_msg, "Error while selecting Max Limit Val..Contact system support" );
+		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+		fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return;
+	}
+
+
+	EXEC SQL
+		SELECT NVL( FTQ_LST_TRD_PRC, 0 ),
+           FTQ_MIN_LOT_QTY                      /*** Added in Ver 1.8 ***/
+		INTO    :d_lst_trdd_prc,
+            :l_lot_sz                           /*** Added in Ver 1.8 ***/
+		FROM    FTQ_FO_TRD_QT
+		WHERE   FTQ_XCHNG_CD  =  :sql_fod_xchng_cd
+		AND     FTQ_PRDCT_TYP =  decode(:sql_fod_prdct_typ,'P','F',:sql_fod_prdct_typ)
+		AND     FTQ_UNDRLYNG  =  :sql_ffp_undrlyng
+		AND     FTQ_EXPRY_DT  =  to_date ( :sql_ffp_expry_dt ,'dd-Mon-yyyy' )
+		AND     FTQ_EXER_TYP  =  :c_exrc_typ
+		AND     FTQ_OPT_TYP   =  :c_opt_typ
+		AND     FTQ_STRK_PRC  =  :l_strike_prc ;
+
+	if ( SQLCODE != 0 )
+	{
+	/*** strcpy ( c_msg, "Error while selecting last traded price. Contact system support" ); *** Commented in Ver 1.8 ***/
+    strcpy ( c_msg, "Error while selecting last traded price and Lot size. Contact system support" ); /*** Added in Ver 1.8 ***/
+		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+		fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return;
+	}
+
+  /*** Commented in Ver 1.8  *** Lot Size Fetch is added in above ftq Fetch ***
+
+	EXEC SQL
+		SELECT  FCM_LOT_SZ
+		INTO    :l_lot_sz
+		FROM    FCM_FO_CNTRCT_MSTR
+		WHERE		FCM_XCHNG_CD  = :sql_fod_xchng_cd    
+		AND     FCM_UNDRLYNG  = :sql_ffp_undrlyng
+		AND     FCM_PRDCT_TYP =  decode(:sql_fod_prdct_typ,'P','F',:sql_fod_prdct_typ)	*** Ver 1.6 ***
+		AND     FCM_EXPRY_DT  =  to_date ( :sql_ffp_expry_dt ,'dd-Mon-yyyy' )						*** Ver 1.6 ***
+		AND     FCM_EXER_TYP  =  :c_exrc_typ																						*** Ver 1.6 *** 
+		AND     FCM_OPT_TYP   =  :c_opt_typ																							*** Ver 1.6 *** 
+		AND     FCM_STRK_PRC  =  :l_strike_prc;																					*** Ver 1.6 *** 
+		*** AND     ROWNUM < 2;	Commented in Ver 1.6 ***																				
+
+	if ( SQLCODE != 0 )
+	{
+		strcpy ( c_msg, "Error while selecting Lot size. Contact system support" ); 
+		sprintf ( c_msg, "Error while selecting Lot size for %c-%s-%s-%ld-%c%c. Contact system support",sql_fod_prdct_typ,sql_ffp_undrlyng,sql_ffp_expry_dt.arr,l_strike_prc,c_opt_typ,c_exrc_typ );	*** Ver 1.6 ***
+		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+		fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg  );
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return;
+	}
+
+  *** Ver 1.8 comment Ends ***/
+
+	EXEC SQL
+        /*** SELECT  NVL(SUM(FOD_LMT_RT*(FOD_ORDR_TOT_QTY - NVL(FOD_EXEC_QTY,0) - NVL(FOD_CNCL_QTY,0))),0) Commented In Ver 1.5 ***/
+				 SELECT  NVL(SUM(DECODE(FOD_PRDCT_TYP,'O',(FOD_LMT_RT+FOD_STRK_PRC),'I',(FOD_LMT_RT+FOD_STRK_PRC),FOD_LMT_RT)*(FOD_ORDR_TOT_QTY - NVL(FOD_EXEC_QTY,0) - NVL(FOD_CNCL_QTY,0))),0)   /*** Ver 1.5 ***/ 
+         INTO    :d_tot_open_val
+         FROM    FOD_FO_ORDR_DTLS , EXG_XCHNG_MSTR
+         WHERE   FOD_TRD_DT = EXG_NXT_TRD_DT
+         AND     FOD_XCHNG_CD = EXG_XCHNG_CD
+         AND     EXG_XCHNG_CD = :sql_fod_xchng_cd
+         AND     FOD_ORDR_STTS IN ('R','O','Q','P')
+         AND     FOD_CLM_MTCH_ACCNT = :sql_ffp_clm_mtch_accnt ;
+
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    strcpy ( c_msg, "Error while selecting Lot size. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    fn_errlog( c_ServiceName, "S31045", SQLMSG, c_err_msg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+
+
+
+	sql_ffp_opnpstn_val = (sql_ffp_opnpstn_qty * d_lst_trdd_prc ) ;  /*** In paise ***/
+	sql_exg_mkt_max_val = ( sql_exg_mkt_max_val*100 ) ; /*** Converting Market val into Paise ***/
+	sql_exg_max_cum_opnord_val = ( sql_exg_max_cum_opnord_val *100 ) ; /*** Converting Market val into Paise ***/
+
+	if( DEBUG_MSG_LVL_3)
+	{
+		fn_userlog( c_ServiceName,"--- sql_ffp_opnpstn_val Is :%lf:", sql_ffp_opnpstn_val );
+		fn_userlog( c_ServiceName,"--- sql_exg_mkt_max_val Is :%lf:", sql_exg_mkt_max_val);
+		fn_userlog( c_ServiceName,"--- d_lst_trdd_prc Is :%lf:", d_lst_trdd_prc);
+		fn_userlog( c_ServiceName,"--- l_lot_sz Is :%ld:", l_lot_sz);
+		fn_userlog( c_ServiceName,"--- d_tot_open_val Is :%lf:", d_tot_open_val);
+		fn_userlog( c_ServiceName,"--- sql_exg_max_cum_opnord_val Is :%lf:", sql_exg_max_cum_opnord_val);
+	}
+
+	/*** Commented in Ver 2.0 ***	
+	i_cumopn_val_flg = 0;
+
+	EXEC SQL
+    SELECT  1 
+    INTO    :i_cumopn_val_flg
+    FROM    DUAL
+	  *** WHERE   :sql_ffp_opnpstn_val > :sql_exg_max_cum_opnord_val; Commented In Ver 1.5 *** 
+    WHERE   ( :sql_ffp_opnpstn_val + :d_tot_open_val ) > :sql_exg_max_cum_opnord_val; *** Ver 1.5 ***
+
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    strcpy ( c_msg, "Error while selecting Lot size. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+
+	if ( i_cumopn_val_flg == 1 )
+  {
+    fn_userlog ( c_ServiceName,"Order Value exceeding max Cumulative open order value " );
+    fn_userlog ( c_ServiceName,"Skipping Match accnt :%s: as Order Value exceeding max Cumulative open order value ",sql_ffp_clm_mtch_accnt);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    sprintf (c_msg,"Order Value exceeding max Cumulative open order value for  match a/c - [%s]",sql_ffp_clm_mtch_accnt);
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )NULL, 0, 0 );
+  }	
+	***/
+
+	i_max_val_flg = 0;
+
+	EXEC SQL
+    SELECT  1 
+    INTO    :i_max_val_flg
+    FROM    DUAL
+    WHERE   :sql_ffp_opnpstn_val > :sql_exg_mkt_max_val ;
+
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    strcpy ( c_msg, "Error while selecting Lot size. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+
+	/****		Below code does following thing																 ****/
+	/****		If the open position value exceeds the max order val allowed   ****/
+	/****		Then the open position qty , which should not cross the        ****/
+	/****		maximum permissable value , is arrived as follows					     ****/
+	/****		Maximum qty allowed = maximum order value / current LTP 			 ****/
+	/****		Then check if this Maximum qty is in multiples of lot size . 	 ****/
+	/****		If the max qty is not in multiples of lot , then the decimal 	 ****/
+	/****		part of the quotient is taken as the new max qty .					 	 ****/
+	/****		Finally to ensure that the max limit is not reached 				 	 ****/
+	/****		with this new arrived open qty , one lot is reduced. 				 	 ****/
+
+
+	if ( i_max_val_flg == 1 )
+	{
+		l_new_max_qty =  sql_exg_mkt_max_val  / d_lst_trdd_prc ;  
+
+		/*** Checking if Max qty is in multiples of Lot size ***/
+
+		if (  (l_new_max_qty % l_lot_sz) == 0 )
+		{
+			if ( l_new_max_qty > l_lot_sz )
+			{
+				l_new_max_qty = l_new_max_qty - l_lot_sz ; /** to ensure that the max limit is not reached , one lot is reduced  **/
+			}
+
+			if( DEBUG_MSG_LVL_3)
+			{
+				fn_userlog( c_ServiceName," Inside case qty  in multiples of lot size");
+				fn_userlog( c_ServiceName," l_new_max_qty Is :%ld:",l_new_max_qty);
+			}
+		}
+		else
+		{
+			l_new_lots 		= l_new_max_qty / l_lot_sz ;
+			l_new_max_qty = l_new_lots * l_lot_sz ;
+			if ( l_new_max_qty > l_lot_sz )
+      {
+				l_new_max_qty = l_new_max_qty - l_lot_sz ; /** to ensure that the max limit is not reached , one lot is reduced  **/
+			}
+			
+			if( DEBUG_MSG_LVL_3)
+			{
+				fn_userlog( c_ServiceName," Inside case qty NOT in multiples of lot size");
+				fn_userlog( c_ServiceName," l_new_max_qty Is :%ld:",l_new_max_qty);
+				fn_userlog( c_ServiceName," l_new_lots Is :%ld:",l_new_lots);
+			}
+
+		}
+							
+		sql_ffp_opnpstn_qty = l_new_max_qty ;
+	}
+	/*** Ver 1.4 Ends ***/
+
+
+
+	/* Ver 1.3 Ends  */
+		
+
+	i_returncode = fn_call_svc_fml ( c_ServiceName,
+                                         c_err_msg,
+                                         "SFO_ORD_ROUT",
+                                         0,
+                                         23,
+                                         2,
+              													 FFO_SVC_NAME, (char *)c_svc_nm,
+              													 FFO_USR_ID, (char *)sql_fod_usr_id.arr,
+              													 FFO_SSSN_ID, (char *)&sql_usr_sssn_id,
+              													 FFO_XCHNG_CD, (char *)sql_fod_xchng_cd,
+              													 FFO_EBA_MTCH_ACT_NO,(char *)sql_ffp_clm_mtch_accnt,
+              													 FFO_PRDCT_TYP, (char *)&sql_fod_prdct_typ,
+              													 FFO_UNDRLYNG, (char *)sql_ffp_undrlyng,
+              													 FFO_EXPRY_DT, (char *)sql_ffp_expry_dt.arr,
+              													 FFO_EXER_TYP, (char *)&c_exrc_typ,
+              													 FFO_OPT_TYP , (char *)&c_opt_typ,
+              													 FFO_STRK_PRC, (char *)&l_strike_prc,
+              													 FFO_CTGRY_INDSTK , (char *)&sql_ffp_indstk,
+              													 FFO_ORDR_FLW, (char *)&sql_ffp_opnpstn_flw,
+              													 FFO_LMT_MKT_SL_FLG ,(char *)&c_slm_flg,
+              													 FFO_ORD_TYP ,(char *)&c_ord_typ,
+              													 FFO_DSCLSD_QTY , &li_dsclsd_qty,
+              													 FFO_STP_LSS_TGR , &li_stp_lss_tgr_prc,
+              													 FFO_ORD_TOT_QTY, (char *)&sql_ffp_opnpstn_qty,
+              													 FFO_LMT_RT, &li_lmt_rt,
+              													 FFO_SPL_FLG ,(char *)&c_spl_flg,
+              													 FFO_CHANNEL, (char *)sql_fod_channel.arr, 
+              													 FFO_ALIAS, (char *)sql_clm_alias_name.arr,
+																				 FFO_SYS_MSG, (char *)c_sys_msg,
+              													 FFO_ORDR_RFRNC, (char *)sql_fod_ordr_rfrnc, NULL,
+              													 FFO_PIPE_ID, (char *)sql_fod_pipe_id, NULL);
+
+
+  if ( i_returncode != SUCC_BFR )
+  {
+      strcpy ( c_msg, "System error IV . Contact system support" );
+			fn_userlog(c_ServiceName,"ERROR in call to ORD_ROUT");		/** Ver 1.2 **/
+      fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+      fn_errlog( c_ServiceName, "S31060", LIBMSG, c_err_msg  );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+	else
+  {
+    sprintf(c_msg, "SENT SQUAREOFF ORDER WITH REF [%s]",sql_fod_ordr_rfrnc);
+		fn_userlog(c_ServiceName,"SENT SQUAREOFF ORDER WITH REF [%s], FOR MTCH [%s]",sql_fod_ordr_rfrnc,sql_ffp_clm_mtch_accnt);		/** Ver 1.2 **/
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    strcpy ( c_msg, "System error V . Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    fn_errlog( c_ServiceName, "S31065", LIBMSG, c_err_msg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }					
+
+	/* To post the Trigger in Tux3 Domain Call the service SFO_FOS_TRG */
+    strcpy ( c_fno_dmn_nm, "FNO" );
+    strcpy ( c_fno_trg_nm, "TRG_LOOK_TAB" );
+    strcpy ( c_fno_trg_dat, "TRG_LOOK_TAB" );
+
+    i_returncode = fn_call_svc_fml ( c_ServiceName,
+                                    c_err_msg,
+                                    "SFO_FOS_TRG",
+                                    0,
+                                    4,
+                                    0,
+                                    FFO_DMN_NM, (char *)c_fno_dmn_nm,
+                                    FFO_TRG_NM, (char *)c_fno_trg_nm,
+                                    FFO_ABT_TRG_DATA, (char *)c_fno_trg_dat,
+                                    FFO_ABT_FILTER, (char *)sql_fod_pipe_id);
+
+    if ( i_returncode != SUCC_BFR )
+    {
+      fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg  );
+    }
+
+  tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )NULL, 0, 0 );
+
+}	

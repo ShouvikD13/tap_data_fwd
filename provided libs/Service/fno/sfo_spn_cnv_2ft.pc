@@ -1,0 +1,4050 @@
+/********************************************************************************/
+/*  Program           : SFO_SPN_CNV_2FT                                         */
+/*                                                                              */
+/*  Input             : vw_pstn_actn                                            */
+/*                                                                              */
+/*  Output            : vw_err_msg                                              */
+/*                                                                              */
+/*  Description       : This service converts the futures plus positions to future */
+/********************************************************************************/
+/*  Log   1.0   11-Feb-2013                                                     */
+/*  Log   1.1   18-Jun-2013                                                     */
+/*  Log   1.2   12-Sep-2013                                                     */
+/*  Log   1.3   28-jan-2014                                                     */
+/*  Log   1.4   17-Apr-2014                                                     */
+/*  Log   1.5   28-Jul-2014                                                     */
+/*  Log   1.6   29-Jun-2015                                                     */
+/*  Log   1.8   08-Dec-2015                                                     */
+/*  Log   1.9   02-Feb-2016                                                     */
+/*  Log   2.0   15-Sep-2020                                                     */
+/*  Log   2.1   22-Feb-2021                                                     */
+/*  Log   2.2   14-Jul-2022                                                     */
+/*  Log   2.3   20_Jan-2023                                                     */
+/********************************************************************************/
+/*  1.0    -    New Release                                                     */
+/*  1.1    -    SPAN bug fix for reading string				Mahesh Shinde							*/
+/*  1.2    -    CR-ISEC14-41247  Correct order flow on converted positions page */
+/*							Mahesh Shinde																										*/
+/*  1.3    -    Bug fig (for PNL on cover trade)		  Mahesh Shinde							*/
+/*  1.4    -    Enabling FP for NRI clients  (Navina D. )						            */
+/*  1.5    -    Changes for AUTO MTM ( Vishnu N)																*/ 
+/*  1.6    -    Contract master & Trade Quote merger Changes (Ritesh Deolekar )	*/
+/*  1.7    -    Trigger price Changes  (Sachin Birje    )                       */
+/*	1.8 	 -		Channel added in conversion log table (Navina D.)								*/
+/*	1.9 	 -		Migration of RI to NRI 																					*/
+/*	2.0 	 -	  Trigger Price Changes ( Suchita D. )														*/
+/*	2.1 	 -	  Minor changes Future Plus To Future ( Suchita Dabir )           */
+/*  2.2    -    SPAN_BOD_MRGN_CR-ISEC14-172812(Sachin Birje)                    */ 
+/*  2.3    -    Margin Reporting Regulatory Changes (Nikhil Soni)    */
+/********************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_pos.h>
+#include <fo_fml_def.h>
+#include <eba_to_ors.h>
+/* COMMENTED IN VER TOL : TUX on LINUX (Ravindra) * #include <fo_view_def.h> */
+#include <fn_span_lib.h>
+#include <fn_log.h>
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_val_ord.h>
+#include <fn_session.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <math.h>
+
+int fn_call_actn_create_fut( char *c_ServiceName,
+   		                       struct st_pstn_actn *ptr_st_pstn_actn_fut,
+      		                   struct vw_err_msg  *ptr_st_err_msg );
+
+int fn_upd_mrgn_fpl( char *c_ServiceName,
+		                 struct vw_pstn_actn *ptr_st_pstn_actn,
+    		             struct vw_undfut_pos *ptr_st_undfut_pos_crrnt,
+        		         struct vw_undfut_pos *ptr_st_undfut_pos,
+            		     struct vw_err_msg *ptr_st_err_msg);
+
+int fn_apply_cnt_actn_fpl( char *c_ServiceName,
+                           struct vw_pstn_actn *ptr_st_pstn_actn,
+                           struct vw_cntfut_pos *ptr_st_cntfut_pos,
+                           struct vw_err_msg *ptr_st_err_msg);
+
+void SFO_SPN_CNV_2FT( TPSVCINFO *rqst )
+{
+
+	char c_ServiceName[33];
+  char c_err_msg[256];
+	char c_mtm_flag = '\0';
+  char sql_cln_mtch_accnt[11];
+  char sql_xchng_cd[4];
+  char sql_prd_typ;
+  char sql_cntrct_tag;
+  char c_fut_create;
+  char c_prdct_type;
+  char c_trn_flw;
+  char c_cntrct_tag;
+  char c_openpstn_flow;
+  char sql_undrlyng[7];
+
+	char c_narration_id[4] = "\0";			/*** Ver 1.4 ***/
+	char c_reason_cd [ 2000 ] = "\0";		/*** Ver 1.4 ***/
+
+	varchar c_exp_dt[LEN_DATE];
+  varchar c_trade_dt[12];
+
+  int i_returncode	= 0;
+  int i_trnsctn			= 0;
+
+	long int l_close_qty  = 0;
+	double d_exec_rt 			= 0.0;
+	double d_pl_amt 			= 0.0;
+	double d_cntrct_pl    = 0.0;
+  double d_undrlyng_pl  = 0.0;
+  double d_ltp          = 0.0;
+  double d_diff_UTM			= 0.0;
+  double d_diff_UOM			= 0.0;
+  double d_diff_UAM			= 0.0;
+  double d_num_of_lots	= 0.0;
+  double d_balance_amt	= 0.0;
+  double d_diff_add_mrgn= 0.0;
+
+  struct vw_pstn_actn 	*ptr_st_pstn_actn;
+  struct vw_err_msg 		*ptr_st_err_msg;
+  struct vw_undfut_pos  st_undfut_pos_crrnt;
+  struct vw_undfut_pos  st_undfut_pos_to_be;
+	struct vw_cntfut_pos  st_cntpos_old;
+  struct vw_cntfut_pos  st_cntpos_crrnt;
+  struct vw_cntfut_pos  st_cntpos_md_rc;
+  struct st_pstn_actn   st_pstn_actn_fut;
+
+	sql_cursor sys_cursor;
+	
+	MEMSET(ptr_st_pstn_actn);
+	MEMSET(ptr_st_err_msg);
+	MEMSET(st_undfut_pos_crrnt);
+	MEMSET(st_undfut_pos_to_be);
+	MEMSET(st_cntpos_old);
+	MEMSET(st_cntpos_crrnt);
+	MEMSET(st_cntpos_md_rc);
+	MEMSET(st_pstn_actn_fut);
+
+	ptr_st_pstn_actn = ( struct vw_pstn_actn *)rqst->data;
+
+  strcpy( c_ServiceName, rqst->name );
+
+  INITDBGLVL(c_ServiceName);
+
+  ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32", "vw_err_msg", sizeof ( struct vw_err_msg ) );
+
+  if ( ptr_st_err_msg ==  NULL )
+  {
+    fn_errlog ( c_ServiceName, "S31005", TPMSG, c_err_msg );
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+  }
+
+  EXEC SQL INCLUDE "table/iai_info_account_info.h"; /* Ver 1.9  **/
+  memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) );
+
+  rtrim(ptr_st_pstn_actn->c_cln_mtch_accnt);
+  rtrim(ptr_st_pstn_actn->c_undrlyng);
+  rtrim(ptr_st_pstn_actn->c_expry_dt);
+  rtrim(ptr_st_pstn_actn->c_ref_rmrks);
+
+	memset ( &st_pstn_actn_fut, '\0', sizeof(struct st_pstn_actn ) ) ;
+  memcpy ( &st_pstn_actn_fut, ptr_st_pstn_actn, sizeof( struct st_pstn_actn ) );
+
+	strcpy( sql_cln_mtch_accnt,ptr_st_pstn_actn->c_cln_mtch_accnt);
+  strcpy( sql_xchng_cd,ptr_st_pstn_actn->c_xchng_cd);
+  strcpy( sql_undrlyng,ptr_st_pstn_actn->c_undrlyng);
+  sql_prd_typ 	 = ptr_st_pstn_actn->c_prd_typ;
+  sql_cntrct_tag = ptr_st_pstn_actn->c_cntrct_tag;
+
+  fn_init_ddr_val ( ptr_st_pstn_actn->c_rout_crt );
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog ( c_ServiceName,"c_user_id        :%s:",ptr_st_pstn_actn->c_user_id );
+    fn_userlog ( c_ServiceName,"l_session_id     :%ld:",ptr_st_pstn_actn->l_session_id );
+    fn_userlog ( c_ServiceName,"c_cln_mtch_accnt :%s:",ptr_st_pstn_actn->c_cln_mtch_accnt );
+    fn_userlog ( c_ServiceName,"c_xchng_cd       :%s:",ptr_st_pstn_actn->c_xchng_cd );
+    fn_userlog ( c_ServiceName,"c_prd_typ        :%c:",ptr_st_pstn_actn->c_prd_typ );
+    fn_userlog ( c_ServiceName,"c_undrlyng       :%s:",ptr_st_pstn_actn->c_undrlyng );
+    fn_userlog ( c_ServiceName,"c_expry_dt       :%s:",ptr_st_pstn_actn->c_expry_dt );
+    fn_userlog ( c_ServiceName,"c_exrc_typ       :%c:",ptr_st_pstn_actn->c_exrc_typ );
+    fn_userlog ( c_ServiceName,"l_actn_typ       :%ld:",ptr_st_pstn_actn->l_actn_typ );
+    fn_userlog ( c_ServiceName,"c_trnsctn_flw    :%c:",ptr_st_pstn_actn->c_trnsctn_flw );
+    fn_userlog ( c_ServiceName,"l_orgnl_qty      :%ld:",ptr_st_pstn_actn->l_orgnl_qty );
+    fn_userlog ( c_ServiceName,"l_orgnl_rt       :%ld:",ptr_st_pstn_actn->l_orgnl_rt );
+    fn_userlog ( c_ServiceName,"l_new_qty        :%ld:",ptr_st_pstn_actn->l_new_qty );
+    fn_userlog ( c_ServiceName,"l_new_rt         :%ld:",ptr_st_pstn_actn->l_new_rt );
+    fn_userlog ( c_ServiceName,"l_exec_qty       :%ld:",ptr_st_pstn_actn->l_exec_qty );
+    fn_userlog ( c_ServiceName,"l_exec_rt        :%ld:",ptr_st_pstn_actn->l_exec_rt );
+    fn_userlog ( c_ServiceName,"l_fresh_qty      :%ld:",ptr_st_pstn_actn->l_fresh_qty );
+    fn_userlog ( c_ServiceName,"l_cover_qty      :%ld:",ptr_st_pstn_actn->l_cover_qty );
+    fn_userlog ( c_ServiceName,"d_add_mrgn_amt   :%lf:",ptr_st_pstn_actn->d_add_mrgn_amt );
+    fn_userlog ( c_ServiceName,"l_curr_rt        :%ld:",ptr_st_pstn_actn->l_curr_rt );
+    fn_userlog ( c_ServiceName,"c_ref_rmrks      :%s:",ptr_st_pstn_actn->c_ref_rmrks );
+    fn_userlog ( c_ServiceName,"c_cntrct_tag     :%c:",ptr_st_pstn_actn->c_cntrct_tag );
+    fn_userlog ( c_ServiceName,"c_prc_flg        :%c:",ptr_st_pstn_actn->c_nkd_blkd_flg );
+    fn_userlog ( c_ServiceName,"l_actn_typ       :%ld|",ptr_st_pstn_actn->l_actn_typ );
+  }
+
+	EXEC SQL
+    SELECT  FUP_CLM_MTCH_ACCNT,
+            FUP_XCHNG_CD,
+            FUP_PRDCT_TYP,
+            FUP_INDSTK,
+            FUP_UNDRLYNG,
+            FUP_CNTRCT_TAG,
+            FUP_UIBUY_QTY,
+            FUP_UIBUY_VAL,
+            FUP_UISELL_QTY,
+            FUP_UISELL_VAL,
+            FUP_UEXBUY_QTY,
+            FUP_UEXBUY_VAL,
+            FUP_UEXSELL_QTY,
+            FUP_UEXSELL_VAL,
+            FUP_UBUY_EXCTD_QTY,
+            FUP_USELL_EXCTD_QTY,
+            FUP_UOPNPSTN_FLW,
+            FUP_UOPNPSTN_QTY,
+            FUP_UOPNPSTN_VAL,
+            FUP_UMTM_OPN_VAL,
+            FUP_ADD_MRGN_VAL,
+            FUP_UORDR_MRGN,
+            FUP_UEXCTD_MRGN,
+            FUP_USPREAD_MRGN,
+            FUP_USPREAD_PNL,
+            FUP_UTRD_MRGN,
+            NVL(FUP_MTM_FLG,'O'),
+            NVL(FUP_UMIN_TRD_MRGN,0)
+    INTO    :st_undfut_pos_crrnt.c_cln_mtch_accnt,
+            :st_undfut_pos_crrnt.c_xchng_cd,
+            :st_undfut_pos_crrnt.c_prd_typ,
+            :st_undfut_pos_crrnt.c_ctgry_indstk,
+            :st_undfut_pos_crrnt.c_undrlyng,
+            :st_undfut_pos_crrnt.c_cntrct_tag,
+            :st_undfut_pos_crrnt.l_ibuy_qty,
+            :st_undfut_pos_crrnt.d_ibuy_ord_vl,
+            :st_undfut_pos_crrnt.l_isell_qty,
+            :st_undfut_pos_crrnt.d_isell_ord_vl,
+            :st_undfut_pos_crrnt.l_exbuy_qty,
+            :st_undfut_pos_crrnt.d_exbuy_ord_vl,
+            :st_undfut_pos_crrnt.l_exsell_qty,
+            :st_undfut_pos_crrnt.d_exsell_ord_vl,
+            :st_undfut_pos_crrnt.l_buy_exctd_qty,
+            :st_undfut_pos_crrnt.l_sell_exctd_qty,
+            :st_undfut_pos_crrnt.c_opnpstn_flw,
+            :st_undfut_pos_crrnt.l_opnpstn_qty,
+            :st_undfut_pos_crrnt.d_org_opn_val,
+						:st_undfut_pos_crrnt.d_mtm_opn_val,
+            :st_undfut_pos_crrnt.d_add_mrgn_val,
+            :st_undfut_pos_crrnt.d_ordr_mrgn,
+            :st_undfut_pos_crrnt.d_exctd_mrgn,
+            :st_undfut_pos_crrnt.d_sprd_mrgn,
+            :st_undfut_pos_crrnt.d_sprd_pl,
+            :st_undfut_pos_crrnt.d_trd_mrgn,
+            :c_mtm_flag,
+            :st_undfut_pos_crrnt.d_mm_trd_mrgn
+    FROM    FUP_FUT_UNDRLYNG_PSTN
+    WHERE FUP_CLM_MTCH_ACCNT  = :ptr_st_pstn_actn->c_cln_mtch_accnt
+    AND   FUP_XCHNG_CD        = :ptr_st_pstn_actn->c_xchng_cd
+    AND   FUP_PRDCT_TYP       = :ptr_st_pstn_actn->c_prd_typ
+    AND   FUP_UNDRLYNG        = :ptr_st_pstn_actn->c_undrlyng
+    AND   FUP_CNTRCT_TAG      = :ptr_st_pstn_actn->c_cntrct_tag;
+
+  if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_errlog ( c_ServiceName, "S31010", SQLMSG, ptr_st_err_msg->c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.c_cln_mtch_accnt		:%s:",st_undfut_pos_crrnt.c_cln_mtch_accnt);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.c_xchng_cd					:%s:",st_undfut_pos_crrnt.c_xchng_cd);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.c_undrlyng					:%s:",st_undfut_pos_crrnt.c_undrlyng);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.c_prd_typ						:%c:",st_undfut_pos_crrnt.c_prd_typ);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.c_cntrct_tag				:%c:",st_undfut_pos_crrnt.c_cntrct_tag);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.c_opnpstn_flw				:%c:",st_undfut_pos_crrnt.c_opnpstn_flw);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.l_ibuy_qty					:%ld:",st_undfut_pos_crrnt.l_ibuy_qty);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_ibuy_ord_vl				:%lf:",st_undfut_pos_crrnt.d_ibuy_ord_vl);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.l_isell_qty					:%ld:",st_undfut_pos_crrnt.l_isell_qty);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_isell_ord_vl			:%lf:",st_undfut_pos_crrnt.d_isell_ord_vl);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.l_exbuy_qty					:%ld:",st_undfut_pos_crrnt.l_exbuy_qty);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_exbuy_ord_vl			:%lf:",st_undfut_pos_crrnt.d_exbuy_ord_vl);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.l_exsell_qty				:%ld:",st_undfut_pos_crrnt.l_exsell_qty);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_exsell_ord_vl			:%lf:",st_undfut_pos_crrnt.d_exsell_ord_vl);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.l_buy_exctd_qty			:%ld:",st_undfut_pos_crrnt.l_buy_exctd_qty);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.l_sell_exctd_qty		:%ld:",st_undfut_pos_crrnt.l_sell_exctd_qty);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.l_opnpstn_qty				:%ld:",st_undfut_pos_crrnt.l_opnpstn_qty);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_org_opn_val				:%lf:",st_undfut_pos_crrnt.d_org_opn_val);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_mtm_opn_val				:%lf:",st_undfut_pos_crrnt.d_mtm_opn_val);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_add_mrgn_val			:%lf:",st_undfut_pos_crrnt.d_add_mrgn_val);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_ordr_mrgn					:%lf:",st_undfut_pos_crrnt.d_ordr_mrgn);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_exctd_mrgn				:%lf:",st_undfut_pos_crrnt.d_exctd_mrgn);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_sprd_mrgn					:%lf:",st_undfut_pos_crrnt.d_sprd_mrgn);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_sprd_pl						:%lf:",st_undfut_pos_crrnt.d_sprd_pl);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_trd_mrgn					:%lf:",st_undfut_pos_crrnt.d_trd_mrgn);	
+    fn_userlog ( c_ServiceName,"st_undfut_pos_crrnt.d_mm_trd_mrgn				:%lf:",st_undfut_pos_crrnt.d_mm_trd_mrgn);	
+	}
+	/*
+  memcpy ( &st_undfut_pos_to_be,&st_undfut_pos_crrnt,sizeof(struct vw_undfut_pos ) );	
+	*/
+	strcpy( st_undfut_pos_to_be.c_cln_mtch_accnt, ptr_st_pstn_actn->c_cln_mtch_accnt );
+  strcpy( st_undfut_pos_to_be.c_xchng_cd, ptr_st_pstn_actn->c_xchng_cd );
+  strcpy( st_undfut_pos_to_be.c_undrlyng, ptr_st_pstn_actn->c_undrlyng );
+  st_undfut_pos_to_be.c_prd_typ  = ptr_st_pstn_actn->c_prd_typ;
+  st_undfut_pos_to_be.c_ctgry_indstk  = ptr_st_pstn_actn->c_ctgry_indstk;
+  st_undfut_pos_to_be.c_cntrct_tag = ptr_st_pstn_actn->c_cntrct_tag;
+  st_undfut_pos_to_be.l_ibuy_qty = 0;
+  st_undfut_pos_to_be.d_ibuy_ord_vl = 0;
+  st_undfut_pos_to_be.l_isell_qty = 0;
+  st_undfut_pos_to_be.d_isell_ord_vl = 0;
+  st_undfut_pos_to_be.l_exbuy_qty = 0;
+  st_undfut_pos_to_be.d_exbuy_ord_vl = 0;
+  st_undfut_pos_to_be.l_exsell_qty = 0;
+  st_undfut_pos_to_be.d_exsell_ord_vl = 0;
+  st_undfut_pos_to_be.l_buy_exctd_qty = 0;
+  st_undfut_pos_to_be.l_sell_exctd_qty = 0;
+  st_undfut_pos_to_be.c_opnpstn_flw = 'N';
+  st_undfut_pos_to_be.l_opnpstn_qty = 0;
+  st_undfut_pos_to_be.d_org_opn_val = 0;
+  st_undfut_pos_to_be.d_mtm_opn_val = 0;
+  st_undfut_pos_to_be.l_opn_buyqty = 0;
+  st_undfut_pos_to_be.l_opn_sellqty = 0;
+  st_undfut_pos_to_be.d_ibuy_mrgn = 0;
+  st_undfut_pos_to_be.d_isell_mrgn = 0;
+  st_undfut_pos_to_be.d_exbuy_mrgn = 0;
+  st_undfut_pos_to_be.d_exsell_mrgn = 0;
+  st_undfut_pos_to_be.d_add_mrgn_val = st_undfut_pos_crrnt.d_add_mrgn_val;
+  st_undfut_pos_to_be.d_exctd_mrgn = st_undfut_pos_crrnt.d_exctd_mrgn;
+  st_undfut_pos_to_be.d_sprd_mrgn = st_undfut_pos_crrnt.d_sprd_mrgn;
+  st_undfut_pos_to_be.d_sprd_pl = st_undfut_pos_crrnt.d_sprd_pl;
+  st_undfut_pos_to_be.d_trd_mrgn = st_undfut_pos_crrnt.d_trd_mrgn;
+  st_undfut_pos_to_be.c_oprn_typ = '*';
+  st_undfut_pos_to_be.d_mm_trd_mrgn = st_undfut_pos_crrnt.d_mm_trd_mrgn;
+
+	i_trnsctn = fn_begintran( c_ServiceName, ptr_st_err_msg->c_err_msg );
+  
+	if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31015", LIBMSG, ptr_st_err_msg->c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+
+	EXEC SQL ALLOCATE :sys_cursor;
+
+    EXEC SQL EXECUTE
+      BEGIN
+         OPEN :sys_cursor FOR
+          SELECT  FFP_CLM_MTCH_ACCNT,
+                  FFP_XCHNG_CD,
+                  FFP_PRDCT_TYP,
+                  FFP_INDSTK,
+                  FFP_UNDRLYNG,
+                  TO_CHAR (FFP_EXPRY_DT,'DD-Mon-YYYY'),
+                  FFP_EXER_TYP,
+                  FFP_CNTRCT_TAG,
+                  FFP_IBUY_QTY,
+                  FFP_IBUY_ORD_VAL,
+                  FFP_ISELL_QTY,
+                  FFP_ISELL_ORD_VAL,
+                  FFP_EXBUY_QTY,
+                  FFP_EXBUY_ORD_VAL,
+                  FFP_EXSELL_QTY,
+                  FFP_EXSELL_ORD_VAL,
+                  FFP_BUY_EXCTD_QTY,
+                  FFP_SELL_EXCTD_QTY,
+                  FFP_OPNPSTN_FLW,
+                  FFP_OPNPSTN_QTY,
+                  FFP_OPNPSTN_VAL,
+                  FFP_MTM_OPN_VAL
+          FROM    FFP_FO_FUTURES_PSTN
+          WHERE   FFP_CLM_MTCH_ACCNT = :sql_cln_mtch_accnt
+          AND     FFP_XCHNG_CD       = :sql_xchng_cd
+          AND     FFP_PRDCT_TYP      = :sql_prd_typ
+          AND     FFP_UNDRLYNG       = :sql_undrlyng
+          AND     FFP_CNTRCT_TAG     = :sql_cntrct_tag
+          ORDER BY FFP_EXPRY_DT asc;
+        END;
+      END-EXEC;
+
+  if ( SQLCODE != 0 )
+  {
+	  EXEC SQL CLOSE :sys_cursor;
+    EXEC SQL FREE :sys_cursor;
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    fn_errlog ( c_ServiceName, "S31020", SQLMSG, ptr_st_err_msg->c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog ( c_ServiceName, "Before While Loop");
+  }
+
+	while ( 1 )
+  {
+    d_cntrct_pl = 0.0;  
+  	MEMSET(c_exp_dt);
+		c_fut_create = 'N';
+
+    EXEC SQL  FETCH   :sys_cursor
+              INTO    :st_cntpos_crrnt.c_cln_mtch_accnt,
+                      :st_cntpos_crrnt.c_xchng_cd,
+                      :st_cntpos_crrnt.c_prd_typ,
+                      :st_cntpos_crrnt.c_ctgry_indstk,
+                      :st_cntpos_crrnt.c_undrlyng,
+                      :c_exp_dt,
+                      :st_cntpos_crrnt.c_exrc_typ,
+                      :st_cntpos_crrnt.c_cntrct_tag,
+                      :st_cntpos_crrnt.l_ibuy_qty,
+                      :st_cntpos_crrnt.d_ibuy_ord_vl,
+                      :st_cntpos_crrnt.l_isell_qty,
+                      :st_cntpos_crrnt.d_isell_ord_vl,
+                      :st_cntpos_crrnt.l_exbuy_qty,
+                      :st_cntpos_crrnt.d_exbuy_ord_vl,
+                      :st_cntpos_crrnt.l_exsell_qty,
+                      :st_cntpos_crrnt.d_exsell_ord_vl,
+                      :st_cntpos_crrnt.l_buy_exctd_qty,
+                      :st_cntpos_crrnt.l_sell_exctd_qty,
+                      :st_cntpos_crrnt.c_opnpstn_flw,
+                      :st_cntpos_crrnt.l_opnpstn_qty,
+                      :st_cntpos_crrnt.d_org_opn_val,
+                      :st_cntpos_crrnt.d_mtm_opn_val;
+
+   if ( SQLCODE != 0 )
+   {
+     if ( SQLCODE == NO_DATA_FOUND )
+     {
+       break;
+     }
+		 EXEC SQL CLOSE :sys_cursor;
+   	 EXEC SQL FREE :sys_cursor;
+		 fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   	 fn_errlog ( c_ServiceName, "S31025", SQLMSG, ptr_st_err_msg->c_err_msg );
+   	 tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+   }
+
+   SETNULL( c_exp_dt );
+   strcpy (st_cntpos_crrnt.c_expry_dt, (char *) c_exp_dt.arr );
+   rtrim(st_cntpos_crrnt.c_xchng_cd);
+   rtrim(st_cntpos_crrnt.c_undrlyng);
+   rtrim(st_cntpos_crrnt.c_expry_dt);
+
+   if( DEBUG_MSG_LVL_3 )
+   {
+    fn_userlog ( c_ServiceName, "Contract fetched -CLOSE_FUTPLUS : " );
+    fn_userlog ( c_ServiceName, "FPLS Expiry date       :%s:", c_exp_dt.arr );
+    fn_userlog ( c_ServiceName, "FPLS Exercise Type     :%c:", st_cntpos_crrnt.c_exrc_typ );
+    fn_userlog ( c_ServiceName, "FPLS IWTL buy qty      :%ld:", st_cntpos_crrnt.l_ibuy_qty );
+    fn_userlog ( c_ServiceName, "FPLS IWTL buy val      :%lf:", st_cntpos_crrnt.d_ibuy_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS IWTL sell qty     :%ld:", st_cntpos_crrnt.l_isell_qty );
+    fn_userlog ( c_ServiceName, "FPLS IWTL sell val     :%lf:", st_cntpos_crrnt.d_isell_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS EXCH buy qty      :%ld:", st_cntpos_crrnt.l_exbuy_qty );
+    fn_userlog ( c_ServiceName, "FPLS EXCH buy val      :%lf:", st_cntpos_crrnt.d_exbuy_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS EXCH sell qty     :%ld:", st_cntpos_crrnt.l_exsell_qty );
+    fn_userlog ( c_ServiceName, "FPLS EXCH sell val      :%lf:", st_cntpos_crrnt.d_exsell_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS Buy exctd qty     :%ld:", st_cntpos_crrnt.l_buy_exctd_qty );
+    fn_userlog ( c_ServiceName, "FPLS Sell exctd qty    :%ld:", st_cntpos_crrnt.l_sell_exctd_qty );
+    fn_userlog ( c_ServiceName, "FPLS Open qty          :%ld:", st_cntpos_crrnt.l_opnpstn_qty );
+    fn_userlog ( c_ServiceName, "FPLS Original open val :%lf:", st_cntpos_crrnt.d_org_opn_val );
+    fn_userlog ( c_ServiceName, "FPLS MTMed open val    :%lf:", st_cntpos_crrnt.d_mtm_opn_val );
+    fn_userlog ( c_ServiceName, "FPLS IMTMed open val   :%lf:", st_cntpos_crrnt.d_imtm_opn_val );
+    fn_userlog ( c_ServiceName, "The spl flag						:%c:",ptr_st_pstn_actn->c_nkd_blkd_flg);
+    fn_userlog ( c_ServiceName, "Expiry 								:%s:",st_cntpos_crrnt.c_expry_dt);
+    fn_userlog ( c_ServiceName, "pstn Expiry 						:%s:",ptr_st_pstn_actn->c_expry_dt);
+    fn_userlog ( c_ServiceName, "st_cntpos_crrnt.c_opnpstn_flw 						:%c:",st_cntpos_crrnt.c_opnpstn_flw);
+   }
+
+   memcpy ( &st_cntpos_old, &st_cntpos_crrnt, sizeof( st_cntpos_old ) );
+   memcpy ( &st_cntpos_md_rc, &st_cntpos_crrnt, sizeof( st_cntpos_md_rc ) );
+
+   if( st_cntpos_crrnt.c_opnpstn_flw != 'N' )
+   {
+     if(  strcmp(ptr_st_pstn_actn->c_expry_dt,st_cntpos_crrnt.c_expry_dt ) == 0 || ( ( strcmp(ptr_st_pstn_actn->c_user_id,"system") == 0 ) && (ptr_st_pstn_actn->l_session_id == 0 ))) 
+     {
+			if(DEBUG_MSG_LVL_3)
+      {
+      	fn_userlog ( c_ServiceName, "Match Found");
+      }
+
+			c_fut_create = 'Y';
+				
+			if ( ptr_st_pstn_actn->l_actn_typ == CONV_TO_FUT )
+      ptr_st_pstn_actn->l_actn_typ = CLOSE_FUTPLUS;
+
+      if( ptr_st_pstn_actn->l_actn_typ == CONV_TO_PART_FUT)
+      ptr_st_pstn_actn->l_actn_typ = CLOSE_PART_FUTPLUS;
+
+			if(st_cntpos_crrnt.c_opnpstn_flw == 'S')
+    	{
+      	ptr_st_pstn_actn->l_new_qty = -1 * ptr_st_pstn_actn->l_new_qty;
+    	}	
+		
+      i_returncode = fn_apply_cnt_actn_fpl( c_ServiceName,
+                                            ptr_st_pstn_actn,
+                                            &st_cntpos_md_rc,
+                                            ptr_st_err_msg );
+      if ( i_returncode == -1 )
+      {
+				EXEC SQL CLOSE :sys_cursor;
+    		EXEC SQL FREE :sys_cursor;
+     		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    		fn_errlog ( c_ServiceName, "S31030", LIBMSG, ptr_st_err_msg->c_err_msg );
+    		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+      }
+     } /*** END of Match Found ***/
+   }
+
+   if( DEBUG_MSG_LVL_3 )
+   {
+    fn_userlog ( c_ServiceName, " st_cntpos_crrnt.c_xchng_cd |%s|",st_cntpos_crrnt.c_xchng_cd);
+    fn_userlog ( c_ServiceName, " st_cntpos_crrnt.c_prd_typ  |%c|",st_cntpos_crrnt.c_prd_typ);
+    fn_userlog ( c_ServiceName, " st_cntpos_crrnt.c_undrlyng |%s|",st_cntpos_crrnt.c_undrlyng);
+    fn_userlog ( c_ServiceName, " c_exp_dt                   |%s|",c_exp_dt.arr);
+    fn_userlog ( c_ServiceName, " st_cntpos_crrnt.c_exrc_typ |%c|",st_cntpos_crrnt.c_exrc_typ);
+   }
+
+   EXEC SQL
+      SELECT  FTQ_LST_TRD_PRC
+      INTO    :d_ltp
+      FROM    FTQ_FO_TRD_QT
+      WHERE   FTQ_XCHNG_CD  = :st_cntpos_crrnt.c_xchng_cd
+      AND     FTQ_PRDCT_TYP = 'F'
+      AND     FTQ_UNDRLYNG  = :st_cntpos_crrnt.c_undrlyng
+      AND     FTQ_EXPRY_DT  = :c_exp_dt
+      AND     FTQ_EXER_TYP  = :st_cntpos_crrnt.c_exrc_typ;
+
+   if(SQLCODE  !=  0 )
+   {
+		 EXEC SQL CLOSE :sys_cursor;
+     EXEC SQL FREE :sys_cursor;
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   	 fn_errlog ( c_ServiceName, "S31035", SQLMSG, ptr_st_err_msg->c_err_msg );
+     tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+   }
+
+   if( DEBUG_MSG_LVL_3 )
+   {
+     fn_userlog ( c_ServiceName, " d_ltp                         |%lf|",d_ltp);
+     fn_userlog ( c_ServiceName, " st_cntpos_crrnt.l_opnpstn_qty |%ld|",st_cntpos_crrnt.l_opnpstn_qty);
+     fn_userlog ( c_ServiceName, " st_cntpos_crrnt.d_org_opn_val |%lf|",st_cntpos_crrnt.d_org_opn_val);
+   }
+
+   if( st_cntpos_crrnt.l_opnpstn_qty  > 0 )
+   {
+     d_cntrct_pl = ( d_ltp * (double) st_cntpos_crrnt.l_opnpstn_qty ) - st_cntpos_crrnt.d_org_opn_val;
+   }
+   else if ( st_cntpos_crrnt.l_opnpstn_qty < 0 )
+   {
+     d_cntrct_pl = fabs(st_cntpos_crrnt.d_org_opn_val)  -  ( d_ltp * (double) abs(st_cntpos_crrnt.l_opnpstn_qty) )  ;
+   }
+
+   if( DEBUG_MSG_LVL_3 )
+   {
+    fn_userlog(c_ServiceName,"Contract Level PNL    |%lf|",d_cntrct_pl);
+    fn_userlog(c_ServiceName,"Underlying Level PNL  |%lf|",d_undrlyng_pl);
+   }
+
+   d_undrlyng_pl = d_undrlyng_pl + d_cntrct_pl;
+
+	 d_num_of_lots = ((double)(abs(st_cntpos_crrnt.l_opnpstn_qty))) / ((double)(abs(ptr_st_pstn_actn->l_new_qty))) ;
+
+   if( DEBUG_MSG_LVL_3 )
+   {
+   	fn_userlog( c_ServiceName,"d_num_of_lots |%lf|",d_num_of_lots);
+   }
+
+   fn_sum_cpos ( st_cntpos_md_rc, &st_undfut_pos_to_be );
+
+	 if ( st_cntpos_md_rc.l_opnpstn_qty > 0 )
+   {
+     st_cntpos_md_rc.c_opnpstn_flw = BUY;
+   }
+   else if ( st_cntpos_md_rc.l_opnpstn_qty < 0 )
+   {
+     st_cntpos_md_rc.c_opnpstn_flw = SELL;
+   }
+   else
+   {
+     st_cntpos_md_rc.c_opnpstn_flw = NEUTRAL;
+   }
+
+   EXEC SQL
+     UPDATE  FFP_FO_FUTURES_PSTN
+     SET     FFP_IBUY_QTY       = :st_cntpos_md_rc.l_ibuy_qty,
+             FFP_IBUY_ORD_VAL   = :st_cntpos_md_rc.d_ibuy_ord_vl,
+             FFP_ISELL_QTY      = :st_cntpos_md_rc.l_isell_qty,
+             FFP_ISELL_ORD_VAL  = :st_cntpos_md_rc.d_isell_ord_vl,
+             FFP_EXBUY_QTY      = :st_cntpos_md_rc.l_exbuy_qty,
+             FFP_EXBUY_ORD_VAL  = :st_cntpos_md_rc.d_exbuy_ord_vl,
+             FFP_EXSELL_QTY     = :st_cntpos_md_rc.l_exsell_qty,
+             FFP_EXSELL_ORD_VAL = :st_cntpos_md_rc.d_exsell_ord_vl,
+             FFP_BUY_EXCTD_QTY  = :st_cntpos_md_rc.l_buy_exctd_qty,
+             FFP_SELL_EXCTD_QTY = :st_cntpos_md_rc.l_sell_exctd_qty,
+             FFP_OPNPSTN_FLW    = :st_cntpos_md_rc.c_opnpstn_flw,
+             FFP_OPNPSTN_QTY    = :st_cntpos_md_rc.l_opnpstn_qty,
+             FFP_OPNPSTN_VAL    = :st_cntpos_md_rc.d_org_opn_val,
+             FFP_MTM_OPN_VAL    = :st_cntpos_md_rc.d_mtm_opn_val,
+						 FFP_TRG_PRC				= DECODE(:st_cntpos_md_rc.c_opnpstn_flw,'N',0,FFP_TRG_PRC), /** Ver 1.5 Starts **/
+             FFP_MIN_TRG_PRC    = DECODE(:st_cntpos_md_rc.c_opnpstn_flw,'N',0,FFP_MIN_TRG_PRC) /** Ver 1.7 Starts **/
+     WHERE   FFP_CLM_MTCH_ACCNT = :ptr_st_pstn_actn->c_cln_mtch_accnt
+     AND     FFP_XCHNG_CD       = :ptr_st_pstn_actn->c_xchng_cd
+     AND     FFP_PRDCT_TYP      = :ptr_st_pstn_actn->c_prd_typ
+     AND     FFP_UNDRLYNG       = :ptr_st_pstn_actn->c_undrlyng
+     AND     FFP_EXPRY_DT       = to_date(:st_cntpos_crrnt.c_expry_dt, 'DD-Mon-YYYY')
+     AND     FFP_EXER_TYP       = :ptr_st_pstn_actn->c_exrc_typ
+     AND     FFP_CNTRCT_TAG     = :ptr_st_pstn_actn->c_cntrct_tag;
+
+   if ( SQLCODE != 0 )
+   {
+		 EXEC SQL CLOSE :sys_cursor;
+     EXEC SQL FREE :sys_cursor;
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     fn_errlog(c_ServiceName, "S31040", SQLMSG, ptr_st_err_msg->c_err_msg );
+     tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+   }
+
+	 if( DEBUG_MSG_LVL_3 )
+   {
+    fn_userlog ( c_ServiceName, "*************  SFO_UPD_FUT_PLS - IV  *************");
+    fn_userlog ( c_ServiceName, "Calcualted underlying level position" );
+    fn_userlog ( c_ServiceName, "FPLS IWTL buy qty      :%ld:", st_undfut_pos_to_be.l_ibuy_qty );
+    fn_userlog ( c_ServiceName, "FPLS IWTL buy val      :%lf:", st_undfut_pos_to_be.d_ibuy_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS IWTL sell qty     :%ld:", st_undfut_pos_to_be.l_isell_qty );
+    fn_userlog ( c_ServiceName, "FPLS IWTL sell val     :%lf:", st_undfut_pos_to_be.d_isell_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS EXCH buy qty      :%ld:", st_undfut_pos_to_be.l_exbuy_qty );
+    fn_userlog ( c_ServiceName, "FPLS EXCH buy val      :%lf:", st_undfut_pos_to_be.d_exbuy_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS EXCH sell qty     :%ld:", st_undfut_pos_to_be.l_exsell_qty );
+    fn_userlog ( c_ServiceName, "FPLS EXCH sell val     :%lf:", st_undfut_pos_to_be.d_exsell_ord_vl );
+    fn_userlog ( c_ServiceName, "FPLS Buy exctd qty     :%ld:", st_undfut_pos_to_be.l_buy_exctd_qty );
+    fn_userlog ( c_ServiceName, "FPLS Sell exctd qty    :%ld:", st_undfut_pos_to_be.l_sell_exctd_qty );
+    fn_userlog ( c_ServiceName, "FPLS Open qty          :%ld:", st_undfut_pos_to_be.l_opnpstn_qty );
+    fn_userlog ( c_ServiceName, "FPLS Original open val :%lf:", st_undfut_pos_to_be.d_org_opn_val );
+    fn_userlog ( c_ServiceName, "FPLS MTMed open val    :%lf:", st_undfut_pos_to_be.d_mtm_opn_val );
+    fn_userlog ( c_ServiceName, "FPLS Add Margin val    :%lf:", st_undfut_pos_to_be.d_add_mrgn_val );
+    fn_userlog ( c_ServiceName, "FPLS Add Margin val    :%lf:", st_undfut_pos_crrnt.d_add_mrgn_val );
+   }
+
+
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog ( c_ServiceName, "*************  SFO_UPD_FUT_PLS - V *************");
+    fn_userlog ( c_ServiceName, "Calculating margin" );
+  }
+
+  i_returncode = fn_upd_mrgn_fpl( c_ServiceName,
+                                  ptr_st_pstn_actn,
+                                  &st_undfut_pos_crrnt,
+                                  &st_undfut_pos_to_be,
+                                  ptr_st_err_msg );
+
+  if ( i_returncode != 0 )
+  {
+		EXEC SQL CLOSE :sys_cursor;
+    EXEC SQL FREE :sys_cursor;
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    fn_errlog(c_ServiceName, "S31045", LIBMSG, ptr_st_err_msg->c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+
+	if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog ( c_ServiceName, "Current margin values" );
+    fn_userlog ( c_ServiceName, "FPLS Order level margin     :%lf:", st_undfut_pos_crrnt.d_ordr_mrgn );
+    fn_userlog ( c_ServiceName, "FPLS Executed level margin  :%lf:", st_undfut_pos_crrnt.d_exctd_mrgn );
+    fn_userlog ( c_ServiceName, "FPLS Spread level margin    :%lf:", st_undfut_pos_crrnt.d_sprd_mrgn );
+    fn_userlog ( c_ServiceName, "FPLS Spread profit and loss :%lf:", st_undfut_pos_crrnt.d_sprd_pl );
+    fn_userlog ( c_ServiceName, "FPLS Trade level margin     :%lf:", st_undfut_pos_crrnt.d_trd_mrgn );
+    fn_userlog ( c_ServiceName, "To be margin values" );
+    fn_userlog ( c_ServiceName, "FPLS Order level margin     :%lf:", st_undfut_pos_to_be.d_ordr_mrgn );
+    fn_userlog ( c_ServiceName, "FPLS Executed level margin  :%lf:", st_undfut_pos_to_be.d_exctd_mrgn );
+    fn_userlog ( c_ServiceName, "FPLS Spread level margin    :%lf:", st_undfut_pos_to_be.d_sprd_mrgn );
+    fn_userlog ( c_ServiceName, "FPLS Spread profit and loss :%lf:", st_undfut_pos_to_be.d_sprd_pl );
+    fn_userlog ( c_ServiceName, "FPLS Trade level margin     :%lf:", st_undfut_pos_to_be.d_trd_mrgn );
+    fn_userlog ( c_ServiceName, "FPLS Add Margin val    		 :%lf:", st_undfut_pos_to_be.d_add_mrgn_val ); 
+    fn_userlog ( c_ServiceName, "FPLS Add Margin val    		 :%lf:", st_undfut_pos_crrnt.d_add_mrgn_val );
+  }
+
+  sprintf(ptr_st_pstn_actn->c_ref_rmrks,"FUT-%s-%s-%c", ptr_st_pstn_actn->c_undrlyng, ptr_st_pstn_actn->c_expry_dt, ptr_st_pstn_actn->c_prd_typ);
+
+  d_diff_UOM = st_undfut_pos_crrnt.d_ordr_mrgn - st_undfut_pos_to_be.d_ordr_mrgn ;
+
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog ( c_ServiceName, "FPLS Difference in UOM :%lf:", d_diff_UOM );
+  }
+
+  if ( d_diff_UOM != 0 )
+  {
+
+   i_returncode = fn_upd_limits( c_ServiceName,
+                                  ptr_st_pstn_actn,
+                                  ptr_st_err_msg,
+                                  ORDER_MARGIN_ADJ_ON_FUT_CONV,
+                                  DEBIT_WITHOUT_LIMIT,
+                                  d_diff_UOM,
+                                  &d_balance_amt);
+   if ( i_returncode != 0 )
+   {
+		EXEC SQL CLOSE :sys_cursor;
+    EXEC SQL FREE :sys_cursor;
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		fn_userlog(c_ServiceName, "Error in fn_upd_limits order margin |%s|", ptr_st_err_msg->c_err_msg );
+
+		switch ( i_returncode )
+    {
+      case INSUFFICIENT_LIMITS :
+         fn_errlog ( c_ServiceName, "B21007", DEFMSG, ptr_st_err_msg->c_err_msg );
+         tpreturn ( TPFAIL, INSUFFICIENT_LIMITS, ( char * )ptr_st_err_msg, 0, 0 );
+        break;
+
+      default :
+         tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+         break;
+    }
+   }
+  }
+
+  fn_userlog ( c_ServiceName, "Before cover qty check : l_cover_qty :%ld:",ptr_st_pstn_actn->l_cover_qty); /** ver 2.1 **/
+	if ( ptr_st_pstn_actn->l_cover_qty > 0 )
+  {
+    d_diff_UAM = st_undfut_pos_crrnt.d_add_mrgn_val;  
+
+    if ( d_diff_UAM != 0 )
+    {
+      d_diff_add_mrgn = d_diff_UAM / d_num_of_lots;       
+    }
+
+    if( DEBUG_MSG_LVL_3 )
+    {
+      fn_userlog ( c_ServiceName, "FPLS Difference in UAMV :%lf:", d_diff_add_mrgn );
+    }
+
+    if( d_diff_add_mrgn != 0 )     
+    {
+      i_returncode = fn_upd_limits( c_ServiceName,
+                                    ptr_st_pstn_actn,
+                                    ptr_st_err_msg,
+                                    RELEASE_OF_ADD_MARGIN,
+                                    DEBIT_WITHOUT_LIMIT,
+                                    d_diff_add_mrgn,      
+                                    &d_balance_amt);
+      if ( i_returncode != 0 )
+      {
+				EXEC SQL CLOSE :sys_cursor;
+    		EXEC SQL FREE :sys_cursor;
+    		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_userlog(c_ServiceName, "Error in fn_upd_limits add margin |%s|", ptr_st_err_msg->c_err_msg );
+	
+				switch ( i_returncode )
+  	    {
+    	    case INSUFFICIENT_LIMITS :
+      	     fn_errlog ( c_ServiceName, "B21007", DEFMSG, ptr_st_err_msg->c_err_msg );
+        	   tpreturn ( TPFAIL, INSUFFICIENT_LIMITS, ( char * )ptr_st_err_msg, 0, 0 );
+          	break;
+
+ 	       default :
+  	         tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    	       break;
+      	}
+      }
+    }
+
+    if (ptr_st_pstn_actn->c_trnsctn_flw == BUY )
+    {
+			d_pl_amt =((st_cntpos_old.d_mtm_opn_val / st_cntpos_old.l_opnpstn_qty ) - ptr_st_pstn_actn->l_exec_rt) * ptr_st_pstn_actn->l_cover_qty ;
+    }
+    else
+    {
+      d_pl_amt =(ptr_st_pstn_actn->l_exec_rt - ( st_cntpos_old.d_mtm_opn_val / st_cntpos_old.l_opnpstn_qty)) * ptr_st_pstn_actn->l_cover_qty ;   	}
+
+  	if( DEBUG_MSG_LVL_3 )
+  	{
+    	fn_userlog (c_ServiceName,"FPLS Profit/Loss at contract level on execution :%lf:", d_pl_amt );
+  	}
+
+
+    if ( d_pl_amt != 0 )
+    {
+      sprintf ( ptr_st_pstn_actn->c_ref_rmrks,"FUT-%s-%s", ptr_st_pstn_actn->c_undrlyng, ptr_st_pstn_actn->c_expry_dt);
+	
+			/*****  NRI - TDS Starts under Ver 1.4 *****/
+			/**** if(strncmp(ptr_st_pstn_actn->c_cln_mtch_accnt, "751", 3) == 0)    Commented in Ver 1.9 ****/
+			/****** Added in Ver 1.9 Starts *******/
+MEMSET ( sql_iai_type ) ;
+      EXEC SQL
+      SELECT  IAI_TYPE
+      INTO    :sql_iai_type
+      FROM    IAI_INFO_ACCOUNT_INFO
+      WHERE   IAI_MATCH_ACCOUNT_NO  = :ptr_st_pstn_actn->c_cln_mtch_accnt ;
+
+      if ( SQLCODE != 0 )
+			{
+    			EXEC SQL CLOSE :sys_cursor;
+    			EXEC SQL FREE :sys_cursor;
+    			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    			fn_errlog(c_ServiceName, "S31050", LIBMSG, ptr_st_err_msg->c_err_msg );
+    			tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+			}
+			
+			 SETNULL(sql_iai_type);
+
+			/****** Added Ver 1.9 Ends ********/
+			if(strcmp(sql_iai_type.arr,"NRO_NON_PINS") == 0)   /****** Check Added in Ver 1.9 ***/	
+			{
+					strcpy(c_narration_id,TDS_NRI);
+					strcpy(c_reason_cd,"Profit Loss on Cover Leg");
+
+					i_returncode = fn_tds( c_ServiceName,
+																 ptr_st_pstn_actn,
+																	ptr_st_err_msg,
+																	c_narration_id,
+																	c_reason_cd,
+																	DEBIT_WITHOUT_LIMIT,
+																	d_pl_amt,
+																	&d_balance_amt);
+
+					if ( i_returncode != 0 )
+					{
+						EXEC SQL CLOSE :sys_cursor;
+    				EXEC SQL FREE :sys_cursor;
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			      fn_errlog(c_ServiceName, "S31055", LIBMSG, ptr_st_err_msg->c_err_msg );
+						tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+					}
+			}
+			/*****  NRI - TDS ends under Ver 1.4 *****/
+
+			i_returncode = fn_upd_limits( c_ServiceName,
+                                    ptr_st_pstn_actn,
+                                    ptr_st_err_msg,
+                                    PROFIT_LOSS_ON_COVER_LEG,
+                                    DEBIT_WITHOUT_LIMIT,
+                                    d_pl_amt,
+                                    &d_balance_amt);
+      if ( i_returncode != 0 )
+      {
+				EXEC SQL CLOSE :sys_cursor;
+    		EXEC SQL FREE :sys_cursor;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_userlog(c_ServiceName, "Error in fn_upd_limits PNL |%s|", ptr_st_err_msg->c_err_msg );
+				
+				switch ( i_returncode )
+      	{
+ 	        case INSUFFICIENT_LIMITS :
+  	         fn_errlog ( c_ServiceName, "B21007", DEFMSG, ptr_st_err_msg->c_err_msg );
+    	       tpreturn ( TPFAIL, INSUFFICIENT_LIMITS, ( char * )ptr_st_err_msg, 0, 0 );
+      	    break;
+
+  	       default :
+  	         tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    	       break;
+      	}
+      }
+    }
+  } /***** if-end of cover qty >  0 *******/
+
+	d_diff_UTM = st_undfut_pos_crrnt.d_trd_mrgn - st_undfut_pos_to_be.d_trd_mrgn;
+
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog ( c_ServiceName, "FPLS Difference in UTM :%lf:", d_diff_UTM );
+  }
+
+  if ( d_diff_UTM != 0 )
+  {
+    i_returncode = fn_upd_limits( c_ServiceName,
+                                  ptr_st_pstn_actn,
+                                  ptr_st_err_msg,
+                                  TRD_MARGIN_ADJ_ON_FUT_CONV,
+                                  DEBIT_WITHOUT_LIMIT,
+                                  d_diff_UTM,
+                                  &d_balance_amt);
+    if ( i_returncode != 0 )
+    {
+			EXEC SQL CLOSE :sys_cursor;
+    	EXEC SQL FREE :sys_cursor;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    	fn_userlog(c_ServiceName, "Error in fn_upd_limits trade margin |%s|", ptr_st_err_msg->c_err_msg );
+
+			switch ( i_returncode )
+      {
+        case INSUFFICIENT_LIMITS :
+           fn_errlog ( c_ServiceName, "B21007", DEFMSG, ptr_st_err_msg->c_err_msg );
+           tpreturn ( TPFAIL, INSUFFICIENT_LIMITS, ( char * )ptr_st_err_msg, 0, 0 );
+          break;
+
+        default :
+           tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+           break;
+      }
+    }
+  }
+
+  st_undfut_pos_to_be.d_add_mrgn_val = d_diff_UAM - d_diff_add_mrgn ;  
+
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog(c_ServiceName," The fut_creation flg is:%c:",c_fut_create );
+    fn_userlog(c_ServiceName," The Open Pstn flg is:%c:",st_cntpos_crrnt.c_opnpstn_flw);
+	}	
+
+	if( st_cntpos_crrnt.c_opnpstn_flw != 'N'  && c_fut_create =='Y' )
+  {
+    st_pstn_actn_fut.c_prd_typ = FUTURES;
+    strcpy( st_pstn_actn_fut.c_expry_dt , st_cntpos_crrnt.c_expry_dt );
+
+		if( DEBUG_MSG_LVL_3 )
+    {
+      fn_userlog(c_ServiceName,"st_pstn_actn_fut.c_cln_mtch_accnt |%s|",st_pstn_actn_fut.c_cln_mtch_accnt);
+      fn_userlog(c_ServiceName,"st_pstn_actn_fut.c_xchng_cd       |%s|",st_pstn_actn_fut.c_xchng_cd);
+      fn_userlog(c_ServiceName,"st_pstn_actn_fut.c_undrlyng       |%s|",st_pstn_actn_fut.c_undrlyng);
+      fn_userlog(c_ServiceName," st_pstn_actn_fut.c_expry_dt      |%s|",st_pstn_actn_fut.c_expry_dt);
+      fn_userlog(c_ServiceName," st_pstn_actn_fut.c_exrc_typ      |%c|",st_pstn_actn_fut.c_exrc_typ);
+      fn_userlog(c_ServiceName," st_pstn_actn_fut.c_prd_typ       |%c|",st_pstn_actn_fut.c_prd_typ);
+      fn_userlog(c_ServiceName," st_pstn_actn_fut.c_trnsctn_flw   |%c|",st_pstn_actn_fut.c_trnsctn_flw);
+      fn_userlog(c_ServiceName," ptr_st_pstn_actn->c_trnsctn_flw  |%c|",ptr_st_pstn_actn->c_trnsctn_flw);
+    }
+
+		/*** Commented In Ver 1.6 ***
+
+    EXEC SQL
+      SELECT  FCM_CNTRCT_TAG
+      INTO    :c_cntrct_tag
+      FROM    FCM_FO_CNTRCT_MSTR
+      WHERE   FCM_XCHNG_CD        = :st_pstn_actn_fut.c_xchng_cd
+      AND     FCM_PRDCT_TYP       = :st_pstn_actn_fut.c_prd_typ
+      AND     FCM_UNDRLYNG        = :st_pstn_actn_fut.c_undrlyng
+      AND     FCM_EXPRY_DT        = to_date( :st_pstn_actn_fut.c_expry_dt, 'dd-mon-yyyy' )
+      AND     FCM_EXER_TYP        = :st_pstn_actn_fut.c_exrc_typ;
+
+		*** Ver 1.6 Comment Ends ***/
+
+		/*** Ver 1.6 Starts ***/
+		
+		EXEC SQL
+      SELECT  FTQ_CNTRCT_TAG
+      INTO    :c_cntrct_tag
+      FROM    FTQ_FO_TRD_QT
+      WHERE   FTQ_XCHNG_CD        = :st_pstn_actn_fut.c_xchng_cd
+      AND     FTQ_PRDCT_TYP       = :st_pstn_actn_fut.c_prd_typ
+      AND     FTQ_UNDRLYNG        = :st_pstn_actn_fut.c_undrlyng
+      AND     FTQ_EXPRY_DT        = to_date( :st_pstn_actn_fut.c_expry_dt, 'dd-mon-yyyy' )
+      AND     FTQ_EXER_TYP        = :st_pstn_actn_fut.c_exrc_typ;	
+	
+		/*** Ver 1.6 Ends ***/
+
+
+    if ( SQLCODE != 0 )
+    {
+			EXEC SQL CLOSE :sys_cursor;
+      EXEC SQL FREE :sys_cursor;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog(c_ServiceName, "S31060", SQLMSG, ptr_st_err_msg->c_err_msg );
+      tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+    }
+
+    if(DEBUG_MSG_LVL_0)
+    {
+     fn_userlog(c_ServiceName," Trade Quote Contract Tag Is :%c:",c_cntrct_tag);
+    }
+
+    st_pstn_actn_fut.c_cntrct_tag = c_cntrct_tag;
+
+    st_pstn_actn_fut.c_trnsctn_flw = st_cntpos_crrnt.c_opnpstn_flw;
+    st_pstn_actn_fut.l_orgnl_qty = 0;
+    st_pstn_actn_fut.l_orgnl_rt = 0;
+    st_pstn_actn_fut.l_new_qty = 0;
+    st_pstn_actn_fut.l_new_rt = 0;
+			
+    if ( ptr_st_pstn_actn->l_actn_typ == CLOSE_PART_FUTPLUS)
+    {
+      if( st_pstn_actn_fut.c_trnsctn_flw == BUY )
+      {
+        st_pstn_actn_fut.l_exec_qty = ptr_st_pstn_actn->l_new_qty;
+        /* c_trn_flw = SELL; Commented in ver 1.2 ***/
+				c_trn_flw = BUY;     /*** Added in ver 1.2 **/
+      }
+      else
+      {
+        st_pstn_actn_fut.l_exec_qty = -1*( ptr_st_pstn_actn->l_new_qty );
+        /* c_trn_flw = BUY;  Commented in ver 1.2 ***/
+        c_trn_flw = SELL;			/*** Added in ver 1.2 **/
+      }
+    }
+    else
+    {
+      if( st_pstn_actn_fut.c_trnsctn_flw == BUY )
+      {
+        st_pstn_actn_fut.l_exec_qty = st_cntpos_crrnt.l_opnpstn_qty;
+        /* c_trn_flw = SELL;   Commented in ver 1.2 ***/
+        c_trn_flw = BUY;				/*** Added in ver 1.2 **/
+      }
+      else
+      {
+        st_pstn_actn_fut.l_exec_qty = -1*( st_cntpos_crrnt.l_opnpstn_qty );
+        /* c_trn_flw = BUY;	Commented in ver 1.2 ***/
+        c_trn_flw = SELL;		/*** Added in ver 1.2 **/
+      }
+    }
+
+    st_pstn_actn_fut.l_actn_typ = CREATE_FUT;
+	
+		c_prdct_type = FUTURE_PLUS;
+    l_close_qty = st_pstn_actn_fut.l_exec_qty;
+    st_pstn_actn_fut.l_exec_rt = ptr_st_pstn_actn->l_exec_rt;
+    st_pstn_actn_fut.l_fresh_qty  = 0;
+    st_pstn_actn_fut.l_cover_qty  = 0;
+    st_pstn_actn_fut.d_add_mrgn_amt  = 0;
+    st_pstn_actn_fut.l_curr_rt = 0;
+    ptr_st_pstn_actn->l_fresh_qty  = 0;
+    ptr_st_pstn_actn->l_cover_qty  = 0;
+
+    if( DEBUG_MSG_LVL_3 )
+    {
+      fn_userlog(c_ServiceName,"Inputs Passed for Future Creation");
+      fn_userlog(c_ServiceName,"Action Type  :%ld:",st_pstn_actn_fut.l_actn_typ);
+      fn_userlog(c_ServiceName,"Exchng cd    :%s:",st_pstn_actn_fut.c_xchng_cd);
+      fn_userlog(c_ServiceName,"Prdct typ    :%c:",st_pstn_actn_fut.c_prd_typ);
+      fn_userlog(c_ServiceName,"Undrlyng     :%s:",st_pstn_actn_fut.c_undrlyng);
+      fn_userlog(c_ServiceName,"Expiry Date  :%s:",st_pstn_actn_fut.c_expry_dt);
+      fn_userlog(c_ServiceName,"Exer typ     :%c:",st_pstn_actn_fut.c_exrc_typ);
+      fn_userlog(c_ServiceName,"Cntrct tag   :%c:",st_pstn_actn_fut.c_cntrct_tag);
+      fn_userlog(c_ServiceName,"Trd flw      :%c:",st_pstn_actn_fut.c_trnsctn_flw);
+      fn_userlog(c_ServiceName,"Exe Qty      :%ld:",st_pstn_actn_fut.l_exec_qty);
+      fn_userlog(c_ServiceName,"Exe Rate     :%ld:",st_pstn_actn_fut.l_exec_rt);
+      fn_userlog(c_ServiceName,"Spl Flag     :%c:",st_pstn_actn_fut.c_nkd_blkd_flg);
+      fn_userlog(c_ServiceName,"Spl Flag for 2nd leg   :%c:",ptr_st_pstn_actn->c_nkd_blkd_flg);
+    }
+
+		i_returncode  = fn_call_actn_create_fut( c_ServiceName,
+                                             &st_pstn_actn_fut,
+                                             ptr_st_err_msg );
+
+    if ( i_returncode != 0 )
+    {
+			EXEC SQL CLOSE :sys_cursor;
+    	EXEC SQL FREE :sys_cursor;
+			fn_userlog(c_ServiceName,"Error in fn_call_actn_create_fut");
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			
+			switch ( i_returncode )
+      {
+        case INSUFFICIENT_LIMITS :
+  				 fn_errlog ( c_ServiceName, "B21007", DEFMSG, ptr_st_err_msg->c_err_msg );
+           tpreturn ( TPFAIL, INSUFFICIENT_LIMITS, ( char * )ptr_st_err_msg, 0, 0 );
+          break;
+
+        default :
+           tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+           break;
+      }
+    }
+		
+		EXEC SQL
+    	INSERT INTO FFF_FO_FUT_FPLSCNV
+           	(
+              	FFF_CLM_MTCH_ACCNT,
+              	FFF_XCHNG_CD,
+              	FFF_PRDCT_TYP,
+              	FFF_INDSTK,
+              	FFF_UNDRLYNG,
+              	FFF_EXPRY_DT,
+              	FFF_EXER_TYP,
+              	FFF_OPT_TYP,
+              	FFF_STRK_PRC,
+              	FFF_ORDR_FLW,
+              	FFF_CLS_QTY,
+              	FFF_CLS_RT,
+              	FFF_CLS_TM,
+              	FFF_CNTRCT_TAG,
+              	FFF_UPLD_FLG,
+								FFF_CHANNEL			/*** Ver 1.8 ***/
+           	)
+           	VALUES
+           	(
+              	:st_pstn_actn_fut.c_cln_mtch_accnt,
+              	:st_pstn_actn_fut.c_xchng_cd,
+              	:c_prdct_type,
+              	:st_pstn_actn_fut.c_ctgry_indstk,
+              	:st_pstn_actn_fut.c_undrlyng,
+              	:st_pstn_actn_fut.c_expry_dt,
+              	:st_pstn_actn_fut.c_exrc_typ,
+              	:st_pstn_actn_fut.c_opt_typ,
+              	:st_pstn_actn_fut.l_strike_prc,
+              	:c_trn_flw,
+              	:l_close_qty,
+              	:st_pstn_actn_fut.l_exec_rt,   
+              	sysdate,
+              	:st_cntpos_crrnt.c_cntrct_tag,
+              	'N',
+								decode(:st_pstn_actn_fut.c_user_id,'system','SYS','WEB')		/*** Ver 1.8 ***/
+           	);
+	
+      if( SQLCODE != 0 )
+      {
+				EXEC SQL CLOSE :sys_cursor;
+    		EXEC SQL FREE :sys_cursor;
+      	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    		fn_errlog(c_ServiceName, "S31065", SQLMSG, ptr_st_err_msg->c_err_msg );
+    		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+      }
+
+  		if( DEBUG_MSG_LVL_3 )
+  		{
+    		fn_userlog(c_ServiceName,"Inserted record into FFF:%s:",st_pstn_actn_fut.c_cln_mtch_accnt);
+  		}
+	 } /*** END of future creation loop ***/
+	}	 /*** END of while loop ***/
+
+	EXEC SQL CLOSE :sys_cursor;
+  EXEC SQL FREE :sys_cursor;
+
+	if ( st_undfut_pos_to_be.l_opnpstn_qty > 0 )
+  {
+    st_undfut_pos_to_be.c_opnpstn_flw = BUY;
+  }
+  else if ( st_undfut_pos_to_be.l_opnpstn_qty < 0 )
+  {
+    st_undfut_pos_to_be.c_opnpstn_flw = SELL;
+  }
+  else
+  {
+    st_undfut_pos_to_be.c_opnpstn_flw = NEUTRAL;
+  }	
+	
+	EXEC SQL
+      UPDATE  FUP_FUT_UNDRLYNG_PSTN
+      SET     FUP_UIBUY_QTY       = :st_undfut_pos_to_be.l_ibuy_qty,
+              FUP_UIBUY_VAL       = :st_undfut_pos_to_be.d_ibuy_ord_vl,
+              FUP_UISELL_QTY      = :st_undfut_pos_to_be.l_isell_qty,
+              FUP_UISELL_VAL      = :st_undfut_pos_to_be.d_isell_ord_vl,
+              FUP_UEXBUY_QTY      = :st_undfut_pos_to_be.l_exbuy_qty,
+              FUP_UEXBUY_VAL      = :st_undfut_pos_to_be.d_exbuy_ord_vl,
+              FUP_UEXSELL_QTY     = :st_undfut_pos_to_be.l_exsell_qty,
+              FUP_UEXSELL_VAL     = :st_undfut_pos_to_be.d_exsell_ord_vl,
+              FUP_UBUY_EXCTD_QTY  = :st_undfut_pos_to_be.l_buy_exctd_qty,
+              FUP_USELL_EXCTD_QTY = :st_undfut_pos_to_be.l_sell_exctd_qty,
+              FUP_UOPNPSTN_FLW    = :st_undfut_pos_to_be.c_opnpstn_flw,
+              FUP_UOPNPSTN_QTY    = :st_undfut_pos_to_be.l_opnpstn_qty,
+              FUP_UOPNPSTN_VAL    = :st_undfut_pos_to_be.d_org_opn_val,
+              FUP_UMTM_OPN_VAL    = :st_undfut_pos_to_be.d_mtm_opn_val,
+              FUP_UORDR_MRGN      = :st_undfut_pos_to_be.d_ordr_mrgn,
+              FUP_UEXCTD_MRGN     = :st_undfut_pos_to_be.d_exctd_mrgn,
+              FUP_USPREAD_MRGN    = :st_undfut_pos_to_be.d_sprd_mrgn,
+              FUP_USPREAD_PNL     = :st_undfut_pos_to_be.d_sprd_pl,
+              FUP_ADD_MRGN_VAL    = :st_undfut_pos_to_be.d_add_mrgn_val,
+              FUP_UTRD_MRGN       = :st_undfut_pos_to_be.d_trd_mrgn,
+              FUP_UMIN_TRD_MRGN   = :st_undfut_pos_to_be.d_mm_trd_mrgn
+      WHERE   FUP_CLM_MTCH_ACCNT  = :ptr_st_pstn_actn->c_cln_mtch_accnt
+      AND     FUP_XCHNG_CD        = :ptr_st_pstn_actn->c_xchng_cd
+      AND     FUP_PRDCT_TYP       = :ptr_st_pstn_actn->c_prd_typ
+      AND     FUP_UNDRLYNG        = :ptr_st_pstn_actn->c_undrlyng
+      AND     FUP_CNTRCT_TAG      = :ptr_st_pstn_actn->c_cntrct_tag;
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName, "S31070", SQLMSG, ptr_st_err_msg->c_err_msg );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }	
+
+  /*** Ver 1.5 Starts ****/
+
+  i_returncode =  fn_calc_trgprc_on_chngmrgn(c_ServiceName,
+                                               ptr_st_pstn_actn,
+                                               ptr_st_err_msg);
+  if ( i_returncode != 0 )
+  {
+    fn_errlog(c_ServiceName, "S31075", LIBMSG, ptr_st_err_msg->c_err_msg );
+    fn_userlog(c_ServiceName,"Pls check, Error in calcualting Auto MTM Trigger Price");
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+
+  /*** Ver 1.5 Ends ***/
+
+	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+		fn_errlog(c_ServiceName, "S31080", LIBMSG, ptr_st_err_msg->c_err_msg );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+	}
+	
+	/*** Ver 2.3 : starts here : Function call to report margin ( Function call moved after transaction commit ) ***/
+  i_returncode = 0;
+
+  i_returncode = fn_upd_mrgn_reporting( st_undfut_pos_to_be.c_cln_mtch_accnt,
+                                        st_undfut_pos_to_be.c_xchng_cd,
+                                        c_ServiceName,
+                                        c_err_msg);
+
+  if ( i_returncode != 0 )
+  {
+    fn_errlog(c_ServiceName, "S31085", LIBMSG, ptr_st_err_msg->c_err_msg );
+    fn_userlog(c_ServiceName,"Pls check, Nikhil Error while calling function fn_upd_mrgn_reporting..");
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+  /*** Ver 2.3 : Ends here ***/
+	
+	tpfree ( ( char * ) ptr_st_err_msg );
+
+  tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_st_pstn_actn, 0, 0 );
+}
+
+int fn_apply_cnt_actn_fpl( char *c_ServiceName,
+                        	 struct vw_pstn_actn *ptr_st_pstn_actn,
+                           struct vw_cntfut_pos *ptr_st_cntfut_pos,
+                           struct vw_err_msg *ptr_st_err_msg)
+{
+  long int li_temp_qty		= 0;
+  long int li_tmp_opnqty	= 0;
+  long int li_flg_tmp_qty	= 0;
+  long int li_temp_opn_qty= 0; 
+	double	d_exec_rt				= 0.0;
+	
+	switch ( ptr_st_pstn_actn->l_actn_typ )
+  {
+		case CLOSE_FUTPLUS :
+
+          ptr_st_pstn_actn->l_cover_qty = abs(ptr_st_pstn_actn->l_new_qty);      
+
+          li_temp_qty = ptr_st_cntfut_pos->l_opnpstn_qty;
+          li_flg_tmp_qty = ptr_st_cntfut_pos->l_opnpstn_qty;
+          ptr_st_pstn_actn->l_orgnl_qty = ptr_st_cntfut_pos->l_opnpstn_qty * -1;
+          ptr_st_pstn_actn->c_trnsctn_flw = ptr_st_cntfut_pos->c_opnpstn_flw;
+
+          d_exec_rt = ptr_st_cntfut_pos->d_mtm_opn_val/ptr_st_cntfut_pos->l_opnpstn_qty; 
+          ptr_st_pstn_actn->l_exec_rt = d_exec_rt ;
+
+          fn_add_pos_in_val(  li_temp_qty * (-1),
+                              ptr_st_cntfut_pos->d_org_opn_val,
+                              li_temp_qty,
+                              &(ptr_st_cntfut_pos->l_opnpstn_qty),
+                              &(ptr_st_cntfut_pos->d_org_opn_val ) );
+
+          fn_add_pos_in_val(  li_temp_qty * (-1),
+                              ptr_st_cntfut_pos->d_mtm_opn_val,
+                              li_temp_qty,
+                              &li_temp_qty,
+                              &(ptr_st_cntfut_pos->d_mtm_opn_val ) );
+
+          if ( li_flg_tmp_qty > 0 )
+          {
+            ptr_st_cntfut_pos->l_sell_exctd_qty = (-1) * ptr_st_cntfut_pos->l_buy_exctd_qty ;
+          }
+          else if ( li_flg_tmp_qty < 0 )
+          {
+            ptr_st_cntfut_pos->l_buy_exctd_qty = (-1) * ptr_st_cntfut_pos->l_sell_exctd_qty ;
+					}
+
+          break;
+
+ 		 case CLOSE_PART_FUTPLUS :
+
+          ptr_st_pstn_actn->l_cover_qty = abs(ptr_st_pstn_actn->l_new_qty); /*** ver 2.1 ***/
+          fn_userlog(c_ServiceName,"CLOSE_PART_FUTPLUS l_cover_qty :%ld:",ptr_st_pstn_actn->l_cover_qty); /*** ver 2.1 ***/
+          li_temp_qty = ptr_st_pstn_actn->l_new_qty;
+          li_temp_opn_qty = ptr_st_cntfut_pos->l_opnpstn_qty;
+          li_flg_tmp_qty = ptr_st_pstn_actn->l_new_qty;
+          ptr_st_pstn_actn->l_orgnl_qty = ptr_st_pstn_actn->l_new_qty * -1;
+          ptr_st_pstn_actn->c_trnsctn_flw = ptr_st_cntfut_pos->c_opnpstn_flw;
+          d_exec_rt = ptr_st_cntfut_pos->d_mtm_opn_val/ptr_st_cntfut_pos->l_opnpstn_qty;     
+          ptr_st_pstn_actn->l_exec_rt = d_exec_rt ;  
+
+          fn_add_pos_in_val(  li_temp_qty * (-1),
+                              ptr_st_cntfut_pos->d_org_opn_val,
+                              ptr_st_cntfut_pos->l_opnpstn_qty,
+                              &(ptr_st_cntfut_pos->l_opnpstn_qty),
+                              &(ptr_st_cntfut_pos->d_org_opn_val ) );
+
+          fn_add_pos_in_val(  li_temp_qty * (-1),
+                              ptr_st_cntfut_pos->d_mtm_opn_val,
+                              li_temp_opn_qty,
+                              &li_temp_opn_qty,
+                              &(ptr_st_cntfut_pos->d_mtm_opn_val ) );
+
+					if ( li_flg_tmp_qty > 0 )
+          {
+            ptr_st_cntfut_pos->l_sell_exctd_qty = ptr_st_cntfut_pos->l_sell_exctd_qty + (-1) * ptr_st_pstn_actn->l_new_qty ;
+          }
+          else if ( li_flg_tmp_qty < 0 )
+          {
+            ptr_st_cntfut_pos->l_buy_exctd_qty = ptr_st_cntfut_pos->l_buy_exctd_qty + (-1) * ptr_st_pstn_actn->l_new_qty ;
+          }
+
+          break;
+
+    case CREATE_FUT:
+
+          if ( ptr_st_pstn_actn->c_trnsctn_flw == BUY )
+          {
+            if( ptr_st_cntfut_pos->l_opnpstn_qty > 0 )
+            {
+              ptr_st_pstn_actn->l_fresh_qty = ptr_st_pstn_actn->l_exec_qty;
+              ptr_st_pstn_actn->l_cover_qty = 0;
+            }
+            else
+            {
+              ptr_st_pstn_actn->l_cover_qty = fn_minl(ptr_st_pstn_actn->l_exec_qty,labs(ptr_st_cntfut_pos->l_opnpstn_qty) );
+
+              ptr_st_pstn_actn->l_fresh_qty = fn_maxl(ptr_st_pstn_actn->l_exec_qty - ptr_st_pstn_actn->l_cover_qty, 0 );
+            }
+
+            if ( ptr_st_pstn_actn->l_cover_qty > 0 )
+            {
+              li_temp_qty = ptr_st_cntfut_pos->l_opnpstn_qty;
+
+              fn_add_pos_in_val(  ptr_st_pstn_actn->l_cover_qty,
+                                  ptr_st_cntfut_pos->d_org_opn_val,
+                                  li_temp_qty,
+																	&(ptr_st_cntfut_pos->l_opnpstn_qty),
+                                  &(ptr_st_cntfut_pos->d_org_opn_val ) );
+
+              fn_add_pos_in_val(  ptr_st_pstn_actn->l_cover_qty,
+                                  ptr_st_cntfut_pos->d_mtm_opn_val,
+                                  li_temp_qty,
+                                  &li_temp_qty,
+                                  &(ptr_st_cntfut_pos->d_mtm_opn_val ) );
+
+            }
+
+            if ( ptr_st_pstn_actn->l_fresh_qty > 0 )
+            {
+              li_temp_qty = ptr_st_cntfut_pos->l_opnpstn_qty;
+
+              fn_add_fplspos  ( ptr_st_pstn_actn->l_fresh_qty,      
+                                d_exec_rt,
+                                &(ptr_st_cntfut_pos->l_opnpstn_qty),
+                                &(ptr_st_cntfut_pos->d_org_opn_val ) );
+
+              fn_add_fplspos( ptr_st_pstn_actn->l_fresh_qty,       
+                              d_exec_rt,
+                              &li_temp_qty,
+                              &(ptr_st_cntfut_pos->d_mtm_opn_val ) );
+
+            }
+
+            ptr_st_cntfut_pos->l_buy_exctd_qty = ptr_st_cntfut_pos->l_buy_exctd_qty + ptr_st_pstn_actn->l_exec_qty;
+         }
+         else
+         {
+            if ( ptr_st_cntfut_pos->l_opnpstn_qty < 0 )
+            {
+              ptr_st_pstn_actn->l_fresh_qty = ptr_st_pstn_actn->l_exec_qty;
+              ptr_st_pstn_actn->l_cover_qty = 0;
+						}
+            else
+            {
+              if( DEBUG_MSG_LVL_3 )
+              {
+                fn_userlog(c_ServiceName,"Inside CREATE FUT l_exec_qty Is    :%ld:",ptr_st_pstn_actn->l_exec_qty);
+                fn_userlog(c_ServiceName,"Inside CREATE FUT l_opnpstn_qty Is :%ld:",ptr_st_cntfut_pos->l_opnpstn_qty);
+              }
+
+              ptr_st_pstn_actn->l_cover_qty = fn_minl(ptr_st_pstn_actn->l_exec_qty, ptr_st_cntfut_pos->l_opnpstn_qty );
+              ptr_st_pstn_actn->l_fresh_qty = fn_maxl(ptr_st_pstn_actn->l_exec_qty - ptr_st_pstn_actn->l_cover_qty, 0 );
+
+            }
+
+            if ( ptr_st_pstn_actn->l_cover_qty > 0 )
+            {
+              li_temp_qty = ptr_st_cntfut_pos->l_opnpstn_qty;
+
+              fn_add_pos_in_val(  ptr_st_pstn_actn->l_cover_qty * ( -1 ),
+                                  ptr_st_cntfut_pos->d_org_opn_val,
+                                  li_temp_qty,
+                                  &(ptr_st_cntfut_pos->l_opnpstn_qty),
+                                  &(ptr_st_cntfut_pos->d_org_opn_val ) );
+
+              fn_add_pos_in_val(  ptr_st_pstn_actn->l_cover_qty * ( -1 ),
+                                  ptr_st_cntfut_pos->d_mtm_opn_val,
+                                  li_temp_qty,
+                                  &li_temp_qty,
+                                  &(ptr_st_cntfut_pos->d_mtm_opn_val ) );
+            }
+
+            if ( ptr_st_pstn_actn->l_fresh_qty > 0 )
+            {
+              li_temp_qty = ptr_st_cntfut_pos->l_opnpstn_qty;
+
+              fn_add_fplspos( ptr_st_pstn_actn->l_fresh_qty * (-1), 
+                              d_exec_rt,
+                              &(ptr_st_cntfut_pos->l_opnpstn_qty),
+                              &(ptr_st_cntfut_pos->d_org_opn_val ) );
+
+              fn_add_fplspos( ptr_st_pstn_actn->l_fresh_qty * (-1),
+                              d_exec_rt,
+                              &li_temp_qty,
+                              &(ptr_st_cntfut_pos->d_mtm_opn_val ) );
+
+            }
+
+            ptr_st_cntfut_pos->l_sell_exctd_qty = ptr_st_cntfut_pos->l_sell_exctd_qty + (ptr_st_pstn_actn->l_exec_qty *(-1)); 				 }
+         break;
+
+  } /**** END of switch case ****/
+
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog ( c_ServiceName, "*************  SFO_UPD_FUT_PLS - III *************");
+    fn_userlog ( c_ServiceName, "Contract after updation by pstn_actn: " );
+    fn_userlog ( c_ServiceName, "IWTL buy qty      :%ld:", ptr_st_cntfut_pos->l_ibuy_qty );
+    fn_userlog ( c_ServiceName, "IWTL buy val      :%lf:", ptr_st_cntfut_pos->d_ibuy_ord_vl );
+    fn_userlog ( c_ServiceName, "IWTL sell qty     :%ld:", ptr_st_cntfut_pos->l_isell_qty );
+    fn_userlog ( c_ServiceName, "IWTL sell val     :%lf:", ptr_st_cntfut_pos->d_isell_ord_vl );
+    fn_userlog ( c_ServiceName, "EXCH buy qty      :%ld:", ptr_st_cntfut_pos->l_exbuy_qty );
+    fn_userlog ( c_ServiceName, "EXCH buy val      :%lf:", ptr_st_cntfut_pos->d_exbuy_ord_vl );
+    fn_userlog ( c_ServiceName, "EXCH sell qty     :%ld:", ptr_st_cntfut_pos->l_exsell_qty );
+    fn_userlog ( c_ServiceName, "EXCH sell val      :%lf:", ptr_st_cntfut_pos->d_exsell_ord_vl );
+    fn_userlog ( c_ServiceName, "Buy exctd qty     :%ld:", ptr_st_cntfut_pos->l_buy_exctd_qty );
+    fn_userlog ( c_ServiceName, "Sell exctd qty    :%ld:", ptr_st_cntfut_pos->l_sell_exctd_qty );
+    fn_userlog ( c_ServiceName, "Open qty          :%ld:", ptr_st_cntfut_pos->l_opnpstn_qty );
+    fn_userlog ( c_ServiceName, "Original open val :%lf:", ptr_st_cntfut_pos->d_org_opn_val );
+    fn_userlog ( c_ServiceName, "MTMed open val    :%lf:", ptr_st_cntfut_pos->d_mtm_opn_val );
+  }
+
+  return SUCCESS;
+}
+
+int fn_upd_mrgn_fpl( char *c_ServiceName,
+                  	 struct vw_pstn_actn *ptr_st_pstn_actn,
+                  	 struct vw_undfut_pos *ptr_st_undfut_pos_crrnt,
+                  	 struct vw_undfut_pos *ptr_st_undfut_pos,
+                  	 struct vw_err_msg *ptr_st_err_msg)
+{
+
+  int i_returncode	= 0;
+
+  long int  li_ose_qty = 0;
+  long int  li_ibm_qty = 0;
+  long int  li_ebm_qty = 0;
+  long int  li_obe_qty = 0;
+  long int  li_ism_qty = 0;
+  long int  li_esm_qty = 0;
+  long int  li_opn_qty = 0;
+  long int  li_unmtchd_qty = 0;
+  long int  li_sum_CUOQ = 0;
+  long int  li_spd_qty  = 0;
+
+  double d_initial_mrgn = 0.0;
+  double d_spread_mrgn  = 0.0;
+  double d_min_mrgn			= 0.0;	
+  double d_min_spread_mrgn = 0.0;
+  double d_i_exp 				= 0.0;
+  double d_e_exp 				= 0.0;
+  double d_sum_CUOV			= 0.0;
+  double d_sum_CUOV_cmp	= 0.0;
+  double d_und_opn_val_imtm	= 0.0;
+
+  char c_pos_opn = '\0';
+
+  struct vw_cntfut_pos st_cntfut_pos;
+
+  EXEC SQL BEGIN DECLARE SECTION;
+    sql_cursor  sys_cursor;    
+    char  sql_cntrct_tag;
+    char  sql_cln_mtch_accnt[11];
+    char  sql_xchng_cd[4];
+    char  sql_prd_typ;
+    char  sql_undrlyng[7];
+    double d_far_mtm_opn_val;
+    long int  li_far_opnpstn_qty;
+  EXEC SQL END DECLARE SECTION;
+
+  strcpy( sql_cln_mtch_accnt,ptr_st_pstn_actn->c_cln_mtch_accnt);
+  strcpy( sql_xchng_cd,ptr_st_pstn_actn->c_xchng_cd);
+  strcpy( sql_undrlyng,ptr_st_pstn_actn->c_undrlyng);
+  sql_prd_typ = ptr_st_pstn_actn->c_prd_typ;
+  sql_cntrct_tag = ptr_st_undfut_pos->c_cntrct_tag;
+
+  i_returncode = fn_get_im_prcntg( c_ServiceName,
+                                   ptr_st_pstn_actn,
+                                   ptr_st_err_msg,
+                                   &d_initial_mrgn,
+                                   &d_spread_mrgn,
+                                   &d_min_mrgn,
+                                   &d_min_spread_mrgn,
+                                   ptr_st_undfut_pos->c_cntrct_tag );
+
+  if ( i_returncode == -1 )
+  {
+    return ( -1 );
+  }
+
+  if ( ptr_st_undfut_pos->l_ibuy_qty != 0 )
+  {
+    li_ose_qty = fn_maxl( ( ptr_st_undfut_pos->l_sell_exctd_qty * (-1)) - ptr_st_undfut_pos->l_buy_exctd_qty, 0 );
+
+    li_ibm_qty = fn_maxl( (ptr_st_undfut_pos->l_ibuy_qty - li_ose_qty), 0 );
+
+    ptr_st_undfut_pos->d_ibuy_mrgn = li_ibm_qty * (ptr_st_undfut_pos->d_ibuy_ord_vl / ptr_st_undfut_pos->l_ibuy_qty) * d_initial_mrgn / 100.0 ;
+  }
+  else
+  {
+    ptr_st_undfut_pos->d_ibuy_mrgn = 0;
+  }
+
+  if ( ptr_st_undfut_pos->l_exbuy_qty != 0 )
+  {
+    li_ose_qty = fn_maxl( (ptr_st_undfut_pos->l_sell_exctd_qty * (-1)) - ptr_st_undfut_pos->l_buy_exctd_qty, 0 );
+    li_ebm_qty = fn_maxl( (ptr_st_undfut_pos->l_exbuy_qty - li_ose_qty), 0 );
+    ptr_st_undfut_pos->d_exbuy_mrgn = li_ebm_qty * (ptr_st_undfut_pos->d_exbuy_ord_vl / ptr_st_undfut_pos->l_exbuy_qty) * d_initial_mrgn / 100.0 ;
+  }
+  else
+  {
+    ptr_st_undfut_pos->d_exbuy_mrgn = 0;
+  }
+
+  if ( ptr_st_undfut_pos->l_isell_qty != 0 )
+  {
+    li_obe_qty = fn_maxl( ptr_st_undfut_pos->l_buy_exctd_qty - (ptr_st_undfut_pos->l_sell_exctd_qty * (-1) ), 0 );
+
+    li_ism_qty = fn_maxl( ( ( ptr_st_undfut_pos->l_isell_qty * (-1)) - li_obe_qty), 0 );
+
+    ptr_st_undfut_pos->d_isell_mrgn = li_ism_qty * (ptr_st_undfut_pos->d_isell_ord_vl / ptr_st_undfut_pos->l_isell_qty) * d_initial_mrgn / 100.0 ;
+  }
+  else
+  {
+    ptr_st_undfut_pos->d_isell_mrgn = 0;
+  }
+
+  if ( ptr_st_undfut_pos->l_exsell_qty != 0 )
+  {
+    li_obe_qty = fn_maxl( ptr_st_undfut_pos->l_buy_exctd_qty - ( ptr_st_undfut_pos->l_sell_exctd_qty * (-1) ), 0 );
+
+    li_esm_qty = fn_maxl( ( ( ptr_st_undfut_pos->l_exsell_qty * (-1)) - li_obe_qty), 0 );
+
+    ptr_st_undfut_pos->d_exsell_mrgn = li_esm_qty * (ptr_st_undfut_pos->d_exsell_ord_vl / ptr_st_undfut_pos->l_exsell_qty) * d_initial_mrgn / 100.0 ;
+	}
+  else
+  {
+    ptr_st_undfut_pos->d_exsell_mrgn = 0;
+  }
+
+  d_i_exp = fn_maxd(ptr_st_undfut_pos->d_ibuy_mrgn, ptr_st_undfut_pos->d_isell_mrgn);
+
+  d_e_exp = fn_maxd(ptr_st_undfut_pos->d_exbuy_mrgn, ptr_st_undfut_pos->d_exsell_mrgn);
+
+  ptr_st_undfut_pos->d_ordr_mrgn = fn_maxd( d_i_exp, d_e_exp );
+
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog ( c_ServiceName, "Total order level margin" );
+    fn_userlog ( c_ServiceName, "IWTL buy exposure   :%lf:", ptr_st_undfut_pos->d_ibuy_mrgn );
+    fn_userlog ( c_ServiceName, "IWTL sell exposure  :%lf:", ptr_st_undfut_pos->d_isell_mrgn );
+    fn_userlog ( c_ServiceName, "IWTL total exposure :%lf:", d_i_exp );
+    fn_userlog ( c_ServiceName, "EXCH buy exposure   :%lf:", ptr_st_undfut_pos->d_exbuy_mrgn );
+    fn_userlog ( c_ServiceName, "EXCH sell exposure  :%lf:", ptr_st_undfut_pos->d_exsell_mrgn );
+    fn_userlog ( c_ServiceName, "EXCH total exposure :%lf:", d_e_exp );
+    fn_userlog ( c_ServiceName, "Final exposure      :%lf:", ptr_st_undfut_pos->d_ordr_mrgn );
+  }
+
+  li_spd_qty = fn_minl( ptr_st_undfut_pos->l_opn_buyqty, labs(ptr_st_undfut_pos->l_opn_sellqty) );
+
+	EXEC SQL
+      SELECT  FFP_MTM_OPN_VAL,
+              FFP_OPNPSTN_QTY
+      INTO    :d_far_mtm_opn_val,
+              :li_far_opnpstn_qty
+      FROM    FFP_FO_FUTURES_PSTN
+      WHERE   FFP_CLM_MTCH_ACCNT = :sql_cln_mtch_accnt
+      AND     FFP_XCHNG_CD       = :sql_xchng_cd
+      AND     FFP_PRDCT_TYP      = :sql_prd_typ
+      AND     FFP_UNDRLYNG       = :sql_undrlyng
+      AND     FFP_CNTRCT_TAG     = :sql_cntrct_tag
+      AND     FFP_EXPRY_DT       =
+              ( SELECT  MAX(FFP_EXPRY_DT)
+              FROM    FFP_FO_FUTURES_PSTN
+              WHERE   FFP_CLM_MTCH_ACCNT = :sql_cln_mtch_accnt
+              AND     FFP_XCHNG_CD       = :sql_xchng_cd
+              AND     FFP_PRDCT_TYP      = :sql_prd_typ
+              AND     FFP_UNDRLYNG       = :sql_undrlyng
+              AND     FFP_CNTRCT_TAG     = :sql_cntrct_tag
+              AND     FFP_OPNPSTN_QTY    != 0 );
+
+    if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+    {
+      fn_errlog( c_ServiceName, "S31090", SQLMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;
+    }
+
+    if ( SQLCODE == 0 )
+    {
+      ptr_st_undfut_pos->d_sprd_mrgn = li_spd_qty * ( d_far_mtm_opn_val / li_far_opnpstn_qty ) * d_spread_mrgn / 100.0;
+
+      ptr_st_undfut_pos->d_imtm_sprd_mrgn = ptr_st_undfut_pos->d_sprd_mrgn;
+
+      ptr_st_undfut_pos->d_mm_sprd_mrgn = li_spd_qty * (d_far_mtm_opn_val / li_far_opnpstn_qty ) * d_min_spread_mrgn / 100.0;
+    }
+    else
+    {
+      ptr_st_undfut_pos->d_sprd_mrgn = 0;
+      ptr_st_undfut_pos->d_imtm_sprd_mrgn = 0;
+      ptr_st_undfut_pos->d_mm_sprd_mrgn = 0;
+    }
+
+		c_pos_opn = 'Y';
+
+    EXEC SQL ALLOCATE :sys_cursor;
+
+    if( ptr_st_undfut_pos->l_opnpstn_qty > 0)
+    {
+      EXEC SQL EXECUTE
+        BEGIN
+          OPEN :sys_cursor FOR
+            SELECT  FFP_MTM_OPN_VAL,
+                    FFP_OPNPSTN_QTY,
+                    FFP_IMTM_OPN_VAL
+            FROM    FFP_FO_FUTURES_PSTN
+            WHERE   FFP_CLM_MTCH_ACCNT = :sql_cln_mtch_accnt
+            AND     FFP_XCHNG_CD       = :sql_xchng_cd
+            AND     FFP_PRDCT_TYP      = :sql_prd_typ
+            AND     FFP_UNDRLYNG       = :sql_undrlyng
+            AND     FFP_CNTRCT_TAG     = :sql_cntrct_tag
+            AND     FFP_OPNPSTN_QTY    > 0
+            ORDER BY FFP_EXPRY_DT desc;
+          END;
+        END-EXEC;
+
+    }
+    else if( ptr_st_undfut_pos->l_opnpstn_qty < 0)
+    {
+      EXEC SQL EXECUTE
+        BEGIN
+          OPEN :sys_cursor FOR
+            SELECT  FFP_MTM_OPN_VAL,
+                    FFP_OPNPSTN_QTY,
+                    FFP_IMTM_OPN_VAL
+            FROM    FFP_FO_FUTURES_PSTN
+            WHERE   FFP_CLM_MTCH_ACCNT = :sql_cln_mtch_accnt
+            AND     FFP_XCHNG_CD       = :sql_xchng_cd
+            AND     FFP_PRDCT_TYP      = :sql_prd_typ
+            AND     FFP_UNDRLYNG       = :sql_undrlyng
+            AND     FFP_CNTRCT_TAG     = :sql_cntrct_tag
+            AND     FFP_OPNPSTN_QTY    < 0
+            ORDER BY FFP_EXPRY_DT desc;
+          END;
+        END-EXEC;
+    }
+    else
+    {
+      d_sum_CUOV = 0;
+      d_sum_CUOV_cmp = 0;
+      ptr_st_undfut_pos->d_sprd_pl = (-1) * ptr_st_undfut_pos->d_mtm_opn_val;
+      ptr_st_undfut_pos->d_imtm_sprd_pl = (-1) * ptr_st_undfut_pos->d_imtm_opn_val;
+      ptr_st_undfut_pos->d_mm_sprd_pl = ptr_st_undfut_pos->d_sprd_pl;
+      ptr_st_undfut_pos->d_exctd_mrgn = 0;
+      ptr_st_undfut_pos->d_imtm_exctd_mrgn = 0;
+      ptr_st_undfut_pos->d_mm_exctd_mrgn = 0;
+			c_pos_opn = 'N';
+      ptr_st_undfut_pos->d_add_mrgn_val = 0;
+      SQLCODE = 0;
+    }
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31095", SQLMSG, ptr_st_err_msg->c_err_msg  );
+      EXEC SQL FREE :sys_cursor;
+      return ( -1 );
+    }
+
+    if ( c_pos_opn == 'Y' )
+    {
+      li_opn_qty = ptr_st_undfut_pos->l_opnpstn_qty;
+      li_unmtchd_qty = li_opn_qty;
+      li_sum_CUOQ = 0;
+      d_sum_CUOV = 0;
+      d_sum_CUOV_cmp = 0;
+
+      while ( li_unmtchd_qty != 0)
+      {
+        EXEC SQL FETCH :sys_cursor
+                INTO :st_cntfut_pos.d_mtm_opn_val,
+                     :st_cntfut_pos.l_opnpstn_qty,
+                     :st_cntfut_pos.d_imtm_opn_val;
+
+        if ( SQLCODE != 0 )
+        {
+          fn_errlog( c_ServiceName, "S31100", SQLMSG, ptr_st_err_msg->c_err_msg  );
+          EXEC SQL CLOSE :sys_cursor;
+          EXEC SQL FREE :sys_cursor;
+          return ( -1 );
+        }
+
+        if ( li_opn_qty > 0 )
+        {
+          st_cntfut_pos.l_und_opn_qty = fn_minl( st_cntfut_pos.l_opnpstn_qty, li_unmtchd_qty );
+        }
+        else
+        {
+          st_cntfut_pos.l_und_opn_qty = fn_maxl( st_cntfut_pos.l_opnpstn_qty, li_unmtchd_qty );
+        }
+		
+				st_cntfut_pos.d_und_opn_val=st_cntfut_pos.l_und_opn_qty * (st_cntfut_pos.d_mtm_opn_val / st_cntfut_pos.l_opnpstn_qty);
+        d_und_opn_val_imtm = st_cntfut_pos.l_und_opn_qty * (st_cntfut_pos.d_imtm_opn_val / st_cntfut_pos.l_opnpstn_qty);
+
+        li_sum_CUOQ 	 = li_sum_CUOQ + st_cntfut_pos.l_und_opn_qty;
+        d_sum_CUOV 		 = d_sum_CUOV + st_cntfut_pos.d_und_opn_val;
+        d_sum_CUOV_cmp = d_sum_CUOV_cmp + d_und_opn_val_imtm;
+        li_unmtchd_qty = li_unmtchd_qty - st_cntfut_pos.l_und_opn_qty;
+      }
+
+      EXEC SQL CLOSE :sys_cursor;
+      EXEC SQL FREE :sys_cursor;
+
+      ptr_st_undfut_pos->d_sprd_pl = d_sum_CUOV - ptr_st_undfut_pos->d_mtm_opn_val;
+
+      ptr_st_undfut_pos->d_imtm_sprd_pl = d_sum_CUOV_cmp - ptr_st_undfut_pos->d_imtm_opn_val;
+
+      ptr_st_undfut_pos->d_mm_sprd_pl = ptr_st_undfut_pos->d_sprd_pl;
+
+      if ( li_opn_qty > 0 )
+      {
+        ptr_st_undfut_pos->d_exctd_mrgn = d_sum_CUOV * d_initial_mrgn / 100.0;
+
+        ptr_st_undfut_pos->d_imtm_exctd_mrgn = d_sum_CUOV_cmp * d_initial_mrgn / 100.0;
+
+        ptr_st_undfut_pos->d_mm_exctd_mrgn = d_sum_CUOV * d_min_mrgn / 100.0;
+      }
+      else if ( li_opn_qty < 0 )
+      {
+        ptr_st_undfut_pos->d_exctd_mrgn = ( (-1) * d_sum_CUOV )* d_initial_mrgn / 100.0;
+
+        ptr_st_undfut_pos->d_imtm_exctd_mrgn = ( (-1) * d_sum_CUOV_cmp )* d_initial_mrgn / 100.0;
+
+        ptr_st_undfut_pos->d_mm_exctd_mrgn = ( (-1) * d_sum_CUOV )* d_min_mrgn / 100.0;
+      }
+
+			if ( ( ptr_st_undfut_pos->l_opnpstn_qty == 0 ) ||
+           ( ( ptr_st_undfut_pos->l_opnpstn_qty > 0 ) &&
+             ( ptr_st_undfut_pos_crrnt->l_opnpstn_qty < 0 ) ) ||
+           ( ( ptr_st_undfut_pos->l_opnpstn_qty < 0 ) &&
+             ( ptr_st_undfut_pos_crrnt->l_opnpstn_qty > 0 ) ) )
+      {
+        ptr_st_undfut_pos->d_add_mrgn_val = 0;
+      }
+
+    }
+    else
+    {
+      EXEC SQL CLOSE :sys_cursor;
+      EXEC SQL FREE :sys_cursor;
+    }
+
+    if ( ( ptr_st_undfut_pos->d_exctd_mrgn +
+           ptr_st_undfut_pos->d_sprd_mrgn ) <=
+           ptr_st_undfut_pos->d_sprd_pl )
+    {
+      ptr_st_undfut_pos->d_trd_mrgn = 0;
+    }
+    else
+    {
+      ptr_st_undfut_pos->d_trd_mrgn = ptr_st_undfut_pos->d_exctd_mrgn +
+                                      ptr_st_undfut_pos->d_sprd_mrgn -
+                                      ptr_st_undfut_pos->d_sprd_pl;
+    }
+
+    if((ptr_st_undfut_pos->d_imtm_exctd_mrgn + ptr_st_undfut_pos->d_imtm_sprd_mrgn ) <= ptr_st_undfut_pos->d_imtm_sprd_pl )
+    {
+      ptr_st_undfut_pos->d_imtm_trd_mrgn = 0;
+    }
+    else
+    {
+      ptr_st_undfut_pos->d_imtm_trd_mrgn = ptr_st_undfut_pos->d_imtm_exctd_mrgn + ptr_st_undfut_pos->d_imtm_sprd_mrgn - ptr_st_undfut_pos->d_imtm_sprd_pl;
+    }
+
+    if((ptr_st_undfut_pos->d_mm_exctd_mrgn + ptr_st_undfut_pos->d_mm_sprd_mrgn ) <= ptr_st_undfut_pos->d_mm_sprd_pl )
+    {
+      ptr_st_undfut_pos->d_mm_trd_mrgn = 0;
+    }
+ else
+    {
+      ptr_st_undfut_pos->d_mm_trd_mrgn = ptr_st_undfut_pos->d_mm_exctd_mrgn + ptr_st_undfut_pos->d_mm_sprd_mrgn - ptr_st_undfut_pos->d_mm_sprd_pl;
+    }
+
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog ( c_ServiceName, "Actual net open value  :%lf:", d_sum_CUOV );
+    fn_userlog ( c_ServiceName, "MTMed open val         :%lf:", ptr_st_undfut_pos->d_mtm_opn_val );
+    fn_userlog ( c_ServiceName, "Spread PL              :%lf:", ptr_st_undfut_pos->d_sprd_pl );
+    fn_userlog ( c_ServiceName, "Executed Margin        :%lf:", ptr_st_undfut_pos->d_exctd_mrgn );
+    fn_userlog ( c_ServiceName, "Total Trade Margin     :%lf:", ptr_st_undfut_pos->d_trd_mrgn );
+    fn_userlog ( c_ServiceName, "Act net open value -CMP:%lf:", d_sum_CUOV_cmp );
+    fn_userlog ( c_ServiceName, "Spread PL at IMTM      :%lf:", ptr_st_undfut_pos->d_imtm_sprd_pl );
+    fn_userlog ( c_ServiceName, "Executed Margin at IMTM:%lf:", ptr_st_undfut_pos->d_imtm_exctd_mrgn );
+    fn_userlog ( c_ServiceName, "Total IMTM Trade Margin:%lf:", ptr_st_undfut_pos->d_imtm_trd_mrgn );
+    fn_userlog ( c_ServiceName, "Spread PL at MM        :%lf:", ptr_st_undfut_pos->d_mm_sprd_pl );
+    fn_userlog ( c_ServiceName, "Executed Margin at MM  :%lf:", ptr_st_undfut_pos->d_mm_exctd_mrgn );
+    fn_userlog ( c_ServiceName, "Total Trade Mrgn at MM :%lf:", ptr_st_undfut_pos->d_mm_trd_mrgn );   
+  }
+
+  return SUCCESS;
+}
+
+int fn_call_actn_create_fut( char *c_ServiceName,
+                             struct st_pstn_actn *ptr_st_pstn_actn_fut,
+                             struct vw_err_msg  *ptr_st_err_msg )
+{
+
+  char c_err_msg[256];
+	char c_inp_strng[ 8000 ];
+	char c_inp_strng1[ 8000 ];
+	char c_inp_strng2[ 8000 ];
+	char c_inp_strng11[ 8000 ];
+	char c_inp_strng22[ 8000 ];
+	char c_op_strng[ 8000 ];
+	char c_op_strng1[ 8000 ];
+  char c_op_strng2[ 8000 ];
+	char c_seq_num1[12000];
+  char c_seq_num2[12000];
+	char c_expry_dt[10];
+  char c_strk_prc[20];
+  char c_pos_avl;
+	char sql_prd_typ;
+	char c_mrgn_indctr[3];
+	char c_pipe_id[3];
+  char c_opseq_num1[20];
+  char c_opseq_num2[20];
+  char c_mtch_accnt1[11];
+  char c_mtch_accnt2[11];
+  char c_spn_mrgn1[20];
+  char c_spn_mrgn2[20];
+  char c_nov1[20];
+  char c_nov2[20];
+  char c_total_mrgn1[20];
+  char c_total_mrgn2[20];
+	char c_fno_dmn_nm [ 16 ];
+  char c_fno_trg_nm [ 16 ];
+  char c_fno_trg_dat [ 256 ];
+  char *null_ptr  = 0;
+  char c_dr_without_lmt_flg;
+  char c_narration_id[4];
+  char  c_cntrct_tag;
+  char  c_prdct_type;
+  char  c_trn_flw;
+	char  c_upos_avl = '\0';
+  char c_reason_cd [ 2000 ] = "\0";		/*** Ver 1.4 ***/
+	char c_ucc_cd[13] = "\0";			/*** ADDED in VER 2.3 ***/
+
+	char sql_cln_mtch_accnt[11];
+  char sql_xchng_cd[4];
+  char c_xchng_cd_spn[4];
+  char c_xchng_cd_spn1[4];	/** Added pst_live ***/	
+  char sql_undrlyng[7];
+  varchar c_exp_dt[LEN_DATE];
+  varchar c_stock_cd [20];
+
+  char c_extra_update = '\0'; /****** ver 2.0 *****/
+  struct st_err_msg st_error_message; /** ver 2.0  **/
+ 
+	int i_returncode =0;
+	int i_trnsctn    =0;
+	int i_actn_id = -1;
+	int i_cntrct_cnt = 0;
+	
+	long l_prtfl_seq1  = 0;
+  long l_prtfl_seq2  = 0;
+	long l_ose_qty     = 0;
+  long l_obe_qty     = 0;
+  long l_ibuy_qty    = 0;
+  long l_ebuy_qty    = 0;
+  long l_isell_qty   = 0;
+  long l_esell_qty   = 0;
+  long l_total_buy_qty  = 0;
+  long l_total_sell_qty = 0;
+  long l_cover_qty      = 0;
+	long l_max_opn_qty = 0;
+  long l_min_opn_qty = 0;
+  long l_temp_qty    = 0;
+	long l_length1     = 0;
+  long l_length2     = 0;
+  long  li_len_tobuf = 0;
+  long  l_basket_id   = 0;
+  long  l_close_qty   = 0;
+  long l_open_qty_old = 0.0;  /*** Ver 1.3 ***/
+	
+	double d_expsr     			= 0.0;
+	double d_expsr_mrgn     = 0.0;
+  double d_min_expsr 			= 0.0;
+  double d_min_expsr_mrgn = 0.0;
+  double d_intl_mrgn 			= 0.0;
+  double d_mltplr         = 0.0;
+  double d_cntrct_pl      = 0.0;
+  double d_undrlyng_pl    = 0.0;
+  double d_ltp    				= 0.0;
+  double d_clsng_prc  	  = 0.0;
+  double d_strike_prc     = 0.0;
+	double d_spn_mrgn    = 0.0;
+	double d_spn_mrgn1    = 0.0;
+  double d_spn_mrgn2    = 0.0;
+  double d_nov1         = 0.0;
+  double d_nov2         = 0.0;
+  double d_nov          = 0.0;
+  double d_total_mrgn1  = 0.0;
+  double d_total_mrgn2  = 0.0;
+  double d_total_mrgn   = 0.0;
+  double d_min_mrgn     = 0.0;
+  double d_balance_amt  = 0.0;
+  double d_rlsd_mrgn    = 0.0;
+  double d_oblckd_amnt  = 0.0;
+  double d_exec_rt  		= 0.0;
+  double d_obl_pl  		  = 0.0;  /*** Ver 1.3 ***/
+  double d_open_val_old = 0.0;  /*** Ver 1.3 ***/
+  double d_diff_pl 			= 0.0;  /*** Ver 1.3 ***/
+
+  /*** Ver 2.2  Starts Here ***/
+  int    i_ret_val=0;
+
+  double d_spn_bmrgn1=0;
+  double d_bnov1=0;
+  double d_total_bmrgn1=0;
+
+  double d_spn_bmrgn2=0;
+  double d_bnov2=0;
+  double d_total_bmrgn2=0;
+
+  double d_spn_bmrgn=0;
+  double d_bnov=0;
+  double d_total_bmrgn=0;
+  /*** Ver 2.2  Ends here ***/
+
+	FBFR32 *ptr_fml_Ibuf;
+  FBFR32 *ptr_fml_Obuf;
+
+	sql_cursor     sys_cursor;
+
+	EXEC SQL INCLUDE "table/iai_info_account_info.h"; /* Ver 1.9 */
+  struct st_err_msg 	*ptr_st_err_msg_spn;
+	struct st_fus_undrlyng_pstn st_undpstn_crrnt;
+	struct st_fus_undrlyng_pstn st_undfut_pos_to_be;
+  struct st_fcp_cntrct_pstn st_cntrct_pstn_crrnt;
+  struct st_fcp_cntrct_pstn st_cntrct_pstn_md_rc;
+
+	ptr_fml_Obuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+	
+	if ( ptr_fml_Obuf == NULL )
+  {
+		fn_errlog(c_ServiceName, "S31105", TPMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+	}
+
+  ptr_fml_Ibuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN*10); 
+
+	if ( ptr_fml_Ibuf == NULL )
+  {
+    tpfree((char *)ptr_fml_Obuf);
+		fn_errlog(c_ServiceName, "S31110", TPMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+	}
+
+	memset ( &st_undfut_pos_to_be, '\0', sizeof(struct st_fus_undrlyng_pstn ) ) ;
+
+  rtrim(ptr_st_pstn_actn_fut->c_cln_mtch_accnt);
+  rtrim(ptr_st_pstn_actn_fut->c_undrlyng);
+  rtrim(ptr_st_pstn_actn_fut->c_expry_dt);
+  rtrim(ptr_st_pstn_actn_fut->c_ref_rmrks);
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog ( c_ServiceName,"c_user_id        :%s:",ptr_st_pstn_actn_fut->c_user_id );
+    fn_userlog ( c_ServiceName,"l_session_id     :%ld:",ptr_st_pstn_actn_fut->l_session_id );
+    fn_userlog ( c_ServiceName,"c_cln_mtch_accnt :%s:",ptr_st_pstn_actn_fut->c_cln_mtch_accnt );
+    fn_userlog ( c_ServiceName,"c_xchng_cd       :%s:",ptr_st_pstn_actn_fut->c_xchng_cd );
+    fn_userlog ( c_ServiceName,"c_prd_typ        :%c:",ptr_st_pstn_actn_fut->c_prd_typ );
+    fn_userlog ( c_ServiceName,"c_undrlyng       :%s:",ptr_st_pstn_actn_fut->c_undrlyng );
+    fn_userlog ( c_ServiceName,"c_expry_dt       :%s:",ptr_st_pstn_actn_fut->c_expry_dt );
+    fn_userlog ( c_ServiceName,"c_exrc_typ       :%c:",ptr_st_pstn_actn_fut->c_exrc_typ );
+    fn_userlog ( c_ServiceName,"l_actn_typ       :%ld:",ptr_st_pstn_actn_fut->l_actn_typ );
+    fn_userlog ( c_ServiceName,"c_trnsctn_flw    :%c:",ptr_st_pstn_actn_fut->c_trnsctn_flw );
+    fn_userlog ( c_ServiceName,"l_orgnl_qty      :%ld:",ptr_st_pstn_actn_fut->l_orgnl_qty );
+    fn_userlog ( c_ServiceName,"l_orgnl_rt       :%ld:",ptr_st_pstn_actn_fut->l_orgnl_rt );
+    fn_userlog ( c_ServiceName,"l_new_qty        :%ld:",ptr_st_pstn_actn_fut->l_new_qty );
+    fn_userlog ( c_ServiceName,"l_new_rt         :%ld:",ptr_st_pstn_actn_fut->l_new_rt );
+    fn_userlog ( c_ServiceName,"l_exec_qty       :%ld:",ptr_st_pstn_actn_fut->l_exec_qty );
+    fn_userlog ( c_ServiceName,"l_exec_rt        :%ld:",ptr_st_pstn_actn_fut->l_exec_rt );
+    fn_userlog ( c_ServiceName,"l_fresh_qty      :%ld:",ptr_st_pstn_actn_fut->l_fresh_qty );
+    fn_userlog ( c_ServiceName,"l_cover_qty      :%ld:",ptr_st_pstn_actn_fut->l_cover_qty );
+    fn_userlog ( c_ServiceName,"d_add_mrgn_amt   :%lf:",ptr_st_pstn_actn_fut->d_add_mrgn_amt );
+    fn_userlog ( c_ServiceName,"l_curr_rt        :%ld:",ptr_st_pstn_actn_fut->l_curr_rt );
+    fn_userlog ( c_ServiceName,"c_ref_rmrks      :%s:",ptr_st_pstn_actn_fut->c_ref_rmrks );
+    fn_userlog ( c_ServiceName,"c_cntrct_tag     :%c:",ptr_st_pstn_actn_fut->c_cntrct_tag );
+    fn_userlog ( c_ServiceName,"c_prc_flg        :%c:",ptr_st_pstn_actn_fut->c_nkd_blkd_flg );    
+    fn_userlog ( c_ServiceName,"l_actn_typ       :%ld|",ptr_st_pstn_actn_fut->l_actn_typ );
+  }
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog ( c_ServiceName, "Getting the current unerlying position" );
+  }
+
+	c_upos_avl = 'Y';
+
+	EXEC SQL
+    SELECT  FUS_CLM_MTCH_ACCNT,
+            FUS_XCHNG_CD,
+            FUS_INDSTK,
+            FUS_UNDRLYNG,
+            FUS_UIBUY_QTY,
+            FUS_UIBUY_VAL,
+            FUS_UISELL_QTY,
+            FUS_UISELL_VAL,
+            FUS_UEXBUY_QTY,
+            FUS_UEXBUY_VAL,
+            FUS_UEXSELL_QTY,
+            FUS_UEXSELL_VAL,
+            FUS_UBUY_EXCTD_QTY,
+            FUS_USELL_EXCTD_QTY,
+            FUS_UOPNPSTN_FLW,
+            FUS_UOPNPSTN_QTY,
+            FUS_UOPNPSTN_VAL,
+            FUS_UMTM_OPN_VAL,
+            FUS_INITIAL_MRGN,
+            FUS_SPAN_WEMULT_MRGN,
+            FUS_EBA_EXPR_MRGN,
+            FUS_USPAN_WENOV_MRGN,
+            FUS_MULTIPLIER,
+            FUS_USPAN_NENOV_MRGN,
+            FUS_NET_OPTN_VAL,
+            NVL(FUS_MIN_MRGN,0),
+            NVL(FUS_MTM_FLG,'O'),
+            FUS_BLCKD_PL,
+            FUS_REQD_INITIAL_MRGN
+    INTO    :st_undpstn_crrnt.c_cln_mtch_accnt,
+            :st_undpstn_crrnt.c_xchng_cd,
+            :st_undpstn_crrnt.c_indstk,
+            :st_undpstn_crrnt.c_undrlyng,
+            :st_undpstn_crrnt.l_uibuy_qty,
+            :st_undpstn_crrnt.d_uibuy_val,
+            :st_undpstn_crrnt.l_uisell_qty,
+            :st_undpstn_crrnt.d_uisell_val,
+            :st_undpstn_crrnt.l_uexbuy_qty,
+            :st_undpstn_crrnt.d_uexbuy_val,
+            :st_undpstn_crrnt.l_uexsell_qty,
+            :st_undpstn_crrnt.d_uexsell_val,
+            :st_undpstn_crrnt.l_ubuy_exctd_qty,
+            :st_undpstn_crrnt.l_usell_exctd_qty,
+            :st_undpstn_crrnt.c_uopnpstn_flw,
+            :st_undpstn_crrnt.l_uopnpstn_qty,
+						:st_undpstn_crrnt.d_uopnpstn_val,
+            :st_undpstn_crrnt.d_umtm_opn_val,
+            :st_undpstn_crrnt.d_initial_mrgn,
+            :st_undpstn_crrnt.d_span_wemult_mrgn,
+            :st_undpstn_crrnt.d_eba_expr_mrgn,
+            :st_undpstn_crrnt.d_uspan_wenov_mrgn,
+            :st_undpstn_crrnt.d_multpr,
+            :st_undpstn_crrnt.d_uspan_nenov_mrgn,
+            :st_undpstn_crrnt.d_net_optn_val,
+            :st_undpstn_crrnt.d_min_mrgn,
+            :st_undpstn_crrnt.c_mtm_flg,
+            :st_undpstn_crrnt.d_blckd_pl,
+            :st_undpstn_crrnt.d_reqd_initial_mrgn
+   FROM    FUS_FO_UNDRLYNG_SPN_PSTN
+   WHERE   FUS_CLM_MTCH_ACCNT  = :ptr_st_pstn_actn_fut->c_cln_mtch_accnt
+   AND     FUS_XCHNG_CD        = :ptr_st_pstn_actn_fut->c_xchng_cd
+   AND     FUS_UNDRLYNG        = :ptr_st_pstn_actn_fut->c_undrlyng;
+
+   if (  SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+   {
+		 tpfree((char *)ptr_fml_Ibuf);
+		 fn_errlog(c_ServiceName, "S31115", SQLMSG, ptr_st_err_msg->c_err_msg );
+     return FAILURE;
+   }
+
+	 if (SQLCODE == NO_DATA_FOUND)
+	 {
+		if(DEBUG_MSG_LVL_3)
+  	{
+    	fn_userlog ( c_ServiceName, "Inside NO_DATA_FOUND unerlying position" );
+  	}
+
+		strcpy( st_undpstn_crrnt.c_cln_mtch_accnt, ptr_st_pstn_actn_fut->c_cln_mtch_accnt );
+    strcpy( st_undpstn_crrnt.c_xchng_cd, ptr_st_pstn_actn_fut->c_xchng_cd );
+    strcpy( st_undpstn_crrnt.c_undrlyng, ptr_st_pstn_actn_fut->c_undrlyng );
+    st_undpstn_crrnt.c_indstk  = ptr_st_pstn_actn_fut->c_ctgry_indstk;
+    st_undpstn_crrnt.l_uibuy_qty= 0;
+    st_undpstn_crrnt.d_uibuy_val= 0;
+    st_undpstn_crrnt.l_uisell_qty= 0;
+    st_undpstn_crrnt.d_uisell_val= 0;
+    st_undpstn_crrnt.l_uexbuy_qty= 0;
+    st_undpstn_crrnt.d_uexbuy_val= 0;
+    st_undpstn_crrnt.l_uexsell_qty= 0;
+    st_undpstn_crrnt.d_uexsell_val= 0;
+    st_undpstn_crrnt.l_ubuy_exctd_qty= 0;
+    st_undpstn_crrnt.l_usell_exctd_qty = 0;
+    st_undpstn_crrnt.c_uopnpstn_flw = 'N';
+    st_undpstn_crrnt.l_uopnpstn_qty = 0;
+    st_undpstn_crrnt.d_uopnpstn_val = 0;
+    st_undpstn_crrnt.d_umtm_opn_val = 0;
+    st_undpstn_crrnt.d_initial_mrgn = 0;
+    st_undpstn_crrnt.d_span_wemult_mrgn = 0;
+    st_undpstn_crrnt.d_eba_expr_mrgn  = 0;
+    st_undpstn_crrnt.d_uspan_wenov_mrgn = 0;
+    st_undpstn_crrnt.d_multpr = 0;
+    st_undpstn_crrnt.d_uspan_nenov_mrgn = 0;
+    st_undpstn_crrnt.d_net_optn_val = 0;
+    st_undpstn_crrnt.d_min_mrgn = 0;
+    st_undpstn_crrnt.d_blckd_pl = 0;
+    st_undpstn_crrnt.d_reqd_initial_mrgn  = 0;
+    st_undpstn_crrnt.d_umtm_opn_val= 0;	
+		c_upos_avl = 'N';
+	 }		
+	 /*	
+	 memcpy ( &st_undfut_pos_to_be,&st_undpstn_crrnt,sizeof(struct st_fus_undrlyng_pstn ) );
+	 */
+
+	 strcpy( st_undfut_pos_to_be.c_cln_mtch_accnt, ptr_st_pstn_actn_fut->c_cln_mtch_accnt );
+   strcpy( st_undfut_pos_to_be.c_xchng_cd, ptr_st_pstn_actn_fut->c_xchng_cd );
+   strcpy( st_undfut_pos_to_be.c_undrlyng, ptr_st_pstn_actn_fut->c_undrlyng );
+   st_undfut_pos_to_be.c_indstk            = ptr_st_pstn_actn_fut->c_ctgry_indstk;
+   st_undfut_pos_to_be.l_uibuy_qty         = 0;
+   st_undfut_pos_to_be.d_uibuy_val         = 0;
+   st_undfut_pos_to_be.l_uisell_qty        = 0;
+   st_undfut_pos_to_be.d_uisell_val        = 0;
+   st_undfut_pos_to_be.l_uexbuy_qty        = 0;
+   st_undfut_pos_to_be.d_uexbuy_val        = 0;
+   st_undfut_pos_to_be.l_uexsell_qty       = 0;
+   st_undfut_pos_to_be.d_uexsell_val       = 0;
+   st_undfut_pos_to_be.l_ubuy_exctd_qty    = 0;
+   st_undfut_pos_to_be.l_usell_exctd_qty   = 0;
+   st_undfut_pos_to_be.c_uopnpstn_flw      = 'N';
+   st_undfut_pos_to_be.l_uopnpstn_qty      = 0;
+   st_undfut_pos_to_be.d_uopnpstn_val      = 0;
+   st_undfut_pos_to_be.d_umtm_opn_val      = 0;
+   st_undfut_pos_to_be.d_initial_mrgn      = st_undpstn_crrnt.d_initial_mrgn ;
+   st_undfut_pos_to_be.d_span_wemult_mrgn  = st_undpstn_crrnt.d_span_wemult_mrgn ;
+   st_undfut_pos_to_be.d_eba_expr_mrgn     = st_undpstn_crrnt.d_eba_expr_mrgn ;
+   st_undfut_pos_to_be.d_uspan_wenov_mrgn  = st_undpstn_crrnt.d_uspan_wenov_mrgn ;
+   st_undfut_pos_to_be.d_multpr            = st_undpstn_crrnt.d_multpr ;
+   st_undfut_pos_to_be.d_uspan_nenov_mrgn  = st_undpstn_crrnt.d_uspan_nenov_mrgn ;
+   st_undfut_pos_to_be.d_net_optn_val      = st_undpstn_crrnt.d_net_optn_val ;
+   st_undfut_pos_to_be.d_min_mrgn          = st_undpstn_crrnt.d_min_mrgn ;
+   st_undfut_pos_to_be.d_blckd_pl          = st_undpstn_crrnt.d_blckd_pl ;
+   st_undfut_pos_to_be.d_reqd_initial_mrgn = st_undpstn_crrnt.d_reqd_initial_mrgn ;
+   st_undfut_pos_to_be.d_umtm_opn_val      = 0;
+   st_undfut_pos_to_be.c_mtm_flg           = st_undpstn_crrnt.c_mtm_flg;
+	
+	 if(DEBUG_MSG_LVL_3)
+   {
+   	 fn_userlog ( c_ServiceName, "Coping String Values" );
+   }
+	 strcpy( sql_cln_mtch_accnt,ptr_st_pstn_actn_fut->c_cln_mtch_accnt);
+   strcpy( sql_xchng_cd,ptr_st_pstn_actn_fut->c_xchng_cd);
+   strcpy( sql_undrlyng,ptr_st_pstn_actn_fut->c_undrlyng); 
+   sql_prd_typ = ptr_st_pstn_actn_fut->c_prd_typ;
+
+	 if(DEBUG_MSG_LVL_3)
+   {
+   	 fn_userlog ( c_ServiceName, "After Copy Struct Values" );
+   }
+
+	 EXEC  SQL
+    SELECT  SPN_PRTFL1_SEQ.nextval
+    INTO    :l_prtfl_seq1
+    FROM    DUAL;
+
+   if ( SQLCODE  !=  0 )
+   {
+		 tpfree((char *)ptr_fml_Ibuf);
+     fn_userlog(c_ServiceName,"Error While Fetching  Sequence Number 1.");
+		 fn_errlog(c_ServiceName, "S31120", SQLMSG, ptr_st_err_msg->c_err_msg );
+     return FAILURE;
+   }
+
+   EXEC  SQL
+     SELECT  SPN_PRTFL1_SEQ.nextval
+     INTO    :l_prtfl_seq2
+     FROM    DUAL;
+ 
+   if ( SQLCODE  !=  0 )
+   {
+	   tpfree((char *)ptr_fml_Ibuf);
+     fn_userlog(c_ServiceName,"Error While Fetching  Sequence Number 1.");
+		 fn_errlog(c_ServiceName, "S31125", SQLMSG, ptr_st_err_msg->c_err_msg );
+     return FAILURE;
+   }
+
+	 MEMSET(c_inp_strng); 
+	 MEMSET(c_inp_strng1); 
+   MEMSET(c_inp_strng2);
+	 MEMSET(c_inp_strng11); 
+   MEMSET(c_inp_strng22);
+
+	 strcpy(c_inp_strng1,"1^");
+   strcpy(c_inp_strng2,"|");
+
+   if(strcmp(sql_xchng_cd,"NFO") == 0)
+   {
+     strcat(c_inp_strng1,"NSE^");
+   }
+   else if(strcmp(sql_xchng_cd,"BFO") == 0)
+   {
+     strcat(c_inp_strng1,"BSE^");
+   }
+
+   sprintf(c_seq_num1,"%ld",l_prtfl_seq1);
+   sprintf(c_seq_num2,"%ld",l_prtfl_seq2);
+
+   strcat( c_inp_strng1 , c_seq_num1 );
+   strcat( c_inp_strng2 , c_seq_num2 );
+
+   strcat(c_inp_strng1,"^");
+   strcat(c_inp_strng2,"^");
+
+   EXEC SQL
+     SELECT  FCB_UNDRLYNG_BSKT_ID
+     INTO    :l_basket_id
+     FROM    FCB_FO_CLN_BSKT_ALLTD
+     WHERE   FCB_CLN_LVL = ( SELECT  CLM_CLNT_LVL
+                             FROM    CLM_CLNT_MSTR
+                             WHERE   CLM_MTCH_ACCNT = :sql_cln_mtch_accnt);
+   if ( SQLCODE != 0 )
+   {
+	   tpfree((char *)ptr_fml_Ibuf);
+		 fn_errlog(c_ServiceName, "S31130", SQLMSG, ptr_st_err_msg->c_err_msg );
+     return FAILURE;
+   }	
+
+	 if(DEBUG_MSG_LVL_3)
+   {
+   	 fn_userlog ( c_ServiceName, "Basket Id is |%ld|",l_basket_id );
+   }
+
+	 EXEC SQL ALLOCATE :sys_cursor;
+
+  EXEC SQL EXECUTE
+    BEGIN
+      OPEN    :sys_cursor FOR
+      SELECT  FCP_CLM_MTCH_ACCNT,
+              FCP_XCHNG_CD,
+              FCP_PRDCT_TYP,
+              FCP_INDSTK,
+              FCP_UNDRLYNG,
+              TO_CHAR(FCP_EXPRY_DT,'DD-Mon-YYYY'),
+              FCP_EXER_TYP,
+              FCP_STRK_PRC,
+              FCP_OPT_TYP,
+              FCP_IBUY_QTY,
+              FCP_IBUY_ORD_VAL,
+              FCP_ISELL_QTY,
+              FCP_ISELL_ORD_VAL,
+              FCP_EXBUY_QTY,
+              FCP_EXBUY_ORD_VAL,
+              FCP_EXSELL_QTY,
+              FCP_EXSELL_ORD_VAL,
+              FCP_BUY_EXCTD_QTY,
+              FCP_SELL_EXCTD_QTY,
+              FCP_OPNPSTN_FLW,
+              FCP_OPNPSTN_QTY,
+              FCP_OPNPSTN_VAL,
+              FCP_MTM_OPN_VAL
+        FROM  FCP_FO_SPN_CNTRCT_PSTN
+        WHERE FCP_CLM_MTCH_ACCNT  = :sql_cln_mtch_accnt
+        AND   FCP_XCHNG_CD        = :sql_xchng_cd
+        AND   FCP_UNDRLYNG        = :sql_undrlyng
+        ORDER BY FCP_EXPRY_DT ASC;
+      END;
+  END-EXEC;
+
+  if ( SQLCODE != 0 )
+  {
+    EXEC SQL CLOSE :sys_cursor;	
+    EXEC SQL FREE  :sys_cursor;	
+	  tpfree((char *)ptr_fml_Ibuf);
+		fn_errlog(c_ServiceName, "S31135", SQLMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+	}
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog ( c_ServiceName, "Before While Loop");
+  }
+	
+	d_undrlyng_pl = 0.0;
+	c_pos_avl = 'N';	
+
+	while ( 1 )
+  {
+    d_expsr_mrgn      = 0.0;
+    d_min_expsr_mrgn  = 0.0;
+    d_cntrct_pl       = 0.0;
+		d_strike_prc			= 0.0;
+
+    MEMSET(c_exp_dt);
+
+    EXEC SQL FETCH  :sys_cursor
+             INTO   :st_cntrct_pstn_crrnt.c_cln_mtch_accnt,
+                    :st_cntrct_pstn_crrnt.c_xchng_cd,
+                    :st_cntrct_pstn_crrnt.c_prd_typ,
+                    :st_cntrct_pstn_crrnt.c_ctgry_indstk,
+                    :st_cntrct_pstn_crrnt.c_undrlyng,
+                    :c_exp_dt,
+                    :st_cntrct_pstn_crrnt.c_exer_typ,
+                    :st_cntrct_pstn_crrnt.l_strike_prc,
+                    :st_cntrct_pstn_crrnt.c_opt_typ,
+                    :st_cntrct_pstn_crrnt.l_ibuy_qty,
+                    :st_cntrct_pstn_crrnt.d_ibuy_ord_val,
+                    :st_cntrct_pstn_crrnt.l_isell_qty,
+                    :st_cntrct_pstn_crrnt.d_isell_ord_val,
+                    :st_cntrct_pstn_crrnt.l_exbuy_qty,
+                    :st_cntrct_pstn_crrnt.d_exbuy_ord_val,
+                    :st_cntrct_pstn_crrnt.l_exsell_qty,
+                    :st_cntrct_pstn_crrnt.d_exsell_ord_val,
+                    :st_cntrct_pstn_crrnt.l_buy_exctd_qty,
+                    :st_cntrct_pstn_crrnt.l_sell_exctd_qty,
+                    :st_cntrct_pstn_crrnt.c_opnpstn_flw,
+                    :st_cntrct_pstn_crrnt.l_opnpstn_qty,
+                    :st_cntrct_pstn_crrnt.d_opnpstn_val,
+                    :st_cntrct_pstn_crrnt.d_mtm_opn_val;
+
+    if ( SQLCODE != 0 )
+    {
+      if ( SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog(c_ServiceName," Inside NO_DATA_FOUND .");
+        break;
+      }
+
+        EXEC SQL CLOSE :sys_cursor;
+        EXEC SQL FREE :sys_cursor;
+				tpfree((char *)ptr_fml_Ibuf);
+    		fn_userlog(c_ServiceName,"Error While Fetching  Sequence Number 1.");
+				fn_errlog(c_ServiceName, "S31140", SQLMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+		
+	  if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog ( c_ServiceName, "Contract Fetch");
+      fn_userlog ( c_ServiceName, "st_cntrct_pstn_crrnt.c_xchng_cd	|%s|",st_cntrct_pstn_crrnt.c_xchng_cd);
+      fn_userlog ( c_ServiceName, "st_cntrct_pstn_crrnt.c_prd_typ		|%c|",st_cntrct_pstn_crrnt.c_prd_typ);
+      fn_userlog ( c_ServiceName, "st_cntrct_pstn_crrnt.c_undrlyng	|%s|",st_cntrct_pstn_crrnt.c_undrlyng);
+      fn_userlog ( c_ServiceName, "st_cntrct_pstn_crrnt.c_expry_dt	|%s|",c_exp_dt.arr);
+      fn_userlog ( c_ServiceName, "st_cntrct_pstn_crrnt.c_exer_typ	|%c|",st_cntrct_pstn_crrnt.c_exer_typ);
+      fn_userlog ( c_ServiceName, "ptr_st_pstn_actn->c_xchng_cd			|%s|",ptr_st_pstn_actn_fut->c_xchng_cd);
+      fn_userlog ( c_ServiceName, "ptr_st_pstn_actn->c_prd_typ			|%c|",ptr_st_pstn_actn_fut->c_prd_typ);
+      fn_userlog ( c_ServiceName, "ptr_st_pstn_actn->c_undrlyng			|%s|",ptr_st_pstn_actn_fut->c_undrlyng);
+      fn_userlog ( c_ServiceName, "ptr_st_pstn_actn->c_expry_dt			|%s|",ptr_st_pstn_actn_fut->c_expry_dt);
+      fn_userlog ( c_ServiceName, "ptr_st_pstn_actn->c_exer_typ			|%c|",ptr_st_pstn_actn_fut->c_exrc_typ);
+    }
+
+		SETNULL( c_exp_dt );
+    strcpy ( st_cntrct_pstn_crrnt.c_expry_dt, (char *) c_exp_dt.arr );
+    rtrim(st_cntrct_pstn_crrnt.c_xchng_cd);
+    rtrim(st_cntrct_pstn_crrnt.c_undrlyng);
+    rtrim(st_cntrct_pstn_crrnt.c_expry_dt);
+
+		if( (strcmp(st_cntrct_pstn_crrnt.c_xchng_cd,ptr_st_pstn_actn_fut->c_xchng_cd) == 0 ) &&
+          (st_cntrct_pstn_crrnt.c_prd_typ == ptr_st_pstn_actn_fut->c_prd_typ) &&
+          (strcmp(st_cntrct_pstn_crrnt.c_undrlyng,ptr_st_pstn_actn_fut->c_undrlyng) == 0 ) &&
+          (strcasecmp(st_cntrct_pstn_crrnt.c_expry_dt,ptr_st_pstn_actn_fut->c_expry_dt) == 0 ) &&
+          (st_cntrct_pstn_crrnt.c_exer_typ == ptr_st_pstn_actn_fut->c_exrc_typ) )
+      {
+  			if(DEBUG_MSG_LVL_3)
+   			{
+     			fn_userlog ( c_ServiceName, "Match Found");
+				}
+		
+				if(st_cntrct_pstn_crrnt.c_opnpstn_flw == 'S')
+  			{
+    			ptr_st_pstn_actn_fut->l_new_qty = -1 * ptr_st_pstn_actn_fut->l_new_qty;
+  			}
+
+				l_open_qty_old = st_cntrct_pstn_crrnt.l_opnpstn_qty;   /*** Added in ver 1.3 ***/
+				d_open_val_old = st_cntrct_pstn_crrnt.d_opnpstn_val;   /*** Added in ver 1.3 ***/
+
+        i_returncode =  fn_apply_spn_actn ( c_ServiceName,
+                                            ptr_st_pstn_actn_fut,
+                                            &st_cntrct_pstn_crrnt,
+                                            ptr_st_err_msg_spn );
+        if ( i_returncode == -1 )
+        {
+					EXEC SQL CLOSE :sys_cursor;
+        	EXEC SQL FREE :sys_cursor;
+        	tpfree((char *)ptr_fml_Ibuf);
+					fn_errlog(c_ServiceName, "S31145", SQLMSG, ptr_st_err_msg->c_err_msg );
+    			return FAILURE;
+        }
+
+        memcpy ( &st_cntrct_pstn_md_rc, &st_cntrct_pstn_crrnt, sizeof( st_cntrct_pstn_md_rc ));
+
+				if ( ( (st_cntrct_pstn_crrnt.c_opnpstn_flw !=   ptr_st_pstn_actn_fut->c_trnsctn_flw)
+              && st_cntrct_pstn_crrnt.c_opnpstn_flw !='N')
+             && ( abs(st_cntrct_pstn_crrnt.l_opnpstn_qty) >=  abs(ptr_st_pstn_actn_fut->l_new_qty) )  )
+        {
+          if(DEBUG_MSG_LVL_0)
+          {
+            fn_userlog(c_ServiceName,"SPAN Inside Squre Off Check.");
+          }
+
+          l_ose_qty        = 0;
+          l_obe_qty        = 0;
+          l_ibuy_qty       = 0;
+          l_ebuy_qty       = 0;
+          l_isell_qty      = 0;
+          l_esell_qty      = 0;
+          l_total_buy_qty  = 0;
+          l_total_sell_qty = 0;
+          l_cover_qty      = 0;
+
+          if ( st_cntrct_pstn_crrnt.l_ibuy_qty != 0 )
+          {
+            l_ose_qty  = fn_maxl(st_cntrct_pstn_crrnt.l_sell_exctd_qty * (-1) - st_cntrct_pstn_crrnt.l_buy_exctd_qty, 0 );
+            l_ibuy_qty = fn_maxl(st_cntrct_pstn_crrnt.l_ibuy_qty - l_ose_qty,0);
+          }
+
+          if ( st_cntrct_pstn_crrnt.l_exbuy_qty != 0 )
+          {
+            l_ose_qty  = fn_maxl(st_cntrct_pstn_crrnt.l_sell_exctd_qty * (-1) - st_cntrct_pstn_crrnt.l_buy_exctd_qty, 0 );
+            l_ebuy_qty = fn_maxl( ( st_cntrct_pstn_crrnt.l_exbuy_qty - l_ose_qty ), 0 );
+          }
+
+          if ( st_cntrct_pstn_crrnt.l_isell_qty != 0 )
+          {
+            l_obe_qty = fn_maxl( st_cntrct_pstn_crrnt.l_buy_exctd_qty - st_cntrct_pstn_crrnt.l_sell_exctd_qty * (-1) , 0 );
+            l_isell_qty = fn_maxl( st_cntrct_pstn_crrnt.l_isell_qty * (-1) - l_obe_qty,0  );
+          }
+					
+					if ( st_cntrct_pstn_crrnt.l_exsell_qty != 0 )
+          {
+            l_obe_qty = fn_maxl( st_cntrct_pstn_crrnt.l_buy_exctd_qty - st_cntrct_pstn_crrnt.l_sell_exctd_qty * (-1) , 0 );
+            l_esell_qty = fn_maxl( st_cntrct_pstn_crrnt.l_exsell_qty * (-1) - l_obe_qty,0 );
+          }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"SPAN  st_cntrct_pstn_crrnt.l_buy_exctd_qty:%ld:",st_cntrct_pstn_crrnt.l_buy_exctd_qty);
+            fn_userlog(c_ServiceName,"SPAN  st_cntrct_pstn_crrnt.l_sel_exctd_qty%ld:",st_cntrct_pstn_crrnt.l_sell_exctd_qty);
+            fn_userlog(c_ServiceName,"SPAN  st_cntrct_pstn_crrnt.l_ibuy_qty     :%ld:",st_cntrct_pstn_crrnt.l_ibuy_qty);
+            fn_userlog(c_ServiceName,"SPAN  st_cntrct_pstn_crrnt.l_isell_qty    :%ld:",st_cntrct_pstn_crrnt.l_isell_qty);
+            fn_userlog(c_ServiceName,"SPAN  st_cntrct_pstn_crrnt.l_exbuy_qty    :%ld:",st_cntrct_pstn_crrnt.l_exbuy_qty);
+            fn_userlog(c_ServiceName,"SPAN  st_cntrct_pstn_crrnt.l_exsell_qty   :%ld:",st_cntrct_pstn_crrnt.l_exsell_qty);
+            fn_userlog(c_ServiceName,"SPAN  l_ibuy_qty                          :%ld:",l_ibuy_qty);
+            fn_userlog(c_ServiceName,"SPAN  l_ebuy_qty                          :%ld:",l_ebuy_qty);
+            fn_userlog(c_ServiceName,"SPAN  l_isell_qty                         :%ld:",l_isell_qty);
+            fn_userlog(c_ServiceName,"SPAN  l_esell_qty                         :%ld:",l_esell_qty);
+          }
+
+          l_total_buy_qty  = fn_maxl(l_ibuy_qty,abs(l_ebuy_qty));
+          l_total_sell_qty = fn_maxl(l_isell_qty,abs(l_esell_qty));
+
+          l_cover_qty  = l_total_buy_qty + l_total_sell_qty ;
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"SPAN  l_total_buy_qty    :%ld:",l_total_buy_qty);
+            fn_userlog(c_ServiceName,"SPAN  l_total_sell_qty   :%ld:",l_total_sell_qty);
+            fn_userlog(c_ServiceName,"SPAN  l_cover_qty        :%ld:",l_cover_qty);
+            fn_userlog(c_ServiceName,"SPAN  st_cntrct_pstn_crrnt.l_opnpstn_qty :%ld:",st_cntrct_pstn_crrnt.l_opnpstn_qty);
+            fn_userlog(c_ServiceName,"SPAN  Cover qty is       :%ld:",ptr_st_pstn_actn_fut->l_cover_qty); /** Ver 1.3 **/
+            fn_userlog(c_ServiceName,"SPAN  Executed qty is    :%ld:",ptr_st_pstn_actn_fut->l_exec_qty);  /** Ver 1.3 **/
+          }
+
+					/*** Ver 1.3 ***
+
+					ptr_st_pstn_actn_fut->l_cover_qty = fn_minl(ptr_st_pstn_actn_fut->l_exec_qty,labs(st_cntrct_pstn_crrnt.l_opnpstn_qty));
+
+					*** Ver 1.3 ***/
+
+          if (l_cover_qty != 0 )
+          {
+              fn_userlog(c_ServiceName,"SPAN cover quantity is greater than open position quantity.");
+          }
+          else
+          {
+            ptr_st_pstn_actn_fut->l_actn_typ = SYSTEM_PLACE_ORDER ;
+          }
+				}
+				c_pos_avl = 'Y';
+			}
+              
+		fn_userlog(c_ServiceName,"Calling SPAN sum position");
+
+    fn_sum_spnpos ( st_cntrct_pstn_crrnt,&st_undfut_pos_to_be );
+
+		l_max_opn_qty = st_cntrct_pstn_crrnt.l_opnpstn_qty  +  fn_maxl(st_cntrct_pstn_crrnt.l_ibuy_qty,st_cntrct_pstn_crrnt.l_exbuy_qty) ;
+      l_min_opn_qty = st_cntrct_pstn_crrnt.l_opnpstn_qty  +  fn_maxl(abs(st_cntrct_pstn_crrnt.l_isell_qty),abs(st_cntrct_pstn_crrnt.l_exsell_qty)) * -1  ;
+
+		if ( st_cntrct_pstn_crrnt.c_prd_typ ==  'O' )
+    {
+       l_temp_qty  = fn_minl ( l_max_opn_qty , l_min_opn_qty );
+       l_max_opn_qty = l_temp_qty  ;
+       l_min_opn_qty = l_temp_qty  ;
+    }
+
+		if(DEBUG_MSG_LVL_3)
+    {
+       fn_userlog(c_ServiceName,"Calculate Exposure.");
+       fn_userlog(c_ServiceName,"l_max_opn_qty		|%ld|.",l_max_opn_qty);
+       fn_userlog(c_ServiceName,"l_min_opn_qty	  |%ld|.",l_min_opn_qty);
+		}
+
+		i_returncode  = fn_cal_expsr  ( c_ServiceName,
+                                      st_cntrct_pstn_crrnt,
+                                      l_basket_id,
+                                      &d_expsr_mrgn,
+                                      &d_min_expsr_mrgn,
+                                      &d_mltplr,
+                                      c_err_msg
+                                    );
+
+    if ( i_returncode != 0 )
+    {
+			EXEC SQL CLOSE :sys_cursor;
+      EXEC SQL FREE :sys_cursor;
+      tpfree((char *)ptr_fml_Ibuf);
+			fn_errlog(c_ServiceName, "S31150", LIBMSG, ptr_st_err_msg->c_err_msg );
+    	return FAILURE;
+    }	
+
+		EXEC SQL
+        SELECT  NVL(FTQ_LST_TRD_PRC,0),
+								NVL(FTQ_CLS_PRC,0)
+        INTO    :d_ltp,
+								:d_clsng_prc
+        FROM    FTQ_FO_TRD_QT
+        WHERE   FTQ_XCHNG_CD  = :st_cntrct_pstn_crrnt.c_xchng_cd
+        AND     FTQ_PRDCT_TYP = :st_cntrct_pstn_crrnt.c_prd_typ
+        AND     FTQ_UNDRLYNG  = :st_cntrct_pstn_crrnt.c_undrlyng
+        AND     FTQ_EXPRY_DT  = :c_exp_dt
+        AND     FTQ_EXER_TYP  = :st_cntrct_pstn_crrnt.c_exer_typ
+        AND     FTQ_OPT_TYP   = :st_cntrct_pstn_crrnt.c_opt_typ
+        AND     FTQ_STRK_PRC  = :st_cntrct_pstn_crrnt.l_strike_prc;
+
+    if(SQLCODE  !=  0 && SQLCODE != NO_DATA_FOUND )
+    {
+			EXEC SQL CLOSE :sys_cursor;
+      EXEC SQL FREE :sys_cursor;
+      tpfree((char *)ptr_fml_Ibuf);
+			fn_errlog(c_ServiceName, "S31155", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	return FAILURE;
+    }
+
+    if( SQLCODE == NO_DATA_FOUND )   
+    {
+      d_ltp = 0.0;
+      d_clsng_prc = 0.0;
+    }
+
+		if(DEBUG_MSG_LVL_3)
+    {
+       fn_userlog(c_ServiceName,"LTP is 			 |%lf|",d_ltp);
+       fn_userlog(c_ServiceName,"Closing Price |%lf|",d_clsng_prc);
+       fn_userlog(c_ServiceName,"d_expsr_mrgn  |%lf|",d_expsr_mrgn);
+       fn_userlog(c_ServiceName,"d_min_expsr_mrgn |%lf|",d_min_expsr_mrgn);
+       fn_userlog(c_ServiceName,"d_mltplr 		 |%lf|",d_mltplr);
+    }
+
+		if ( st_cntrct_pstn_crrnt.l_opnpstn_qty != 0 )
+    {
+       if ( st_cntrct_pstn_crrnt.c_prd_typ == 'O')
+       {
+         if( st_cntrct_pstn_crrnt.l_opnpstn_qty < 0 )
+         {
+           if(DEBUG_MSG_LVL_3)
+           {
+             fn_userlog(c_ServiceName,"SPAN - Inside Option Profit / Loss Case.");
+           }
+           d_cntrct_pl = (double) abs(st_cntrct_pstn_crrnt.l_opnpstn_qty)  * ( d_clsng_prc - d_ltp );
+         }
+       }
+       else
+       {
+         if (  st_cntrct_pstn_crrnt.c_prd_typ  ==  'F' )
+         {
+           if(DEBUG_MSG_LVL_3)
+           {
+             fn_userlog(c_ServiceName,"SPAN - Inside Option Profit / Loss Case.");
+           }
+
+           if( st_cntrct_pstn_crrnt.l_opnpstn_qty  > 0 )
+           {
+             d_cntrct_pl = ( d_ltp * (double) st_cntrct_pstn_crrnt.l_opnpstn_qty ) - st_cntrct_pstn_crrnt.d_opnpstn_val;
+           }
+           else if ( st_cntrct_pstn_crrnt.l_opnpstn_qty < 0 )
+           {
+            d_cntrct_pl = fabs(st_cntrct_pstn_crrnt.d_opnpstn_val)  -  ( d_ltp * (double) abs(st_cntrct_pstn_crrnt.l_opnpstn_qty) )  ;
+           }
+         }
+       }
+     }
+
+		 EXEC SQL
+        SELECT  SEM_MAP_VL
+        INTO    :c_stock_cd
+        FROM    SEM_STCK_MAP
+        WHERE   SEM_STCK_CD = :st_cntrct_pstn_crrnt.c_undrlyng
+        AND     SEM_ENTTY   = decode(:sql_xchng_cd,'NFO',3,'BFO',14)  ; 
+
+      if ( SQLCODE  !=  0 )
+      {
+				EXEC SQL CLOSE :sys_cursor;
+      	EXEC SQL FREE :sys_cursor;
+      	tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31160", SQLMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+
+      SETNULL(c_stock_cd);
+
+      EXEC SQL
+        SELECT to_char(to_date(:st_cntrct_pstn_crrnt.c_expry_dt,'DD-Mon-YYYY'),'dd-Mon-YY')
+        INTO  :c_expry_dt
+        FROM  DUAL;
+
+      if ( SQLCODE  !=  0 )
+      {
+				EXEC SQL CLOSE :sys_cursor;
+        EXEC SQL FREE :sys_cursor;
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31165", SQLMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+			
+			d_strike_prc  = (double) st_cntrct_pstn_crrnt.l_strike_prc / 100.00  ;
+      sprintf(c_strk_prc,"%lf",d_strike_prc);
+
+      fn_spn_rtrim(c_strk_prc,'0');
+      fn_spn_rtrim(c_strk_prc,'.');
+
+			if( i_cntrct_cnt  ==  0 )
+      {
+        if(DEBUG_MSG_LVL_3)
+        {
+          fn_userlog(c_ServiceName,"SPAN  - i_cntrct_cnt Is :%ld:",i_cntrct_cnt);
+        }
+
+        if(st_cntrct_pstn_crrnt.c_prd_typ ==  'F')
+        {
+          sprintf(c_inp_strng11,"%s^%s~%c:%s^%ld^%lf",st_cntrct_pstn_crrnt.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,l_max_opn_qty,d_ltp);
+
+        strcat(c_inp_strng1,c_inp_strng11);
+
+        sprintf(c_inp_strng22,"%s^%s~%c:%s^%ld^%lf",st_cntrct_pstn_crrnt.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,l_min_opn_qty,d_ltp);
+
+        strcat(c_inp_strng2,c_inp_strng22);
+
+        }
+        else
+        {
+          sprintf(c_inp_strng11,"%s^%s~%c:%s:%c%c:%s^%ld^%lf",st_cntrct_pstn_crrnt.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,st_cntrct_pstn_crrnt.c_opt_typ,st_cntrct_pstn_crrnt.c_exer_typ,c_strk_prc,l_max_opn_qty,d_ltp);
+
+          strcat(c_inp_strng1,c_inp_strng11);
+
+          sprintf(c_inp_strng22,"%s^%s~%c:%s:%c%c:%s^%ld^%lf",st_cntrct_pstn_crrnt.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,st_cntrct_pstn_crrnt.c_opt_typ,st_cntrct_pstn_crrnt.c_exer_typ,c_strk_prc,l_min_opn_qty,d_ltp); 
+          strcat(c_inp_strng2,c_inp_strng22);
+
+        }
+      }
+			else
+      {
+        if(st_cntrct_pstn_crrnt.c_prd_typ  ==  'F')
+        {
+          sprintf(c_inp_strng11,"%s~%c:%s^%ld^%lf",c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,l_max_opn_qty,d_ltp);
+          strcat(c_inp_strng1,c_inp_strng11);
+
+          sprintf(c_inp_strng22,"%s~%c:%s^%ld^%lf",c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,l_min_opn_qty,d_ltp);
+          strcat(c_inp_strng2,c_inp_strng22);
+
+        }
+        else
+        {
+          sprintf(c_inp_strng11,"%s~%c:%s:%c%c:%s^%ld^%lf",c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,st_cntrct_pstn_crrnt.c_opt_typ,st_cntrct_pstn_crrnt.c_exer_typ,c_strk_prc,l_max_opn_qty,d_ltp);
+
+          strcat(c_inp_strng1,c_inp_strng11);
+
+          sprintf(c_inp_strng22,"%s~%c:%s:%c%c:%s^%ld^%lf",c_stock_cd.arr,st_cntrct_pstn_crrnt.c_prd_typ,c_expry_dt,st_cntrct_pstn_crrnt.c_opt_typ,st_cntrct_pstn_crrnt.c_exer_typ,c_strk_prc,l_min_opn_qty,d_ltp);
+
+          strcat(c_inp_strng2,c_inp_strng22);
+
+        }
+      }	
+	
+		strcat(c_inp_strng1,",");
+    strcat(c_inp_strng2,",");
+    d_undrlyng_pl = d_undrlyng_pl + d_cntrct_pl ;
+
+		d_expsr     = d_expsr_mrgn  + d_expsr ;
+    d_min_expsr = d_min_expsr_mrgn  + d_min_expsr ;
+	
+		i_cntrct_cnt++;
+	}  /*** End of While loop ***/
+
+	EXEC SQL CLOSE :sys_cursor;
+  EXEC SQL FREE :sys_cursor;	
+
+	if ( c_pos_avl == 'N' )
+  {
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"INSIDE c_pos_avl == N ");
+    }
+
+    d_expsr_mrgn      = 0.0;
+    d_min_expsr_mrgn  = 0.0;
+    d_strike_prc      = 0.0;    
+
+    MEMSET(st_cntrct_pstn_md_rc.c_expry_dt);
+
+		if(DEBUG_MSG_LVL_3)
+  	{
+    fn_userlog ( c_ServiceName,"c_user_id        :%s:",ptr_st_pstn_actn_fut->c_user_id );
+    fn_userlog ( c_ServiceName,"l_session_id     :%ld:",ptr_st_pstn_actn_fut->l_session_id );
+    fn_userlog ( c_ServiceName,"c_cln_mtch_accnt :%s:",ptr_st_pstn_actn_fut->c_cln_mtch_accnt );
+    fn_userlog ( c_ServiceName,"c_xchng_cd       :%s:",ptr_st_pstn_actn_fut->c_xchng_cd );
+    fn_userlog ( c_ServiceName,"c_prd_typ        :%c:",ptr_st_pstn_actn_fut->c_prd_typ );
+    fn_userlog ( c_ServiceName,"c_undrlyng       :%s:",ptr_st_pstn_actn_fut->c_undrlyng );
+    fn_userlog ( c_ServiceName,"c_expry_dt       :%s:",ptr_st_pstn_actn_fut->c_expry_dt );
+    fn_userlog ( c_ServiceName,"c_exrc_typ       :%c:",ptr_st_pstn_actn_fut->c_exrc_typ );
+    fn_userlog ( c_ServiceName,"l_actn_typ       :%ld:",ptr_st_pstn_actn_fut->l_actn_typ );
+    fn_userlog ( c_ServiceName,"c_trnsctn_flw    :%c:",ptr_st_pstn_actn_fut->c_trnsctn_flw );
+    fn_userlog ( c_ServiceName,"l_orgnl_qty      :%ld:",ptr_st_pstn_actn_fut->l_orgnl_qty );
+    fn_userlog ( c_ServiceName,"l_orgnl_rt       :%ld:",ptr_st_pstn_actn_fut->l_orgnl_rt );
+    fn_userlog ( c_ServiceName,"l_new_qty        :%ld:",ptr_st_pstn_actn_fut->l_new_qty );
+    fn_userlog ( c_ServiceName,"l_new_rt         :%ld:",ptr_st_pstn_actn_fut->l_new_rt );
+    fn_userlog ( c_ServiceName,"l_exec_qty       :%ld:",ptr_st_pstn_actn_fut->l_exec_qty );
+    fn_userlog ( c_ServiceName,"l_exec_rt        :%ld:",ptr_st_pstn_actn_fut->l_exec_rt );
+    fn_userlog ( c_ServiceName,"l_fresh_qty      :%ld:",ptr_st_pstn_actn_fut->l_fresh_qty );
+    fn_userlog ( c_ServiceName,"l_cover_qty      :%ld:",ptr_st_pstn_actn_fut->l_cover_qty );
+    fn_userlog ( c_ServiceName,"d_add_mrgn_amt   :%lf:",ptr_st_pstn_actn_fut->d_add_mrgn_amt );
+    fn_userlog ( c_ServiceName,"l_curr_rt        :%ld:",ptr_st_pstn_actn_fut->l_curr_rt );
+    fn_userlog ( c_ServiceName,"c_ref_rmrks      :%s:",ptr_st_pstn_actn_fut->c_ref_rmrks );
+    fn_userlog ( c_ServiceName,"c_cntrct_tag     :%c:",ptr_st_pstn_actn_fut->c_cntrct_tag );
+    fn_userlog ( c_ServiceName,"c_prc_flg        :%c:",ptr_st_pstn_actn_fut->c_nkd_blkd_flg );
+    fn_userlog ( c_ServiceName,"l_actn_typ       :%ld|",ptr_st_pstn_actn_fut->l_actn_typ );
+  	}
+
+    strcpy( st_cntrct_pstn_md_rc.c_cln_mtch_accnt,ptr_st_pstn_actn_fut->c_cln_mtch_accnt );
+    strcpy( st_cntrct_pstn_md_rc.c_xchng_cd, ptr_st_pstn_actn_fut->c_xchng_cd );
+    strcpy( st_cntrct_pstn_md_rc.c_undrlyng, ptr_st_pstn_actn_fut->c_undrlyng );
+    strcpy( st_cntrct_pstn_md_rc.c_expry_dt, ptr_st_pstn_actn_fut->c_expry_dt );
+    st_cntrct_pstn_md_rc.c_prd_typ        = ptr_st_pstn_actn_fut->c_prd_typ;
+    st_cntrct_pstn_md_rc.c_exer_typ       = ptr_st_pstn_actn_fut->c_exrc_typ;
+    st_cntrct_pstn_md_rc.c_opt_typ        = ptr_st_pstn_actn_fut->c_opt_typ;
+    st_cntrct_pstn_md_rc.l_strike_prc     = ptr_st_pstn_actn_fut->l_strike_prc;
+    st_cntrct_pstn_md_rc.c_ctgry_indstk   = ptr_st_pstn_actn_fut->c_ctgry_indstk;
+    st_cntrct_pstn_md_rc.l_ibuy_qty       = 0;
+    st_cntrct_pstn_md_rc.d_ibuy_ord_val   = 0;
+    st_cntrct_pstn_md_rc.l_isell_qty      = 0;
+    st_cntrct_pstn_md_rc.d_isell_ord_val  = 0;
+    st_cntrct_pstn_md_rc.l_exbuy_qty      = 0;
+    st_cntrct_pstn_md_rc.d_exbuy_ord_val  = 0;
+    st_cntrct_pstn_md_rc.l_exsell_qty     = 0;
+    st_cntrct_pstn_md_rc.d_exsell_ord_val = 0;
+    st_cntrct_pstn_md_rc.l_buy_exctd_qty  = 0;
+    st_cntrct_pstn_md_rc.l_sell_exctd_qty = 0;
+    st_cntrct_pstn_md_rc.c_opnpstn_flw    = 'N';
+    st_cntrct_pstn_md_rc.l_opnpstn_qty    = 0;
+    st_cntrct_pstn_md_rc.d_opnpstn_val    = 0;
+    st_cntrct_pstn_md_rc.d_mtm_opn_val    = 0;
+    st_cntrct_pstn_md_rc.d_imtm_opn_val   = 0;
+
+		EXEC SQL
+      SELECT  NVL(FTQ_LST_TRD_PRC,0) 
+      INTO    :d_ltp
+      FROM    FTQ_FO_TRD_QT
+      WHERE   FTQ_XCHNG_CD  = :st_cntrct_pstn_md_rc.c_xchng_cd
+      AND     FTQ_PRDCT_TYP = :st_cntrct_pstn_md_rc.c_prd_typ
+      AND     FTQ_UNDRLYNG  = :st_cntrct_pstn_md_rc.c_undrlyng
+      AND     FTQ_EXPRY_DT  = :st_cntrct_pstn_md_rc.c_expry_dt
+      AND     FTQ_EXER_TYP  = :st_cntrct_pstn_md_rc.c_exer_typ
+      AND     FTQ_OPT_TYP   = :st_cntrct_pstn_md_rc.c_opt_typ
+      AND     FTQ_STRK_PRC  = :st_cntrct_pstn_md_rc.l_strike_prc;
+
+    if(SQLCODE  !=  0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31170", SQLMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;
+    }
+
+    i_returncode =  fn_apply_spn_actn ( c_ServiceName,
+                                        ptr_st_pstn_actn_fut,
+                                        &st_cntrct_pstn_md_rc,
+                                        ptr_st_err_msg_spn );
+    if ( i_returncode == -1 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31175", LIBMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;
+    }
+
+    fn_sum_spnpos ( st_cntrct_pstn_md_rc, &st_undfut_pos_to_be );
+
+    memcpy ( &st_cntrct_pstn_crrnt, &st_cntrct_pstn_md_rc, sizeof(st_cntrct_pstn_crrnt ));
+
+		if(DEBUG_MSG_LVL_3)
+    {
+       fn_userlog(c_ServiceName,"st_cntrct_pstn_md_rc.d_opnpstn_val |%lf|",st_cntrct_pstn_md_rc.d_opnpstn_val);
+		}
+
+    i_returncode  = fn_cal_expsr  ( c_ServiceName,
+                                    st_cntrct_pstn_md_rc,
+                                    l_basket_id,
+                                     &d_expsr_mrgn,
+                                     &d_min_expsr_mrgn,
+                                     &d_mltplr,
+                                     c_err_msg
+                                   );
+		if ( i_returncode != 0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31180", LIBMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;	
+    }
+
+		/*  
+    l_max_opn_qty = st_cntrct_pstn_md_rc.l_ibuy_qty ;
+    l_min_opn_qty = st_cntrct_pstn_md_rc.l_isell_qty ;
+		*/
+
+		if(DEBUG_MSG_LVL_3)
+    {
+       fn_userlog(c_ServiceName,"LTP is        |%lf|",d_ltp);
+       fn_userlog(c_ServiceName,"Closing Price |%lf|",d_clsng_prc);
+       fn_userlog(c_ServiceName,"d_expsr_mrgn  |%lf|",d_expsr_mrgn);
+       fn_userlog(c_ServiceName,"d_min_expsr_mrgn |%lf|",d_min_expsr_mrgn);
+       fn_userlog(c_ServiceName,"d_mltplr      |%lf|",d_mltplr);
+    }
+
+		l_max_opn_qty = st_cntrct_pstn_md_rc.l_opnpstn_qty  +  fn_maxl(st_cntrct_pstn_md_rc.l_ibuy_qty,st_cntrct_pstn_md_rc.l_exbuy_qty) ;
+      l_min_opn_qty = st_cntrct_pstn_md_rc.l_opnpstn_qty  +  fn_maxl(abs(st_cntrct_pstn_md_rc.l_isell_qty),abs(st_cntrct_pstn_md_rc.l_exsell_qty)) * -1  ;
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"SPAN open QTY 			:%ld:",st_cntrct_pstn_md_rc.l_opnpstn_qty);
+      fn_userlog(c_ServiceName,"SPAN BUY QTY 				:%ld:",st_cntrct_pstn_md_rc.l_ibuy_qty);
+      fn_userlog(c_ServiceName,"SPAN SELL QTY 			:%ld:",st_cntrct_pstn_md_rc.l_isell_qty);
+      fn_userlog(c_ServiceName,"SPAN l_min_opn_qty  :%ld:",l_min_opn_qty);
+    }
+
+    d_ltp = d_ltp / 100;
+
+    EXEC SQL
+      SELECT  SEM_MAP_VL
+      INTO    :c_stock_cd
+      FROM    SEM_STCK_MAP
+      WHERE   SEM_STCK_CD = :st_cntrct_pstn_md_rc.c_undrlyng
+      AND     SEM_ENTTY   = 3;
+
+
+    if ( SQLCODE  !=  0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31185", SQLMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;
+    }
+
+    SETNULL(c_stock_cd);
+
+    EXEC SQL
+      SELECT to_char(to_date(:st_cntrct_pstn_md_rc.c_expry_dt,'DD-Mon-YYYY'),'dd-Mon-YY')
+      INTO  :c_expry_dt
+      FROM  DUAL;
+
+    if ( SQLCODE  !=  0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31190", SQLMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;
+    }
+
+    d_strike_prc  = (double) st_cntrct_pstn_md_rc.l_strike_prc / 100.00  ;
+    sprintf(c_strk_prc,"%lf",d_strike_prc);
+
+    fn_spn_rtrim(c_strk_prc,'0');
+    fn_spn_rtrim(c_strk_prc,'.');
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"SPAN c_expry_dt Is :%s:",c_expry_dt);
+    }
+
+    if( i_cntrct_cnt  ==  0 )
+    {
+      if(st_cntrct_pstn_md_rc.c_prd_typ ==  'F')
+      {
+        sprintf(c_inp_strng11,"%s^%s~%c:%s^%ld^%2.2lf",st_cntrct_pstn_md_rc.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,l_max_opn_qty,d_ltp);
+
+        strcat(c_inp_strng1,c_inp_strng11);
+
+        sprintf(c_inp_strng22,"%s^%s~%c:%s^%ld^%2.2lf",st_cntrct_pstn_md_rc.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,l_min_opn_qty,d_ltp);
+
+        strcat(c_inp_strng2,c_inp_strng22);
+
+      }
+      else if ( st_cntrct_pstn_md_rc.c_prd_typ  == 'O' )
+      {
+
+        sprintf(c_inp_strng11,"%s^%s~%c:%s:%c%c:%s^%ld^%lf",st_cntrct_pstn_md_rc.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,st_cntrct_pstn_md_rc.c_opt_typ,st_cntrct_pstn_md_rc.c_exer_typ,c_strk_prc,l_max_opn_qty,d_ltp);
+
+        strcat(c_inp_strng1,c_inp_strng11);
+
+        sprintf(c_inp_strng22,"%s^%s~%c:%s:%c%c:%s^%ld^%lf",st_cntrct_pstn_md_rc.c_cln_mtch_accnt,c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,st_cntrct_pstn_md_rc.c_opt_typ,st_cntrct_pstn_md_rc.c_exer_typ,c_strk_prc,l_min_opn_qty,d_ltp);
+
+        strcat(c_inp_strng2,c_inp_strng22);
+
+      }
+    }
+    else
+		{
+      if(st_cntrct_pstn_md_rc.c_prd_typ ==  'F')
+      {
+        sprintf(c_inp_strng11,"%s~%c:%s^%ld^%2.2lf",c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,l_max_opn_qty,d_ltp);
+
+        strcat(c_inp_strng1,c_inp_strng11);
+
+        sprintf(c_inp_strng22,"%s~%c:%s^%ld^%2.2lf",c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,l_min_opn_qty,d_ltp);
+
+        strcat(c_inp_strng2,c_inp_strng22);
+
+      }
+      else if ( st_cntrct_pstn_md_rc.c_prd_typ  == 'O' )
+      {
+
+        sprintf(c_inp_strng11,"%s~%c:%s:%c%c:%s^%ld^%lf",c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,st_cntrct_pstn_md_rc.c_opt_typ,st_cntrct_pstn_md_rc.c_exer_typ,c_strk_prc,l_max_opn_qty,d_ltp);
+
+        strcat(c_inp_strng1,c_inp_strng11);
+
+        sprintf(c_inp_strng22,"%s~%c:%s:%c%c:%s^%ld^%lf",c_stock_cd.arr,st_cntrct_pstn_md_rc.c_prd_typ,c_expry_dt,st_cntrct_pstn_md_rc.c_opt_typ,st_cntrct_pstn_md_rc.c_exer_typ,c_strk_prc,l_min_opn_qty,d_ltp);
+
+        strcat(c_inp_strng2,c_inp_strng22);
+
+      }
+    }
+
+		if(DEBUG_MSG_LVL_0)
+    {
+       fn_userlog(c_ServiceName,"SPAN - d_undrlyng_pl Is :%lf:",d_undrlyng_pl);
+    }
+
+    d_expsr     = d_expsr_mrgn  + d_expsr ;
+    d_min_expsr = d_min_expsr_mrgn  + d_min_expsr ;
+
+  }/*** End of position not available check ***/
+
+	l_length1 = strlen(c_inp_strng1);
+
+  if( c_inp_strng1[l_length1  - 1 ] == ',')
+  {
+    c_inp_strng1[l_length1 -1]  ='\0';
+  }
+
+  l_length2 = strlen(c_inp_strng2);
+
+  if( c_inp_strng2[l_length2  - 1 ] == ',')
+  {
+    c_inp_strng2[l_length2 -1]  ='\0';
+  }
+
+  if ( st_cntrct_pstn_md_rc.l_opnpstn_qty > 0 )
+  {
+    st_cntrct_pstn_md_rc.c_opnpstn_flw = BUY;
+  }
+  else if ( st_cntrct_pstn_md_rc.l_opnpstn_qty < 0 )
+  {
+    st_cntrct_pstn_md_rc.c_opnpstn_flw = SELL;
+  }
+  else
+  {
+    st_cntrct_pstn_md_rc.c_opnpstn_flw = NEUTRAL;
+  }
+
+	if( c_pos_avl == 'N')
+  {
+
+		/*** Added in VER 2.3 Strats here : Fetching client UCC code ***/
+
+			MEMSET(c_ucc_cd);
+
+      EXEC SQL
+      SELECT  NVL(NVL(RTRIM(CLM_CP_CD),RTRIM( CLM_CLNT_CD )),CLM_MTCH_ACCNT )
+      INTO  :c_ucc_cd
+      FROM  CLM_CLNT_MSTR
+      WHERE CLM_MTCH_ACCNT = :st_cntrct_pstn_md_rc.c_cln_mtch_accnt;
+
+      if ( SQLCODE  !=  0 )
+      {
+        tpfree((char *)ptr_fml_Ibuf);
+        fn_userlog(c_ServiceName,"VER 2.3 -- fn_call_actn_create_fut :  Error While Fetching UCC code for :%s:.", st_cntrct_pstn_md_rc.c_cln_mtch_accnt);
+        fn_errlog(c_ServiceName, "S31195", SQLMSG, ptr_st_err_msg->c_err_msg );
+        return FAILURE;
+      }
+
+      rtrim(c_ucc_cd);
+
+      if(DEBUG_MSG_LVL_3)
+        fn_userlog(c_ServiceName,"VER 2.3 -- fn_call_actn_create_fut : MAtch ID :%s: have ucc code :%s:", st_cntrct_pstn_md_rc.c_cln_mtch_accnt, c_ucc_cd);
+
+      /*** VER 2.3 ends here ***/
+
+    EXEC SQL
+      INSERT INTO FCP_FO_SPN_CNTRCT_PSTN
+      (
+        FCP_CLM_MTCH_ACCNT,
+        FCP_XCHNG_CD,
+        FCP_PRDCT_TYP,
+        FCP_INDSTK,
+        FCP_UNDRLYNG,
+        FCP_EXPRY_DT,
+        FCP_EXER_TYP,
+        FCP_STRK_PRC,
+        FCP_OPT_TYP,
+        FCP_IBUY_QTY,
+        FCP_IBUY_ORD_VAL,
+        FCP_ISELL_QTY,
+        FCP_ISELL_ORD_VAL,
+        FCP_EXBUY_QTY,
+        FCP_EXBUY_ORD_VAL,
+        FCP_EXSELL_QTY,
+        FCP_EXSELL_ORD_VAL,
+        FCP_BUY_EXCTD_QTY,
+        FCP_SELL_EXCTD_QTY,
+        FCP_OPNPSTN_FLW,
+        FCP_OPNPSTN_QTY,
+        FCP_OPNPSTN_VAL,
+        FCP_MTM_OPN_VAL,
+        FCP_OPT_PREMIUM,
+				FCP_UCC_CD			/*** Added in VER 2.3 ***/
+      )
+      VALUES
+      (
+				:st_cntrct_pstn_md_rc.c_cln_mtch_accnt,
+        :st_cntrct_pstn_md_rc.c_xchng_cd,
+        :st_cntrct_pstn_md_rc.c_prd_typ,
+        :st_cntrct_pstn_md_rc.c_ctgry_indstk,
+        :st_cntrct_pstn_md_rc.c_undrlyng,
+        to_date(:st_cntrct_pstn_md_rc.c_expry_dt,'DD-Mon-YYYY'),
+        :st_cntrct_pstn_md_rc.c_exer_typ,
+        :st_cntrct_pstn_md_rc.l_strike_prc,
+        :st_cntrct_pstn_md_rc.c_opt_typ,
+        :st_cntrct_pstn_md_rc.l_ibuy_qty,
+        :st_cntrct_pstn_md_rc.d_ibuy_ord_val,
+        :st_cntrct_pstn_md_rc.l_isell_qty,
+        :st_cntrct_pstn_md_rc.d_isell_ord_val,
+        :st_cntrct_pstn_md_rc.l_exbuy_qty,
+        :st_cntrct_pstn_md_rc.d_exbuy_ord_val,
+        :st_cntrct_pstn_md_rc.l_exsell_qty,
+        :st_cntrct_pstn_md_rc.d_exsell_ord_val,
+        :st_cntrct_pstn_md_rc.l_buy_exctd_qty,
+        :st_cntrct_pstn_md_rc.l_sell_exctd_qty,
+        :st_cntrct_pstn_md_rc.c_opnpstn_flw,
+        :st_cntrct_pstn_md_rc.l_opnpstn_qty,
+        :st_cntrct_pstn_md_rc.d_opnpstn_val,
+        :st_cntrct_pstn_md_rc.d_mtm_opn_val,
+       	0,
+				:c_ucc_cd					/*** Added in VER 2.3 ***/
+      );
+
+    if ( SQLCODE != 0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31200", SQLMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;
+    }
+  }
+  else
+  {
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"SPAN - Before Update FCP"); 
+    }
+		
+		EXEC SQL
+      UPDATE  FCP_FO_SPN_CNTRCT_PSTN
+      SET     FCP_IBUY_QTY       = :st_cntrct_pstn_md_rc.l_ibuy_qty,
+              FCP_IBUY_ORD_VAL   = :st_cntrct_pstn_md_rc.d_ibuy_ord_val,
+              FCP_ISELL_QTY      = :st_cntrct_pstn_md_rc.l_isell_qty,
+              FCP_ISELL_ORD_VAL  = :st_cntrct_pstn_md_rc.d_isell_ord_val,
+              FCP_EXBUY_QTY      = :st_cntrct_pstn_md_rc.l_exbuy_qty,
+              FCP_EXBUY_ORD_VAL  = :st_cntrct_pstn_md_rc.d_exbuy_ord_val,
+              FCP_EXSELL_QTY     = :st_cntrct_pstn_md_rc.l_exsell_qty,
+              FCP_EXSELL_ORD_VAL = :st_cntrct_pstn_md_rc.d_exsell_ord_val,
+              FCP_BUY_EXCTD_QTY  = :st_cntrct_pstn_md_rc.l_buy_exctd_qty,
+              FCP_SELL_EXCTD_QTY = :st_cntrct_pstn_md_rc.l_sell_exctd_qty,
+              FCP_OPNPSTN_FLW    = :st_cntrct_pstn_md_rc.c_opnpstn_flw,
+              FCP_OPNPSTN_QTY    = :st_cntrct_pstn_md_rc.l_opnpstn_qty,
+              FCP_OPNPSTN_VAL    = :st_cntrct_pstn_md_rc.d_opnpstn_val,
+              FCP_MTM_OPN_VAL    = :st_cntrct_pstn_md_rc.d_mtm_opn_val
+      WHERE   FCP_CLM_MTCH_ACCNT = :ptr_st_pstn_actn_fut->c_cln_mtch_accnt
+      AND     FCP_XCHNG_CD       = :ptr_st_pstn_actn_fut->c_xchng_cd
+      AND     FCP_PRDCT_TYP      = :ptr_st_pstn_actn_fut->c_prd_typ
+      AND     FCP_UNDRLYNG       = :ptr_st_pstn_actn_fut->c_undrlyng
+      AND     FCP_OPT_TYP        = :ptr_st_pstn_actn_fut->c_opt_typ
+      AND     FCP_STRK_PRC       = :ptr_st_pstn_actn_fut->l_strike_prc
+      AND     FCP_EXPRY_DT       = to_date(:ptr_st_pstn_actn_fut->c_expry_dt,'DD-Mon-YYYY')
+      AND     FCP_EXER_TYP       = :ptr_st_pstn_actn_fut->c_exrc_typ;
+
+		if ( SQLCODE  !=  0 )
+  	{
+    	tpfree((char *)ptr_fml_Ibuf);
+			fn_errlog(c_ServiceName, "S31205", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	return FAILURE;
+  	}
+	}
+
+	if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog( c_ServiceName, "i_cntrct_cnt = :%d:",i_cntrct_cnt);
+  }
+
+	EXEC SQL
+    SELECT pcm_crnt_pipe_id
+    INTO   :c_pipe_id
+    FROM   pcm_pipe_clm_map
+    WHERE  pcm_xchng_cd        = :ptr_st_pstn_actn_fut->c_xchng_cd
+    AND   pcm_clm_mtch_accnt   = :ptr_st_pstn_actn_fut->c_cln_mtch_accnt;
+
+  if (( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ))
+  {
+    tpfree((char *)ptr_fml_Ibuf);
+		fn_errlog(c_ServiceName, "S31210", SQLMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+  }
+
+
+	if (i_cntrct_cnt > 10)
+  {
+    if ( Fadd32 (ptr_fml_Ibuf,FFO_PIPE_ID,(char *)c_pipe_id,0)  ==  -1 )
+    {
+    	tpfree((char *)ptr_fml_Ibuf);
+			fn_errlog(c_ServiceName, "S31215", TPMSG, ptr_st_err_msg->c_err_msg );
+    	return FAILURE;
+    }
+
+    fn_cpy_ddr ( ptr_st_pstn_actn_fut->c_rout_crt );
+
+    MEMSET(c_inp_strng);
+    strcpy(c_inp_strng,c_inp_strng1);
+    strcat(c_inp_strng,"\n");
+
+    if(DEBUG_MSG_LVL_5)
+    {
+      fn_userlog(c_ServiceName,"c_inp_strng 1 = :%s:",c_inp_strng);
+    }
+
+    if ( Fadd32 (ptr_fml_Ibuf,FFO_REMARKS,(char *)c_inp_strng,0)  ==  -1 )
+    {
+    	tpfree((char *)ptr_fml_Ibuf);
+			fn_errlog(c_ServiceName, "S31220", TPMSG, ptr_st_err_msg->c_err_msg );
+    	return FAILURE;
+    }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Before Call To Service For Margin Calculation.");
+    }
+
+    i_returncode  = tpcall("SFO_SPAN_MRGN",(char*)ptr_fml_Ibuf,0,(char **)&ptr_fml_Obuf,&li_len_tobuf,0);
+
+    if( i_returncode != 0 )
+    {
+      if(Fget32(ptr_fml_Obuf,FFO_ERR_MSG,0,(char *)c_err_msg,0) == -1)
+      {
+    		tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31225", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+
+      fn_userlog(c_ServiceName, "ERROR message is |%s|",c_err_msg);
+			
+			if(strcmp(c_err_msg,"Packet Length Exceeds Max Length") == 0)
+      {
+    		tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31230", LIBMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+      else
+      {
+    		tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31235", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+    }
+
+    if ( Fget32 (ptr_fml_Obuf,FFO_ABT_TRG_DATA,0,(char *)c_op_strng1,0)  ==  -1 )
+    {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31240", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"Output String 1 Is :%s:",c_op_strng1);
+    }
+
+    /*** Ver 2.2  Starts Here ***/
+    i_ret_val = fn_get_bodspan_mrgn(ptr_fml_Ibuf,
+                                    i_cntrct_cnt,
+                                    &d_spn_bmrgn1,
+                                    &d_bnov1,
+                                    &d_total_bmrgn1,
+                                    c_ServiceName,
+                                    ptr_st_err_msg->c_err_msg
+                                   );
+    if( i_ret_val != 0 )
+    {
+     tpfree((char *)ptr_fml_Ibuf);
+     fn_errlog(c_ServiceName, "S31245", LIBMSG, ptr_st_err_msg->c_err_msg );
+     return FAILURE; 
+    }
+
+    if(DEBUG_MSG_LVL_4)
+    {
+      fn_userlog(c_ServiceName,"d_spn_bmrgn1 :%lf: d_bnov1:%lf: d_total_bmrgn1:%lf:",d_spn_bmrgn1,d_bnov1,d_total_bmrgn1);
+    }
+    /*** Ver 2.2  Ends here ***/
+
+
+    MEMSET(c_inp_strng);
+
+   	if(strcmp(sql_xchng_cd,"NFO") == 0)
+   	{
+     	strcpy(c_inp_strng,"1^NSE^");
+   	}
+   	else if(strcmp(sql_xchng_cd,"BFO") == 0)
+   	{
+     	strcpy(c_inp_strng,"1^BSE^");
+   	}
+    if(DEBUG_MSG_LVL_5)
+    {
+      fn_userlog(c_ServiceName,"Initial c_inp_strng2 = :%s:",c_inp_strng2);
+    }
+
+    fn_spn_ltrim(c_inp_strng2,'|');
+    /*sprintf(c_inp_strng,"1^%s",c_inp_strng2); ***comment pst_live***/
+    strcat(c_inp_strng,c_inp_strng2);		/** pst_live**/
+    strcat(c_inp_strng,"\n");
+		
+		if(DEBUG_MSG_LVL_5)
+    {
+      fn_userlog(c_ServiceName,"c_inp_strng 2 = :%s:",c_inp_strng);
+    }
+
+    if ( Fchg32 (ptr_fml_Ibuf,FFO_REMARKS,0,(char *)c_inp_strng,0)  ==  -1 )
+    {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31250", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Before Call To Service For Margin Calculation.");
+    }
+
+    i_returncode  = tpcall("SFO_SPAN_MRGN",(char*)ptr_fml_Ibuf,0,(char **)&ptr_fml_Obuf,&li_len_tobuf,0);
+
+    if( i_returncode != 0 )
+    {
+      if(Fget32(ptr_fml_Obuf,FFO_ERR_MSG,0,(char *)c_err_msg,0) == -1)
+      {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31255", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+
+      fn_userlog(c_ServiceName, "ERROR message is |%s|",c_err_msg);
+
+      if(strcmp(c_err_msg,"Packet Length Exceeds Max Length") == 0)
+      {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31260", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+      else
+      {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31265", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+      }
+    }
+		
+		if ( Fget32 (ptr_fml_Obuf,FFO_ABT_TRG_DATA,0,(char *)c_op_strng2,0)  ==  -1 )
+    {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31270", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+
+    fn_spn_ltrim(c_op_strng2,'1');
+    fn_spn_ltrim(c_op_strng2,'^');
+
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"Output String 2 Is :%s:",c_op_strng2);
+    }
+
+    /*** Ver 2.2  Starts Here ***/
+    i_ret_val = fn_get_bodspan_mrgn(ptr_fml_Ibuf,
+                                    i_cntrct_cnt,
+                                    &d_spn_bmrgn2,
+                                    &d_bnov2,
+                                    &d_total_bmrgn2,
+                                    c_ServiceName,
+                                    ptr_st_err_msg->c_err_msg 
+                                   );
+    if( i_ret_val != 0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+        fn_errlog(c_ServiceName, "S31275", TPMSG, ptr_st_err_msg->c_err_msg );
+        return FAILURE; 
+    }
+    if(DEBUG_MSG_LVL_4)
+    {
+      fn_userlog(c_ServiceName,"d_spn_bmrgn2 :%lf: d_bnov2:%lf: d_total_bmrgn2:%lf:",d_spn_bmrgn2,d_bnov2,d_total_bmrgn2);
+    }
+    /*** Ver 2.2 Ends here ***/
+
+  }
+	else
+  {
+    strcpy(c_inp_strng,c_inp_strng1);
+    strcat(c_inp_strng,c_inp_strng2);
+    strcat(c_inp_strng,"\n");
+
+    if ( Fadd32 (ptr_fml_Ibuf,FFO_PIPE_ID,(char *)c_pipe_id,0)  ==  -1 )
+    {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31280", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+
+    if ( Fadd32 (ptr_fml_Ibuf,FFO_REMARKS,(char *)c_inp_strng,0)  ==  -1 )
+    {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31285", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+
+    if(DEBUG_MSG_LVL_5)
+    {
+      fn_userlog(c_ServiceName,"Before Call To Service For Margin Calculation.");
+      fn_userlog(c_ServiceName,"Before Call To Service String is |%s|.",c_inp_strng);
+    }
+
+    fn_cpy_ddr ( ptr_st_pstn_actn_fut->c_rout_crt );
+
+    i_returncode  = tpcall("SFO_SPAN_MRGN",(char*)ptr_fml_Ibuf,0,(char **)&ptr_fml_Obuf,&li_len_tobuf,0);
+
+    if( i_returncode != 0 )
+    {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31290", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+
+    if ( Fget32 (ptr_fml_Obuf,FFO_ABT_TRG_DATA,0,(char *)c_op_strng,0)  ==  -1 )
+    {
+        tpfree((char *)ptr_fml_Ibuf);
+				fn_errlog(c_ServiceName, "S31295", TPMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+    }
+		
+		if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"Output String Is :%s:",c_op_strng);
+    }
+
+    strcpy(c_op_strng1,strtok(c_op_strng,"|"));
+    strcpy(c_op_strng2,strtok(null_ptr,"|"));
+
+    /*** Ver 2.2  Starts Here ***/
+    i_ret_val = fn_get_bodspan_mrgn(ptr_fml_Ibuf,
+                                    i_cntrct_cnt,
+                                    &d_spn_bmrgn1,
+                                    &d_bnov1,
+                                    &d_total_bmrgn1,
+                                    c_ServiceName,
+                                    c_err_msg
+                                   );
+    if( i_ret_val != 0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31300", TPMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE; 
+    }
+
+    if(DEBUG_MSG_LVL_4)
+    { 
+      fn_userlog(c_ServiceName,"d_spn_bmrgn1 :%lf: d_bnov1:%lf: d_total_bmrgn1:%lf:",d_spn_bmrgn1,d_bnov1,d_total_bmrgn1);
+    }
+    /*** Ver 2.2  Ends here ***/
+
+  }
+	
+	strcpy(c_mrgn_indctr,strtok(c_op_strng1,"^"));
+  strcpy(c_seq_num1,strtok(null_ptr,"^"));
+  strcpy(c_xchng_cd_spn,strtok(null_ptr,"^"));       
+  strcpy(c_mtch_accnt1,strtok(null_ptr,"^"));
+  strcpy(c_spn_mrgn1,strtok(null_ptr,"^"));
+  strcpy(c_nov1,strtok(null_ptr,"^"));
+  strcpy(c_total_mrgn1,strtok(null_ptr,"^"));
+
+	if (i_cntrct_cnt > 10)   /*** Condition Added in ver 1.1 ***/
+  {
+  strcpy(c_xchng_cd_spn1,strtok(c_op_strng2,"^")); /*** added pst_live ***/      
+  /*strcpy(c_seq_num2,strtok(c_op_strng2,"^")); ****commentted pst_live **/
+  strcpy(c_seq_num2,strtok(null_ptr,"^"));
+	}
+	else
+	{
+		strcpy(c_seq_num2,strtok(c_op_strng2,"^"));   /*** Added in ver 1.1 ***/
+	}
+  strcpy(c_mtch_accnt2,strtok(null_ptr,"^"));
+  strcpy(c_spn_mrgn2,strtok(null_ptr,"^"));
+  strcpy(c_nov2,strtok(null_ptr,"^"));
+  strcpy(c_total_mrgn2,strtok(null_ptr,"^"));
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"SPAN c_mtch_accnt1 Is :%s:",c_mtch_accnt1);
+    fn_userlog(c_ServiceName,"SPAN c_xchng_cd_spn1 Is :%s:",c_xchng_cd_spn1);
+    fn_userlog(c_ServiceName,"SPAN c_seq_num2 Is :%s:",c_seq_num2);
+    fn_userlog(c_ServiceName,"SPAN c_mtch_accnt2 Is :%s:",c_mtch_accnt2);
+    fn_userlog(c_ServiceName,"SPAN c_spn_mrgn2 Is :%s:",c_spn_mrgn2);
+    fn_userlog(c_ServiceName,"SPAN c_nov2 Is :%s:",c_nov2);
+    fn_userlog(c_ServiceName,"SPAN c_total_mrgn2 Is :%s:",c_total_mrgn2);
+  }
+
+  if ( c_mtch_accnt1[0] == '1' || c_mtch_accnt1[0] == '2' || c_mtch_accnt1[0] == '3' )
+  {
+    tpfree((char *)ptr_fml_Ibuf);
+		fn_errlog(c_ServiceName, "S31305", TPMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"c_total_mrgn1 Is :%s:",c_total_mrgn1);
+    fn_userlog(c_ServiceName,"c_total_mrgn2 Is :%s:",c_total_mrgn2);
+  }
+
+  /*** Ver 2.2  Starts here ***/
+  d_spn_bmrgn = fn_maxd(d_spn_bmrgn1,d_spn_bmrgn2) * 100;
+  d_bnov      = fn_maxd(d_bnov1,d_bnov2) * 100;
+  d_total_bmrgn = fn_maxd(d_total_bmrgn1,d_total_bmrgn2) * 100;
+
+  if(DEBUG_MSG_LVL_4)
+  {
+    fn_userlog(c_ServiceName,"d_spn_bmrgn :%lf: d_bnov :%lf: d_total_bmrgn:%lf:",d_spn_bmrgn,d_bnov,d_total_bmrgn);
+  }
+  /*** Ver 11.e Ends here ***/
+
+  d_spn_mrgn1   = atof(c_spn_mrgn1);
+  d_spn_mrgn2   = atof(c_spn_mrgn2);
+  d_nov1        = atof(c_nov1);
+  d_nov2        = atof(c_nov2);
+  d_total_mrgn1 = atof(c_total_mrgn1);
+  d_total_mrgn2 = atof(c_total_mrgn2);
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"d_total_mrgn1 Is :%lf:",d_total_mrgn1);
+    fn_userlog(c_ServiceName,"d_total_mrgn2 Is :%lf:",d_total_mrgn2);
+  }
+
+  st_undfut_pos_to_be.d_uspan_nenov_mrgn  = fn_maxd(d_spn_mrgn1,d_spn_mrgn2) * 100;
+  st_undfut_pos_to_be.d_net_optn_val      = fn_maxd(d_nov1,d_nov2) * 100;
+  st_undfut_pos_to_be.d_uspan_wenov_mrgn  = fn_maxd(d_total_mrgn1,d_total_mrgn2) * 100 ;
+
+  /*** Ver 2.2  Starts Here ***/
+  st_undfut_pos_to_be.d_uspan_nenov_mrgn  = fn_maxd(st_undfut_pos_to_be.d_uspan_nenov_mrgn,d_spn_bmrgn);
+  st_undfut_pos_to_be.d_net_optn_val = fn_maxd(st_undfut_pos_to_be.d_net_optn_val,d_bnov);
+  st_undfut_pos_to_be.d_uspan_wenov_mrgn = fn_maxd(st_undfut_pos_to_be.d_uspan_wenov_mrgn,d_total_bmrgn);
+  /*** Ver 2.2  Ends Here ***/
+
+  d_spn_mrgn    = st_undfut_pos_to_be.d_uspan_nenov_mrgn    ;     /***  SPAN  MRGN  ***/
+  d_nov         = st_undfut_pos_to_be.d_net_optn_val        ;     /***  NOV ***/
+  d_total_mrgn  = st_undfut_pos_to_be.d_uspan_wenov_mrgn    ;     /***  SPAN +/- NOV  ***/
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"SPAN - SPAN MARGIN Is :%lf:",d_spn_mrgn);
+    fn_userlog(c_ServiceName,"SPAN - SPAN MARGIN Is :%lf:",st_undfut_pos_to_be.d_uspan_wenov_mrgn);
+  }
+
+  i_returncode  = fn_cal_mrgn ( c_ServiceName,
+                                d_total_mrgn,
+                                d_mltplr,
+                                d_expsr,
+                                d_min_expsr,
+                                &d_min_mrgn,
+                                &d_intl_mrgn,
+                                c_err_msg
+                              );
+
+  if ( i_returncode !=  0 )
+  {
+   	tpfree((char *)ptr_fml_Ibuf);
+		fn_errlog(c_ServiceName, "S31310", LIBMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+  }
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"SPAN  - SPAN MARGIN IS :%lf:",d_spn_mrgn);
+    fn_userlog(c_ServiceName,"SPAN  - NOV IS :%lf:",d_nov);
+    fn_userlog(c_ServiceName,"SPAN  - Total Margin  IS :%lf:",d_total_mrgn);
+    fn_userlog(c_ServiceName,"SPAN  - Exposure  IS :%lf:",d_expsr);
+    fn_userlog(c_ServiceName,"SPAN  - Min. Margin IS :%lf:",d_min_mrgn);
+    fn_userlog(c_ServiceName,"SPAN  - Initial Margin IS :%lf:",d_intl_mrgn);
+  }
+
+  st_undfut_pos_to_be.d_multpr            = d_mltplr      ;
+  st_undfut_pos_to_be.d_eba_expr_mrgn     = (long long)d_expsr    ;
+  st_undfut_pos_to_be.d_span_wemult_mrgn  = (long long)d_total_mrgn * d_mltplr ;
+  st_undfut_pos_to_be.d_min_mrgn          = d_min_mrgn ;
+  st_undfut_pos_to_be.d_reqd_initial_mrgn = (long long)d_intl_mrgn ;
+  st_undfut_pos_to_be.d_ntnl_pl           = d_undrlyng_pl ;
+
+	if (st_undpstn_crrnt.d_initial_mrgn != 0)
+  {
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog( c_ServiceName, "st_undpstn_crrnt.d_initial_mrgn Is :%lf:",st_undpstn_crrnt.d_initial_mrgn);
+    }
+
+		d_rlsd_mrgn = st_undpstn_crrnt.d_initial_mrgn;
+
+    c_dr_without_lmt_flg = DEBIT_WITHOUT_LIMIT ;
+    strcpy ( c_narration_id , REL_TRDMRGN_ON_CONV_FUTPLS_TO_FUT );
+
+    i_returncode = fn_upd_spnlimits ( c_ServiceName,
+                                      ptr_st_pstn_actn_fut,
+                                      ptr_st_err_msg_spn,
+                                      c_narration_id,
+                                      c_dr_without_lmt_flg,
+                                      st_undpstn_crrnt.d_initial_mrgn,
+                                      &d_balance_amt
+                                    );
+    if ( i_returncode != 0 )
+    {
+ 			switch ( i_returncode )
+      {
+        case  INSUFFICIENT_LIMITS :
+
+    					tpfree((char *)ptr_fml_Ibuf);
+							fn_userlog( c_ServiceName, "Inside INSUFFICIENT_LIMITS |%s|",ptr_st_err_msg_spn->c_err_msg);
+    					return INSUFFICIENT_LIMITS;
+
+            default:
+							
+              tpfree((char *)ptr_fml_Ibuf);
+							fn_errlog(c_ServiceName, "S31315", LIBMSG, ptr_st_err_msg->c_err_msg );
+    					return FAILURE;
+          }
+    }
+   }
+
+	if ( st_undfut_pos_to_be.d_span_wemult_mrgn != 0)
+  {
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog( c_ServiceName, "st_undfut_pos_to_be.d_span_wemult_mrgn Is :%lf:",st_undfut_pos_to_be.d_span_wemult_mrgn);
+    }
+
+		d_rlsd_mrgn = d_rlsd_mrgn - st_undfut_pos_to_be.d_span_wemult_mrgn;
+
+		if( ( strcmp ( ptr_st_pstn_actn_fut->c_user_id,"system" ) != 0 ) && ( ptr_st_pstn_actn_fut->l_session_id != 0 ) )
+		{
+    	c_dr_without_lmt_flg = DEBIT_WHEN_LIMIT;
+		}
+		else 
+		{
+			c_dr_without_lmt_flg = DEBIT_WITHOUT_LIMIT;
+		}
+
+    strcpy ( c_narration_id, BLK_SPAN_MRGN_ON_CONV_FUTPLS_TO_FUT );
+
+    i_returncode = fn_upd_spnlimits ( c_ServiceName,
+                                      ptr_st_pstn_actn_fut,
+                                      ptr_st_err_msg_spn,
+                                      c_narration_id,
+                                      c_dr_without_lmt_flg,
+                                      st_undfut_pos_to_be.d_span_wemult_mrgn * (-1),
+                                      &d_balance_amt
+                                    );
+    if ( i_returncode != 0 )
+    {
+			switch ( i_returncode )
+      {
+        case  INSUFFICIENT_LIMITS :
+
+              tpfree((char *)ptr_fml_Ibuf);
+							fn_userlog( c_ServiceName, "Inside INSUFFICIENT_LIMITS from function |%s|",ptr_st_err_msg_spn->c_err_msg);
+    					return INSUFFICIENT_LIMITS; 
+       default:
+              tpfree((char *)ptr_fml_Ibuf);
+							fn_errlog(c_ServiceName, "S31320", LIBMSG, ptr_st_err_msg->c_err_msg );
+    					return FAILURE;
+      }	
+    }
+
+   }
+
+  if(st_undfut_pos_to_be.d_eba_expr_mrgn != 0)
+  {
+
+		 d_rlsd_mrgn = d_rlsd_mrgn - st_undfut_pos_to_be.d_eba_expr_mrgn;
+
+     strcpy ( c_narration_id, BLK_EXPR_MRGN_ON_CONV_FUTPLS_TO_FUT  );
+
+		 if( ( strcmp ( ptr_st_pstn_actn_fut->c_user_id,"system" ) != 0 ) && ( ptr_st_pstn_actn_fut->l_session_id != 0 ) )
+		 {	
+     	 c_dr_without_lmt_flg = DEBIT_WHEN_LIMIT;
+		 }	
+		 else 
+		 {
+			 c_dr_without_lmt_flg = DEBIT_WITHOUT_LIMIT;
+		 }	
+     if(DEBUG_MSG_LVL_0)
+     {
+      fn_userlog( c_ServiceName ,"Block Margin before fn_upd_spnlimits is |%lf|",st_undfut_pos_to_be.d_eba_expr_mrgn);
+     }
+
+     i_returncode = fn_upd_spnlimits ( c_ServiceName,
+                                      ptr_st_pstn_actn_fut,
+                                      ptr_st_err_msg_spn,
+                                      c_narration_id,
+                                      c_dr_without_lmt_flg,
+                                      st_undfut_pos_to_be.d_eba_expr_mrgn * (-1),
+                                      &d_balance_amt
+                                    );
+    if ( i_returncode != 0 )
+    {
+			switch ( i_returncode )
+      {
+        case  INSUFFICIENT_LIMITS :
+              tpfree((char *)ptr_fml_Ibuf);
+							fn_userlog( c_ServiceName, "Inside INSUFFICIENT_LIMITS |%s|",ptr_st_err_msg_spn->c_err_msg);
+    					return INSUFFICIENT_LIMITS;
+
+       default:
+					
+              tpfree((char *)ptr_fml_Ibuf);
+							fn_errlog(c_ServiceName, "S31325", LIBMSG, ptr_st_err_msg->c_err_msg );
+    					return FAILURE;
+      }
+    }
+  }
+	
+	st_undfut_pos_to_be.d_initial_mrgn = st_undfut_pos_to_be.d_span_wemult_mrgn + st_undfut_pos_to_be.d_eba_expr_mrgn;
+
+	EXEC SQL
+      SELECT  NVL(FUS_BLCKD_PL,0)
+      INTO    :d_oblckd_amnt
+      FROM    FUS_FO_UNDRLYNG_SPN_PSTN
+      WHERE   FUS_CLM_MTCH_ACCNT  = :sql_cln_mtch_accnt
+      AND     FUS_UNDRLYNG        = :sql_undrlyng
+      AND     FUS_XCHNG_CD        = :ptr_st_pstn_actn_fut->c_xchng_cd;
+
+  if ( SQLCODE != 0 && SQLCODE  !=  NO_DATA_FOUND)
+  {
+    tpfree((char *)ptr_fml_Ibuf);
+		fn_errlog(c_ServiceName, "S31330", SQLMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+  }
+
+	/*** d_undrlyng_pl = d_oblckd_amnt + d_undrlyng_pl;  Commented in ver 1.3 ***/
+
+	/*** Added in ver 1.3 ***/
+
+	if( d_undrlyng_pl >= 0 )
+  {
+    d_diff_pl = d_oblckd_amnt ;
+  }
+  else
+  { 
+    d_diff_pl = d_oblckd_amnt + d_undrlyng_pl ;
+  }
+	
+	if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog(c_ServiceName,"SPAN  - d_undrlyng_pl Is :%lf:",d_undrlyng_pl);
+    fn_userlog(c_ServiceName,"SPAN  - d_oblckd_amnt Is :%lf:",d_oblckd_amnt);
+    fn_userlog(c_ServiceName,"SPAN  - d_diff_pl Is :%lf:",d_diff_pl);
+  }
+
+	/*** End of ver 1.3 ***/
+
+	/*** Commented in ver 1.3 ****
+  if ( d_undrlyng_pl < 0 )
+	******************************/
+
+	if ( d_diff_pl != 0 )             /*** Added in ver 1.3 ***/
+  {
+
+     d_rlsd_mrgn = d_rlsd_mrgn + d_undrlyng_pl;
+
+		 if( ( strcmp ( ptr_st_pstn_actn_fut->c_user_id,"system" ) != 0 ) && ( ptr_st_pstn_actn_fut->l_session_id != 0 ) )
+		 {
+     	 c_dr_without_lmt_flg = DEBIT_WHEN_LIMIT;
+		 }
+		 else 
+		 {
+			 c_dr_without_lmt_flg = DEBIT_WITHOUT_LIMIT;	
+		 }		
+     strcpy ( c_narration_id, BLK_NOTIONAL_LOSS_ON_CONV_FUTPLS_TO_FUT );
+
+     if(DEBUG_MSG_LVL_0)
+     {
+       fn_userlog( c_ServiceName ,"Profit Loss before fn_upd_spnlimits is |%lf|",d_undrlyng_pl);
+     }
+
+     i_returncode = fn_upd_spnlimits( c_ServiceName,
+                                      ptr_st_pstn_actn_fut,
+                                      ptr_st_err_msg_spn,
+                                      c_narration_id,
+                                      c_dr_without_lmt_flg,
+                                      /*** d_undrlyng_pl, *** Ver 1.3 ***/
+																			d_diff_pl,         /*** Ver 1.3 ***/
+                                      &d_balance_amt);
+
+     if ( i_returncode != 0 )
+     {
+			 switch ( i_returncode )
+       {
+        case  INSUFFICIENT_LIMITS :
+              tpfree((char *)ptr_fml_Ibuf);
+							fn_userlog( c_ServiceName, "Inside INSUFFICIENT_LIMITS |%s|",ptr_st_err_msg_spn->c_err_msg);
+    					return INSUFFICIENT_LIMITS;
+
+        default:
+
+              tpfree((char *)ptr_fml_Ibuf);
+							fn_errlog(c_ServiceName, "S31335", LIBMSG, ptr_st_err_msg->c_err_msg );
+    					return FAILURE;
+          }
+      }
+			
+			/*** st_undfut_pos_to_be.d_blckd_pl = st_undfut_pos_to_be.d_blckd_pl + d_undrlyng_pl * (-1);	*** Ver 1.3 ***/
+			st_undfut_pos_to_be.d_blckd_pl = d_oblckd_amnt - d_diff_pl ; /*** Ver 1.3 ***/
+   }
+
+	 /*** Added in ver 1.3 ********/	
+	
+	if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog (c_ServiceName,"Cover quantity is |%ld|",ptr_st_pstn_actn_fut->l_cover_qty);
+    fn_userlog (c_ServiceName,"MTM OPen val is   |%lf|",st_cntrct_pstn_crrnt.d_mtm_opn_val);
+    fn_userlog (c_ServiceName,"OPen val is   		 |%lf|",st_cntrct_pstn_crrnt.d_opnpstn_val);
+    fn_userlog (c_ServiceName,"open position quantity is |%ld|",st_cntrct_pstn_crrnt.l_opnpstn_qty);
+    fn_userlog (c_ServiceName,"Executed rate is |%ld|",ptr_st_pstn_actn_fut->l_exec_rt);
+    fn_userlog (c_ServiceName,"OPen qty old is   |%ld|",l_open_qty_old);
+    fn_userlog (c_ServiceName,"OPen val old is   |%lf|",d_open_val_old);
+  }
+	
+	if (ptr_st_pstn_actn_fut->l_cover_qty > 0 )
+	{
+
+		if (ptr_st_pstn_actn_fut->c_trnsctn_flw == BUY )
+    {
+      d_obl_pl =((d_open_val_old / l_open_qty_old ) - ptr_st_pstn_actn_fut->l_exec_rt) * ptr_st_pstn_actn_fut->l_cover_qty ;
+    }
+    else
+    {
+      d_obl_pl =(ptr_st_pstn_actn_fut->l_exec_rt - ( d_open_val_old / l_open_qty_old)) * ptr_st_pstn_actn_fut->l_cover_qty ;     }
+
+    if( DEBUG_MSG_LVL_3 )
+    {
+      fn_userlog (c_ServiceName,"Profit/Loss at contract level on conversion :%lf:", d_obl_pl );
+    }
+
+    if ( d_obl_pl != 0 )
+    {
+      sprintf ( ptr_st_pstn_actn_fut->c_ref_rmrks,"FUT-%s-%s", ptr_st_pstn_actn_fut->c_undrlyng, ptr_st_pstn_actn_fut->c_expry_dt);
+
+			/*****  NRI - TDS Starts under Ver 1.4 *****/
+			/**** if(strncmp(ptr_st_pstn_actn_fut->c_cln_mtch_accnt, "751", 3) == 0) Commented in Ver 1.9 *****/
+      /****** Added Ver 1.9 starts *******/
+      MEMSET (sql_iai_type);
+      EXEC SQL
+      SELECT  IAI_TYPE
+      INTO    :sql_iai_type
+      FROM    IAI_INFO_ACCOUNT_INFO
+      WHERE   IAI_MATCH_ACCOUNT_NO  = :ptr_st_pstn_actn_fut->c_cln_mtch_accnt ;
+
+      if ( SQLCODE != 0 )
+      {
+    		tpfree((char *)ptr_fml_Ibuf);
+    		fn_errlog(c_ServiceName, "S31340", SQLMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+			}
+    	SETNULL(sql_iai_type);
+			/****** Added Ver 1.9 Ends ********/
+			if(strcmp(sql_iai_type.arr,"NRO_NON_PINS") == 0)   /****** check Added in Ver 1.9 *******/
+			{
+					strcpy(c_narration_id,TDS_NRI);
+					strcpy(c_reason_cd,"Profit Loss on Cover Leg");
+
+					i_returncode = fn_spntds( c_ServiceName,
+																  ptr_st_pstn_actn_fut,
+																	ptr_st_err_msg_spn,
+																	c_narration_id,
+																	c_reason_cd,
+																	DEBIT_WITHOUT_LIMIT,
+																	d_obl_pl,
+																	&d_balance_amt);
+
+					if ( i_returncode != 0 )
+					{
+						tpfree((char *)ptr_fml_Ibuf);
+						fn_errlog(c_ServiceName, "S31345", SQLMSG, ptr_st_err_msg->c_err_msg );
+						return FAILURE;
+					}
+			}
+			/*****  NRI - TDS ends under Ver 1.4 *****/
+
+      i_returncode = fn_upd_spnlimits( c_ServiceName,
+                                    ptr_st_pstn_actn_fut,
+                                    ptr_st_err_msg_spn,
+                                    PROFIT_LOSS_ON_COVER_LEG,
+                                    DEBIT_WITHOUT_LIMIT,
+                                    d_obl_pl,
+                                    &d_balance_amt);
+      if ( i_returncode != 0 )
+      {
+        fn_userlog(c_ServiceName, "Error in fn_upd_limits PNL |%s|", ptr_st_err_msg_spn->c_err_msg );
+
+        switch ( i_returncode )
+        {
+          case INSUFFICIENT_LIMITS :
+							tpfree((char *)ptr_fml_Ibuf);
+             fn_errlog ( c_ServiceName, "B21007", DEFMSG, ptr_st_err_msg_spn->c_err_msg );
+             return INSUFFICIENT_LIMITS;
+            break;
+
+           default :
+							tpfree((char *)ptr_fml_Ibuf);
+              fn_errlog(c_ServiceName, "S31350", LIBMSG, ptr_st_err_msg_spn->c_err_msg );
+              return FAILURE;
+             break;
+        }
+      }
+    }
+  } /***** if-end of cover qty >  0 *******/
+
+	 /*** Added in ver 1.3 ********/	
+
+	 if ( st_undfut_pos_to_be.l_uopnpstn_qty > 0 )
+   {
+     st_undfut_pos_to_be.c_uopnpstn_flw = BUY;
+   }
+   else if ( st_undfut_pos_to_be.l_uopnpstn_qty < 0 )
+   {
+     st_undfut_pos_to_be.c_uopnpstn_flw = SELL;
+   }
+   else
+   {
+     st_undfut_pos_to_be.c_uopnpstn_flw = NEUTRAL;
+   }	
+	
+	 /**** if( c_pos_avl == 'N') ***/
+	 if( c_upos_avl == 'N')
+   {
+
+			/*** Added in VER 2.3 Strats here : Fetching client UCC code ***/
+       MEMSET(c_ucc_cd); 
+  		EXEC SQL
+  		SELECT  NVL(NVL(RTRIM(CLM_CP_CD),RTRIM( CLM_CLNT_CD )),CLM_MTCH_ACCNT )
+  		INTO  :c_ucc_cd
+  		FROM  CLM_CLNT_MSTR
+  		WHERE CLM_MTCH_ACCNT = :sql_cln_mtch_accnt;
+
+  		if ( SQLCODE  !=  0 )
+  		{
+    		tpfree((char *)ptr_fml_Ibuf);
+    		fn_userlog(c_ServiceName,"VER 2.3 -- fn_call_actn_create_fut :  Error While Fetching UCC code for :%s:.", sql_cln_mtch_accnt);
+    		fn_errlog(c_ServiceName, "S31355", SQLMSG, ptr_st_err_msg->c_err_msg );
+    		return FAILURE;
+  		}
+
+  		rtrim(c_ucc_cd);
+
+  		if(DEBUG_MSG_LVL_3)
+    		fn_userlog(c_ServiceName,"VER 2.3 -- fn_call_actn_create_fut : MAtch ID :%s: have ucc code :%s:", sql_cln_mtch_accnt, c_ucc_cd);
+
+  		/*** VER 2.3 ends here ***/
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Inside FUS'c_upos_avl == 'N' Condition.");
+    }
+
+		EXEC SQL
+      SELECT TO_CHAR(EXG_NXT_TRD_DT,'DD-Mon-YYYY')
+      INTO   :st_undfut_pos_to_be.c_trd_dt
+      FROM   EXG_XCHNG_MSTR
+      WHERE  EXG_XCHNG_CD = :ptr_st_pstn_actn_fut->c_xchng_cd
+      AND    EXG_MKT_TYP = 'D';
+
+    if ( SQLCODE != 0 )
+    {
+			tpfree((char *)ptr_fml_Ibuf);
+      fn_errlog(c_ServiceName, "S31360", SQLMSG, ptr_st_err_msg->c_err_msg );
+      return FAILURE;
+    }
+
+		EXEC SQL
+      INSERT INTO FUS_FO_UNDRLYNG_SPN_PSTN
+      (
+        FUS_CLM_MTCH_ACCNT,
+        FUS_XCHNG_CD,
+        FUS_UNDRLYNG,
+        FUS_INDSTK,
+        FUS_UIBUY_QTY,
+        FUS_UIBUY_VAL,
+        FUS_UISELL_QTY,
+        FUS_UISELL_VAL,
+        FUS_UEXBUY_QTY,
+        FUS_UEXBUY_VAL,
+        FUS_UEXSELL_QTY,
+        FUS_UEXSELL_VAL,
+        FUS_UBUY_EXCTD_QTY,
+        FUS_USELL_EXCTD_QTY,
+        FUS_UOPNPSTN_FLW,
+        FUS_UOPNPSTN_QTY,
+        FUS_UOPNPSTN_VAL,
+        FUS_UMTM_OPN_VAL,
+        FUS_INITIAL_MRGN,
+        FUS_SPAN_WEMULT_MRGN,
+        FUS_EBA_EXPR_MRGN,
+        FUS_USPAN_WENOV_MRGN,
+        FUS_MULTIPLIER,
+        FUS_USPAN_NENOV_MRGN,
+        FUS_NET_OPTN_VAL,
+        FUS_MTM_FLG,
+        FUS_TRD_DT,
+        FUS_NTNL_PL,
+        FUS_BLCKD_PL,
+        FUS_MIN_MRGN,
+        FUS_REQD_INITIAL_MRGN,
+				FUS_UCC_CD			/*** Added in Ver 2.3 ***/
+      )
+      VALUES
+      (
+        :st_undfut_pos_to_be.c_cln_mtch_accnt,
+        :st_undfut_pos_to_be.c_xchng_cd,
+        :st_undfut_pos_to_be.c_undrlyng,
+        :st_undfut_pos_to_be.c_indstk,
+        :st_undfut_pos_to_be.l_uibuy_qty,
+        :st_undfut_pos_to_be.d_uibuy_val,
+        :st_undfut_pos_to_be.l_uisell_qty,
+        :st_undfut_pos_to_be.d_uisell_val,
+        :st_undfut_pos_to_be.l_uexbuy_qty,
+        :st_undfut_pos_to_be.d_uexbuy_val,
+        :st_undfut_pos_to_be.l_uexsell_qty,
+        :st_undfut_pos_to_be.d_uexsell_val,
+        :st_undfut_pos_to_be.l_ubuy_exctd_qty,
+        :st_undfut_pos_to_be.l_usell_exctd_qty,
+        :st_undfut_pos_to_be.c_uopnpstn_flw,
+        :st_undfut_pos_to_be.l_uopnpstn_qty,
+        :st_undfut_pos_to_be.d_uopnpstn_val,
+				:st_undfut_pos_to_be.d_umtm_opn_val,
+        :st_undfut_pos_to_be.d_initial_mrgn,
+        :st_undfut_pos_to_be.d_span_wemult_mrgn ,
+        :st_undfut_pos_to_be.d_eba_expr_mrgn,
+        :st_undfut_pos_to_be.d_uspan_wenov_mrgn,
+        :st_undfut_pos_to_be.d_multpr,
+        :st_undfut_pos_to_be.d_uspan_nenov_mrgn,
+        :st_undfut_pos_to_be.d_net_optn_val,
+        :st_undfut_pos_to_be.c_mtm_flg,
+        :st_undfut_pos_to_be.c_trd_dt,
+        :st_undfut_pos_to_be.d_ntnl_pl,
+        :st_undfut_pos_to_be.d_blckd_pl ,
+        :st_undfut_pos_to_be.d_min_mrgn,
+        :st_undfut_pos_to_be.d_reqd_initial_mrgn,
+				:c_ucc_cd				/*** Added in Ver 2.3 ***/
+      );
+
+      if ( SQLCODE != 0 )
+      {
+				tpfree((char *)ptr_fml_Ibuf);
+      	fn_errlog(c_ServiceName, "S31365", SQLMSG, ptr_st_err_msg->c_err_msg );
+      	return FAILURE;
+      }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"----------AFTER FUS INSERT----");
+    }
+  }
+  else
+  {
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Inside Else 'c_upos_avl == 'N' Condition.");
+    }
+	
+	 EXEC SQL
+      UPDATE  FUS_FO_UNDRLYNG_SPN_PSTN
+      SET     FUS_UIBUY_QTY         = :st_undfut_pos_to_be.l_uibuy_qty,
+              FUS_UIBUY_VAL         = :st_undfut_pos_to_be.d_uibuy_val,
+              FUS_UISELL_QTY        = :st_undfut_pos_to_be.l_uisell_qty,
+              FUS_UISELL_VAL        = :st_undfut_pos_to_be.d_uisell_val,
+              FUS_UEXBUY_QTY        = :st_undfut_pos_to_be.l_uexbuy_qty,
+              FUS_UEXBUY_VAL        = :st_undfut_pos_to_be.d_uexbuy_val,
+              FUS_UEXSELL_QTY       = :st_undfut_pos_to_be.l_uexsell_qty,
+              FUS_UEXSELL_VAL       = :st_undfut_pos_to_be.d_uexsell_val,
+              FUS_UBUY_EXCTD_QTY    = :st_undfut_pos_to_be.l_ubuy_exctd_qty,
+              FUS_USELL_EXCTD_QTY   = :st_undfut_pos_to_be.l_usell_exctd_qty,
+              FUS_UOPNPSTN_FLW      = :st_undfut_pos_to_be.c_uopnpstn_flw,
+              FUS_UOPNPSTN_QTY      = :st_undfut_pos_to_be.l_uopnpstn_qty,
+              FUS_UOPNPSTN_VAL      = :st_undfut_pos_to_be.d_uopnpstn_val,
+              FUS_UMTM_OPN_VAL      = :st_undfut_pos_to_be.d_umtm_opn_val,
+              FUS_INITIAL_MRGN      = :st_undfut_pos_to_be.d_initial_mrgn,
+              FUS_SPAN_WEMULT_MRGN  = :st_undfut_pos_to_be.d_span_wemult_mrgn,
+              FUS_EBA_EXPR_MRGN     = :st_undfut_pos_to_be.d_eba_expr_mrgn,
+              FUS_USPAN_WENOV_MRGN  = :st_undfut_pos_to_be.d_uspan_wenov_mrgn,
+              FUS_MULTIPLIER        = :st_undfut_pos_to_be.d_multpr,
+              FUS_USPAN_NENOV_MRGN  = :st_undfut_pos_to_be.d_uspan_nenov_mrgn,
+              FUS_NET_OPTN_VAL      = :st_undfut_pos_to_be.d_net_optn_val,
+              FUS_MTM_FLG           = :st_undfut_pos_to_be.c_mtm_flg,
+              FUS_NTNL_PL           = :st_undfut_pos_to_be.d_ntnl_pl,
+              FUS_BLCKD_PL          = :st_undfut_pos_to_be.d_blckd_pl ,
+              FUS_MIN_MRGN          = :st_undfut_pos_to_be.d_min_mrgn,
+              FUS_REQD_INITIAL_MRGN = :st_undfut_pos_to_be.d_reqd_initial_mrgn
+      WHERE   FUS_CLM_MTCH_ACCNT    = :ptr_st_pstn_actn_fut->c_cln_mtch_accnt
+      AND     FUS_XCHNG_CD          = :ptr_st_pstn_actn_fut->c_xchng_cd
+      AND     FUS_UNDRLYNG          = :ptr_st_pstn_actn_fut->c_undrlyng;
+
+    if ( SQLCODE != 0 )
+    {
+      tpfree((char *)ptr_fml_Ibuf);
+			fn_errlog(c_ServiceName, "S31370", SQLMSG, ptr_st_err_msg->c_err_msg );
+    	return FAILURE;
+		}
+	}
+
+
+
+   /************** ver 2.0 stats **************/
+  c_extra_update = 'N';
+  i_returncode  = fn_cal_trg_prc( c_ServiceName ,ptr_st_pstn_actn_fut ,c_extra_update,
+                                      &st_error_message );
+
+  if( i_returncode != 0 )
+  {
+      fn_errlog(c_ServiceName, "S31375", LIBMSG, ptr_st_err_msg->c_err_msg );
+      fn_userlog(c_ServiceName,"ERROR IN fn_cal_trg_prc"); 
+  }
+  /************** ver 2.0 ends ***/
+
+		if( DEBUG_MSG_LVL_3 )
+    {
+      fn_userlog(c_ServiceName,"END of function"); 
+    }
+
+
+
+	return SUCCESS;
+}

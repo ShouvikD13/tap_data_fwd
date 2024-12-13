@@ -1,0 +1,408 @@
+/******************************************************************************/
+/*  Program           : CLN_SHM_TOKN 		                                      */
+/*                                                                            */
+/*  Input             :																												*/ 
+/*                                                                            */
+/*  Description       : This process is used to populate the shared memory 		*/
+/*											with token id. 																			  */	
+/*                     																												*/
+/******************************************************************************/
+/*Ver 1.0             : New Release (Vishnu N)																*/
+/*Ver 1.1             : View to FML changes	(Samip M) - 09-Sep-2014						*/
+/*Ver 1.2             : FCM-FTQ Merger Changes (Anand Dhopte) - 12-Aug-2015   */ 
+/*Ver 1.3             : Broadcast Automation (Tanmay W) - 27-Aug-2015         */
+/*Ver 1.4             : Splitting of data into seperate queue for option stock*/
+/*                      Varadraj G (17-Jul-2018)                              */
+/******************************************************************************/
+
+/**** C header ****/
+#include <stdio.h>
+#include <sys/socket.h>
+
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <Usysflds.h>
+
+/** #include <fo_view_def.h> **/	/** Ver 1.1 **/
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_scklib_tap.h>
+
+/* Process specific header  */
+#include <fn_env.h>
+#include <fn_log.h>
+#include <brd_cln_srvr.h>
+#include <fn_fil_log.h>
+#include <fn_ddr.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fo_shm.h>
+
+
+char c_pipe_id [ 5+1 ];
+
+/******** Ver 1.4 ********/
+char c_prdct_typ;
+char c_undrlyng[10];
+char c_indstk;
+long l_tokn_no;
+char c_first_char;
+/********* Ver 1.4 Ends ***/
+
+int i_exit_stts;
+
+struct st_tkn_val *st_tkn;
+
+int fn_clear_data(void);
+
+void CLN_SHM_TOKN( int argc, char *argv[] )
+{
+  int shmID,i;
+	int i_return_code;  
+  long int li_buf_len ;
+	long l_tot_cnt;
+  long l_size;
+  int i_trnsctn=0;                      /** Ver 1.3 **/
+
+	char c_ServiceName [33];
+	char c_errmsg [256];
+  size_t shm_size;	
+char *ptr_c_tmp;
+	
+	
+	struct st_tkn_val st_tkn_temp;
+
+	strcpy(c_ServiceName, argv[0]);
+
+	INITBATDBGLVL(argv[0]);
+
+	i_return_code = fn_clear_data();
+	if(i_return_code == -1)
+	{
+		fn_errlog( c_ServiceName, "S31005", "Error while clearing shm", c_errmsg );
+    return;	
+	}	
+
+  /*** Commented in Ver 1.2 ***
+
+	EXEC SQL
+	 		 SELECT count(1)
+			 INTO   :l_tot_cnt
+			 FROM   FCM_FO_CNTRCT_MSTR
+      where   FCM_TOKEN_NO is not null
+        AND   FCM_XCHNG_CD = 'NFO';
+
+  ***/
+   
+  /*** Ver 1.2 Starts ***/
+
+  EXEC SQL
+       SELECT count(1)
+       INTO   :l_tot_cnt
+       FROM   FTQ_FO_TRD_QT
+      where   FTQ_TOKEN_NO is not null
+        AND   FTQ_XCHNG_CD = 'NFO';  
+ 
+  /*** Ver 1.2 Ends   ***/ 
+			 	
+	if( SQLCODE != 0 )
+  {
+   fn_errlog( c_ServiceName, "S31010", SQLMSG, c_errmsg );
+	 return;
+  }
+
+  if(DEBUG_MSG_LVL_0)
+  {
+   fn_userlog(c_ServiceName,"Count of FTQ contracts :%ld",l_tot_cnt);
+  }
+	
+  l_size = (sizeof(st_tkn_temp) * (l_tot_cnt+1)); 
+	fn_userlog(c_ServiceName," before get shmid for l_size :%ld:",l_size);
+
+	i_return_code = fn_get_shm_id(OWNER,c_ServiceName,l_size,c_errmsg);
+
+	if( i_return_code == -1)
+	{
+		fn_errlog( c_ServiceName, "S31015","", c_errmsg );
+		return;
+	}
+
+	fn_userlog(c_ServiceName," before attach");
+
+	i_return_code = fn_attach_shm((void *)&st_tkn,c_ServiceName,c_errmsg);
+	if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31020","", c_errmsg );
+		return;
+  }
+
+  st_tkn_temp.l_tkn_id = l_tot_cnt;
+
+	memcpy(&st_tkn[0],&st_tkn_temp,sizeof(struct st_tkn_val));
+
+	fn_userlog(c_ServiceName,"l_tot_cnt :%ld:",l_tot_cnt);
+	fn_userlog(c_ServiceName,"st_tkn[0].l_tkn_id :%ld:",st_tkn[0].l_tkn_id);	
+
+
+  /*** Commented in Ver 1.2 ***
+
+	EXEC SQL
+		DECLARE cur_tkn_val CURSOR FOR
+		SELECT decode(FCM_PRDCT_TYP,'O',DECODE(FCM_INDSTK,'I','C','D'),'F',DECODE(FCM_INDSTK,'I','A','B')), 
+					 FCM_TOKEN_NO
+		FROM   FCM_FO_CNTRCT_MSTR
+		where FCM_TOKEN_NO is not null
+		AND  FCM_XCHNG_CD = 'NFO'
+		ORDER  BY FCM_TOKEN_NO;
+	
+  ***/
+  /********** Commented in Ver 1.4 ********* 
+  *** Ver 1.2 Starts ***
+
+   EXEC SQL
+    DECLARE cur_tkn_val CURSOR FOR
+    SELECT decode(FTQ_PRDCT_TYP,'O',DECODE(FTQ_INDSTK,'I','C','D'),'F',DECODE(FTQ_INDSTK,'I','A','B')),
+           FTQ_TOKEN_NO
+    FROM   FTQ_FO_TRD_QT
+    where FTQ_TOKEN_NO is not null
+    AND  FTQ_XCHNG_CD = 'NFO'
+    ORDER  BY FTQ_TOKEN_NO;
+    
+  *** Ver 1.2 Ends   ***
+  ************** Ver 1.4 comment Ends *********/
+
+  /*************** Ver 1.4 starts *****************/
+   
+   EXEC SQL
+    DECLARE cur_tkn_val CURSOR FOR
+    SELECT FTQ_PRDCT_TYP,FTQ_UNDRLYNG,FTQ_INDSTK,FTQ_TOKEN_NO
+    FROM   FTQ_FO_TRD_QT
+    where FTQ_TOKEN_NO is not null
+    AND  FTQ_XCHNG_CD = 'NFO'
+    ORDER  BY FTQ_TOKEN_NO;
+
+  /*************** Ver 1.4 Ends *******************/
+
+	EXEC SQL OPEN cur_tkn_val;
+
+	if( SQLCODE != 0 )
+  {
+   fn_errlog( c_ServiceName, "S31025", SQLMSG, c_errmsg );
+	 return;
+  }
+
+	i = 1;	
+	while(1)
+	{
+		MEMSET(st_tkn_temp);
+    MEMSET(c_undrlyng);
+
+		EXEC SQL
+				FETCH cur_tkn_val
+				/***  INTO  :st_tkn_temp.c_val,
+							:st_tkn_temp.l_tkn_id; *  commented in Ver 1.4 ***/
+        INTO  :c_prdct_typ,  /**** Added 4 variables in Ver 1.4 ****/
+              :c_undrlyng,
+              :c_indstk,
+              :l_tokn_no;
+		
+		if (SQLCODE != 0)
+    {
+      if(SQLCODE == NO_DATA_FOUND)
+      {
+        break;
+      }
+      fn_errlog( c_ServiceName, "S31030", SQLMSG, c_errmsg  );
+      EXEC SQL CLOSE cur_tkn_val;
+			return;
+    }
+     st_tkn_temp.l_tkn_id = l_tokn_no; 
+		 fn_userlog( c_ServiceName, "count :%d:",i);
+		 
+    /* if(DEBUG_MSG_LVL_0)
+     {
+      fn_userlog(c_ServiceName,"FTQ st_tkn_temp.c_val :%c:",st_tkn_temp.c_val);
+      fn_userlog(c_ServiceName,"FTQ st_tkn_temp.l_tkn_id :%ld:",st_tkn_temp.l_tkn_id);
+     } **** commented in ver 1.4 testing ***/
+    
+     /************ Added in Ver 1.4 ****************/
+    c_first_char = c_undrlyng[0];
+   
+    if(c_prdct_typ == 'O')
+    {
+      if(c_indstk == 'I')
+      {
+       st_tkn_temp.c_val = 'C';
+      }
+      else
+      {
+        switch(c_first_char)
+        {
+         case 'A':
+         case 'B':
+         case 'C':
+         case 'D':
+         case 'E':
+         case 'F':
+         case 'G':
+         case 'H':
+         case 'I':
+         case 'J':
+         case 'K':
+         st_tkn_temp.c_val = 'D';
+         break;
+         default:
+         st_tkn_temp.c_val = 'E';
+         break; 
+        }
+      }
+    }
+    if(c_prdct_typ == 'F')
+    {
+     if(c_indstk == 'I')
+     {
+      st_tkn_temp.c_val = 'A';
+     }
+     else
+     {
+      st_tkn_temp.c_val = 'B';
+     } 
+    }
+     /************ Ver 1.4 Ends ********************/
+	
+ 		 memcpy(&st_tkn[i],&st_tkn_temp,sizeof(struct st_tkn_val)); 
+		 /*** commented in ver 1.4 ***************************************** 
+     fn_userlog( c_ServiceName, "Token No :%ld:",st_tkn[i].l_tkn_id);
+		 fn_userlog( c_ServiceName, "Product Type :%c:",st_tkn[i].c_val);
+     *********************** ver 1.4 comment ends **********************/
+     fn_userlog( c_ServiceName, "Token No :%ld: , Product Type :%c:",st_tkn[i].l_tkn_id,st_tkn[i].c_val);/****** Added in ver 1.4 ***/	
+		i++; 
+	}	 	
+	fn_userlog(c_ServiceName," before Detach");
+	
+	i_return_code = fn_detach_shm((void *)&st_tkn,c_ServiceName,c_errmsg);
+  if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31035","", c_errmsg );
+    return;
+  }	
+
+  /****** Ver 1.3 starts ******/
+
+  i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName,"S31040",LIBMSG,c_errmsg);
+    return;
+  }
+
+  EXEC SQL
+  UPDATE FSP_FO_SYSTM_PRMTR
+  set    FSP_BRD_RUN_DATE = sysdate ;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31045", SQLMSG, c_errmsg  );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    return; 
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+  {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_errmsg );
+    fn_errlog(c_ServiceName,"S31050",LIBMSG,c_errmsg);
+    return;
+  }
+
+  /******* Ver 1.3 Ends ********/
+
+	fn_userlog(c_ServiceName,"Process completed");
+} 
+int fn_bat_init(int argc, char *argv[])
+{
+  int  i_ch_val ;
+  int  i_loop;
+  int  i_msgq_typ;
+
+  char c_ServiceName [ 33 ];
+  char c_pipe_id [ 5+1 ];
+  char c_err_msg[256];
+  char *ptr_c_tmp;
+  char c_fileName[256];
+
+  strcpy( c_ServiceName, "cln_shm_tokn" );
+
+  if( argc != 4)
+  {
+    fn_userlog(c_ServiceName,
+    "Usage - cln_shm_tokn <Exchange qualifier> <Exchange code> <pipe_id>");
+    return ( -1 );
+  }
+
+  fn_var = CLN_SHM_TOKN;
+  return ( 0 );
+}
+void fn_bat_term(int argc,
+                 char *argv[] )
+{
+  return;
+}
+
+
+int fn_prcs_trg(char *c_ServiceName,
+                 int i_trg_typ)
+{
+  return ( 0 );
+}
+int fn_clear_data()
+{
+  int shmID,i;
+  int i_return_code;
+	long l_tot_cnt;
+
+  char c_ServiceName [33];
+  char c_errmsg [256];
+  size_t shm_size;
+
+	l_tot_cnt = 0;
+	strcpy(c_ServiceName,"cln_shm_tokn");
+
+	i_return_code = fn_get_shm_id(CLIENT,c_ServiceName,l_tot_cnt,c_errmsg);
+
+  if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31055","", c_errmsg );
+    return -1;
+  }
+	if( i_return_code == 1)
+	{
+	 fn_userlog(c_ServiceName,"Shared memory doesn't exist");
+	 return 0;		
+	}
+
+  fn_userlog(c_ServiceName," before attach");
+
+  i_return_code = fn_attach_shm((void *)&st_tkn,c_ServiceName,c_errmsg);
+  if( i_return_code == -1)
+  {
+    fn_errlog( c_ServiceName, "S31060","", c_errmsg );
+    return -1;
+  }
+	i_return_code = fn_dstry_shm(c_ServiceName,c_errmsg);
+	if(i_return_code == -1)	
+	{
+	 fn_errlog( c_ServiceName, "S31065","", c_errmsg );
+    return -1;
+	}
+
+	return 0;	
+}
+	

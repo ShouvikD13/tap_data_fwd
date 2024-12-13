@@ -1,0 +1,1122 @@
+/******************************************************************************/
+/*  Program           : CLN_BRD_CLNTF		                                      */
+/*                                                                            */
+/*  Input             : C_PIPE_ID                                             */
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       : Broadcast client runs in the process space of the     */
+/*                      EBA system and it is a Tuxedo based client process.   */
+/*                      It receives messages from broadcast server in ORS     */
+/*                      system and directs the message to appropriate services*/
+/*                      in EBA sytem.                                         */
+/*  Log               : 1.0   09-May-2013   Sachin Birje                      */
+/*  Log               : 1.1   09-Sep-2014   Samip M														*/
+/*  Log               : 1.2   14-Aug-2023   Agam                              */
+/******************************************************************************/
+/*Ver 1.0             : New Release																						*/
+/*Ver 1.1             : View to FML changes																		*/
+/*Ver TOL             : Tux on Linux                                          */
+/******************************************************************************/
+
+/**** C header ****/
+#include <stdio.h>
+#include <sqlca.h>
+#include <sys/socket.h>
+#include <unistd.h> 
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+
+/** #include <fo_view_def.h> **/	/** Ver 1.1 **/
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_scklib_tap.h>
+#include <fo_exg_brd_lib.h>
+
+/* Process specific header  */
+#include <fn_env.h>
+#include <fn_log.h>
+#include <brd_cln_srvr.h>
+#include <fn_fil_log.h>
+#include <fn_ddr.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <fml_rout.h>
+#include <fn_signal.h>
+#include <lzo1z.h>
+#include <fn_read_debug_lvl.h>
+#include <signal.h>                              /* Added in Ver TOL */
+#define MAX_BCAST_PACKET_LEN 516 
+#define QUE_EMPTY 1             
+
+void fn_procs_msgs ( int  i_sck_id,
+                     char *c_ServiceName,
+                     char *c_err_msg );
+
+void fn_procs_msgs_1 ( int  i_sck_id,
+                     	 char *c_ServiceName,
+                     	 char *c_err_msg );
+
+
+void fn_sgnl_usr2(int i_sig_no);
+
+
+
+char c_xchng_cd [ 3+1 ];
+char c_pipe_id [ 5+1 ];
+char c_brd_port[10];
+char c_tbt_mod;	
+
+int  i_dmp_val;
+int	 i_lzo_ret_val;
+int  i_sck_id;
+int i_exit_stts;
+
+char  c_qspace_name[10]; 
+char  c_q_name[10];     
+
+LZO_EXTERN(int) i_lzo_ret_val;
+
+long int li_port;
+
+void CLN_BRD_CLNTF ( int argc, char *argv[] )
+{
+
+	char c_ServiceName [33];
+	char c_err_msg [256];
+	char c_run_mod;
+	char *ptr_c_tmp;
+
+	int	 i_ret_val;
+  
+	strcpy(c_ServiceName, argv[0]);
+
+	INITBATDBGLVL(argv[0]);
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"BEFORE Port No. Is :%s:",c_brd_port);
+	}
+  
+	ptr_c_tmp = (char*) fn_get_prcs_spc ( c_ServiceName, "RUN_MODE" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"L31010", LIBMSG, c_err_msg);
+    fn_destroy_pipe(); 
+    exit(0);
+  }
+  c_run_mod = *ptr_c_tmp;
+
+
+	ptr_c_tmp = (char*) fn_get_prcs_spc ( c_ServiceName, "TBT_MODE" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"L31010", LIBMSG, c_err_msg);
+    fn_destroy_pipe();
+    exit(0);
+  }
+	c_tbt_mod = *ptr_c_tmp;
+
+
+	if ( c_run_mod == WITH_QUOTES )
+  {
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"Inside RUN_MOD = WITH_QUOTES");
+		}
+
+    fn_procs_msgs ( i_sck_id,
+                    c_ServiceName,
+                    c_err_msg );
+  }
+  else
+  {
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"Inside RUN_MOD = WITHOUT_QUOTES");
+		}
+    fn_procs_msgs_1 ( i_sck_id,
+                      c_ServiceName,
+                      c_err_msg );
+  }
+	
+}
+
+
+void fn_procs_msgs ( int  i_sck_id,
+                     char *c_ServiceName,
+                     char *c_err_msg )
+{
+	char c_serv_addr[20];
+	char c_bcast_data [516];
+	char *ptr_c_data;
+	char c_decmp_data[512];
+
+	int i_family;
+  int i_port_no;
+	long int li_buf_len ;
+	int i_ch_val;
+	int i_ret_val;
+	int i_msg_count;
+	int i_ip_len;
+	unsigned int i_op_len;
+	int i_trnsctn_cd;
+	unsigned short int si_err_cd;
+
+  
+  FBFR32  *Qbuffer;
+  TPQCTL qctl;
+  int i_tran_id;
+  int   i_err;
+  int   i_ferr;
+
+	union st_exch_brd_msg st_exch_msg;
+  union st_exch_brd_msg *ptr_exch_msg;
+  struct st_bcast_pack_data st_bcastdata;
+  struct st_bcast_cmp_packet *st_bcastcmp_packet;
+
+	i_exit_stts = DONT_EXIT;
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Inside Function fn_procs_msgs WITH_QUOTES");
+	}
+
+
+  Qbuffer = (FBFR32*)tpalloc("FML32",NULL,MAX_BCAST_PACKET_LEN);
+
+  if(Qbuffer == NULL)
+  {
+      fn_userlog(c_ServiceName,"Allocation of memory failure for Qbuffer ");
+      fn_errlog(c_ServiceName,"S31005",TPMSG,c_err_msg);
+      return;
+  }
+
+
+	while ( i_exit_stts == DONT_EXIT )
+  {
+		li_buf_len = sizeof( c_bcast_data );
+
+		memset ( c_bcast_data, '\0', sizeof ( c_bcast_data ) );
+    
+    i_tran_id = fn_begintran ( c_ServiceName, c_err_msg );
+    if ( i_tran_id == -1 )
+    {
+     fn_errlog(c_ServiceName, "S31010", LIBMSG, c_err_msg );
+     Fadd32( Qbuffer, FFO_ERR_MSG, c_err_msg, 0 );
+     break;
+    }
+    qctl.flags = TPNOFLAGS;
+
+    if(tpdequeue(c_qspace_name, c_q_name,(TPQCTL *)&qctl,(char **)&Qbuffer,&li_buf_len ,0)== - 1)
+    {
+     if(qctl.diagnostic != QMENOMSG)
+     {
+       fn_errlog(c_ServiceName,"S31015",TPMSG,c_err_msg);
+     }
+     if(qctl.diagnostic == QMENOMSG)
+     {
+       i_ch_val = QUE_EMPTY;
+
+       if(DEBUG_MSG_LVL_4)
+         fn_userlog(c_ServiceName ,"i_ch_val is QUE_EMPTY" );
+
+       fn_aborttran(c_ServiceName,i_tran_id,c_err_msg);
+
+       usleep(100000); /* sleep of 1000000 microseconds(1 Sec) added to following Queue error */
+                       /*TMQUEUE.10240086.1.0: gtrid x0 x4f792a37 x3409d: Q_CAT:1472: ERROR: xa_st                         art() - no more tran table entries (max = 20 ) **/
+       continue;
+     }
+     else
+     {
+       fn_aborttran(c_ServiceName,i_tran_id,c_err_msg);
+       break;
+     }
+
+     } 
+     i_tran_id = fn_committran(c_ServiceName ,i_tran_id , c_err_msg);
+
+     if(i_tran_id == -1 )
+     {
+      fn_errlog(c_ServiceName,"S31020",TPMSG , c_err_msg);
+      fn_aborttran(c_ServiceName,i_tran_id,c_err_msg);
+      break ;
+     }
+
+     i_err = Fget32(Qbuffer,FML_SBUF,0,(char*)c_bcast_data,(unsigned long *)&li_buf_len);
+     i_ferr = Ferror32;
+
+     if( i_err == -1 )
+     {
+      fn_errlog(c_ServiceName,  "S31025", Fstrerror32(i_ferr),c_err_msg);
+      break;
+     }
+
+		memset ( &st_bcastdata, '\0', sizeof ( struct st_bcast_pack_data ) );
+    memcpy ( &st_bcastdata, c_bcast_data, li_buf_len );
+
+		ptr_c_data = (char *) st_bcastdata.c_pack_data;
+
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName, "No of packets |%d|",st_bcastdata.si_no_of_packets);
+		}
+
+		for(i_msg_count=0;i_msg_count<st_bcastdata.si_no_of_packets;i_msg_count++)
+		{
+			i_ip_len = 0;
+
+			st_bcastcmp_packet = (struct st_bcast_cmp_packet * )ptr_c_data;
+
+			if(DEBUG_MSG_LVL_3)
+			{
+      	fn_userlog(c_ServiceName, "Compressed %d",st_bcastcmp_packet->si_comp_len);
+			}
+
+      if ( st_bcastcmp_packet->si_comp_len > 0 )
+      {
+        i_ip_len = st_bcastcmp_packet->si_comp_len;
+
+        memset(c_decmp_data, '\0', sizeof(c_decmp_data));
+
+        i_lzo_ret_val= lzo1z_decompress ( (char *)st_bcastcmp_packet->c_comp_data,
+                      										i_ip_len,
+                      										(char *)c_decmp_data,
+                      										&i_op_len,
+                      										NULL );
+
+        ptr_exch_msg = ( union st_exch_brd_msg * )( (char *)c_decmp_data + 8 );
+
+        ptr_c_data += ( sizeof(st_bcastcmp_packet->si_comp_len) + i_ip_len );
+      }
+      else
+      {
+        ptr_exch_msg =  ( union st_exch_brd_msg * ) ( (char *)st_bcastcmp_packet->c_comp_data + 8 );
+
+        ptr_c_data += ( sizeof(st_bcastcmp_packet->si_comp_len) + ((struct st_bcast_header *)ptr_exch_msg)->si_message_length + 8);
+      }
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName, "Message received - |%d|",ptr_exch_msg->st_hdr.si_transaction_code);
+				fn_userlog(c_ServiceName,"Before Switch Case");
+			}
+
+			switch ( ptr_exch_msg->st_hdr.si_transaction_code )
+			{
+				case BCAST_JRNL_VCT_MSG:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_JRNL_VCT_MSG");
+					fn_userlog(c_ServiceName,"Inside BCAST_JRNL_VCT_MSG Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_gnrltrd_msg( &(ptr_exch_msg->st_bcast_msg), 
+																	  c_xchng_cd,
+																		c_pipe_id,
+																	  c_ServiceName,
+																	  c_err_msg);		
+
+				if ( i_ret_val == -1 )
+        {
+        	i_exit_stts = EXIT;
+        }
+
+					break;
+
+				case BCAST_SYSTEM_INFORMATION_OUT:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_SYSTEM_INFORMATION_OUT");
+					fn_userlog(c_ServiceName,"Inside BCAST_SYSTEM_INFORMATION_OUT Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_system_information_out ( &(ptr_exch_msg->st_sys_info_dat),
+																								c_xchng_cd,
+																								c_ServiceName,
+																								c_err_msg);
+
+				if ( i_ret_val == -1 )
+        {
+          i_exit_stts = EXIT;
+        }
+
+					break;
+
+				case BCAST_SECURITY_MSTR_CHG:
+				
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_SECURITY_MSTR_CHG");
+					fn_userlog(c_ServiceName,"Inside BCAST_SECURITY_MSTR_CHG Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_security_mstr_chg ( &(ptr_exch_msg->st_sec_upd_info),
+																					 c_xchng_cd,
+                                           c_ServiceName,
+                                           c_err_msg);
+        if ( i_ret_val == -1 )
+        {
+          i_exit_stts = EXIT;
+        }
+				
+					break;
+
+				case BCAST_INSTR_MSTR_CHG:
+
+					/*** Not Handled ***/
+
+          break;
+		
+				case BCAST_PART_MSTR_CHG:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_PART_MSTR_CHG");
+			  	fn_userlog(c_ServiceName,"Inside BCAST_PART_MSTR_CHG Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_part_mstr_chg ( &(ptr_exch_msg->st_part_upd_info),
+																				c_xchng_cd,
+                                        c_ServiceName,
+                                        c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+          break;
+
+				case BCAST_STOCK_STATUS_CHG:
+				case BCAST_STOCK_STATUS_CHG_PREOPEN:
+	
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case Stock Status Change");
+					fn_userlog(c_ServiceName,"Inside BCAST_STOCK_STATUS_CHG Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_stock_status_chg ( &(ptr_exch_msg->st_sec_stts_upd_info),
+																				 		c_xchng_cd,
+                                         		c_ServiceName,
+                                         		c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_TURNOVER_EXCEEDED:
+				case BROADCAST_BROKER_REACTIVATED:
+
+					if(DEBUG_MSG_LVL_0)
+					{
+						fn_userlog(c_ServiceName,"Inside Case Broker Activation / DeActivation");
+						fn_userlog(c_ServiceName,"Inside BCAST_TURNOVER_EXCEEDED Exchange Code Is :%s:",c_xchng_cd);
+					}
+
+				i_ret_val = fn_turnover_exceeded (&(ptr_exch_msg->st_brd_tlmt_exceed),
+                                      			ptr_exch_msg->st_hdr.si_transaction_code,
+																						c_xchng_cd,
+																						c_pipe_id,
+                                      			c_ServiceName,
+                                      			c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BC_OPEN_MSG:
+				case BC_CLOSE_MSG:
+				case BC_PRE_OR_POST_DAY_MSG:
+				case BC_PRE_OPEN_ENDED:
+				case EQUAL_BC_POSTCLOSE_MSG:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case Market status Change");  
+					fn_userlog(c_ServiceName,"Inside BC_OPEN_MSG Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_brdmkt_stts_chng ( &(ptr_exch_msg->st_brd_vct_msg),
+																					 c_xchng_cd,
+																					 c_pipe_id,
+                            	             c_ServiceName,
+                              	           c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+		
+					break;
+
+
+				case BCAST_TICKER_AND_MKT_INDEX:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_TICKER_AND_MKT_INDEX");
+					fn_userlog(c_ServiceName,"Inside BCAST_TICKER_AND_MKT_INDEX Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_ticker_and_mkt_index ( &(ptr_exch_msg->st_ticker),
+																								c_xchng_cd,
+                                                c_ServiceName,
+                                                c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_MBO_MBP_UPDATE:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_MBO_MBP_UPDATE");
+					fn_userlog(c_ServiceName,"Inside BCAST_MBO_MBP_UPDATE Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_mbo_mbp_update ( &(ptr_exch_msg->st_brd_mbo_mbp),
+																				  c_xchng_cd,
+                                          c_ServiceName,
+                                          c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_ONLY_MBP:
+
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_ONLY_MBP");
+					fn_userlog(c_ServiceName,"Inside BCAST_ONLY_MBP Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_bcast_only_mbp( &(ptr_exch_msg->st_brd_only_mbp),
+																				 c_xchng_cd,
+                                         c_ServiceName,
+																				 c_tbt_mod, 
+                                         c_err_msg);
+
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_MW_ROUND_ROBIN:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_MW_ROUND_ROBIN");
+					fn_userlog(c_ServiceName,"Inside BCAST_MW_ROUND_ROBIN Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_mw_round_robin ( &(ptr_exch_msg->st_brd_inq_res),
+																					c_xchng_cd,
+                                          c_ServiceName,
+                                          c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case SECURITY_OPEN_PRICE:
+			
+					 /*** Not Handled ***/
+          break;
+
+				case BCAST_CIRCUIT_MSG:
+			
+					/*** Ignored ***/
+          break;
+
+				case BCAST_INDICES:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_INDICES");
+					fn_userlog(c_ServiceName,"Inside BCAST_INDICES Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_bcast_indices ( &(ptr_exch_msg->st_brd_indices),
+																				 c_xchng_cd,
+                                         c_ServiceName,
+                                         c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_INDUSTRY_INDEX_UPDATE:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_INDUSTRY_INDEX_UPDATE");
+					fn_userlog(c_ServiceName,"Inside BCAST_INDUSTRY_INDEX_UPDATE Exchange Code Is :%s:",c_xchng_cd);
+				}
+		
+				i_ret_val = fn_bcast_industry_index_update (&(ptr_exch_msg->st_brd_indust_indices),
+																											c_xchng_cd,
+                                        							c_ServiceName,
+                                        							c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_SPD_MBP_DELTA:
+
+					 /*** Not Handled ***/
+          break;
+
+				case BCAST_INDEX_MSTR_CHG:
+			
+					/*** Not Handled ***/
+          break;
+
+				case BCAST_BASE_PRICE:
+
+					 /*** Not Handled ***/
+          break;
+
+				case BCAST_INDEX_MAP_TABLE:
+
+					/*** Not Handled ***/
+          break;
+
+				case RPRT_MARKET_STATS_OUT_RPT:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case RPRT_MARKET_STATS_OUT_RPT");
+					fn_userlog(c_ServiceName,"Inside RPRT_MARKET_STATS_OUT_RPT Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_rprt_market_stats_out_rpt ( & ( ptr_exch_msg->st_rp_mkt_stts),
+																											c_xchng_cd,
+                                                      c_ServiceName,
+                                                      c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case MKT_MVMT_CM_OI_IN:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case MKT_MVMT_CM_OI_IN");
+					fn_userlog(c_ServiceName,"Inside MKT_MVMT_CM_OI_IN Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+				i_ret_val = fn_eq_oi_qt ( ptr_exch_msg->st_eq_oi.st_oi_dat,
+                                  ptr_exch_msg->st_hdr.c_alpha_char,
+                                  ptr_exch_msg->st_hdr.si_error_code,
+																  c_xchng_cd,
+                                  c_ServiceName,
+                                  c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+         case BCAST_GI_INDICES_ASSETS :
+           if(DEBUG_MSG_LVL_0)
+           {
+            fn_userlog(c_ServiceName,"Inside Case BCAST_GI_INDICES_ASSETS");
+            fn_userlog(c_ServiceName,"Inside BCAST_GI_INDICES_ASSETS Exchange Code Is :%s:",c_xchng_cd);
+           }                
+              
+           i_ret_val = fn_upd_global_indices( &(ptr_exch_msg->st_index_details),
+ 							                                  c_xchng_cd,
+              							                    c_pipe_id,
+                            							      c_ServiceName,
+                                 						    c_err_msg);
+
+           if ( i_ret_val == -1 )
+           {
+             i_exit_stts = EXIT;
+           } 
+
+          break;
+
+				default:
+
+					fn_userlog ( c_ServiceName, "Warning - Invalid message type - %d",ptr_exch_msg->st_hdr.si_transaction_code );
+					break;
+			}
+		}
+  }
+  tpfree ( ( char * ) Qbuffer ); 
+}
+
+void fn_procs_msgs_1 ( int  i_sck_id,
+                       char *c_ServiceName,
+                       char *c_err_msg )
+{
+	char c_serv_addr[20];
+  char c_bcast_data [516];
+  char *ptr_c_data;
+  char c_decmp_data[512];
+
+  int i_family;
+  int i_port_no;
+  long int li_buf_len ;
+  int i_ch_val;
+	int i_ret_val;
+  int i_msg_count;
+  int i_ip_len;
+  unsigned int i_op_len;
+  unsigned short int si_err_cd;
+  
+  FBFR32  *Qbuffer;
+  TPQCTL qctl;
+  int i_tran_id;
+  int   i_err;
+  int   i_ferr;
+
+  union st_exch_brd_msg st_exch_msg;
+  union st_exch_brd_msg *ptr_exch_msg;
+  struct st_bcast_pack_data st_bcastdata;
+  struct st_bcast_cmp_packet *st_bcastcmp_packet;
+
+  i_exit_stts = DONT_EXIT;
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Inside Function fn_procs_msgs_1");
+	}
+
+  Qbuffer = (FBFR32*)tpalloc("FML32",NULL,MAX_BCAST_PACKET_LEN);
+
+  if(Qbuffer == NULL)
+  {
+      fn_userlog(c_ServiceName,"Allocation of memory failure for Qbuffer ");
+      fn_errlog(c_ServiceName,"S31030",TPMSG,c_err_msg);
+      return;
+  }
+
+	while ( i_exit_stts == DONT_EXIT )
+  {
+    memset ( c_bcast_data, '\0', sizeof ( c_bcast_data ) );
+
+		li_buf_len = sizeof(c_bcast_data);
+
+    i_tran_id = fn_begintran ( c_ServiceName, c_err_msg );
+    if ( i_tran_id == -1 )
+    {
+     fn_errlog(c_ServiceName, "S31035", LIBMSG, c_err_msg );
+     Fadd32( Qbuffer, FFO_ERR_MSG, c_err_msg, 0 );
+     break;
+    }
+    qctl.flags = TPNOFLAGS;
+
+    if(tpdequeue(c_qspace_name, c_q_name,(TPQCTL *)&qctl,(char **)&Qbuffer,&li_buf_len ,0)== - 1)
+    {
+     if(qctl.diagnostic != QMENOMSG)
+     {
+       fn_errlog(c_ServiceName,"S31040",TPMSG,c_err_msg);
+     }
+     if(qctl.diagnostic == QMENOMSG)
+     {
+       i_ch_val = QUE_EMPTY;
+
+       if(DEBUG_MSG_LVL_4)
+         fn_userlog(c_ServiceName ,"i_ch_val is QUE_EMPTY" );
+
+       fn_aborttran(c_ServiceName,i_tran_id,c_err_msg);
+
+       usleep(100000); /* sleep of 1000000 microseconds(1 Sec) added to following Queue error */
+                       /*TMQUEUE.10240086.1.0: gtrid x0 x4f792a37 x3409d: Q_CAT:1472: ERROR: xa_st                         ar
+t() - no more tran table entries (max = 20 ) **/
+       continue;
+     }
+     else
+     {
+       fn_aborttran(c_ServiceName,i_tran_id,c_err_msg);
+       break;
+     }
+
+     }
+     i_tran_id = fn_committran(c_ServiceName ,i_tran_id , c_err_msg);
+
+     if(i_tran_id == -1 )
+     {
+      fn_errlog(c_ServiceName,"S31045",TPMSG , c_err_msg);
+      fn_aborttran(c_ServiceName,i_tran_id,c_err_msg);
+      break ;
+     }
+     
+     i_err = Fget32(Qbuffer,FML_SBUF,0,(char*)c_bcast_data,(unsigned long *)&li_buf_len);
+     i_ferr = Ferror32;
+
+     if( i_err == -1 )
+     {
+      fn_errlog(c_ServiceName,  "S31050", Fstrerror32(i_ferr),c_err_msg);
+      break;
+     }
+    
+    memset ( &st_bcastdata, '\0', sizeof ( struct st_bcast_pack_data ) );
+    memcpy ( &st_bcastdata, c_bcast_data, li_buf_len );
+
+    ptr_c_data = (char *) st_bcastdata.c_pack_data;
+
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName, "No of packets |%d|",st_bcastdata.si_no_of_packets);
+		}
+		for(i_msg_count=0;i_msg_count<st_bcastdata.si_no_of_packets;i_msg_count++)
+    {
+      i_ip_len = 0;
+
+      st_bcastcmp_packet = (struct st_bcast_cmp_packet * )ptr_c_data;
+
+			if(DEBUG_MSG_LVL_3)
+			{
+      	fn_userlog(c_ServiceName, "Compressed %d",st_bcastcmp_packet->si_comp_len);
+			}
+
+      if ( st_bcastcmp_packet->si_comp_len > 0 )
+      {
+        i_ip_len = st_bcastcmp_packet->si_comp_len;
+
+        memset(c_decmp_data, '\0', sizeof(c_decmp_data));
+
+        i_lzo_ret_val = lzo1z_decompress ( (char *)st_bcastcmp_packet->c_comp_data,
+                      										 i_ip_len,
+                      										 (char *)c_decmp_data,
+                      										 &i_op_len,
+                      										 NULL);
+
+        ptr_exch_msg = ( union st_exch_brd_msg * )( (char *)c_decmp_data + 8 );
+
+        ptr_c_data += ( sizeof(st_bcastcmp_packet->si_comp_len) + i_ip_len );
+      }
+      else
+      {
+        ptr_exch_msg =  ( union st_exch_brd_msg * ) ( (char *)st_bcastcmp_packet->c_comp_data + 8 );
+
+        ptr_c_data += ( sizeof(st_bcastcmp_packet->si_comp_len) + ((struct st_bcast_header *)ptr_exch_msg)->si_message_length + 8);
+      }
+
+			if(DEBUG_MSG_LVL_3)
+			{
+      	fn_userlog(c_ServiceName, "Message received - |%d|",ptr_exch_msg->st_hdr.si_transaction_code);
+			}
+
+			switch ( ptr_exch_msg->st_hdr.si_transaction_code )
+      {
+        case BCAST_JRNL_VCT_MSG:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_JRNL_VCT_MSG");
+				}
+		
+				i_ret_val = fn_gnrltrd_msg( &(ptr_exch_msg->st_bcast_msg),
+                                    c_xchng_cd,
+																		c_pipe_id,
+                                    c_ServiceName,
+                                    c_err_msg);
+
+        if ( i_ret_val == -1 )
+        {
+          i_exit_stts = EXIT;
+        }
+
+          break;
+
+        case BCAST_SYSTEM_INFORMATION_OUT:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_SECURITY_MSTR_CHG:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_INSTR_MSTR_CHG:
+
+          /*** Not Handled ***/
+
+          break;
+
+        case BCAST_PART_MSTR_CHG:
+	
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_STOCK_STATUS_CHG:
+        case BCAST_STOCK_STATUS_CHG_PREOPEN:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_TURNOVER_EXCEEDED:
+        case BROADCAST_BROKER_REACTIVATED:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BC_OPEN_MSG:
+        case BC_CLOSE_MSG:
+        case BC_PRE_OR_POST_DAY_MSG:
+        case BC_PRE_OPEN_ENDED:
+        case EQUAL_BC_POSTCLOSE_MSG:
+
+				if(DEBUG_MSG_LVL_0)
+				{
+					fn_userlog(c_ServiceName,"Inside Case Market status Change");
+				}
+
+				i_ret_val = fn_brdmkt_stts_chng ( &(ptr_exch_msg->st_brd_vct_msg),
+                          	               c_xchng_cd,
+																					 c_pipe_id,
+                              	           c_ServiceName,
+                                	         c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					
+          break;
+
+				case BCAST_TICKER_AND_MKT_INDEX:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_MBO_MBP_UPDATE:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_ONLY_MBP:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_MW_ROUND_ROBIN:
+
+					 /*** Not Handled ***/
+          break;
+
+        case SECURITY_OPEN_PRICE:
+
+           /*** Not Handled ***/
+          break;
+
+        case BCAST_CIRCUIT_MSG:
+
+          /*** Ignored ***/
+          break;
+
+        case BCAST_INDICES:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_INDUSTRY_INDEX_UPDATE:
+
+					 /*** Not Handled ***/
+          break;
+
+        case BCAST_SPD_MBP_DELTA:
+
+           /*** Not Handled ***/
+          break;
+
+        case BCAST_INDEX_MSTR_CHG:
+
+          /*** Not Handled ***/
+          break;
+
+        case BCAST_BASE_PRICE:
+
+           /*** Not Handled ***/
+          break;
+
+				case BCAST_INDEX_MAP_TABLE:
+
+          /*** Not Handled ***/
+          break;
+
+        case RPRT_MARKET_STATS_OUT_RPT:
+
+					 /*** Not Handled ***/
+          break;
+
+        case MKT_MVMT_CM_OI_IN:
+
+					 /*** Not Handled ***/
+          break;
+
+        default:
+
+          fn_userlog ( c_ServiceName, "Warning - Invalid message type - %d",ptr_exch_msg->st_hdr.si_transaction_code );
+          break;
+      }
+
+		}
+	}
+  tpfree ( ( char * ) Qbuffer );
+}
+
+int fn_bat_init(int argc, char *argv[])
+{
+  int  i_ch_val ;
+	int  i_loop;
+
+  char c_ServiceName [ 33 ];
+	char c_pipe_id [ 5+1 ];
+  char c_err_msg[256];
+	char *ptr_c_tmp;
+  char c_fileName[256];
+
+  strcpy( c_ServiceName, "cln_brd_clntF" );
+
+  if( argc != 4)
+  {
+    fn_userlog(c_ServiceName,
+    "Usage - cln_brd_clntF <Exchange qualifier> <Exchange code> <pipe_id>");
+    return ( -1 );
+  }
+  strcpy( c_pipe_id, argv[3] );
+
+  /*** Initialize the Routing string ***/
+  fn_init_ddr_pop ( argv[3],
+                    TRADING_SECTION,
+                    COMMON);
+
+  EXEC SQL
+    SELECT opm_xchng_cd
+    INTO   :c_xchng_cd
+    FROM   opm_ord_pipe_mstr
+    WHERE  opm_pipe_id = :c_pipe_id;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg );
+    return ( -1 );
+  }
+
+
+  ptr_c_tmp = ( char * ) fn_get_prcs_spc ( c_ServiceName, "ORS_SRVR_PORT" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog( c_ServiceName, "L31035", LIBMSG, c_err_msg );
+  }
+
+	strcpy (c_brd_port,ptr_c_tmp);
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Port No. Is :%s:",c_brd_port);
+	}
+ 
+  memset(c_qspace_name,'\0',sizeof(c_qspace_name));
+  ptr_c_tmp = (char *)fn_get_prcs_spc ( c_ServiceName ,"BRDQSPACE_NAME");
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31060", LIBMSG,   c_err_msg );
+    fn_userlog ( c_ServiceName , "Error : Unable to get QSPACE_NAME from the config file");
+    return -1;
+  }
+  else
+  {
+    strcpy( c_qspace_name , ptr_c_tmp );
+  }
+
+  fn_userlog(c_ServiceName,"Qspace Name is :%s:", c_qspace_name);
+  memset(c_q_name,'\0',sizeof(c_q_name));
+  ptr_c_tmp = (char *)fn_get_prcs_spc (c_ServiceName , "BRDQ_NAME");
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_userlog (c_ServiceName,"Error :Unable to get Q_NAME from the config file ");
+    fn_errlog(c_ServiceName, "S31065", LIBMSG,c_err_msg );
+    return -1;
+  }
+  else
+  {
+     strcpy( c_q_name , ptr_c_tmp );
+  }
+  fn_userlog(c_ServiceName ,"Queue Name is :%s:", c_q_name);
+
+  
+	fn_sck_init();
+
+	if ( fn_set_sgn_hnd ( SIGUSR2, fn_sgnl_usr2, c_ServiceName, c_err_msg ) == -1 )
+	{
+  	fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg );
+  	return -1;
+	}
+
+  fn_var = CLN_BRD_CLNTF;
+
+  return ( 0 );
+}
+
+void fn_bat_term(int argc,
+                 char *argv[] )
+{
+  /*  Close socket  */
+  char c_err_msg[256];
+	char c_ServiceName[256];
+	int i_ret_val;
+
+	strcpy(c_ServiceName,argv[0]);
+
+	i_ret_val = fn_close_sck( i_sck_id,
+                            c_ServiceName,
+                            c_err_msg );
+
+  if ( i_ret_val == -1 )
+  {
+    fn_userlog ( c_ServiceName, "Error while closing socket." );
+  }
+  return;
+}
+
+int fn_prcs_trg(char *c_ServiceName,
+                 int i_trg_typ)
+{
+  return ( 0 );
+}
+void fn_sgnl_usr2(int i_sig_no)
+{
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog("cln_brd_clntF","CLN_BRD_CLNTF SIGUSER2 exit");
+	}
+  i_exit_stts = EXIT;
+  return;
+}

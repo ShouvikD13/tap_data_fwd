@@ -1,0 +1,1395 @@
+/******************************************************************************/
+/*  Program           : BAT_PRDCT_PRTFL	                                      */
+/*                                                                            */
+/*  Input             :                                                       */
+/*                                                                            */
+/*  Output            : Success / Failure                                     */
+/*                                                                            */
+/*  Description       : This batch Process run daily which will calculate			*/ 
+/*											Realized and Unrealized PNL and insert into table.    */
+/*                                                                            */
+/*  Log               : Ver 1.0   08-Apr-2014       Mahesh Shinde             */
+/*  Log               : Ver 1.1   13-Aug-2014       Mahesh Shinde             */
+/*  Log								: Ver 1.2		05-Dec-2014				Tanmay Warkhade						*/
+/*  Log               : Ver 1.3   31-Mar-2015       Navina D.                 */
+/*  Log               : Ver 1.4   13-Aug-2015       Anand Dhopte              */ 
+/*  Log               : Ver 1.5   24-May-2016       Navina D.                 */ 
+/*  Log               : Ver 1.6   02-Sep-2016				Navina D.                 */ 
+/*  Log               : Ver 1.7   16-Dec-2016       Sandip T.                 */ 
+/*  Log								: Ver 1.8		08-Sep-2017				Bhushan Harekar						*/
+/*  Log								: Ver 1.9		06-Jun-2018				Navina D.                 */
+/*  Log               : Ver 2.0   24-Dec-2018       Mrinal Kishore            */
+/*  Log               : Ver 2.1   17-Jul-2019       Kiran Itkar               */
+/*  Log               : Ver 2.2   28-Dec-2022       Mahesh Shinde             */
+/******************************************************************************/
+/*  Ver 1.0           : New Release                                           */
+/*  Ver 1.1           : The exchange code added as skip BSE expiry dates      */
+/*                      Also updated flag for completed status                */
+/*	Ver 1.2						: History Mode bug fixed 																*/
+/*										  Entry made in table when error occurs									*/
+/*  Ver 1.3           : Adhoc Expiry                                          */
+/*  Ver 1.4           : Contract Master and Trade Quote Table Merger Changes  */
+/*  Ver 1.5           : Weekly option contracts on Banknifty                  */ 
+/*  Ver 1.6           : Server changed for fn_pre_prcs_rcrd                   */ 
+/*  Ver 1.7           : Server changed for fn_pre_prcs_rcrd                   */ 
+/*	Ver 1.8						: Console Post Message commented												*/
+/*	Ver 1.9						: ADHOC portfolio after housekeep process               */
+/*  Ver 2.0           : Automating trigger of Product portfolio               */
+/*  Ver 2.1           : Mail trigger after successful completion of product   */
+/*                      portfolio process.                                    */
+/*  Ver 2.2           : Bug fix for TPALLOC tux 12 version										*/
+/******************************************************************************/
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <string.h>
+#include <stdlib.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#define  EXPIRY 'X'
+#define  ALL_EXPIRY 'A'
+#define  DAILY	'D'
+#define  ADHOC_EXPIRY	'H'		/*** Ver 1.3 ***/
+#define  UPDATE_PRTFL_FLAG 'U'   /*** Ver 2.0 ***/
+
+#include <fn_pos.h> 		/* Ver 1.2 */
+int i_err_cnt = 0;			/* Ver 1.2 */
+void BAT_PRDCT_PRTFL( int argc, char *argv[] )
+{
+	char c_msg[256];
+	char c_xchng_cd [4];
+  char c_ServiceName [ 33 ];
+	char  c_command[150] = "\0"; 				/* Ver 1.2 */
+  char c_command_1[150] = "\0";           /* Ver 2.1 */
+  char c_err_msg [ 256 ];
+  char c_clm_mtch_accnt[10+1];
+  char c_cln_mtch_accnt[10+1];
+	char c_underlying[7] = "\0";  /*** Ver 1.3 ***/
+	char c_run_mode ='\0';
+	char c_hstry_mode ='\0';								
+	int  i_exists     = 0;                 
+	char c_run_mode_temp ='\0';
+	char c_run_date[12];
+	char c_near_expry_dt[12]= "\0"; /*** Ver 1.3 ***/
+	char   c_path[100] = "\0";		/* Ver 1.2 */
+	char max_trd_dt[12] = "\0"; 		/* Ver 1.2 */
+	int  i_trnsctn = 0;
+	int  i_returnval;
+	long li_cnt = 0;
+	long li_tot_records = 0;
+
+	strcpy ( c_ServiceName, argv[0] );
+
+	FBFR32* ptr_fml_Ibuf;
+/*	FBFR32* ptr_fml_Obuf; Commented in Ver 2.2 */
+
+	sql_cursor ftd_cursor;
+	sql_cursor expiry_cursor;
+	sql_cursor adhoc_expiry_cursor;		/*** Ver 1.3 ***/
+
+	MEMSET(c_command); 		/* Ver 1.2 */
+	INITBATDBGLVL(argv[0]);
+
+	sprintf ( c_msg, "BATCH PROCESS %s STARTED", argv[0] );
+	/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );  Commented in Ver 1.8 ***/
+
+	if( DEBUG_MSG_LVL_0 )
+	{
+		fn_userlog( c_ServiceName, "---------- BAT_PRDCT_PRTFL STARTED ---------");
+	}
+
+	if ( argc < 6 )
+	{
+		fn_userlog( c_ServiceName," Usage are :NFO NFO NA DATE RUN_MODE <match account> <Underlying>");/* ver 1.1 Usagechanged*/ /*** Underlying added in Ver 1.3 ***/
+		/*** fn_bat_pst_msg ( c_ServiceName, "Invalid Number of Arguments", c_tag );  Commented in Ver 1.8 ***/
+		exit(0);
+	}
+
+	if (argc > 6)
+	{
+		strcpy(c_cln_mtch_accnt,argv[6]);
+	}
+	else 
+	{
+		strcpy(c_cln_mtch_accnt,"%");
+	}
+
+	c_run_mode = argv[5][0];
+	strcpy(c_run_date,argv[4]);	
+	strcpy(c_xchng_cd,argv[2]);	
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog( c_ServiceName, "Run Date is 		|%s|",c_run_date );
+		fn_userlog( c_ServiceName, "Run Type is 		:%c:",c_run_mode );
+		fn_userlog( c_ServiceName, "Exchange code is:%s:",c_xchng_cd );
+		fn_userlog( c_ServiceName, "Match account is:%s:",c_cln_mtch_accnt );
+	}
+				
+	/** if (c_run_mode != 'D' && c_run_mode != 'X' && c_run_mode != 'A' && c_run_mode != 'H') *** Run mode added for Adhoc Expiry Ver 1.3 *** Commented in Ver 2.0 ***/
+	if (c_run_mode != 'D' && c_run_mode != 'X' && c_run_mode != 'A' && c_run_mode != 'H' && c_run_mode != 'U') /* Ver 2.0 **/
+		{
+			fn_userlog( c_ServiceName," Usage are :NFO NFO NA DATE RUN_MODE <match account> <Underlying>"); /*** Ver 1.3 Underlying ***/
+			fn_userlog( c_ServiceName," Invalid run mode ");
+			return; 
+		}
+	
+		/******** Ver 1.2 Starts ******/
+
+		if(tuxgetenv("HOME") == NULL)
+  	{
+    	fn_errlog(c_ServiceName, "S31005",LIBMSG,c_err_msg);
+    	return;
+  	}
+
+  	strcpy(c_path, tuxgetenv("HOME"));  /* Ver 1.2 */
+		strcat(c_path, "/sh_scripts");	
+
+		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31010", SQLMSG, c_err_msg  );
+      return;
+    }
+    EXEC SQL
+    UPDATE ELT_ERR_LOG_TAB SET ELT_MAIL_STTS ='M' WHERE trunc(ELT_DATE) = trunc(sysdate) AND ELT_MAIL_STTS ='N';
+
+    if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+    {
+      fn_errlog(c_ServiceName,"S31015",SQLMSG,c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+    if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg  );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+		/******** Ver 1.2 Ends ******/
+
+		/*** Added in Ver 2.2 ***/
+		ptr_fml_Ibuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+    if(ptr_fml_Ibuf == NULL)
+    {
+       fn_errlog( c_ServiceName, "S31025", TPMSG, c_err_msg  );
+       return;
+    }
+		/**** Ver 2.2 Ends ***/
+
+		if ( c_run_mode == DAILY )
+		{
+			/******************* Commented in ver 1.2 *******************
+		  	EXEC SQL
+				SELECT 'N'
+				INTO   :c_hstry_mode
+				FROM   dual
+				WHERE  exists
+				(
+					SELECT 1
+					FROM   FTD_FO_TRD_DTLS
+					WHERE  trunc(FTD_TRD_DT)= :c_run_date
+				);
+
+		******************* Commented in ver 1.2 *******************/
+
+		/********************Added in ver 1.2 ***********************/
+				EXEC SQL
+				SELECT 'N'
+				INTO   :c_hstry_mode
+				FROM   dual
+				WHERE  exists
+				(
+					SELECT 1
+					FROM   FTD_FO_TRD_DTLS
+		/*		WHERE :c_run_date =  (select trunc(max(FTD_TRD_DT)) from FTD_FO_TRD_DTLS) ** Commented in Ver 2.0 **/
+          WHERE :c_run_date IN  (select distinct trunc(FTD_TRD_DT) from FTD_FO_TRD_DTLS) /*** Ver 2.0 ***/
+				);
+
+		/********************Added in ver 1.2 ***********************/
+				 
+				if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_userlog(c_ServiceName,"Inside error.");
+					fn_errlog(c_ServiceName,"S31030",SQLMSG,c_err_msg);
+					tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+						return;
+				}
+
+				if (SQLCODE == NO_DATA_FOUND )
+				{
+					c_hstry_mode = 'R';
+					fn_userlog ( c_ServiceName, "Inside No data found in ftd ");
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog( c_ServiceName, "Run mode after ftd is 		|%c|",c_hstry_mode );
+				}
+
+				if ( c_hstry_mode == 'R' )  
+				{
+
+					EXEC SQL ALLOCATE :ftd_cursor;
+
+					/*** Select cursor on those match account who have trade today ***/
+
+						EXEC SQL  EXECUTE
+											BEGIN
+											OPEN    :ftd_cursor FOR
+											SELECT  distinct(FTD_CLM_MTCH_ACCNT)
+											FROM    FTD_FO_TRD_DTLS_HSTRY
+											WHERE   FTD_CLM_MTCH_ACCNT like :c_cln_mtch_accnt
+											AND    trunc(FTD_TRD_DT) = :c_run_date;
+						END;
+						END-EXEC;
+
+						if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+						{
+							fn_userlog(c_ServiceName,"Inside selecting records.");
+							fn_errlog(c_ServiceName,"S31035",SQLMSG,c_err_msg);
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+					}
+					else
+					{
+
+						EXEC SQL ALLOCATE :ftd_cursor;
+					
+						/*** Select cursor on those match account who have trade today ***/
+					
+						EXEC SQL  EXECUTE
+												BEGIN
+												OPEN  	:ftd_cursor FOR
+												SELECT	distinct(FTD_CLM_MTCH_ACCNT)
+												FROM 		FTD_FO_TRD_DTLS
+												WHERE   FTD_CLM_MTCH_ACCNT like :c_cln_mtch_accnt;
+						END;
+						END-EXEC;
+					
+						if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+						{
+							fn_userlog(c_ServiceName,"Inside selecting records.");
+							fn_errlog(c_ServiceName,"S31040",SQLMSG,c_err_msg);
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+					}	
+					/*** Allocate Space For Input Output Buffer ***/
+					
+					/* ptr_fml_Ibuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+					
+					if(ptr_fml_Ibuf == NULL)
+					{
+						fn_errlog( c_ServiceName, "S31045", TPMSG, c_err_msg  );
+						*** fn_bat_pst_msg(c_ServiceName,"System error ..exiting",c_tag); Commented in Ver 1.8 ***
+						return;
+					}
+
+					ptr_fml_Obuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+					
+					if(ptr_fml_Obuf == NULL)
+					{
+						tpfree( (char *)ptr_fml_Ibuf );
+						fn_errlog( c_ServiceName, "S31050", TPMSG, c_err_msg  );
+						*** fn_bat_pst_msg(c_ServiceName,"System error ..exiting",c_tag);  Commented in Ver 1.8 ***
+						return;
+					}
+					**************Commented in Ver 2.2 ****************************/	
+					while (1)
+					{
+						 if ( DEBUG_MSG_LVL_0 )
+						 { 
+								fn_userlog( c_ServiceName," In while loop");	 
+						 }
+					
+						 MEMSET(c_clm_mtch_accnt);
+
+						 /** Finit32(ptr_fml_Ibuf,MIN_FML_BUF_LEN);*** Ver 2.2 ***/
+						 Finit32(ptr_fml_Ibuf, (FLDLEN32) Fsizeof32(ptr_fml_Ibuf)); /*** Ver 2.2 ***/
+						 li_cnt ++;
+						
+						 EXEC SQL FETCH :ftd_cursor
+												INTO :c_clm_mtch_accnt;
+
+						 if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+						 {
+								fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+								EXEC SQL CLOSE :ftd_cursor;
+								EXEC SQL FREE  :ftd_cursor;
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+								return ;
+						 }
+					
+						 if( SQLCODE == NO_DATA_FOUND )
+						 {
+								fn_userlog( c_ServiceName," No More data To Process" );
+								EXEC SQL CLOSE :ftd_cursor;
+								EXEC SQL FREE  :ftd_cursor;
+								break;
+						 }
+					
+						 i_returnval = fn_pack_vartofml(  c_ServiceName,
+																							c_err_msg,
+																							&ptr_fml_Ibuf,
+																							4,  													
+																							FFO_EBA_MTCH_ACT_NO, ( char * )c_clm_mtch_accnt,
+																							FFO_OPERATION_TYP,	(char *)&c_run_mode,
+																							FFO_NXT_TRD_DT, ( char * )c_run_date,																		
+																							FFO_RQST_TYP, ( char * )&c_hstry_mode	
+																						);
+
+						 if( i_returnval == -1 )
+						 {
+							 fn_errlog( c_ServiceName, "S31060", FMLMSG, c_err_msg  );
+					/*** fn_bat_pst_msg(c_ServiceName,"system error occured..exiting",c_tag);  Commented in Ver 1.8 ***/
+							 tpfree( (char *)ptr_fml_Ibuf );
+					/***		 tpfree( (char *)ptr_fml_Obuf ); Commnted in Ver 2.2 ***/
+							 return;
+						 }
+
+						 if ( DEBUG_MSG_LVL_3 )
+						 {
+								fn_userlog( c_ServiceName," Before fn_pre_prcs_rcrd");
+						 }
+					
+/** Ver 1.7 chnages for server name from sfr_plg_revln to sfr_boc_xchngbk **/	
+						 i_returnval = fn_pre_prcs_rcrd ( c_ServiceName,
+																							c_err_msg,
+																							"sfr_boc_xchngbk", /*** Ver 1.6 changed from sfr_prcs_prtfl  to sfr_plg_revln ***/ 
+																							li_cnt,
+																							li_tot_records );
+						 if ( i_returnval == -1 )
+						 {
+							 fn_errlog( c_ServiceName, "S31065", LIBMSG, c_err_msg );
+							 strcpy ( c_msg, "System error. Contact system support" );
+							 fn_err_log(c_cln_mtch_accnt, NULL, NULL, NULL, NULL, NULL, NULL, 0, c_msg,c_ServiceName,c_err_msg);/** 1.2**/
+							 /*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );  Commented in Ver 1.8 ***/
+		
+							 sprintf(c_command,"ksh %s/prdct_prtfl_report.sh",c_path);   /* Ver 1.2 */
+							 system(c_command);    														/* Ver 1.2 */
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							 return;
+						 }
+					
+		   	/** fn_bat_pst_msg ( c_ServiceName,"Processing records in Daily Mode",c_tag); Commented in Ver 1.8 **/
+							sprintf ( c_msg, "Processing record |%ld| ",li_cnt );
+							/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+
+						 if ( DEBUG_MSG_LVL_0 )
+						 {			
+								fn_userlog( c_ServiceName," Processing record |%ld| ",li_cnt);
+								fn_userlog( c_ServiceName," Processing match account |%s|",c_clm_mtch_accnt);
+						 }
+
+						 i_returnval = tpacall ( "SFO_PRDCT_PRTFL" , (char * )ptr_fml_Ibuf ,0, TPNOTRAN );
+						 if(i_returnval == -1)
+						 {
+							 fn_userlog(c_ServiceName," one record failed to process ");
+							 fn_errlog( c_ServiceName, "S31070", TPMSG, c_err_msg );
+							 strcpy ( c_msg, "ERROR in SFO_PRDCT_PRTFL" ); 					/* Ver 1.2 */
+							 fn_err_log(c_cln_mtch_accnt, NULL, NULL, NULL, NULL, NULL, NULL, 0, c_msg,c_ServiceName,c_err_msg);/** 1.2**/
+							 /*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );  Commented in Ver 1.8 ***/ 
+							 continue;	
+						 }		
+						} /*** END of while loop ***/
+					}	/*** END of daily loop ***/
+
+					if ( c_run_mode == EXPIRY )	
+					{
+						 if ( DEBUG_MSG_LVL_0 )
+						 {			
+								fn_userlog( c_ServiceName,"Inside Expiry Mode"); 
+								fn_userlog( c_ServiceName,"The Expiry date is |%s|",c_run_date);
+						 }
+
+						MEMSET(c_cln_mtch_accnt);
+
+						/*** Finit32(ptr_fml_Ibuf,MIN_FML_BUF_LEN);** Commented in Ver 2.2 ***/
+						
+						if (argc >6)
+						{
+							strcpy(c_cln_mtch_accnt,argv[6]);
+						}
+						else
+						{	
+							strcpy(c_cln_mtch_accnt,"%");
+						}
+
+						li_tot_records = 0;
+
+						EXEC SQL
+								SELECT 'N'
+								INTO   :c_hstry_mode
+								FROM   dual
+								WHERE  exists
+								(
+                  /*** Commented in Ver 1.4 ***  
+                
+									SELECT 1
+									FROM   FCM_FO_CNTRCT_MSTR
+								 * WHERE  trunc(FCM_EXPRY_DT) = to_date(:c_run_date,'dd-Mon-yyyy') commented in ver 1.1 ***
+          			  WHERE    FCM_XCHNG_CD = :c_xchng_cd                               *** Added in ver 1.1 ***
+          				AND      trunc(FCM_EXPRY_DT) = to_date(:c_run_date,'dd-Mon-yyyy') *** Added in ver 1.1 ***
+								
+                  ***/
+
+                  /*** Ver 1.4 Starts ***/
+
+                  SELECT 1
+                  FROM   FTQ_FO_TRD_QT     
+                  WHERE  FTQ_XCHNG_CD = :c_xchng_cd                              
+                  AND    trunc(FTQ_EXPRY_DT) = to_date(:c_run_date,'dd-Mon-yyyy')
+
+                  /*** Ver 1.4 Ends   ***/
+  
+                );
+
+
+						if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+						{
+						 fn_userlog(c_ServiceName,"Inside error.");
+						 fn_errlog(c_ServiceName,"S31075",SQLMSG,c_err_msg);
+						 tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+						 return;
+						} 	
+
+						if (SQLCODE == NO_DATA_FOUND )
+						{
+							fn_userlog ( c_ServiceName, "Inside No data found in fcm ");
+
+							EXEC SQL
+							SELECT 'R'
+							INTO   :c_hstry_mode
+							FROM   dual
+							WHERE  exists
+							(
+                /*** Commented in Ver 1.4 ***
+                
+								SELECT 1
+								FROM   FCM_FO_CNTRCT_MSTR_HSTR
+							 * WHERE  trunc(FCM_EXPRY_DT) = to_date(:c_run_date,'dd-Mon-yyyy')  commented in ver 1.1 ***
+          		  WHERE    FCM_XCHNG_CD = :c_xchng_cd                               *** Added in ver 1.1 ***
+          		  AND      trunc(FCM_EXPRY_DT) = to_date(:c_run_date,'dd-Mon-yyyy') *** Added in ver 1.1 ***
+                
+                ***/
+
+                /*** Ver 1.4 Starts ***/
+
+                SELECT 1
+                FROM   FTQ_FO_TRD_QT_HSTR      
+                WHERE  FTQ_XCHNG_CD = :c_xchng_cd             
+                AND    trunc(FTQ_EXPRY_DT) = to_date(:c_run_date,'dd-Mon-yyyy') 
+
+                /*** Ver 1.4 Ends   ***/  
+							);
+
+							if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+							{
+								fn_userlog(c_ServiceName,"Inside error.");
+								fn_errlog(c_ServiceName,"S31080",SQLMSG,c_err_msg);
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+								return;
+							}
+							
+							if (SQLCODE == NO_DATA_FOUND )
+							{
+								fn_userlog ( c_ServiceName, "Invalid Expiry");
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+								return;
+							}
+						}
+
+						if(DEBUG_MSG_LVL_0) /*** Debug level changed to 0 *** added in ver 1.4 ***/
+						{
+							fn_userlog( c_ServiceName, "Run mode after fcm is     |%c|",c_hstry_mode );
+						}
+
+						 if ( DEBUG_MSG_LVL_0 )
+						 {			
+								fn_userlog( c_ServiceName,"The Match Account  |%s|",c_cln_mtch_accnt); 
+								fn_userlog( c_ServiceName,"The Expiry date is |%s|",c_run_date);
+								fn_userlog( c_ServiceName,"The rerun mode  is |%c|",c_hstry_mode); 
+						 }
+						
+						if ( c_hstry_mode == 'R')  
+						{
+								if ( DEBUG_MSG_LVL_0 )
+								{
+									fn_userlog( c_ServiceName," Inside rerun option");
+								}
+
+								EXEC SQL ALLOCATE :expiry_cursor;
+						
+								EXEC SQL
+									EXECUTE
+									BEGIN
+									OPEN  :expiry_cursor FOR
+								SELECT distinct(fop_clm_mtch_accnt)
+								FROM
+								(
+									SELECT fop_clm_mtch_accnt
+									FROM fop_fo_options_pstn_hstry
+									WHERE fop_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+									AND trunc(fop_expry_dt) =to_date(:c_run_date,'dd-Mon-yyyy')
+								UNION ALL
+									SELECT fcp_clm_mtch_accnt
+									FROM FCP_FO_SPN_CNTRCT_PSTN_HSTRY
+									WHERE fcp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+									AND trunc(fcp_expry_dt)=to_date(:c_run_date,'dd-Mon-yyyy')
+								UNION ALL
+									SELECT ffp_clm_mtch_accnt
+									FROM ffp_fo_futures_pstn_hstry
+									WHERE ffp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+									AND trunc(ffp_expry_dt)=to_date(:c_run_date,'dd-Mon-yyyy')
+								UNION ALL
+									SELECT FOD_CLM_MTCH_ACCNT
+									FROM FOD_FO_ORDR_DTLS_HSTRY
+									WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+									AND trunc(FOD_EXPRY_DT)=to_date(:c_run_date,'dd-Mon-yyyy')
+									AND FOD_PRDCT_TYP in ('U','I')    
+									AND FOD_EXEC_QTY != 0
+								UNION ALL                          
+									SELECT FOD_CLM_MTCH_ACCNT
+									FROM FOD_FO_ORDR_DTLS
+									WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+									AND trunc(FOD_EXPRY_DT)=to_date(:c_run_date,'dd-Mon-yyyy')
+									AND FOD_PRDCT_TYP in ('U','I')
+									AND FOD_EXEC_QTY != 0
+								);
+								END;
+								END-EXEC;
+						
+								if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+								{
+									fn_userlog(c_ServiceName,"Inside count number of records.");
+									fn_errlog(c_ServiceName,"S31085",SQLMSG,c_err_msg);
+									tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+									return;
+								}
+						 }
+						 else
+						 {
+							
+							EXEC SQL ALLOCATE :expiry_cursor;
+						
+							EXEC SQL  
+								EXECUTE
+								BEGIN
+								OPEN 	:expiry_cursor FOR
+							SELECT distinct(fop_clm_mtch_accnt)
+							FROM
+							(
+								SELECT fop_clm_mtch_accnt
+								FROM fop_fo_options_pstn
+								WHERE fop_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+								AND trunc(fop_expry_dt) =to_date(:c_run_date,'dd-Mon-yyyy')
+							UNION ALL
+								SELECT fcp_clm_mtch_accnt
+								FROM FCP_FO_SPN_CNTRCT_PSTN
+								WHERE fcp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+								AND trunc(fcp_expry_dt)=to_date(:c_run_date,'dd-Mon-yyyy')
+							UNION ALL
+								SELECT ffp_clm_mtch_accnt
+								FROM ffp_fo_futures_pstn
+								WHERE ffp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+								AND trunc(ffp_expry_dt)=to_date(:c_run_date,'dd-Mon-yyyy')
+							UNION ALL
+								SELECT FOD_CLM_MTCH_ACCNT
+								FROM FOD_FO_ORDR_DTLS_HSTRY
+								WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+								AND trunc(FOD_EXPRY_DT)=to_date(:c_run_date,'dd-Mon-yyyy')
+								AND FOD_PRDCT_TYP in ('U','I')       
+								AND FOD_EXEC_QTY != 0
+							UNION ALL                             
+									SELECT FOD_CLM_MTCH_ACCNT
+									FROM FOD_FO_ORDR_DTLS
+									WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+									AND trunc(FOD_EXPRY_DT)=to_date(:c_run_date,'dd-Mon-yyyy')
+									AND FOD_PRDCT_TYP in ('U','I')
+									AND FOD_EXEC_QTY != 0
+							);
+							END;
+							END-EXEC;
+					
+							if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+							{
+								fn_userlog(c_ServiceName,"Inside count number of records.");
+								fn_errlog(c_ServiceName,"S31090",SQLMSG,c_err_msg);
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+								return;
+							}			
+						}
+
+						li_cnt = 0;
+
+						while (1)
+						{
+						 if ( DEBUG_MSG_LVL_0 )
+						 {
+								fn_userlog( c_ServiceName," In while loop");
+						 }
+
+						 MEMSET(c_clm_mtch_accnt);
+
+						 /** Finit32(ptr_fml_Ibuf,MIN_FML_BUF_LEN); Ver 2.2 ***/
+						 Finit32(ptr_fml_Ibuf, (FLDLEN32) Fsizeof32(ptr_fml_Ibuf)); /*** Ver 2.2 ***/
+						 li_cnt ++;
+
+						 EXEC SQL FETCH :expiry_cursor
+												INTO :c_clm_mtch_accnt;
+
+						 if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+						 {
+								fn_errlog( c_ServiceName, "S31095", SQLMSG, c_err_msg  );
+								EXEC SQL CLOSE :expiry_cursor;
+								EXEC SQL FREE  :expiry_cursor;
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+								return ;
+						 }
+
+						 if( SQLCODE == NO_DATA_FOUND )
+						 {
+								fn_userlog( c_ServiceName," No More data To Process" );
+								EXEC SQL CLOSE :expiry_cursor;
+								EXEC SQL FREE  :expiry_cursor;
+								break;
+						 }
+						
+						 i_returnval = fn_pack_vartofml(  c_ServiceName,
+																							c_err_msg,
+																							&ptr_fml_Ibuf,
+																							4,																					
+																							FFO_EBA_MTCH_ACT_NO, ( char * )c_clm_mtch_accnt,
+																							FFO_OPERATION_TYP,  (char *)&c_run_mode,
+																							FFO_NXT_TRD_DT, ( char * )c_run_date,
+																							FFO_RQST_TYP, ( char * )&c_hstry_mode 
+																					 );
+
+						if( i_returnval == -1 )
+						{
+							fn_errlog( c_ServiceName, "S31100", FMLMSG, c_err_msg  );
+			  	/*** fn_bat_pst_msg(c_ServiceName,"system error occured..exiting",c_tag); Commented in Ver 1.8 ***/
+							tpfree( (char *)ptr_fml_Ibuf );
+				/***			tpfree( (char *)ptr_fml_Obuf );*** Commented in Ver 2.2 ***/
+							return;
+						}
+
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," Before fn_pre_prcs_rcrd");
+						}
+/** Ver 1.7 chnages for server name from sfr_plg_revln to sfr_boc_xchngbk **/
+						i_returnval = fn_pre_prcs_rcrd ( c_ServiceName,
+																						 c_err_msg,
+																						 "sfr_boc_xchngbk", /*** Ver 1.6 changed from sfr_prcs_prtfl  to sfr_plg_revln ***/
+																						 li_cnt,
+																						 li_tot_records );
+						if ( i_returnval == -1 )
+						{
+							fn_errlog( c_ServiceName, "S31105", LIBMSG, c_err_msg );
+							strcpy ( c_err_msg, "System error. Contact system support" );
+							/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+							fn_err_log(c_cln_mtch_accnt , NULL, NULL, NULL, NULL, NULL, NULL, 0, c_msg,c_ServiceName,c_err_msg);/** 1.2**/
+							sprintf(c_command,"ksh %s/prdct_prtfl_report.sh",c_path);       /** Ver 1.2**/
+							system(c_command);																		/** Ver 1.2**/
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+
+			/*** fn_bat_pst_msg ( c_ServiceName,"Processing records in Daily Mode",c_tag); Commented in Ver 1.8 ***/
+						sprintf ( c_msg, "Processing record |%ld| ",li_cnt );
+						/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+						
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," Before calling SFO_PRDCT_PRTFL ");
+						}
+
+						if ( DEBUG_MSG_LVL_0 )
+						{
+								fn_userlog( c_ServiceName," Processing record |%ld| ",li_cnt);
+								fn_userlog( c_ServiceName," Processing match account |%s|",c_clm_mtch_accnt);
+						}
+
+						i_returnval = tpacall ( "SFO_PRDCT_PRTFL" , (char * )ptr_fml_Ibuf ,0, TPNOTRAN );
+
+						if(i_returnval == -1)
+						{
+							fn_errlog( c_ServiceName, "S31110", TPMSG, c_err_msg );
+							strcpy ( c_msg, "ERROR in SFO_PRDCT_PRTFL" );
+							fn_err_log(c_cln_mtch_accnt,NULL,NULL, NULL,NULL,NULL,NULL,0, c_msg,c_ServiceName,c_err_msg);/** 1.2**/
+						/***	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;  /*** Ver 1.1 ***/ 
+						}	
+						
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," After calling SFO_PRDCT_PRTFL ");
+						}
+					 } /*** END of While loop ***/
+					
+					/*** Commented in Ver 2.0 ***	
+					 *** Added in ver 1.1 ***
+
+   				 i_returnval = tpbegin( TRAN_TIMEOUT, 0 );
+
+   				 if ( i_returnval == -1 )
+   					{
+      				fn_userlog(c_ServiceName," failed to start transaction ");
+      				fn_errlog( c_ServiceName, "S31115", TPMSG, c_err_msg );
+      				strcpy ( c_msg, "System error. Contact system support" );
+      				*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***
+      				return;
+   					}
+
+   					EXEC SQL
+          	UPDATE FNO_SYSTM_PRMTR
+            SET FSP_PRTFL_FLG = 'N'
+          	WHERE  FSP_PRODCT = 'FNO';
+
+   					if ( SQLCODE != 0 )
+   					{
+      				tpabort(0);
+      				fn_userlog(c_ServiceName," failed to update portfolio flag ");
+      				fn_errlog( c_ServiceName, "S31120", SQLMSG, c_err_msg );
+      				strcpy ( c_msg, "System error. Contact system support" );
+      				*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***
+      				return;
+   					}		
+
+   					i_returnval = tpcommit(0);
+   					if ( i_returnval == -1 )
+   					{
+      				fn_userlog(c_ServiceName," failed to commit ");
+      				fn_errlog( c_ServiceName, "S31125", TPMSG, c_err_msg );
+      				strcpy ( c_msg, "System error. Contact system support" );
+      				*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );  Commented in Ver 1.8 ***
+      				return;
+   					}
+
+   					*** End ver 1.1 ***
+						*** Ver 2.0 ends ***/	
+
+					}	 /*** END of Expiry loop ***/
+
+					if (c_run_mode == ALL_EXPIRY)
+					{
+						if ( DEBUG_MSG_LVL_0 )
+						{
+							 fn_userlog( c_ServiceName,"Inside All Expiry Mode");
+							 fn_userlog( c_ServiceName,"The run date is |%s|",c_run_date);
+						}
+					
+						MEMSET(c_cln_mtch_accnt);
+
+						/** Finit32(ptr_fml_Ibuf,MIN_FML_BUF_LEN);** Commented in Ver 2.2 ***/
+
+						if (argc >6)
+						{
+							strcpy(c_cln_mtch_accnt,argv[6]);
+						}
+						else
+						{
+							strcpy(c_cln_mtch_accnt,"%");
+						}
+
+						li_tot_records = 0;
+
+						EXEC SQL ALLOCATE :expiry_cursor;
+
+						EXEC SQL
+							EXECUTE
+							BEGIN
+							OPEN  :expiry_cursor FOR
+						SELECT distinct(fop_clm_mtch_accnt)
+						FROM
+						(
+							SELECT fop_clm_mtch_accnt
+							FROM fop_fo_options_pstn
+							WHERE fop_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND trunc(fop_expry_dt) <=to_date(:c_run_date,'dd-Mon-yyyy')
+						UNION ALL
+							SELECT fop_clm_mtch_accnt
+							FROM fop_fo_options_pstn_hstry
+							WHERE fop_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND trunc(fop_expry_dt) <=to_date(:c_run_date,'dd-Mon-yyyy')
+						UNION ALL
+							SELECT fcp_clm_mtch_accnt
+							FROM FCP_FO_SPN_CNTRCT_PSTN
+							WHERE fcp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND trunc(fcp_expry_dt) <=to_date(:c_run_date,'dd-Mon-yyyy')
+						UNION ALL
+							SELECT fcp_clm_mtch_accnt
+							FROM FCP_FO_SPN_CNTRCT_PSTN_hstry
+							WHERE fcp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND trunc(fcp_expry_dt) <=to_date(:c_run_date,'dd-Mon-yyyy')
+						UNION ALL
+							SELECT ffp_clm_mtch_accnt
+							FROM ffp_fo_futures_pstn
+							WHERE ffp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND trunc(ffp_expry_dt) <=to_date(:c_run_date,'dd-Mon-yyyy')
+						UNION ALL
+							SELECT ffp_clm_mtch_accnt
+							FROM ffp_fo_futures_pstn_hstry
+							WHERE ffp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND trunc(ffp_expry_dt) <=to_date(:c_run_date,'dd-Mon-yyyy')
+						UNION ALL
+						SELECT FOD_CLM_MTCH_ACCNT
+							FROM FOD_FO_ORDR_DTLS_HSTRY
+							WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+							AND trunc(FOD_EXPRY_DT) <=to_date(:c_run_date,'dd-Mon-yyyy')
+							AND FOD_PRDCT_TYP in ('U','I')    
+							AND FOD_EXEC_QTY != 0
+						UNION ALL                          
+									SELECT FOD_CLM_MTCH_ACCNT
+									FROM FOD_FO_ORDR_DTLS
+									WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+									AND trunc(FOD_EXPRY_DT) <= to_date(:c_run_date,'dd-Mon-yyyy')
+									AND FOD_PRDCT_TYP in ('U','I')
+									AND FOD_EXEC_QTY != 0
+						);
+						END;
+						END-EXEC;
+
+						if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+						{
+							fn_userlog(c_ServiceName,"Inside count number of records.");
+							fn_errlog(c_ServiceName,"S31130",SQLMSG,c_err_msg);
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+
+						li_cnt = 0;
+
+						while (1)
+						{
+						 if ( DEBUG_MSG_LVL_0 )
+						 {
+								fn_userlog( c_ServiceName," In while loop");
+						 }
+
+						 MEMSET(c_clm_mtch_accnt);
+
+						 /** Finit32(ptr_fml_Ibuf,MIN_FML_BUF_LEN);*** Ver 2.2 **/
+						 Finit32(ptr_fml_Ibuf, (FLDLEN32) Fsizeof32(ptr_fml_Ibuf)); /*** Ver 2.2 ***/
+						 li_cnt ++;
+
+						 EXEC SQL FETCH :expiry_cursor
+												INTO :c_clm_mtch_accnt;
+						
+						 if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+						 {
+								fn_errlog( c_ServiceName, "S31135", SQLMSG, c_err_msg  );
+								EXEC SQL CLOSE :expiry_cursor;
+								EXEC SQL FREE  :expiry_cursor;
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+								return ;
+						 }
+
+						 if( SQLCODE == NO_DATA_FOUND )
+						 {
+								fn_userlog( c_ServiceName," No More data To Process" );
+								EXEC SQL CLOSE :expiry_cursor;
+								EXEC SQL FREE  :expiry_cursor;
+								break;
+						 }
+
+						 i_returnval = fn_pack_vartofml(  c_ServiceName,
+																							c_err_msg,
+																							&ptr_fml_Ibuf,
+																							4,																			
+																							FFO_EBA_MTCH_ACT_NO, ( char * )c_clm_mtch_accnt,
+																							FFO_OPERATION_TYP,  (char *)&c_run_mode,
+																							FFO_NXT_TRD_DT, ( char * )c_run_date,
+																							FFO_RQST_TYP, ( char * )&c_hstry_mode 
+																					 );
+
+						if( i_returnval == -1 )
+						{
+							fn_errlog( c_ServiceName, "S31140", FMLMSG, c_err_msg  );
+						/*** fn_bat_pst_msg(c_ServiceName,"system error occured..exiting",c_tag); Commented in Ver 1.8 ***/
+							tpfree( (char *)ptr_fml_Ibuf );
+					/***		tpfree( (char *)ptr_fml_Obuf ); **** Commented in Ver 2.2 ***/
+							return;
+						}
+
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," Before fn_pre_prcs_rcrd");
+						}
+/** Ver 1.7 chnages for server name from sfr_plg_revln to sfr_boc_xchngbk **/
+						i_returnval = fn_pre_prcs_rcrd ( c_ServiceName,
+																						 c_err_msg,
+																						 "sfr_boc_xchngbk", /*** Ver 1.6 changed from sfr_prcs_prtfl  to sfr_plg_revln ***/
+																						 li_cnt,
+																						 li_tot_records );
+						if ( i_returnval == -1 )
+						{
+							fn_errlog( c_ServiceName, "S31145", LIBMSG, c_err_msg );
+							strcpy ( c_msg, "System error. Contact system support" );
+							/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+						
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," Before calling SFO_PRDCT_PRTFL ");
+						}
+						
+	/*** fn_bat_pst_msg ( c_ServiceName,"Processing records in All Expiry Mode",c_tag); Commented in Ver 1.8 ***/
+						sprintf ( c_msg, "Processing record |%ld| ",li_cnt );
+						/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+
+						if ( DEBUG_MSG_LVL_0 )
+						{
+								fn_userlog( c_ServiceName," Processing record |%ld| ",li_cnt);
+								fn_userlog( c_ServiceName," Processing match account |%s|",c_clm_mtch_accnt);
+						}
+
+						i_returnval = tpacall ( "SFO_PRDCT_PRTFL" , (char * )ptr_fml_Ibuf ,0, TPNOTRAN );
+
+						if(i_returnval == -1)
+						{
+							fn_errlog( c_ServiceName, "S31150", TPMSG, c_err_msg );
+							strcpy ( c_msg, "ERROR in SFO_PRDCT_PRTFL" );            /* Ver 1.2 */
+							fn_err_log(c_cln_mtch_accnt,NULL,NULL, NULL,NULL,NULL,NULL,0, c_msg,c_ServiceName,c_err_msg);/** 1.2**/
+							/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+						}
+
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," After calling SFO_PRDCT_PRTFL ");
+						}
+					 } /*** END of While loop ***/		
+					}	 /*** END of All Expiry loop ***/
+
+					/*** Ver 1.3 starts ***/
+					if (c_run_mode == ADHOC_EXPIRY)
+					{
+						
+						MEMSET(c_underlying);
+						MEMSET(c_cln_mtch_accnt);
+
+						if (argc > 7)
+						{
+							strcpy(c_cln_mtch_accnt,argv[6]);
+							strcpy(c_underlying,argv[7]);
+						}
+						else 
+						{
+							fn_userlog( c_ServiceName,"Match Account and Underlying Input required in case of Adhoc expiry");
+							return;
+						}
+
+						if ( strcmp(c_cln_mtch_accnt,"NA") == 0 )
+						{
+								strcpy(c_cln_mtch_accnt,"%");
+						}
+
+
+						if ( DEBUG_MSG_LVL_0 )
+						{
+							 fn_userlog( c_ServiceName,"Inside Adhoc Expiry Mode");
+							 fn_userlog( c_ServiceName,"The run date is |%s|",c_run_date);
+						}
+				
+            /*** Commented in Ver 1.4 ***
+	
+				    EXEC SQL
+							SELECT  to_char ( min (FCM_EXPRY_DT),'dd-Mon-yyyy')
+							INTO    :c_near_expry_dt
+							FROM    fcm_fo_cntrct_mstr
+							WHERE   fcm_xchng_cd = :c_xchng_cd  
+							AND     fcm_prdct_typ='F'
+						  AND     FCM_UNDRLYNG = :c_underlying;
+
+            ***/
+
+            /*** Ver 1.4 Starts ***/
+
+             EXEC SQL
+              SELECT  to_char ( min (FTQ_EXPRY_DT),'dd-Mon-yyyy')
+              INTO    :c_near_expry_dt
+              FROM    ftq_fo_trd_qt     
+              WHERE   ftq_xchng_cd = :c_xchng_cd
+              /*** AND     ftq_prdct_typ='F' *** Commented in Ver 1.5 ***/
+							AND     ftq_prdct_typ in ('F','O')	/*** Ver 1.5 ***/
+              AND     ftq_undrlyng = :c_underlying;
+
+            /*** Ver 1.4 Ends   ***/
+
+						if ( SQLCODE != 0 && SQLCODE != -1405 ) /*** NO_DATA_FOUND added in Ver 1.9 ***/
+						{
+							fn_userlog(c_ServiceName,"Error Selecting Minimum Expiry Date."); 
+							fn_errlog(c_ServiceName,"S31155",SQLMSG,c_err_msg);
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+					  /*** Ver 1.9 starts ***/
+						if (SQLCODE == -1405 )
+						{
+						 fn_userlog(c_ServiceName,"Selecting Minimum Expiry Date from history.");
+
+						 EXEC SQL
+              SELECT  to_char ( min (FTQ_EXPRY_DT),'dd-Mon-yyyy')
+              INTO    :c_near_expry_dt
+              FROM    ftq_fo_trd_qt_hstr
+              WHERE   ftq_xchng_cd = :c_xchng_cd
+              AND     ftq_prdct_typ in ('F','O') 
+              AND     ftq_undrlyng = :c_underlying
+					/*		AND     ftq_expry_dt > trunc(sysdate);  ** Commented in Ver 2.0 ***/
+							AND     ftq_expry_dt >= trunc(sysdate); /*** > is replaced with >= in ver 2.0 ***/
+
+							if ( SQLCODE != 0 ) 
+              {
+              	fn_userlog(c_ServiceName,"Error Selecting Expiry Date from HSTR.");
+              	fn_errlog(c_ServiceName,"S31160",SQLMSG,c_err_msg);
+									tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+              	return;
+              }
+						}
+					  /*** Ver 1.9 ends ***/
+						
+
+						if ( DEBUG_MSG_LVL_0 )
+						{
+								fn_userlog( c_ServiceName,"Adhoc Expiry for Underlying |%s| and  Expiry date >= |%s| ",c_underlying,c_near_expry_dt);
+						}
+
+						MEMSET(c_cln_mtch_accnt);
+
+						/** Finit32(ptr_fml_Ibuf,MIN_FML_BUF_LEN); Commented in Ver 2.2 ***/
+
+						if (argc >6)
+						{
+							strcpy(c_cln_mtch_accnt,argv[6]);
+						}
+						else
+						{
+							strcpy(c_cln_mtch_accnt,"%");
+						}
+
+						if ( strcmp(c_cln_mtch_accnt,"NA") == 0 )
+						{
+								strcpy(c_cln_mtch_accnt,"%");
+						}
+
+						li_tot_records = 0;
+
+						EXEC SQL ALLOCATE :adhoc_expiry_cursor;
+
+						EXEC SQL
+							EXECUTE
+							BEGIN
+							OPEN  :adhoc_expiry_cursor FOR
+						SELECT distinct(fop_clm_mtch_accnt)
+						FROM
+						(
+							SELECT fop_clm_mtch_accnt
+							FROM fop_fo_options_pstn
+							WHERE fop_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND fop_undrlyng = :c_underlying
+							AND fop_expry_dt >= :c_near_expry_dt
+						UNION ALL
+							SELECT fop_clm_mtch_accnt
+							FROM fop_fo_options_pstn_hstry
+							WHERE fop_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND fop_undrlyng = :c_underlying
+							AND fop_expry_dt >= :c_near_expry_dt
+						UNION ALL
+							SELECT fcp_clm_mtch_accnt
+							FROM FCP_FO_SPN_CNTRCT_PSTN
+							WHERE fcp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND fcp_undrlyng = :c_underlying
+							AND fcp_expry_dt >= :c_near_expry_dt
+						UNION ALL
+							SELECT fcp_clm_mtch_accnt
+							FROM FCP_FO_SPN_CNTRCT_PSTN_hstry
+							WHERE fcp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND fcp_undrlyng = :c_underlying
+							AND fcp_expry_dt >= :c_near_expry_dt
+						UNION ALL
+							SELECT ffp_clm_mtch_accnt
+							FROM ffp_fo_futures_pstn
+							WHERE ffp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND ffp_undrlyng = :c_underlying
+							AND ffp_expry_dt >= :c_near_expry_dt
+						UNION ALL
+							SELECT ffp_clm_mtch_accnt
+							FROM ffp_fo_futures_pstn_hstry
+							WHERE ffp_clm_mtch_accnt LIKE :c_cln_mtch_accnt
+							AND ffp_undrlyng = :c_underlying
+							AND ffp_expry_dt >= :c_near_expry_dt
+						UNION ALL
+						SELECT FOD_CLM_MTCH_ACCNT
+							FROM FOD_FO_ORDR_DTLS_HSTRY
+							WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+							AND fod_undrlyng = :c_underlying
+							AND FOD_PRDCT_TYP in ('U','I')    
+							AND FOD_EXPRY_DT >= :c_near_expry_dt
+							AND FOD_EXEC_QTY != 0
+						UNION ALL                          
+							SELECT FOD_CLM_MTCH_ACCNT
+							FROM FOD_FO_ORDR_DTLS
+							WHERE FOD_CLM_MTCH_ACCNT LIKE :c_cln_mtch_accnt
+							AND fod_undrlyng = :c_underlying
+							AND FOD_PRDCT_TYP in ('U','I')
+							AND FOD_EXPRY_DT >= :c_near_expry_dt
+							AND FOD_EXEC_QTY != 0
+						);
+						END;
+						END-EXEC;
+
+						if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+						{
+							fn_userlog(c_ServiceName,"Inside count number of records.");
+							fn_errlog(c_ServiceName,"S31165",SQLMSG,c_err_msg);
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+
+						li_cnt = 0;
+
+						while (1)
+						{
+						 if ( DEBUG_MSG_LVL_0 )
+						 {
+								fn_userlog( c_ServiceName," In while loop");
+						 }
+
+						 MEMSET(c_clm_mtch_accnt);
+
+						 /* Finit32(ptr_fml_Ibuf,MIN_FML_BUF_LEN); Ver 2.2 **/
+						 Finit32(ptr_fml_Ibuf, (FLDLEN32) Fsizeof32(ptr_fml_Ibuf)); /*** Ver 2.2 ***/
+						 li_cnt ++;
+
+						 EXEC SQL FETCH  :adhoc_expiry_cursor
+												INTO :c_clm_mtch_accnt;
+						
+						 if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+						 {
+								fn_errlog( c_ServiceName, "S31170", SQLMSG, c_err_msg  );
+								EXEC SQL CLOSE :adhoc_expiry_cursor;
+								EXEC SQL FREE  :adhoc_expiry_cursor;
+								tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+								return ;
+						 }
+
+						 if( SQLCODE == NO_DATA_FOUND )
+						 {
+								fn_userlog( c_ServiceName," No More data To Process" );
+								EXEC SQL CLOSE :adhoc_expiry_cursor;
+								EXEC SQL FREE  :adhoc_expiry_cursor;
+								break;
+						 }
+
+						 i_returnval = fn_pack_vartofml(  c_ServiceName,
+																							c_err_msg,
+																							&ptr_fml_Ibuf,
+																							6,																			
+																							FFO_EBA_MTCH_ACT_NO, ( char * )c_clm_mtch_accnt,
+																							FFO_OPERATION_TYP,  (char *)&c_run_mode,
+																							FFO_NXT_TRD_DT, ( char * )c_run_date,
+																							FFO_RQST_TYP, ( char * )&c_hstry_mode,
+																							FFO_UNDRLYNG, ( char * )c_underlying,
+																							FFO_EXPRY_DT, ( char * )c_near_expry_dt
+																					 );
+
+						if( i_returnval == -1 )
+						{
+							fn_errlog( c_ServiceName, "S31175", FMLMSG, c_err_msg  );
+					/*** fn_bat_pst_msg(c_ServiceName,"system error occured..exiting",c_tag); Commented in Ver 1.8 ***/
+							tpfree( (char *)ptr_fml_Ibuf );
+					/***		tpfree( (char *)ptr_fml_Obuf ); *** Commented in Ver 2.2 ***/
+							return;
+						}
+
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," Before fn_pre_prcs_rcrd");
+						}
+/** Ver 1.7 chnages for server name from sfr_plg_revln to sfr_boc_xchngbk **/
+
+						i_returnval = fn_pre_prcs_rcrd ( c_ServiceName,
+																						 c_err_msg,
+																						 "sfr_boc_xchngbk", /*** Ver 1.6 changed from sfr_prcs_prtfl  to sfr_plg_revln ***/
+																						 li_cnt,
+																						 li_tot_records );
+						if ( i_returnval == -1 )
+						{
+							fn_errlog( c_ServiceName, "S31180", LIBMSG, c_err_msg );
+							strcpy ( c_msg, "System error. Contact system support" );
+							/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+							return;
+						}
+						
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," Before calling SFO_PRDCT_PRTFL ");
+						}
+						
+  /** fn_bat_pst_msg ( c_ServiceName,"Processing records in Adhoc Expiry Mode",c_tag); Commented in Ver 1.8 **/
+						sprintf ( c_msg, "Processing record |%ld| ",li_cnt );
+						/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+
+						if ( DEBUG_MSG_LVL_0 )
+						{
+								fn_userlog( c_ServiceName," Processing record |%ld| ",li_cnt);
+								fn_userlog( c_ServiceName," Processing match account |%s|",c_clm_mtch_accnt);
+						}
+
+						i_returnval = tpacall ( "SFO_PRDCT_PRTFL" , (char * )ptr_fml_Ibuf ,0, TPNOTRAN );
+
+						if(i_returnval == -1)
+						{
+							fn_errlog( c_ServiceName, "S31185", TPMSG, c_err_msg );
+							strcpy ( c_msg, "ERROR in SFO_PRDCT_PRTFL" );           
+							fn_err_log(c_cln_mtch_accnt,NULL,NULL, NULL,NULL,NULL,NULL,0, c_msg,c_ServiceName,c_err_msg);
+							/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+						}
+
+						if ( DEBUG_MSG_LVL_3 )
+						{
+							fn_userlog( c_ServiceName," After calling SFO_PRDCT_PRTFL ");
+						}
+					 } /*** END of While loop ***/		
+					}	 /*** END of Adhoc Expiry loop ***/
+					/*** Ver 1.3 ends ***/
+					/*** Ver 2.0 starts ***/
+				  if (c_run_mode == UPDATE_PRTFL_FLAG)	
+					{
+           i_returnval = tpbegin( TRAN_TIMEOUT, 0 );
+
+           if ( i_returnval == -1 )
+            {
+              fn_userlog(c_ServiceName," failed to start transaction ");
+              fn_errlog( c_ServiceName, "S31190", TPMSG, c_err_msg );
+              strcpy ( c_msg, "System error. Contact system support" );
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+              return;
+            }
+
+            EXEC SQL
+            UPDATE FNO_SYSTM_PRMTR
+            SET FSP_PRTFL_FLG = 'N'
+            WHERE  FSP_PRODCT = 'FNO';
+
+            if ( SQLCODE != 0 )
+            {
+              tpabort(0);
+              fn_userlog(c_ServiceName," failed to update portfolio flag ");
+              fn_errlog( c_ServiceName, "S31195", SQLMSG, c_err_msg );
+              strcpy ( c_msg, "System error. Contact system support" );
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+              return;
+            }
+
+            i_returnval = tpcommit(0);
+            if ( i_returnval == -1 )
+            {
+              fn_userlog(c_ServiceName," failed to commit ");
+              fn_errlog( c_ServiceName, "S31200", TPMSG, c_err_msg );
+              strcpy ( c_msg, "System error. Contact system support" );
+							tpfree( (char *)ptr_fml_Ibuf ); /*** Ver 2.2 ***/
+              return;
+            }
+					  if ( DEBUG_MSG_LVL_0 )	
+						{
+							fn_userlog(c_ServiceName,"Successfully updated portfolio flag"); 
+              fn_userlog(c_ServiceName,"Mail trigger after successful completion of product portfolio process ");      /*** Ver 2.1 ***/
+						}
+            /*** Ver 2.1 starts ***/
+            sprintf(c_command_1,"ksh %s/prdct_prtflo_run_sts.sh '%s'",c_path,c_run_date);
+            system(c_command_1);
+            /*** Ver 2.1 ends ***/
+						return;
+					}
+					/*** Ver 2.0 ends ***/
+
+					tpfree( (char *)ptr_fml_Ibuf );
+					/*** tpfree( (char *)ptr_fml_Obuf );**** Commented in Ver 2.2 ***/
+					
+					sprintf(c_msg, "Batch process %s ended", argv[0] );
+					/*** fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag ); Commented in Ver 1.8 ***/
+
+				/********* ver 1.2 starts *************/
+
+				EXEC SQL 
+				SELECT count(*) 
+				INTO :i_err_cnt
+				from ELT_ERR_LOG_TAB
+				WHERE trunc(ELT_DATE) = trunc(sysdate)
+				AND ELT_MAIL_STTS = 'N';
+				
+				if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+        {
+          fn_errlog(c_ServiceName,"S31205",SQLMSG,c_err_msg);
+          return;
+        }
+			fn_userlog(c_ServiceName,"i_err_cnt is :%d:",i_err_cnt);  
+
+			if(i_err_cnt >0)
+			{
+				sprintf(c_command,"ksh %s/prdct_prtfl_report.sh",c_path);
+				system(c_command); 
+
+				i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+ 				if ( i_trnsctn == -1 )
+ 				{
+					fn_errlog( c_ServiceName, "S31210", SQLMSG, c_err_msg  );
+   				return;
+ 				}
+				EXEC SQL
+				UPDATE ELT_ERR_LOG_TAB SET ELT_MAIL_STTS ='Y' WHERE trunc(ELT_DATE) = trunc(sysdate) AND ELT_MAIL_STTS ='N';
+
+				if( (SQLCODE != 0 ) && (SQLCODE != NO_DATA_FOUND ) )
+            {
+              fn_errlog(c_ServiceName,"S31215",SQLMSG,c_err_msg);
+							fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+              return;
+            }
+				if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+   			{
+					fn_errlog( c_ServiceName, "S31220", SQLMSG, c_err_msg  );
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   				return;
+				}
+			}
+			else
+			{
+				sprintf(c_command,"ksh %s/prdct_prtfl_mail.sh",c_path);
+ 				system(c_command);
+			}
+	
+		 /********* ver 1.2 Ends *************/
+ 			 return;													
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_PRDCT_PRTFL;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}

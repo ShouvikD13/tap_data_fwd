@@ -1,0 +1,488 @@
+/************************************************************************************/
+/** Program Name : bat_prcs_cntsys_chrg.pc                                          */
+/**                                                                                 */
+/** Description  : This program will run on daily basis. This will process for all  */    
+/**                those records in IOD where D20 orders have bann charged for CNT  */
+/**                and system charges by creating entry in MDC and generate invoice */
+/**                updating MDC Limit                                               */
+/** Ver 1.0      : Sandip Tambe                                                     */
+/************************************************************************************/
+ 
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fml_mf.h>
+#include <fn_ddr.h>
+#include <string.h>		
+#include <fml_rout.h> 
+#include <stdlib.h>	
+#include <fn_read_debug_lvl.h>	
+#include <fn_get_gst_amt.h>
+#include <fn_pp_card.h>  /** for gst and invoice structure **/
+# define SQLROWCOUNT  sqlca.sqlerrd[2]
+#define TRAN_TIME 600		
+int fn_upd_segment_lmt(char *c_ServiceName,
+                      char *c_match_acc,
+                      double d_tot_amt,
+                      char *c_acc_ent,
+                      char  c_dr_cr_flg,
+                      char *c_exg_trd_dt,
+                      long  *l_sttlmnt_no,
+                      char *c_err_msg);
+
+void BAT_PRCS_CNTSYS_CHRG( int argc, char *argv[] )
+{
+	long int li_tot_rcrds;
+  int i_ch_val;
+  int i_chk_rerun;
+  int i_trnsctn;
+	double d_cntsys_chrgs;
+	double d_tot_cnt_chrgs;
+	double d_tot_sys_chrgs;
+	double d_cntsys_chrgs_cgst;
+	double d_cntsys_chrgs_sgst;
+	double d_cntsys_chrgs_ugst;
+	double d_cntsys_chrgs_igst;
+	double d_cntsys_chrgs_with_gst;
+  double d_sys_maxcap=0.0;
+  char c_trd_dt[12];
+  char c_fbc_trd_dt[12];
+  char c_ServiceName[33];
+  char c_errmsg[256];
+  char c_xchng_cd[3];
+  char c_command[512]; 
+  char c_prod_cd[3+1];  
+  char c_mtch_acc[10+1];
+  char c_user_id[10+1];
+	char    c_payment_voucher[17];
+	char    c_cur_sys_dt[12];
+  char c_chrg_typ[10];
+  struct  st_gst_amt  st_ptr_cntsys_gst_amt;                  
+  struct  st_get_gst_all_prdct  st_ptr_get_cntsys_gst_all_prdct;
+  struct st_get_gst_invins st_ptr_get_cntsys_gst_invins;        
+	EXEC SQL INCLUDE "table/mdc_misc_dr_cr.h";
+
+  strcpy ( c_ServiceName, argv[0] );
+
+	INITBATDBGLVL(argv[0]);	
+
+	fn_userlog( c_ServiceName, "Batch process %s started", argv[0] );
+  MEMSET(c_trd_dt);
+  MEMSET(c_fbc_trd_dt);
+  MEMSET(c_errmsg);
+  MEMSET(c_xchng_cd);
+  MEMSET(c_prod_cd); 
+ 
+  /*** For Service routing ***/
+  fn_init_ddr_pop("NA", "NA", "NA");
+
+
+
+  if ( argc < 4 )
+  {
+    fn_userlog("bat_prcs_cntsys_chrg","Arg count :%d:",argc);
+    fn_userlog(c_ServiceName,"Usage : %s <Tag> <Exchange Code> <Pipe id> <trd_date>", argv[0] );
+    sprintf( c_command, "ksh sys_cnt_prcs_failure.sh %s %s",c_ServiceName,argv[4]);
+    system(c_command);
+    return; 
+  }
+	if(argc == 4 )
+	{
+   EXEC SQL
+    SELECT MAX(fbc_trd_dt)
+    INTO   :c_trd_dt
+    FROM   fbc_fo_brnch_cal
+    WHERE  fbc_trd_dt < ( SELECT exg_nxt_trd_dt from exg_xchng_mstr where EXG_XCHNG_CD='NFO');
+  	if(SQLCODE != 0 )
+  	{
+     fn_userlog(c_ServiceName,"Failed To Get Current Trade Date");
+     fn_errlog( c_ServiceName, "S31005",SQLMSG, c_errmsg);
+     sprintf( c_command, "ksh sys_cnt_prcs_failure.sh %s %s",c_ServiceName,argv[4]);
+     system(c_command);
+     return; 
+  	}
+	}
+	else
+	{
+  	strcpy(c_trd_dt, argv[4] );
+	}
+	fn_userlog(c_ServiceName,"Processing for :%s:",c_trd_dt);
+	EXEC SQL
+		select count(1) 
+		into :i_chk_rerun
+		from MDC_MISC_DR_CR
+		where MDC_PRDCT_TYP in ('CSF','CNF')
+		and mdc_from_dt=:c_trd_dt ;
+	if(SQLCODE !=0 )
+	{
+     fn_errlog( c_ServiceName, "S31010", SQLMSG, c_errmsg );
+     return;
+	}
+	if(i_chk_rerun > 0 )
+	{
+		fn_userlog(c_ServiceName,"Process Already run for:%s:.. kindly check",c_trd_dt);
+		return;
+	}
+
+  EXEC SQL
+  SELECT NVL(ACM_CHARGE,0)
+  INTO :d_sys_maxcap
+  FROM ACM_ADDL_CHRGS_MSTR
+  WHERE ACM_CHARGE_TYPE='MAX_SYS_CHRG_CAP';
+
+  if(SQLCODE !=0 )
+  {
+     fn_errlog( c_ServiceName, "S31015", SQLMSG, c_errmsg );
+     return;
+  }
+
+	EXEC SQL
+	DECLARE cur_cnt_sys_chrg CURSOR FOR
+	select CHRG_TYP,
+  					 UAC_USR_ID,
+  						IOD_CLM_MTCH_ACCNT,
+  						sum(CNT_TRD_CHRG),
+  						sum(SYSTEM_CHRG)
+	from
+	(
+				select      'CNT_CHRG' CHRG_TYP,
+      							UAC_USR_ID,
+            				IOD_CLM_MTCH_ACCNT,
+            				nvl(IOD_CNT_CHRGS,0)/100 CNT_TRD_CHRG,
+            				0 SYSTEM_CHRG
+    		from  IOD_IGAIN_ORDR_DTLS,UAC_USR_ACCNTS
+    		where IOD_CLM_MTCH_ACCNT = UAC_CLM_MTCH_ACCNT
+    		and    IOD_ORDR_DT=:c_trd_dt
+    		and   nvl(IOD_PRFT_LOSS_FLG,'N')='D'
+    		and   nvl(IOD_CNT_CHRGS,0) > 0
+				union all
+				select      'SYS_CHRG' CHRG_TYP,
+      							UAC_USR_ID,
+            				IOD_CLM_MTCH_ACCNT,
+            				0 CNT_TRD_CHRG,
+            nvl(IOD_SYS_CHRGS,0)/100 SYSTEM_CHRG
+    		from  IOD_IGAIN_ORDR_DTLS,UAC_USR_ACCNTS
+    		where IOD_CLM_MTCH_ACCNT = UAC_CLM_MTCH_ACCNT
+    		and    IOD_ORDR_DT=:c_trd_dt
+    		and   nvl(IOD_PRFT_LOSS_FLG,'N')='D'
+    		and   nvl(IOD_SYS_CHRGS,0) > 0
+ )
+ group by CHRG_TYP,
+             UAC_USR_ID,
+             IOD_CLM_MTCH_ACCNT;
+
+/*		select	UAC_USR_ID,
+						IOD_CLM_MTCH_ACCNT,
+						sum(nvl(IOD_CNT_CHRGS,0)/100),
+						sum(nvl(IOD_SYS_CHRGS,0)/100) 
+	  from	IOD_IGAIN_ORDR_DTLS,UAC_USR_ACCNTS 
+		where	IOD_CLM_MTCH_ACCNT = UAC_CLM_MTCH_ACCNT
+		and    IOD_ORDR_DT=:c_trd_dt
+		and   nvl(IOD_PRFT_LOSS_FLG,'N')='D'
+		and   nvl(IOD_CNT_CHRGS,0)+nvl(IOD_SYS_CHRGS,0) > 0
+		group by IOD_XCHNG_CD,
+						 UAC_USR_ID,
+						 IOD_CLM_MTCH_ACCNT;
+*/
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+     fn_errlog( c_ServiceName, "S31020", SQLMSG, c_errmsg );
+     return;
+  }
+  i_trnsctn= fn_begintran( c_ServiceName, c_errmsg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog ( c_ServiceName, "S31025", LIBMSG, c_errmsg );
+    return ;
+  }
+
+	EXEC SQL OPEN cur_cnt_sys_chrg;
+
+	 if( SQLCODE != 0 )
+   {
+   		fn_errlog( c_ServiceName, "S31030", SQLMSG, c_errmsg );
+   		EXEC SQL CLOSE cur_cnt_sys_chrg;
+	 		return;
+	 }
+	li_tot_rcrds=0; 
+	while(1)
+	{
+    MEMSET(c_prod_cd);
+    MEMSET(c_mtch_acc);
+    MEMSET(c_user_id);
+    MEMSET(c_cur_sys_dt);
+    MEMSET(c_payment_voucher);
+  	MEMSET(st_ptr_cntsys_gst_amt); 
+  	MEMSET(st_ptr_get_cntsys_gst_all_prdct);
+  	MEMSET(st_ptr_get_cntsys_gst_invins);
+    MEMSET(c_chrg_typ);
+		d_tot_sys_chrgs=0.0;
+	  d_tot_sys_chrgs=0.0;	
+	  d_cntsys_chrgs_cgst =0.0;  
+    d_cntsys_chrgs_sgst=0.0;
+    d_cntsys_chrgs_igst=0.0;
+    d_cntsys_chrgs_ugst=0.0;
+
+		EXEC SQL
+				FETCH cur_cnt_sys_chrg
+        INTO  :c_chrg_typ, 
+              :c_user_id,
+							:c_mtch_acc,
+							:d_tot_cnt_chrgs,
+							:d_tot_sys_chrgs;
+	
+    if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    {
+     	fn_errlog( c_ServiceName, "S31035", SQLMSG, c_errmsg  );
+     	EXEC SQL CLOSE cur_cnt_sys_chrg;
+			fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+     	return;
+    }
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+			fn_userlog(c_ServiceName,"No more records to process for MDC insert for CNT and SYS charges");
+     	EXEC SQL CLOSE cur_cnt_sys_chrg;
+     	break;
+    }
+    rtrim(c_chrg_typ);
+  	d_cntsys_chrgs=0; 
+		d_cntsys_chrgs_with_gst=0;
+		fn_userlog(c_ServiceName,"d_tot_cnt_chrgs=:%lf",d_tot_cnt_chrgs);
+		fn_userlog(c_ServiceName,"d_tot_sys_chrgs=:%lf",d_tot_sys_chrgs);
+    fn_userlog(c_ServiceName,"c_chrg_typ :%s:",c_chrg_typ);
+	 if(d_tot_cnt_chrgs > 0 )
+	 {
+			strcpy(c_prod_cd,"CNF");
+			d_cntsys_chrgs=d_tot_cnt_chrgs;
+   }
+	 else if(d_tot_sys_chrgs > 0 )
+	 {
+			strcpy(c_prod_cd,"CSF");
+			d_cntsys_chrgs=d_tot_sys_chrgs;
+
+      if(d_cntsys_chrgs > d_sys_maxcap)
+      {
+       d_cntsys_chrgs = d_sys_maxcap;
+       fn_userlog(c_ServiceName,"After capping charges :%s: - :%lf:",c_mtch_acc,d_cntsys_chrgs);
+      }
+	 }
+   else
+   {
+			d_cntsys_chrgs=0;
+   		fn_userlog(c_ServiceName,"Invalid product Code for match:%s:",c_mtch_acc);
+			continue;
+   }
+   fn_userlog(c_ServiceName,"c_mtch_acc :%s: c_prod_cd :%s: d_cntsys_chrgs :%lf:",c_mtch_acc,c_prod_cd,d_cntsys_chrgs);
+    
+	 fn_userlog(c_ServiceName,"c_trd_dt=:%s:",c_trd_dt);
+	 fn_userlog(c_ServiceName,"c_prod_cd=:%s",c_prod_cd);
+	 fn_userlog(c_ServiceName,"Getting GST details for=:%s",c_user_id);
+   if(fn_get_gst_amt(c_ServiceName,c_user_id,d_cntsys_chrgs,&st_ptr_cntsys_gst_amt, c_errmsg) != 0)
+   {
+    	fn_userlog(c_ServiceName,"call to fn_get_gst_amt failed..");
+    	errlog(c_ServiceName, "S31040", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg );
+    	fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+    	return;
+   }
+
+  strcpy(st_ptr_get_cntsys_gst_all_prdct.c_state_code,st_ptr_cntsys_gst_amt.c_gst_isec_state_cd);
+  rtrim(st_ptr_cntsys_gst_amt.c_gst_isec_state_cd);
+  fn_userlog(c_ServiceName,"st_ptr_get_cntsys_gst_all_prdct.c_state_code :%s:",st_ptr_get_cntsys_gst_all_prdct.c_state_code);
+  st_ptr_get_cntsys_gst_all_prdct.c_seq_flg='O';
+
+	EXEC SQL
+   SELECT  ABS(:d_cntsys_chrgs),
+           FN_GST_SEQ_OTHR_DBIT(:st_ptr_cntsys_gst_amt.c_gst_isec_state_cd,TO_CHAR(SYSDATE,'DD-Mon-YYYY')),
+           TO_CHAR(SYSDATE,'DD-Mon-YYYY'),
+					 case when (:st_ptr_cntsys_gst_amt.d_cgst_per !=0 AND :st_ptr_cntsys_gst_amt.d_sgst_per != 0 )
+								then  ROUND(ABS(:d_cntsys_chrgs *(:st_ptr_cntsys_gst_amt.d_cgst_per/100)),2) else 0 end,
+					 case when (:st_ptr_cntsys_gst_amt.d_sgst_per != 0 )
+								then  ROUND(ABS(:d_cntsys_chrgs *(:st_ptr_cntsys_gst_amt.d_sgst_per/100)),2) else 0 end,
+					 case when (:st_ptr_cntsys_gst_amt.d_sgst_per !=0 AND :st_ptr_cntsys_gst_amt.d_ugst_per != 0 )
+								then  ROUND(ABS(:d_cntsys_chrgs *(:st_ptr_cntsys_gst_amt.d_ugst_per/100)),2) else 0 end,
+					 case when (:st_ptr_cntsys_gst_amt.d_igst_per !=0  )
+								then  ROUND(ABS(:d_cntsys_chrgs *(:st_ptr_cntsys_gst_amt.d_igst_per/100)),2) else 0 end,
+           ROUND(ABS(:d_cntsys_chrgs *(:st_ptr_cntsys_gst_amt.d_cgst_per + 
+																			 :st_ptr_cntsys_gst_amt.d_sgst_per + 
+																			 :st_ptr_cntsys_gst_amt.d_ugst_per + 
+																			 :st_ptr_cntsys_gst_amt.d_igst_per)/100
+																			)
+								,2)
+   INTO    :d_cntsys_chrgs,
+           :c_payment_voucher,
+           :c_cur_sys_dt,
+					 :d_cntsys_chrgs_cgst,
+					 :d_cntsys_chrgs_sgst,
+				 	 :d_cntsys_chrgs_ugst,
+					 :d_cntsys_chrgs_igst,
+					 :d_cntsys_chrgs_with_gst 
+   FROM    DUAL;
+
+	if( SQLCODE !=0 )
+	{
+     fn_errlog(c_ServiceName,"S31045",SQLMSG,c_errmsg);
+     fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+     continue;
+	}
+  MEMSET(sql_mdc_sttlmnt_trd_dt);
+	sql_mdc_sttlmnt_nmbr=0;
+  i_ch_val=fn_upd_segment_lmt(c_ServiceName,
+                                  c_mtch_acc,
+                                  (d_cntsys_chrgs + d_cntsys_chrgs_cgst +
+                                  d_cntsys_chrgs_sgst + d_cntsys_chrgs_ugst +
+                                  d_cntsys_chrgs_igst),
+                                  c_prod_cd,
+                                  'D',
+                                  sql_mdc_sttlmnt_trd_dt.arr,
+                                  &sql_mdc_sttlmnt_nmbr,
+                                  c_errmsg);
+
+   if(i_ch_val != 0)
+   {
+        fn_userlog(c_ServiceName,"fn_upd_segment_lmt failed for :%s:...",c_mtch_acc);
+        fn_errlog(c_ServiceName, "S31050", SQLMSG ,c_errmsg );
+        fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+        return;
+   }
+	SETLEN(sql_mdc_sttlmnt_trd_dt);
+	if(DEBUG_MSG_LVL_0)
+	{	
+		fn_userlog(c_ServiceName,"c_mtch_acc=:%s:",c_mtch_acc);
+		fn_userlog(c_ServiceName,"c_prod_cd=:%s:",c_prod_cd);
+		fn_userlog(c_ServiceName,"c_trd_dt=:%s:",c_trd_dt);
+		fn_userlog(c_ServiceName,"sql_mdc_sttlmnt_trd_dt=:%s",sql_mdc_sttlmnt_trd_dt);
+		fn_userlog(c_ServiceName,"c_payment_voucher=:%s:",c_payment_voucher);
+		fn_userlog(c_ServiceName,"isec_state_cd=:%s",st_ptr_cntsys_gst_amt.c_gst_isec_state_cd);
+		fn_userlog(c_ServiceName,"gst_state_cd=:%s",st_ptr_cntsys_gst_amt.c_gst_state_cd);
+		fn_userlog(c_ServiceName,"d_cntsys_chrgs=:%ld",d_cntsys_chrgs);
+	}
+	EXEC SQL
+        INSERT INTO MDC_MISC_DR_CR( MDC_CLM_MTCH_ACCNT,
+                                    MDC_PRDCT_TYP,
+                                    MDC_CRDT_NMBR,
+                                    MDC_AMT1,
+                                    MDC_AMT2,
+                                    MDC_TOT_AMT,
+                                    MDC_FROM_DT,
+                                    MDC_TO_DT,
+                                    MDC_XCHNG_CD,
+                                    MDC_DR_CR_FLG,
+                                    MDC_MTCH_STTS,
+                                    MDC_BNK_STTS,
+                                    MDC_MTCH_UPD_AMT,
+                                    MDC_BNK_UPD_AMT,
+                                    MDC_INVOICE_NMBR,
+                                    MDC_INVOICE_REF_NMBR,
+                                    MDC_GST_STATE_CD,
+                                    MDC_GST_ISEC_STATE_CD,
+                                    MDC_CGST_AMT,
+                                    MDC_SGST_AMT,
+                                    MDC_IGST_AMT,
+                                    MDC_UGST_AMT,
+                                    MDC_INVOICE_GEN_FLG,
+				    												MDC_LMT_UPD_STTS,
+                                    MDC_STTLMNT_NMBR, 
+                                    MDC_STTLMNT_TRD_DT
+                                  )
+                            VALUES( trim(:c_mtch_acc),
+                                    trim(:c_prod_cd),
+                                    '01'||to_char(sysdate, 'yyddmm')||next_doc_no.NEXTVAL ,
+                                    :d_cntsys_chrgs,
+                                    0, 
+                                    :d_cntsys_chrgs + :d_cntsys_chrgs_cgst +
+                                                    	:d_cntsys_chrgs_sgst +
+                                                    	:d_cntsys_chrgs_ugst +
+                                                    	:d_cntsys_chrgs_igst,
+                                    rtrim(:c_trd_dt),
+                                    TRUNC(sysdate), 
+                                    'NSE', 
+                                    'D',
+                                    'N',
+                                    'N',
+                                    0,
+                                    0,
+                                    rtrim(:c_payment_voucher),       
+                                    NULL,
+                                    trim(:st_ptr_cntsys_gst_amt.c_gst_state_cd),
+                                    trim(:st_ptr_cntsys_gst_amt.c_gst_isec_state_cd),
+				    												:d_cntsys_chrgs_cgst,  
+                                    :d_cntsys_chrgs_sgst,  
+                                    :d_cntsys_chrgs_igst,   
+                                    :d_cntsys_chrgs_ugst,   
+                                    'N',
+                                    'Y', 
+                                    :sql_mdc_sttlmnt_nmbr, 
+                                    rtrim(:sql_mdc_sttlmnt_trd_dt)
+                                  );
+
+        if(SQLCODE != 0)
+        {
+          fn_errlog(c_ServiceName, "S31055", SQLMSG , c_errmsg );
+        	fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+          return;
+        }
+
+        fn_userlog (c_ServiceName,"insert into MDC_MISC_DR_CR Successful");
+        st_ptr_get_cntsys_gst_invins.c_mtch_acc=c_mtch_acc;
+        st_ptr_get_cntsys_gst_invins.c_prdct_cd="OTHRDB";
+        st_ptr_get_cntsys_gst_invins.c_invoice_no=c_payment_voucher;
+        st_ptr_get_cntsys_gst_invins.c_invoice_dt=c_cur_sys_dt;
+        st_ptr_get_cntsys_gst_invins.d_charge_amt=d_cntsys_chrgs;
+        st_ptr_get_cntsys_gst_invins.d_cgst_amt=d_cntsys_chrgs_cgst;
+        st_ptr_get_cntsys_gst_invins.d_sgst_amt=d_cntsys_chrgs_sgst;
+        st_ptr_get_cntsys_gst_invins.d_ugst_amt=d_cntsys_chrgs_ugst;
+        st_ptr_get_cntsys_gst_invins.d_igst_amt=d_cntsys_chrgs_igst;
+        st_ptr_get_cntsys_gst_invins.c_sub_prdct_cd=c_prod_cd;
+        st_ptr_get_cntsys_gst_invins.c_isec_state_cd=st_ptr_cntsys_gst_amt.c_gst_isec_state_cd;
+        st_ptr_get_cntsys_gst_invins.c_state_cd=st_ptr_cntsys_gst_amt.c_gst_state_cd;
+        st_ptr_get_cntsys_gst_invins.c_ref_invoice_no=NULL;
+        st_ptr_get_cntsys_gst_invins.c_ref_invoice_dt=NULL;
+        st_ptr_get_cntsys_gst_invins.d_cgst_per=st_ptr_cntsys_gst_amt.d_cgst_per;
+        st_ptr_get_cntsys_gst_invins.d_sgst_per=st_ptr_cntsys_gst_amt.d_sgst_per;
+        st_ptr_get_cntsys_gst_invins.d_ugst_per=st_ptr_cntsys_gst_amt.d_ugst_per;
+        st_ptr_get_cntsys_gst_invins.d_igst_per=st_ptr_cntsys_gst_amt.d_igst_per;
+
+	 fn_userlog(c_ServiceName,"Insering Invoice for match:%s:.",c_mtch_acc);
+
+        if(fn_call_gst_invins(c_ServiceName, DEF_USR, DEF_SSSN,&st_ptr_get_cntsys_gst_invins,c_errmsg) != 0)
+        {
+          fn_errlog(c_ServiceName, "S31060", SQLMSG ,c_errmsg );
+        	fn_aborttran(c_ServiceName, i_trnsctn, c_errmsg );
+          return;
+        }
+	 fn_userlog(c_ServiceName,"Invoice Insert successfull for match:%s:.",c_mtch_acc);
+ 	 li_tot_rcrds++; /** counter increased by 1 **/
+	}			/** End of while ***/
+	fn_userlog(c_ServiceName,"Total records processed =:%ld:",li_tot_rcrds);
+
+  if (fn_committran( c_ServiceName,i_trnsctn, c_errmsg ) == -1 )
+  {
+   		fn_errlog ( c_ServiceName, "S31065", LIBMSG, c_errmsg );
+   		return ;
+  }	
+	fn_userlog(c_ServiceName,"%s - completed successfully for -%ld records",c_ServiceName,li_tot_rcrds); 	
+	return;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+	fn_var = BAT_PRCS_CNTSYS_CHRG;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+	return 0;
+}

@@ -1,0 +1,398 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_ALL_EODADJ                                        */
+/*                                                                            */
+/*  Input             : FFO_XCHNG_CD                                          */
+/*                      FFO_TRD_DT                                            */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                      FFO_PRDCT_TYP                                         */
+/*                      FFO_AMOUNT                                            */
+/*                                                                            */
+/*  Output            : Success / Failure                                     */
+/*                                                                            */
+/*  Description       : To process the Future / option records in End of Day	*/
+/*										  (EOD) adjustment of Uncrystalized margins for normal	*/
+/*										  and span customers called by the batch program.				*/
+/*                                                                            */
+/*	Log								:	1.0			14-Jun-2011																		*/
+/*  Log               : 1.2     28-Feb-2013                                   */
+/*  Log               : 1.3     01-Mar-2013                                   */
+/*  Log               : 1.4     09-Sep-2014                                   */
+/*  Log               : 1.5     16-Mar-2015                                   */
+/*  Log               : 1.6     26-Jul-2019                                   */
+/******************************************************************************/
+/* 	1.0		-		New Release																											*/	
+/*  1.1   -   Blocked PL added to Blocked margin. As the same needs to be     */
+/*            carry forwarded to the next trade date(02-Apr-2012) - Navina D. */
+/*  1.2   -   Overnight Orders at 4:30 changes | Swati A.B.                   */
+/*  1.3   -   Game Simulator back office Automation | Mahesh Shinde           */
+/*  1.4   -   View to FML changes	|	Samip M																		*/
+/*  1.5   -   Margin Mismatch Fix (CR_ISEC04_61270 Shift Margin               */
+/*            Process Changes)    | Anand Dhopte                              */
+/*  1.6   -   Block delivery margin on ITM long Call & Put options from       */
+/*            Expry-4 days till  Expiry  (Anuj Pancholi)                      */
+/******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fml_def.h>
+/** #include <fo_view_def.h> **/	/** Commented for Ver 1.4 **/
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_tuxlib.h>
+#include <fo.h>
+#include <fn_ddr.h>
+#include <fn_log.h>
+#include <fn_read_debug_lvl.h>   
+#include <fn_span_lib.h>
+#include <fml_rout.h>
+#include <fn_pos.h>       /** Ver 1.3 **/
+
+void SFO_ALL_EODADJ( TPSVCINFO *rqst )
+{
+  FBFR32 *ptr_fml_Ibuf;
+
+  char c_ServiceName [ 33 ];
+  char c_err_msg [ 256 ];
+  int i_returncode;
+  int i_ip_len;
+  int i_op_len;
+  int i_trnsctn;
+/***	int i_err[6];  
+  int i_ferr[6];  array size changed from 6 to 7 in Ver 1.5 ***/
+  int i_ferr[7]; /* Ver 1.5 */
+  int i_err[7];  /* Ver 1.5 */
+	int i = 0;
+	char c_prdct_typ ='\0';
+
+  char c_tag [ 256 ];
+  char c_msg [ 256 ];
+ 
+  /**** Ver 1.3 Starts ****/
+  char c_program_nm[33];
+  char c_xchng_cd_tmp[4];
+  char c_match_id[11];
+  char c_error_txt[256];
+  char c_next_trd_dt[12]; /* Ver 1.5 */ 
+
+  MEMSET(c_program_nm);
+  MEMSET(c_xchng_cd_tmp);
+  MEMSET(c_match_id);
+  MEMSET(c_error_txt);
+
+  strcpy(c_program_nm,"bat_eod_adj");
+  /**** Ver 1.3 Ends ***/
+ 
+  EXEC SQL BEGIN DECLARE SECTION;
+    varchar c_nxt_trd_dt [ LEN_DATE ];
+ 		struct st_upd_limits st_upd_lim;
+  EXEC SQL END DECLARE SECTION;
+
+ 	struct st_upd_limits st_upd_limits_del;
+	struct st_upd_limits st_upd_limits_add;
+
+	struct st_err_msg *ptr_st_err_msg;
+
+	ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);    
+
+	st_upd_lim.c_remarks[0] = '\0';
+
+	if(DEBUG_MSG_LVL_3)
+	{
+ 		fn_userlog ( c_ServiceName,"***********************START SFO_ALL_EODADJ*************************");
+		fn_userlog(c_ServiceName,"START UNPACK Input FML : ptr_fml_Ibuf TO struct st_upd_lim");
+	}
+
+	i_err		[	0	]			=	Fget32( ptr_fml_Ibuf ,FFO_XCHNG_CD,0,(char *) st_upd_lim.c_xchng_cd,0);
+	i_ferr	[	0	]			=	Ferror32;
+	i_err		[	1	]			=	Fget32( ptr_fml_Ibuf ,FFO_TRD_DT,0,(char *) st_upd_lim.c_trd_dt,0);
+	i_ferr	[	1	]			=	Ferror32;
+	i_err		[	2	]			=	Fget32( ptr_fml_Ibuf ,FFO_EBA_MTCH_ACT_NO,0,(char *) st_upd_lim.c_cln_mtch_accnt,0);
+	i_ferr	[	2	]			=	Ferror32;
+	i_err		[	3	]			=	Fget32( ptr_fml_Ibuf ,FFO_PRDCT_TYP,0,(char *) &c_prdct_typ,0);
+	i_ferr	[	3	]			=	Ferror32;
+	i_err		[	4	]			=	Fget32( ptr_fml_Ibuf ,FFO_AMOUNT,0,(char *) &st_upd_lim.d_amount,0);
+	i_ferr	[	4	]			=	Ferror32;
+	i_err		[	5	]			=	Fget32( ptr_fml_Ibuf ,FFO_ROUT_CRT,0,(char *) st_upd_lim.c_rout_crt,0);
+	i_ferr	[	5	]			=	Ferror32;
+  i_err   [ 6 ]     = Fget32( ptr_fml_Ibuf ,FFO_NXT_TRD_DT,0,(char *) c_nxt_trd_dt.arr ,0); /*** added in ver 1.5 ***/
+  i_ferr  [ 6 ]     = Ferror32;  /*** Ver 1.5 ***/
+
+	/*** for ( i=0	;	i < 6 ;	i++ ) commented in ver 1.5 ***/
+  for ( i=0  ; i < 7 ; i++ ) 
+	{
+		if ( (i_err[ i ] == -1 ) && (i_ferr[ i ]	!= FNOTPRES ) )
+    {
+    	fn_userlog( c_ServiceName, "Error in :%d:",i );
+			fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.3 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/ 
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+	}
+  strcpy(c_xchng_cd_tmp,st_upd_lim.c_xchng_cd);    /*** Ver 1.3 ***/
+  strcpy(c_match_id,st_upd_lim.c_cln_mtch_accnt);  /*** Ver 1.3 ***/ 
+  strcpy(c_next_trd_dt,c_nxt_trd_dt.arr);          /*** Ver 1.5 ***/ 
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"INPUT TO SERVICE");
+		fn_userlog(c_ServiceName,"**************************************************");
+		fn_userlog(c_ServiceName,"st_upd_lim.c_xchng_cd	 IS :%s:",	st_upd_lim.c_xchng_cd );
+		fn_userlog(c_ServiceName,"st_upd_lim.c_trd_dt		IS	:%s:",	st_upd_lim.c_trd_dt );
+		fn_userlog(c_ServiceName,"st_upd_lim.c_cln_mtch_accnt	 IS :%s:",	st_upd_lim.c_cln_mtch_accnt );
+		fn_userlog(c_ServiceName,"st_upd_lim.c_prdct_typ	 IS :%c:",	c_prdct_typ );
+		fn_userlog(c_ServiceName,"st_upd_lim.d_amount	 IS :%lf:",	st_upd_lim.d_amount );
+		fn_userlog(c_ServiceName,"st_upd_lim.c_rout_crt	 IS :%s:",	st_upd_lim.c_rout_crt );
+    fn_userlog(c_ServiceName,"Exchange Next Trade Date Is :%s:", c_nxt_trd_dt.arr );     /*** Ver 1.5 ***/ 
+	  fn_userlog(c_ServiceName,"**************************************************");
+	}
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"END UNPACK Input FML : ptr_fml_Ibuf TO struct st_upd_lim");
+	}
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( st_upd_lim.c_rout_crt );
+
+  i_returncode = Fget32( ptr_fml_Ibuf, FFO_BAT_TAG, 0,(char *)c_tag, 0 );
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31010", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.3 ***/
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/ 
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  sprintf ( c_msg, "Processing match a/c - [%s], Trade date - [%s]",st_upd_lim.c_cln_mtch_accnt, st_upd_lim.c_trd_dt );
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Processing match a/c - [%s], Trade date - [%s]",st_upd_lim.c_cln_mtch_accnt, st_upd_lim.c_trd_dt );
+	}
+
+	if ( st_upd_lim.d_amount < 0 )
+	{
+		strcpy( c_err_msg, " Invalid amount passed");
+		fn_userlog(c_ServiceName,"Invalid amount passed" );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "Amount cannot be less than 0" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,c_msg);  /*** Ver 1.3 ***/
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,"System error. Contact system support");  /*** Ver 1.3 ***/
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+ 
+  /****  Commented in Ver 1.5 *******
+  EXEC SQL
+    SELECT  to_char ( exg_nxt_trd_dt, 'dd-Mon-yyyy')
+    INTO    :c_nxt_trd_dt
+    FROM    exg_xchng_mstr
+    WHERE   exg_xchng_cd = :st_upd_lim.c_xchng_cd
+		AND			exg_mkt_typ  = 'D';
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31015", SQLMSG, c_err_msg );
+   	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,"System error. Contact system support");  *** Ver 1.3 ***
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  *** Ver 1.3 ***
+   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	SETNULL ( c_nxt_trd_dt ) ; 
+
+  **********************  Ver 1.5 Comment Ends *****/
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Next trade date Is :%s:",c_nxt_trd_dt.arr );
+	  fn_userlog(c_ServiceName,"st_upd_lim.d_amount Is :%lf:",st_upd_lim.d_amount );
+	}
+
+	if ( st_upd_lim.d_amount > 0 )
+	{
+		memcpy ( &st_upd_limits_del, &st_upd_lim, sizeof( st_upd_limits_del ) );
+
+		st_upd_limits_del.c_dr_cr_flg = CREDIT;
+		strcpy(st_upd_limits_del.c_narration_id,CLOSING_OF_UNCRYSTALIZED_BAL);
+		st_upd_limits_del.c_dr_without_lmt_flg = DEBIT_WITHOUT_LIMIT;
+		fn_cpy_ddr(st_upd_limits_del.c_rout_crt);
+
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"***********fn_update_limits******************");
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_cln_mtch_accnt :%s:",st_upd_limits_del.c_cln_mtch_accnt );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_xchng_cd :%s:",st_upd_limits_del.c_xchng_cd );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_dr_cr_flg :%c:",st_upd_limits_del .c_dr_cr_flg );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_narration_id :%s:",st_upd_limits_del. c_narration_id );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_dr_without_lmt_flg :%c:",st_upd_limits_del. c_dr_without_lmt_flg );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_rout_crt :%s:",st_upd_limits_del.c_rout_crt );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.d_amount :%lf:",st_upd_limits_del. d_amount );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_trd_dt :%s:",st_upd_limits_del.c_trd_dt );
+			fn_userlog(c_ServiceName,"st_upd_limits_del.c_remarks :%s:",st_upd_limits_del.c_remarks );
+			fn_userlog(c_ServiceName,"*********************************************");
+		}
+
+		i_returncode = fn_update_limits ( c_ServiceName,
+																			&st_upd_limits_del,
+																			ptr_st_err_msg );
+	
+
+	  if ( i_returncode != 0 )
+	  {
+	   	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, ptr_st_err_msg->c_err_msg, 0 );
+			fn_userlog(c_ServiceName,"Error in fn_update_limits for CREDIT entry" );
+	   	fn_aborttran( c_ServiceName, i_trnsctn, ptr_st_err_msg->c_err_msg );
+	    strcpy ( c_msg, "System error. Contact system support" );
+	    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact system support");  /*** Ver 1.3 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/ 
+	   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	  }
+	
+		memcpy ( &st_upd_limits_add, &st_upd_lim, sizeof( st_upd_limits_add ) );
+	
+		st_upd_limits_add.c_dr_cr_flg = DEBIT;
+		st_upd_limits_add.d_amount = (-1) * st_upd_lim.d_amount;
+		strcpy(st_upd_limits_add.c_trd_dt, (char *)c_nxt_trd_dt.arr); 
+		strcpy(st_upd_limits_add.c_narration_id,UNCRYSTALIZED_BAL_BROUGHT_FORWARD);
+		st_upd_limits_add.c_dr_without_lmt_flg = DEBIT_WITHOUT_LIMIT;
+		fn_cpy_ddr(st_upd_limits_add.c_rout_crt);
+	
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"***********fn_update_limits******************");
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_cln_mtch_accnt :%s:",st_upd_limits_add.c_cln_mtch_accnt );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_xchng_cd :%s:",st_upd_limits_add.c_xchng_cd );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_dr_cr_flg :%c:",st_upd_limits_add.c_dr_cr_flg );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_narration_id :%s:",st_upd_limits_add.c_narration_id );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_dr_without_lmt_flg :%c:",st_upd_limits_add.c_dr_without_lmt_flg );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_rout_crt :%s:",st_upd_limits_add.c_rout_crt );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.d_amount :%lf:",st_upd_limits_add.d_amount );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_trd_dt :%s:",st_upd_limits_add.c_trd_dt );
+			fn_userlog(c_ServiceName,"st_upd_limits_add.c_remarks :%s:",st_upd_limits_add.c_remarks );
+			fn_userlog(c_ServiceName,"*********************************************");
+		}
+
+		i_returncode = fn_update_limits ( c_ServiceName,
+																			&st_upd_limits_add,
+																			ptr_st_err_msg );
+	
+	  if ( i_returncode != 0 )
+	  {
+	   	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, ptr_st_err_msg->c_err_msg, 0 );
+			fn_userlog(c_ServiceName,"Error in fn_update_limits for DEBIT entry" );
+	   	fn_aborttran( c_ServiceName, i_trnsctn, ptr_st_err_msg->c_err_msg );
+	    strcpy ( c_msg, "System error. Contact system support" );
+	    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact system support");  /*** Ver 1.3 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/
+	   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	  }
+	}
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Product type Is :%c:",c_prdct_typ );
+	}
+
+ fn_userlog(c_ServiceName,"Exchange Next Trade Date Is :%s:",c_next_trd_dt); /*** Ver 1.5 ***/
+
+	if (c_prdct_typ == FUTURES)
+	{
+		EXEC SQL
+			UPDATE  fup_fut_undrlyng_pstn
+/***	SET     fup_trd_dt = to_date(:c_nxt_trd_dt,'dd-Mon-yyyy')  commented In Ver 1.5	***/
+			SET 		fup_trd_dt = to_date(:c_next_trd_dt,'dd-Mon-yyyy')     /*** Ver 1.5 ***/
+			WHERE 	fup_xchng_cd = :st_upd_lim.c_xchng_cd
+			AND			fup_clm_mtch_accnt = :st_upd_lim.c_cln_mtch_accnt
+		/***	AND			fup_trd_dt = to_date(:st_upd_lim.c_trd_dt,'dd-Mon-yyyy')   Commented in Ver 1.5 ***/
+			AND			(fup_utrd_mrgn + fup_uordr_mrgn + fup_add_mrgn_val)!= 0;			
+	}
+	else if (c_prdct_typ == OPTIONS)
+	{
+		EXEC SQL
+			UPDATE  fop_fo_options_pstn
+/***	SET     fop_trd_dt = to_date(:c_nxt_trd_dt,'dd-Mon-yyyy')	commented In Ver 1.5 ***/
+			SET 		fop_trd_dt = to_date(:c_next_trd_dt,'dd-Mon-yyyy')     /*** Ver 1.5 ***/  
+			WHERE 	fop_xchng_cd = :st_upd_lim.c_xchng_cd
+			AND			fop_clm_mtch_accnt = :st_upd_lim.c_cln_mtch_accnt
+		/***	AND			fop_trd_dt = to_date(:st_upd_lim.c_trd_dt,'dd-Mon-yyyy')   Commented in Ver 1.5 ***/
+			AND		(fop_uexctd_mrgn + fop_uordr_mrgn + NVL(fop_udlvry_mrgn,0))!=0; /** Ver 1.6 **/
+	}
+	else if (c_prdct_typ == SPAN)
+	{
+		EXEC SQL
+			UPDATE  FUS_FO_UNDRLYNG_SPN_PSTN
+/***	SET     FUS_TRD_DT = to_date(:c_nxt_trd_dt,'dd-Mon-yyyy')	Commented In Ver 1.5	***/		
+			SET 		FUS_TRD_DT = to_date(:c_next_trd_dt,'dd-Mon-yyyy')     /*** Ver 1.5 ***/
+			WHERE 	FUS_XCHNG_CD = :st_upd_lim.c_xchng_cd
+			AND			FUS_CLM_MTCH_ACCNT = :st_upd_lim.c_cln_mtch_accnt
+		/***	AND			FUS_TRD_DT = to_date(:st_upd_lim.c_trd_dt,'dd-Mon-yyyy')    Commented in Ver 1.5 ***/
+			AND			(FUS_INITIAL_MRGN + FUS_BLCKD_PL) != 0;		/*** FUS_BLCKD_PL added in Ver 1.1 ***/
+	}
+	else if (c_prdct_typ == 'P') /*** Ver 1.2 -- Option Premium shifted and date updated even if margin is zero ***/
+  {
+    EXEC SQL
+      UPDATE  FUS_FO_UNDRLYNG_SPN_PSTN
+/***	SET     FUS_TRD_DT = to_date(:c_nxt_trd_dt,'dd-Mon-yyyy')	Commented In Ver 1.5  ***/
+      SET     FUS_TRD_DT = to_date(:c_next_trd_dt,'dd-Mon-yyyy')     /*** Ver 1.5 ***/     
+      WHERE   FUS_XCHNG_CD = :st_upd_lim.c_xchng_cd
+      AND     FUS_CLM_MTCH_ACCNT = :st_upd_lim.c_cln_mtch_accnt
+      AND     FUS_TRD_DT = to_date(:st_upd_lim.c_trd_dt,'dd-Mon-yyyy') ;
+  }
+
+  if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+    fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg );
+   	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,"System error. Contact system support");  /*** Ver 1.3 ***/
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/
+   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,"System error. Contact system support");  /*** Ver 1.3 ***/
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.3 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  sprintf ( c_msg, "Successfully Processed match a/c - [%s], Trade date - [%s]", st_upd_lim.c_cln_mtch_accnt,st_upd_lim.c_trd_dt );
+
+	if(DEBUG_MSG_LVL_3)
+	{
+ 		fn_userlog ( c_ServiceName,"***********************END SFO_ALL_EODADJ*************************");
+	}
+
+  tpreturn( TPSUCCESS, 0, (char *)ptr_fml_Ibuf, 0 , 0 );
+}

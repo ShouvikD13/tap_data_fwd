@@ -1,0 +1,1753 @@
+/**********************************************************************************/
+/*	Ver 1.0 Intraday reports for ATS			  Indrajit B.			 											*/
+/*      Ver TOL Tux on Linux                                      Agam            */
+/**********************************************************************************/
+
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include<fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <string.h>	
+#include <stdlib.h>
+#include <fn_read_debug_lvl.h>
+#include <eba.h>
+#include <time.h>
+#include <sys/time.h>   /* Added in Ver TOL */
+
+#define SUCCESS 0
+#define FAIL  -1
+
+char c_ServiceName [ 33 ];
+char c_err_msg [ 256 ];
+char c_msg[100];
+char c_time[7];
+
+void fn_gettime(void );
+
+EXEC SQL BEGIN DECLARE SECTION;
+
+typedef struct ats_clnts
+{
+	char c_match_acc[11];
+}st_ats_clnts;
+
+EXEC SQL END DECLARE SECTION;
+
+
+int fn_trade_report(int i_records,
+										char* c_file_name,
+                    char *c_trd_dt,
+                    st_ats_clnts *ptr_trade_rep_clnts,
+                    char *c_ServiceName,
+                    char *c_err_msg);
+
+int fn_open_pos_report( int i_records,
+												char* c_file_name,
+                        char *c_trd_dt,
+                        char c_product,
+                        st_ats_clnts *ptr_opnpos_clnts,
+                        char *c_ServiceName,
+                        char *c_err_msg);
+
+int fn_margin_report(	int i_records,
+											char* c_file_name,
+                     	char *c_trd_dt,
+                     	st_ats_clnts *ptr_ats_mrgn_clnts,
+                     	char *c_ServiceName,
+                     	char *c_err_msg);
+
+int fn_cal_mrgn(char* c_ServiceName,
+                    char* c_xchng_code,
+                    char* c_mtch_accnt,
+                    char* c_underlyng,
+                    char  c_prdct_typ,
+                    char  c_contrct_tag,
+                    double *d_umin_trade_mrgn,
+                    char* c_err_msg);
+
+double fn_cal_min_mrgn(char *c_ServiceName,char *c_mtch_accnt,char *c_undrlyng,char c_cntrct_tag,
+                                char *c_xchng_cd,char c_prdct_typ,char c_ctgry_indstk,char c_exrc_typ,
+                                long gl_lst_trdd_prc, double d_curr_uopn_val, long l_spread_qty);
+
+
+int fn_get_mm_and_smm(char *c_ServiceName,char *c_mtch_accnt,char *c_undrlyng,char c_cntrct_tag,
+                               double *d_min_mrgn_prcnt,double *d_min_sprd_mrgn_prcnt,char c_prdct_typ);
+
+void BAT_ATSREPORTS ( int argc, char *argv[] )
+{
+	int i_ret_val=0;
+	int i_ret=0;
+	int i=0;
+	char c_filedate[9];
+	char c_file_name [ 200 ];
+  char c_file_name_orf [ 200 ];
+  char c_file_name_opo [ 200 ];
+  char c_file_name_mr [ 200 ];
+  char c_command[512];
+
+  EXEC SQL BEGIN DECLARE SECTION;
+		char	c_exg_stts;
+		char	c_trade_date[12];
+		st_ats_clnts *ptr_st_ats_clnts; 
+		int i_rec_cnt=0;
+  EXEC SQL END DECLARE SECTION;
+
+  strcpy ( c_ServiceName, argv[0] );
+  strcpy ( c_trade_date, 	argv[4] );
+	INITBATDBGLVL(argv[0]);
+
+	strcpy( c_tag, "bat_atsreports_na");
+
+	sprintf ( c_msg, "Batch process %s started...........", argv[0] );
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  fn_userlog(c_ServiceName," Batch process %s started...........",c_ServiceName );
+  fn_userlog(c_ServiceName," Trade date passed is :%s: ",c_trade_date );
+
+	MEMSET(c_filedate);
+  MEMSET(c_command);
+
+  EXEC SQL
+    SELECT to_char(sysdate,'yyyymmdd')
+    INTO :c_filedate
+    FROM DUAL;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog( c_ServiceName, "S31005",SQLMSG,c_err_msg);
+    fn_userlog(c_ServiceName,"Error in selecting file time" );
+    sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+    exit(-1);
+  }
+
+	EXEC SQL
+		SELECT COUNT(UAC_CLM_MTCH_ACCNT)
+		INTO :i_rec_cnt
+		FROM ICD_INFO_CLIENT_DTLS,UAC_USR_ACCNTS 
+		WHERE UAC_USR_ID=ICD_USER_ID 
+		AND ICD_ATS_STATUS ='Y';
+	
+
+  fn_userlog(c_ServiceName,"Total number of ATS clients are :%d:",i_rec_cnt);
+	sprintf ( c_msg, "Total number of ATS clients are :%d:",i_rec_cnt );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	ptr_st_ats_clnts = calloc(sizeof(st_ats_clnts),i_rec_cnt);
+
+	if (ptr_st_ats_clnts == NULL )
+	{
+  	fn_userlog(c_ServiceName,"-------Error in allocating pointer ------");
+		sprintf ( c_msg, "Error in creating the reports. contact system support !" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		exit(-1);
+	}
+
+	/***** Select All ATS match accounts from  ICD Table. ****/
+
+	EXEC SQL
+	DECLARE cur_ats_clnts CURSOR for
+		SELECT UAC_CLM_MTCH_ACCNT 
+		FROM ICD_INFO_CLIENT_DTLS,UAC_USR_ACCNTS 
+		WHERE UAC_USR_ID=ICD_USER_ID 
+		AND ICD_ATS_STATUS ='Y';
+
+	EXEC SQL OPEN cur_ats_clnts;
+
+	if(SQLCODE != 0 )
+	{
+		fn_errlog( c_ServiceName, "S31010",SQLMSG,c_err_msg);
+    fn_userlog(c_ServiceName,"Error in opening cursor cur_ats_clnts" );
+		sprintf ( c_msg, "Error in creating reports. contact system support !" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		exit(-1);
+	}
+
+	EXEC SQL FOR :i_rec_cnt
+	FETCH cur_ats_clnts
+	INTO :ptr_st_ats_clnts;
+
+	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog( c_ServiceName, "S31015",SQLMSG,c_err_msg);
+    fn_userlog(c_ServiceName,"Error in fetching ATS clients from ICD table" );
+		sprintf ( c_msg, "Error in creating reports. contact system support !" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		exit(-1);
+	}
+	else if(SQLCODE == NO_DATA_FOUND)
+	{
+    fn_userlog(c_ServiceName,"NO ATS clients found in ICD table" );
+		sprintf ( c_msg, "No ATS clients found" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+		exit(0);
+	}
+
+	for(i = 0;i<i_rec_cnt;i++)
+	{
+  	fn_userlog(c_ServiceName,"Match account is %s",ptr_st_ats_clnts[i].c_match_acc );
+	}
+
+	EXEC SQL CLOSE cur_ats_clnts;
+
+  fn_userlog(c_ServiceName,"CREATING ATS CLIENTS TRADE REPORT............" );
+	sprintf ( c_msg, "CREATING ATS CLIENTS TRADE REPORT............" );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	fn_gettime();
+	sprintf(c_file_name,"%s/%s/fno/ats_trade_report_%s.csv",tuxgetenv("EBALOG_PATH"),c_filedate,c_time);
+
+	i_ret_val = fn_trade_report(i_rec_cnt,c_file_name,c_trade_date,ptr_st_ats_clnts,c_ServiceName,c_err_msg);
+	if( i_ret_val == -1 )
+	{
+  	fn_userlog(c_ServiceName,"Trade report could not be created" );
+		sprintf ( c_msg, " Trade report could not be created" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	}
+  fn_userlog(c_ServiceName,"Shailesh FileDate is :%s: ",c_filedate);
+
+	fn_gettime();
+	sprintf(c_file_name_orf,"%s/%s/fno/ats_openpos_futures_report_%s.csv",tuxgetenv("EBALOG_PATH"),c_filedate,c_time);
+	
+ 	i_ret_val = fn_open_pos_report(i_rec_cnt,c_file_name_orf,c_trade_date,'F',ptr_st_ats_clnts,c_ServiceName,c_err_msg);
+	if( i_ret_val == -1 )
+	{
+  	fn_userlog(c_ServiceName,"Open position futures report could not be created" );
+		sprintf ( c_msg, " Open position futures report could not be created" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	}
+
+	fn_gettime();
+	sprintf(c_file_name_opo,"%s/%s/fno/ats_openpos_options_report_%s.csv",tuxgetenv("EBALOG_PATH"),c_filedate,c_time);
+
+	i_ret_val = fn_open_pos_report(i_rec_cnt,c_file_name_opo,c_trade_date,'O',ptr_st_ats_clnts,c_ServiceName,c_err_msg);
+	if( i_ret_val == -1 )
+	{
+  	fn_userlog(c_ServiceName,"Open position options report could not be created" );
+		sprintf ( c_msg, " Open position options report could not be created" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	}
+
+	fn_gettime();
+  sprintf(c_file_name_mr,"%s/%s/fno/ats_margin_report_%s.csv",tuxgetenv("EBALOG_PATH"),c_filedate,c_time);
+
+	i_ret_val = fn_margin_report(i_rec_cnt,c_file_name_mr,c_trade_date,ptr_st_ats_clnts,c_ServiceName,c_err_msg);
+	if( i_ret_val == -1 )
+	{
+  	fn_userlog(c_ServiceName,"Margin report could not be created" );
+		sprintf ( c_msg, " Margin report could not be created" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	} 
+
+  sprintf( c_command, "ksh sndmail_atsrport.sh %s %s %s %s", c_file_name,c_file_name_orf,c_file_name_opo,c_file_name_mr );
+  fn_userlog( "Mail send command :%s", c_command );
+  system(c_command);
+
+  fn_userlog(c_ServiceName,"===========bat_atsreports Completed======" );
+	sprintf ( c_msg, "===========bat_atsreports Completed======" );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	fn_rgstr_bat('U',c_ServiceName,"NFO","NA");
+  return;
+}
+
+int fn_trade_report(int i_records,
+										char *c_file_name,
+										char *c_trd_dt,
+										st_ats_clnts *ptr_trade_rep_clnts,
+										char *c_ServiceName,
+										char *c_err_msg)
+{
+	int i=0;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+		double d_csh_turnover;
+		double d_mrgn_turnover;
+		double d_easy_mrgn_turnover;
+		double d_mrgn_plus_turnover;
+		double d_total_eq_turnover;
+		double d_futures_turnover;
+		double d_futures_plus_turnover;
+		double d_options_turnover;
+		double d_total_fo_turnover;
+
+	EXEC SQL END DECLARE SECTION;
+
+	FILE  *fp ;
+	char c_file_header [ 500 ];
+	char c_file_record [ 500 ];
+	
+  fn_userlog(c_ServiceName,"File is :%s: ",c_file_name);
+
+  fp = (FILE *)fopen(c_file_name,"w") ;
+
+	if(fp == NULL)
+  {
+  	fn_userlog(c_ServiceName,"-------UNABLE TO OPEN FILE %s-------",c_file_name);
+		sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return -1;
+  }
+
+	
+	sprintf(c_file_header,"Match Account,Equity,,,,,Derivatives");
+	fprintf(fp,"%s\n",c_file_header);
+
+
+	sprintf(c_file_header,",Cash Turnover in Rs.,Margin Turnover in Rs.,Easy Margin Turnover in Rs.,Margin Plus Turnover in Rs.,Total Equity Turnover in Rs.,Futures Turnover in Rs.,Future Plus Turnover in Rs.,Options Turnover in Rs.,Total Derivatives Turnover in Rs.");
+	fprintf(fp,"%s\n",c_file_header);
+	
+	for(i=0;i<i_records;i++)
+	{	
+		MEMSET(c_file_record);
+		d_csh_turnover = 0;
+		d_mrgn_turnover = 0;
+		d_easy_mrgn_turnover = 0;
+		d_mrgn_plus_turnover = 0;
+		d_total_eq_turnover = 0;
+		d_futures_turnover = 0;
+		d_futures_plus_turnover = 0;
+		d_options_turnover = 0;
+		d_total_fo_turnover = 0;
+
+    fn_userlog(c_ServiceName,"Processing trade report for Match Account %s %d of %d",
+															ptr_trade_rep_clnts[i].c_match_acc,i+1,i_records);
+		sprintf ( c_msg, "Match Account %s %d of %d",ptr_trade_rep_clnts[i].c_match_acc,i+1,i_records );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+		EXEC SQL
+				SELECT NVL(SUM(TRD_EXCTD_QTY*TRD_EXCTD_RT),0)
+				INTO :d_csh_turnover
+				FROM TRD_TRD_DTLS 
+				WHERE TRD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+				AND TRUNC(TRD_TRD_DT)= :c_trd_dt  
+				AND TRD_TRNSCTN_TYP IN ('BFP','CBP','SFP','CSP');
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31020",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          fclose(fp);
+					return -1;
+				}
+				
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_csh_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_csh_turnover);
+				}	
+
+		EXEC SQL
+				SELECT NVL(SUM(TRD_EXCTD_QTY*TRD_EXCTD_RT),0)
+				INTO :d_mrgn_turnover
+				FROM TRD_TRD_DTLS 
+				WHERE TRD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc 
+				AND TRUNC(TRD_TRD_DT)=:c_trd_dt
+				AND TRD_TRNSCTN_TYP IN ('BFM','CBM','SFM','CSM') ;
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31025",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+           fclose(fp);
+					return -1;
+				}
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_mrgn_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_mrgn_turnover);
+				}	
+
+		EXEC SQL
+				SELECT 1 
+				INTO :d_easy_mrgn_turnover
+				FROM TRD_TRD_DTLS
+        WHERE TRD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+        AND TRUNC(TRD_TRD_DT)=:c_trd_dt
+        AND TRD_TRNSCTN_TYP IN ('I');
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31030",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+           fclose(fp);
+					return -1;
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_easy_mrgn_turnover :%lf:",
+										ptr_trade_rep_clnts[i].c_match_acc,d_easy_mrgn_turnover);
+				}	
+
+		EXEC SQL
+				SELECT NVL(SUM(TRD_EXCTD_QTY*TRD_EXCTD_RT),0)
+				INTO :d_mrgn_plus_turnover
+				FROM TRD_TRD_DTLS 
+				WHERE TRD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+				AND TRUNC(TRD_TRD_DT)=:c_trd_dt
+				AND TRD_TRNSCTN_TYP IN ('TBF','TSF','TBC','TSC');
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31035",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          fclose(fp);
+					return -1;
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_mrgn_plus_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_mrgn_plus_turnover);
+				}	
+
+		EXEC SQL
+				SELECT NVL(SUM(TRD_EXCTD_QTY*TRD_EXCTD_RT),0)
+				INTO :d_total_eq_turnover
+				FROM TRD_TRD_DTLS 
+				WHERE TRD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+				AND TRUNC(TRD_TRD_DT)=:c_trd_dt;
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31040",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+           fclose(fp);
+					return -1;
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_total_eq_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_total_eq_turnover);
+				}	
+		/**
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0)
+				INTO :d_futures_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY,FOD_FO_ORDR_DTLS_HSTRY 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+							AND FOD_PRDCT_TYP='F' 
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS,FOD_FO_ORDR_DTLS 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+							AND FOD_PRDCT_TYP='F'
+						 ); **/
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0)
+				INTO :d_futures_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_PRDCT_TYP='F' 
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_PRDCT_TYP='F'
+						 ); 
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31045",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+           fclose(fp);
+					return -1;
+				}
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_futures_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_futures_turnover);
+				}	
+		/** 
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0) 
+				INTO :d_futures_plus_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY,FOD_FO_ORDR_DTLS_HSTRY 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+							AND FOD_PRDCT_TYP='P' 
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS,FOD_FO_ORDR_DTLS 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+							AND FOD_PRDCT_TYP='P'
+						 );  **/
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0)
+				INTO :d_futures_plus_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_PRDCT_TYP='P' 
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_PRDCT_TYP='P'
+						 ); 
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31050",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+           fclose(fp);
+					return -1;
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_futures_plus_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_futures_plus_turnover);
+				}	
+		/** 
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0) 
+				INTO :d_options_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY,FOD_FO_ORDR_DTLS_HSTRY 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+							AND FOD_PRDCT_TYP='O' 
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS,FOD_FO_ORDR_DTLS 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+							AND FOD_PRDCT_TYP='O'
+						 ); **/
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0)
+				INTO :d_options_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_PRDCT_TYP='O' 
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_PRDCT_TYP='O'
+						 ); 
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31055",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          fclose(fp);
+					return -1;
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_options_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_options_turnover);
+				}	
+		/**		
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0) 
+				INTO :d_total_fo_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY,FOD_FO_ORDR_DTLS_HSTRY 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS,FOD_FO_ORDR_DTLS 
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							AND FTD_CLM_MTCH_ACCNT = FOD_CLM_MTCH_ACCNT
+							AND FTD_ORDR_RFRNC=FOD_ORDR_RFRNC 
+						 ); **/
+		EXEC SQL
+				SELECT NVL(SUM(TRD_AMT),0)
+				INTO :d_total_fo_turnover	
+				FROM (SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS_HSTRY
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+							AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+							UNION 
+							SELECT NVL(SUM((FTD_STRK_PRC+FTD_EXCTD_RT)*FTD_EXCTD_QTY),0)/100 TRD_AMT 
+							FROM FTD_FO_TRD_DTLS
+							WHERE FTD_CLM_MTCH_ACCNT = :ptr_trade_rep_clnts[i].c_match_acc
+              AND TRUNC(FTD_TRD_DT)  = :c_trd_dt
+						 ); 
+
+				if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31060",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+           fclose(fp);
+					return -1;
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+    			fn_userlog(c_ServiceName,"Match Account %s -> d_total_fo_turnover :%lf:",
+											ptr_trade_rep_clnts[i].c_match_acc,d_total_fo_turnover);
+				}	
+
+		sprintf(c_file_record,"%s,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf",
+												ptr_trade_rep_clnts[i].c_match_acc,
+												d_csh_turnover,
+												d_mrgn_turnover,
+												d_easy_mrgn_turnover,
+												d_mrgn_plus_turnover,
+												d_total_eq_turnover,
+												d_futures_turnover,
+												d_futures_plus_turnover,
+												d_options_turnover,
+												d_total_fo_turnover
+												);
+		fprintf(fp,"%s\n",c_file_record);
+	}
+   fclose(fp);
+  /*fn_userlog(c_ServiceName,"----- ATS clients Trade report for %s created in file %s -----",c_trd_dt,c_file_name);
+  sprintf ( c_msg, "----- ATS clients Trade report for %s created in file %s -----",c_trd_dt,c_file_name );*/
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	
+	return 0;
+}
+
+int fn_open_pos_report(	int i_records,
+												char *c_file_name,
+												char *c_trd_dt,
+												char c_product,
+												st_ats_clnts *ptr_opnpos_clnts,
+												char *c_ServiceName,
+												char *c_err_msg)
+{
+	int i=0;
+	int i_underlying_counter=0;
+	int i_ch_val=0;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+		char c_underlying[7];
+		char c_tmp_mtch_acc[11];
+		char c_expiry_dt[12];
+		char c_cntrct_tag;
+		char c_flw;
+		char c_option_typ;
+		char c_xchng_cd[4];
+		char c_prdct_typ;
+		long l_opn_qty = 0;
+		double d_opnpos_val = 0;
+		double d_margin_amt = 0;
+		double d_min_trd_mrgn= 0;
+		double d_strike_prc = 0;
+
+	EXEC SQL END DECLARE SECTION;
+
+	FILE *fp;
+	char c_file_header [ 500 ];
+	char c_file_record [ 500 ];
+
+  fn_userlog(c_ServiceName,"File is :%s: ",c_file_name);
+
+	MEMSET(c_underlying);
+	MEMSET(c_expiry_dt);
+	MEMSET(c_file_header);
+	MEMSET(c_file_record);
+
+  fn_userlog(c_ServiceName,"File is :%s: ",c_file_name);
+
+  fp = (FILE *)fopen(c_file_name,"w") ;
+
+  if(fp == NULL)
+  {
+    fn_userlog(c_ServiceName,"-------UNABLE TO OPEN FILE %s-------",c_file_name);
+    sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    return -1;
+  }
+
+	if(c_product == 'F')
+	{
+		sprintf(c_file_header,"Match Account,Underlying,Expiry_date/Contract tag,Buy/Sell,Open_qty,Minimum Trade Margin,Margin amount");
+		fprintf(fp,"%s\n",c_file_header);
+	}
+	else
+	{
+		sprintf(c_file_header,"Match Account,Underlying,Expiry_date,Strike Price,Call/Put,Buy/Sell,Open_qty,Open Position val,Margin amount");
+		fprintf(fp,"%s\n",c_file_header);
+	}
+
+	for(i=0;i<i_records;i++)
+	{
+		if(c_product == 'F')
+		{
+			MEMSET(c_underlying);
+			l_opn_qty = 0;
+			d_opnpos_val = 0;
+			d_margin_amt = 0;
+
+    	fn_userlog(c_ServiceName,"Processing Open Position Futures report for Match Account %s %d of %d",
+																ptr_opnpos_clnts[i].c_match_acc,i+1,i_records);
+			sprintf ( c_msg, "Match Account %s %d of %d",ptr_opnpos_clnts[i].c_match_acc,i+1,i_records );
+  		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+			
+			EXEC SQL
+			DECLARE cur_fut_rep	CURSOR FOR
+				SELECT  FUP_XCHNG_CD,
+								FUP_PRDCT_TYP,
+								FUP_CLM_MTCH_ACCNT,
+								FUP_UNDRLYNG,
+								FUP_CNTRCT_TAG,
+								FUP_UOPNPSTN_FLW,
+								NVL(FUP_UOPNPSTN_QTY,0),
+								NVL(FUP_UOPNPSTN_VAL,0),
+								SUM( FUP_UTRD_MRGN + FUP_ADD_MRGN_VAL )/100
+				FROM    FUP_FUT_UNDRLYNG_PSTN
+				WHERE   FUP_CLM_MTCH_ACCNT = :ptr_opnpos_clnts[i].c_match_acc
+				AND     FUP_TRD_DT = TO_DATE(:c_trd_dt,'DD-Mon-YYYY')
+				AND FUP_PRDCT_TYP !='P'
+				GROUP BY FUP_XCHNG_CD,FUP_PRDCT_TYP,FUP_CLM_MTCH_ACCNT,FUP_UNDRLYNG,FUP_CNTRCT_TAG,
+								 FUP_UOPNPSTN_FLW,FUP_UOPNPSTN_QTY,FUP_UOPNPSTN_VAL;
+
+			EXEC SQL OPEN cur_fut_rep;
+
+			if(SQLCODE != 0)
+			{
+				fn_errlog( c_ServiceName, "S31065",SQLMSG,c_err_msg);
+				sprintf ( c_msg, "Error in creating Open position report. contact system support !" );
+				fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fclose(fp);
+	 			return -1;
+			}
+
+			i_underlying_counter =0;
+
+			while(1)
+			{
+				MEMSET(c_underlying);
+				l_opn_qty = 0;
+				d_opnpos_val = 0;
+				d_margin_amt = 0;
+
+				EXEC SQL
+				FETCH cur_fut_rep
+				INTO :c_xchng_cd,
+						 :c_prdct_typ,
+						 :c_tmp_mtch_acc,
+						 :c_underlying,
+					   :c_cntrct_tag,
+						 :c_flw,
+					   :l_opn_qty,
+						 :d_opnpos_val,
+						 :d_margin_amt;
+
+				if(SQLCODE != 0  && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31070",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating Open position report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+					EXEC SQL CLOSE cur_fut_rep;
+				  fclose(fp);
+        	return -1;
+				}
+	
+				if(SQLCODE == NO_DATA_FOUND)
+				{
+					if(i_underlying_counter == 0)
+					{
+						/** The line below is to print the match account in the report in case he does not have any
+								open position in futures **/
+						sprintf(c_file_record,"%s,NA,NA,NA,0,0,0",ptr_opnpos_clnts[i].c_match_acc);
+						fprintf(fp,"%s\n",c_file_record);
+						
+					}
+					fn_userlog(c_ServiceName,"Finished processing futures open pos report for match acc %s",
+																		ptr_opnpos_clnts[i].c_match_acc);
+					break;	
+				}
+
+				/**Calculate minimum trade margin, take inputs as mtch_accnt,undrlyng and tag, output will be minimum trade margin**/
+
+				i_ch_val = fn_cal_mrgn(c_ServiceName,c_xchng_cd,ptr_opnpos_clnts[i].c_match_acc,c_underlying,c_prdct_typ,
+															 c_cntrct_tag,&d_min_trd_mrgn,c_err_msg);
+				if(i_ch_val != 0)
+				{
+					fn_errlog( c_ServiceName, "S31075",LIBMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating Open position report. contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+					EXEC SQL CLOSE cur_fut_rep;
+          fclose(fp);
+					return -1;
+				}
+
+			d_min_trd_mrgn = d_min_trd_mrgn /100;
+
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"Match Account %s -> c_underlying :%s:",
+                      ptr_opnpos_clnts[i].c_match_acc,c_underlying);
+					fn_userlog(c_ServiceName,"Match Account %s -> c_cntrct_tag :%c:",
+                      ptr_opnpos_clnts[i].c_match_acc,c_cntrct_tag);
+					fn_userlog(c_ServiceName,"Match Account %s -> c_flw :%c:",
+                      ptr_opnpos_clnts[i].c_match_acc,c_flw);
+					fn_userlog(c_ServiceName,"Match Account %s -> l_opn_qty :%ld:",
+                      ptr_opnpos_clnts[i].c_match_acc,l_opn_qty);
+					fn_userlog(c_ServiceName,"Match Account %s -> d_opnpos_val :%lf:",
+                      ptr_opnpos_clnts[i].c_match_acc,d_opnpos_val);
+					fn_userlog(c_ServiceName,"Match Account %s -> d_margin_amt :%lf:",
+                      ptr_opnpos_clnts[i].c_match_acc,d_margin_amt);
+					fn_userlog(c_ServiceName,"Match Account %s -> d_min_trd_mrgn:%lf:",
+                      ptr_opnpos_clnts[i].c_match_acc,d_min_trd_mrgn);
+				}
+			
+				sprintf(c_file_record,"%s,%s,%c,%c,%ld,%lf,%lf",
+                        ptr_opnpos_clnts[i].c_match_acc,
+                        c_underlying,
+												c_cntrct_tag,
+                        c_flw,
+                        l_opn_qty,
+												d_min_trd_mrgn,
+                        d_margin_amt
+                        );
+    		fprintf(fp,"%s\n",c_file_record);
+				i_underlying_counter++;
+			}/** End of While loop **/
+			EXEC SQL CLOSE cur_fut_rep;
+		}
+		else
+		{
+			MEMSET(c_underlying);
+			MEMSET(c_expiry_dt);
+			l_opn_qty = 0;
+			d_opnpos_val = 0;
+			d_margin_amt = 0;
+			d_strike_prc = 0;
+
+    	fn_userlog(c_ServiceName,"Processing Open Position Options report for Match Account %s %d of %d",
+																ptr_opnpos_clnts[i].c_match_acc,i+1,i_records);
+			sprintf ( c_msg, "Match Account %s %d of %d",ptr_opnpos_clnts[i].c_match_acc,i+1,i_records );
+  		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+			EXEC SQL
+			DECLARE cur_opt_rep	CURSOR FOR
+				SELECT FOP_CLM_MTCH_ACCNT,
+							 FOP_UNDRLYNG,	
+							 FOP_EXPRY_DT,
+							 FOP_STRK_PRC,
+							 FOP_OPT_TYP,
+							 FOP_OPNPSTN_FLW,
+               FOP_OPNPSTN_QTY,
+               FOP_OPNPSTN_VAL/100,
+               FOP_UEXCTD_MRGN/100
+				FROM	 FOP_FO_OPTIONS_PSTN
+				WHERE  FOP_CLM_MTCH_ACCNT = :ptr_opnpos_clnts[i].c_match_acc 
+				AND 	 FOP_TRD_DT =:c_trd_dt;
+
+			EXEC SQL OPEN cur_opt_rep;
+
+			if(SQLCODE != 0)
+			{
+				fn_errlog( c_ServiceName, "S31080",SQLMSG,c_err_msg);
+				sprintf ( c_msg, "Error in creating Open position report. contact system support !" );
+				fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+				EXEC SQL CLOSE cur_opt_rep;
+        fclose(fp);
+				return -1;
+			}
+
+			i_underlying_counter =0;
+
+			while(1)
+			{
+				MEMSET(c_underlying);
+				MEMSET(c_expiry_dt);
+				l_opn_qty = 0;
+				d_opnpos_val = 0;
+				d_margin_amt = 0;
+				d_strike_prc = 0;
+				
+				EXEC SQL
+				FETCH cur_opt_rep
+				INTO :c_tmp_mtch_acc,
+						 :c_underlying,
+						 :c_expiry_dt,
+					   :d_strike_prc,
+						 :c_option_typ,
+						 :c_flw,
+					   :l_opn_qty,
+						 :d_opnpos_val,
+						 :d_margin_amt;
+
+				if(SQLCODE != 0  && SQLCODE != NO_DATA_FOUND)
+				{
+					fn_errlog( c_ServiceName, "S31085",SQLMSG,c_err_msg);
+					sprintf ( c_msg, "Error in creating Open position report . contact system support !" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+					EXEC SQL CLOSE cur_opt_rep;
+          fclose(fp);
+					return -1;
+				}
+	
+				if(SQLCODE == NO_DATA_FOUND)
+				{
+					if(i_underlying_counter == 0)
+					{
+						/** The line below is to print the match account in the report in case he does not have any
+								open position in options **/
+						sprintf(c_file_record,"%s,NA,NA,0,NA,NA,0,0,0",ptr_opnpos_clnts[i].c_match_acc);
+						fprintf(fp,"%s\n",c_file_record);
+						
+					}
+					fn_userlog(c_ServiceName,"Finished processing options open pos report for match acc %s",
+																		ptr_opnpos_clnts[i].c_match_acc);
+					break;	
+				}
+
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"Match Account %s -> c_underlying :%s:",
+                      ptr_opnpos_clnts[i].c_match_acc,c_underlying);
+					fn_userlog(c_ServiceName,"Match Account %s -> c_expiry_dt :%s:",
+                      ptr_opnpos_clnts[i].c_match_acc,c_expiry_dt);
+					fn_userlog(c_ServiceName,"Match Account %s -> d_strike_prc :%lf:",
+                      ptr_opnpos_clnts[i].c_match_acc,d_strike_prc);
+					fn_userlog(c_ServiceName,"Match Account %s -> c_option_typ :%c:",
+                      ptr_opnpos_clnts[i].c_match_acc,c_option_typ);
+					fn_userlog(c_ServiceName,"Match Account %s -> c_flw :%c:",
+                      ptr_opnpos_clnts[i].c_match_acc,c_flw);
+					fn_userlog(c_ServiceName,"Match Account %s -> l_opn_qty :%ld:",
+                      ptr_opnpos_clnts[i].c_match_acc,l_opn_qty);
+					fn_userlog(c_ServiceName,"Match Account %s -> d_opnpos_val :%lf:",
+                      ptr_opnpos_clnts[i].c_match_acc,d_opnpos_val);
+					fn_userlog(c_ServiceName,"Match Account %s -> d_margin_amt :%lf:",
+                      ptr_opnpos_clnts[i].c_match_acc,d_margin_amt);
+				}
+			
+				sprintf(c_file_record,"%s,%s,%s,%lf,%c,%c,%ld,%lf,%lf",
+                        ptr_opnpos_clnts[i].c_match_acc,
+                        c_underlying,
+                        c_expiry_dt,
+                        d_strike_prc,
+                        c_option_typ,
+                        c_flw,
+                        l_opn_qty,
+                        d_opnpos_val,
+                        d_margin_amt
+                        );
+    		fprintf(fp,"%s\n",c_file_record);
+				i_underlying_counter++;
+			}/** End of While loop **/
+			EXEC SQL CLOSE cur_opt_rep;
+		}
+	}
+  fclose(fp);
+	if(c_product == 'F')
+	{
+  	fn_userlog(c_ServiceName,"----- ATS clients Open position futures report for %s created in file %s -----",c_trd_dt,c_file_name);
+		sprintf ( c_msg, "----- ATS clients Open position futures report for %s created in file %s -----",c_trd_dt,c_file_name );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	}		
+	else
+	{
+  	fn_userlog(c_ServiceName,"----- ATS clients Open position options report for %s created in file %s -----",c_trd_dt,c_file_name);
+		sprintf ( c_msg, "----- ATS clients Open position options report for %s created in file %s -----",c_trd_dt,c_file_name);
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	}
+	return 0;
+}
+
+
+int fn_margin_report( int i_records,
+											char *c_file_name,
+                      char *c_trd_dt,
+                      st_ats_clnts *ptr_ats_mrgn_clnts,
+                      char *c_ServiceName,
+                      char *c_err_msg)
+{
+
+	EXEC SQL BEGIN DECLARE SECTION;
+
+		double d_eq_total_alloc;
+		double d_fo_total_alloc;
+		double d_avlbl_mrgn;
+		double d_bft_amt;
+		varchar c_tmp_match[12];
+		int i_errcd;
+
+	EXEC SQL END DECLARE SECTION;
+
+	int i;
+
+	FILE *fp;
+	char c_file_header [ 500 ];
+	char c_file_record [ 500 ];
+
+	MEMSET(c_file_header);
+	MEMSET(c_file_record);
+
+  fn_userlog(c_ServiceName,"File is :%s: ",c_file_name);
+
+  fp = (FILE *)fopen(c_file_name,"w") ;
+
+	if(fp == NULL)
+  {
+  	fn_userlog(c_ServiceName,"-------UNABLE TO OPEN FILE %s-------",c_file_name);
+		sprintf ( c_msg, "Error in creating trade report. contact system support !" );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    fclose(fp);
+		return -1;
+  }
+
+	
+	sprintf(c_file_header,"Match Account,Total Allocation");
+	fprintf(fp,"%s\n",c_file_header);
+
+
+	sprintf(c_file_header,",Equity,F&O,Blocked for trade");
+	fprintf(fp,"%s\n",c_file_header);
+	
+	for(i=0;i<i_records;i++)
+	{
+		MEMSET(c_tmp_match);
+		strcpy((char *)c_tmp_match.arr,ptr_ats_mrgn_clnts[i].c_match_acc);
+
+    fn_userlog(c_ServiceName,"Processing margin report for Match Account %s %d of %d",
+															ptr_ats_mrgn_clnts[i].c_match_acc,i+1,i_records);
+		sprintf ( c_msg, "Match Account %s %d of %d",ptr_ats_mrgn_clnts[i].c_match_acc,i+1,i_records );
+  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+		EXEC SQL
+		SELECT NVL(CLM_ALLCTD_AMT,0)
+		INTO :d_eq_total_alloc	
+		FROM CLM_CLNT_MSTR 
+		WHERE CLM_MTCH_ACCNT = :ptr_ats_mrgn_clnts[i].c_match_acc;
+
+		if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+		{
+			fn_errlog( c_ServiceName, "S31090",SQLMSG,c_err_msg);
+			sprintf ( c_msg, "Error in creating margin report. contact system support !" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fclose(fp);
+			return -1;
+		}
+		else if(SQLCODE == NO_DATA_FOUND)
+		{
+			d_eq_total_alloc = 0;
+		}
+
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"Match Account %s -> d_eq_total_alloc :%lf:",
+																ptr_ats_mrgn_clnts[i].c_match_acc,d_eq_total_alloc);
+		}	
+
+		EXEC SQL
+			SELECT NVL(FAB_ALCTD_AMT/100,0),NVL(FAB_BFT_AMT/100,0) 
+			INTO :d_fo_total_alloc,d_bft_amt
+			FROM FAB_FO_ALC_BFT_SMRY 
+			WHERE FAB_CLM_MTCH_ACCNT=:ptr_ats_mrgn_clnts[i].c_match_acc;
+
+		if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+		{
+			fn_errlog( c_ServiceName, "S31095",SQLMSG,c_err_msg);
+			sprintf ( c_msg, "Error in creating margin report. contact system support !" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fclose(fp);
+			return -1;
+		}
+		else if(SQLCODE == NO_DATA_FOUND)
+		{
+			d_fo_total_alloc = 0;
+			d_bft_amt = 0;
+		}
+
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"Match Account %s -> d_fo_total_alloc :%lf:",
+																ptr_ats_mrgn_clnts->c_match_acc,d_fo_total_alloc);
+    	fn_userlog(c_ServiceName,"Match Account %s -> d_bft_amt :%lf:",
+																ptr_ats_mrgn_clnts->c_match_acc,d_bft_amt);
+		}
+			
+  /***
+		EXEC SQL EXECUTE
+		BEGIN
+			LIMIT_CAL(:c_tmp_match,:c_trd_dt,'A',1,'NSE',:d_avlbl_mrgn,:i_errcd);	
+		END;
+		END-EXEC;
+		if(i_errcd != 0)
+		{
+			fn_errlog( c_ServiceName, "S31100","ERROR RETURNED FROM LIMIT_CAL PROCEDURE",c_err_msg);
+			sprintf ( c_msg, "Error in creating margin report. contact system support !" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fclose(fp);
+			return -1;
+		}
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"Match Account %s -> d_avlbl_mrgn :%lf:",
+																ptr_ats_mrgn_clnts[i].c_match_acc,d_avlbl_mrgn);
+		}	
+  ***/
+	 	sprintf(c_file_record,"%s,%lf,%lf,%lf",
+													ptr_ats_mrgn_clnts[i].c_match_acc,
+													d_eq_total_alloc,
+													d_fo_total_alloc,
+													d_bft_amt);
+
+		fprintf(fp,"%s\n",c_file_record);
+	}
+
+
+  fn_userlog(c_ServiceName,"----- ATS clients Margin report for %s created in file %s -----",c_trd_dt,c_file_name);
+	sprintf ( c_msg, "----- ATS clients Margin report for %s created in file %s -----",c_trd_dt,c_file_name );
+  fclose(fp);
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	return 0;
+}
+
+void fn_gettime(void)
+{
+  int i_mili_sec = 0;
+  struct timeval tv;
+  struct timezone tz;
+  struct tm *tm;
+
+  gettimeofday(&tv, &tz);
+  tm=localtime(&tv.tv_sec);
+  i_mili_sec= tv.tv_usec/1000;
+ /* sprintf(c_time,"%d:%d:%d:%d",tm->tm_hour, tm->tm_min, tm->tm_sec, i_mili_sec);  */
+  sprintf(c_time,"%d%d%d",tm->tm_hour, tm->tm_min, tm->tm_sec);
+	return;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_ATSREPORTS;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  fn_userlog (c_ServiceName,"-------------------------END--------------------");
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}
+
+int fn_cal_mrgn(char* c_ServiceName,
+										char* c_xchng_code,
+										char* c_mtch_accnt,
+										char* c_underlyng,
+										char  c_prdct_typ,
+										char  c_contrct_tag,
+										double *d_umin_trade_mrgn,
+										char* c_err_msg)
+{
+
+  EXEC SQL BEGIN DECLARE SECTION;
+    sql_cursor  sys_cursor;
+    char c_mtch_accnt_no[11];
+		char c_xchng_cd[4];	
+    char c_ctgry_indstk;
+    char c_undrlyng[7];
+    varchar c_expry_dt[12];
+    char c_exrc_typ;
+    char c_prd_typ;
+		char c_cntrct_tag;
+	  char c_opnpstn_flw;	
+    long l_opnpstn_qty;
+    double d_mtm_opn_val;
+    long l_cvr_qty;
+   	long li_bo_qty;
+    long li_so_qty;
+		long l_und_buy_opn_qty=0;
+		long l_und_sell_opn_qty=0;
+		long l_lst_trdd_prc=0;
+		long l_sprd_qty=0;
+		long l_tot_buy_qty=0;
+		long l_tot_sell_qty=0;
+		double d_curr_cnt_opn_val=0;
+		double d_curr_uopn_val=0;
+	
+
+		char c_uprdct_typ;
+		char c_uindstk;
+		char c_uopnpstn_flw;
+		long l_uopnpstn_qty;
+		double d_utrd_mrgn;
+		double d_ordr_mrgn;
+		double d_umin_trd_mrgn;
+
+  EXEC SQL END DECLARE SECTION;
+
+		char c_msg[256];
+		char c_errmsg[256];
+		int i_ch_val=0;
+
+		EXEC SQL  
+		DECLARE sys_cursor CURSOR FOR
+         SELECT ffp_clm_mtch_accnt,                                   
+								ffp_prdct_typ,
+								ffp_indstk,
+								ffp_undrlyng,
+								to_char( ffp_expry_dt, 'DD-Mon-YYYY' ),
+								ffp_exer_typ,
+								ffp_cntrct_tag,
+								ffp_opnpstn_flw,
+								abs(ffp_opnpstn_qty),
+								ffp_mtm_opn_val,
+								decode(ffp_opnpstn_flw,'S',greatest(abs(ffp_ibuy_qty),abs(ffp_exbuy_qty)) ,
+														'B',greatest(abs(ffp_isell_qty),abs(ffp_exsell_qty) ),0),   
+								ffp_ibuy_qty,
+								ffp_isell_qty
+               FROM     ffp_fo_futures_pstn
+               WHERE    ffp_clm_mtch_accnt = :c_mtch_accnt
+               AND      ffp_xchng_cd = :c_xchng_code
+               AND      ffp_undrlyng    =  :c_underlyng
+               AND      ffp_cntrct_tag = :c_contrct_tag
+               AND      (    ffp_opnpstn_qty != 0
+                        OR ffp_ibuy_qty    != 0
+                        OR ffp_isell_qty   != 0 )
+               AND      ffp_prdct_typ = :c_prdct_typ                              
+             ORDER BY ffp_clm_mtch_accnt,                                       
+                      ffp_undrlyng,
+                      ffp_cntrct_tag,
+                      ffp_expry_dt;
+
+  	EXEC SQL OPEN sys_cursor;
+		if(SQLCODE != 0)
+		{
+			fn_errlog( c_ServiceName, "S31105",SQLMSG,c_err_msg);
+			return -1;
+		}
+
+
+	while(1)
+	{
+		EXEC SQL FETCH sys_cursor
+								INTO :c_mtch_accnt_no,                  
+										 :c_prd_typ,
+										 :c_ctgry_indstk,
+										 :c_undrlyng,
+										 :c_expry_dt,
+										 :c_exrc_typ,
+										 :c_cntrct_tag,
+										 :c_opnpstn_flw,
+										 :l_opnpstn_qty,
+										 :d_mtm_opn_val,
+										 :l_cvr_qty,
+										 :li_bo_qty,
+										 :li_so_qty;
+
+    SETNULL(c_expry_dt);
+
+  	if ( SQLCODE != 0 )
+    {
+      if ( SQLCODE == NO_DATA_FOUND )
+      {
+          EXEC SQL
+             SELECT  fup_prdct_typ,
+                     fup_indstk,
+                     fup_uopnpstn_flw,
+                     abs(fup_uopnpstn_qty),
+                     fup_utrd_mrgn + fup_add_mrgn_val,
+                     fup_uordr_mrgn,
+                     NVL(fup_umin_trd_mrgn,0)
+             INTO    :c_uprdct_typ,
+                     :c_uindstk,
+                     :c_uopnpstn_flw,
+                     :l_uopnpstn_qty,
+                     :d_utrd_mrgn,
+                     :d_ordr_mrgn,
+                     :d_umin_trd_mrgn
+              FROM   fup_fut_undrlyng_pstn
+              WHERE  fup_clm_mtch_accnt = :c_mtch_accnt_no
+              AND    fup_xchng_cd = :c_xchng_code
+              AND    fup_undrlyng = :c_undrlyng
+              AND    fup_cntrct_tag = :c_cntrct_tag
+              AND    fup_prdct_typ = :c_prd_typ;
+						if( SQLCODE != 0 )
+						{
+							fn_errlog( c_ServiceName, "S31110", SQLMSG, c_errmsg  );
+							EXEC SQL CLOSE :sys_cursor;
+							EXEC SQL FREE :sys_cursor;
+							return -1;
+						}
+
+            l_sprd_qty = fn_minl(l_und_sell_opn_qty,l_und_buy_opn_qty);
+
+            if( DEBUG_MSG_LVL_3 ) {
+            fn_userlog( c_ServiceName,"Calling fn_cal_min_mrgn");
+						}
+
+
+            /**This function returns the Minimum Margin amount and MTM loss at tag level**/
+            d_umin_trd_mrgn=fn_cal_min_mrgn(c_ServiceName,c_mtch_accnt_no,c_undrlyng,c_cntrct_tag,c_xchng_code,
+																						c_uprdct_typ,c_uindstk,c_exrc_typ,l_lst_trdd_prc,d_curr_uopn_val,
+																						l_sprd_qty);
+
+            if(d_umin_trd_mrgn==FAIL)
+            {
+							fn_errlog( c_ServiceName, "S31115", SQLMSG, c_errmsg  );
+              EXEC SQL CLOSE :sys_cursor;
+              EXEC SQL FREE :sys_cursor;
+							return -1;
+            }	
+
+						*d_umin_trade_mrgn = d_umin_trd_mrgn;
+
+					  break;
+
+					}		/**End of NO Data Found **/
+					else
+					{
+							fn_errlog( c_ServiceName, "S31120", SQLMSG, c_errmsg  );
+							EXEC SQL CLOSE :sys_cursor;
+							EXEC SQL FREE :sys_cursor;
+							return -1;
+					}
+				}			/**End of Error in Fetch **/
+
+	    EXEC SQL
+         SELECT nvl(FTQ_LST_TRD_PRC,0)
+         INTO :l_lst_trdd_prc
+         FROM ftq_fo_trd_qt
+         WHERE ftq_xchng_cd = :c_xchng_code
+         AND  ftq_prdct_typ = decode(:c_prd_typ, 'P', 'F', :c_prd_typ)          /* Ver 1.5 */
+         AND  ftq_indstk = :c_ctgry_indstk
+         AND  ftq_undrlyng = :c_undrlyng
+         AND  FTQ_EXER_TYP = :c_exrc_typ
+         AND  ftq_expry_dt = :c_expry_dt;
+
+    if(( SQLCODE != 0) && ( SQLCODE != NO_DATA_FOUND ))
+    {
+      fn_errlog( c_ServiceName, "S31125", SQLMSG, c_errmsg  );
+      EXEC SQL CLOSE :sys_cursor;
+      EXEC SQL FREE :sys_cursor;
+			return -1;
+    }
+    else if ( SQLCODE == NO_DATA_FOUND )
+    {
+     l_lst_trdd_prc = 0;
+    }	
+
+   /*Ver 1.8 starts for calculating current open position value at underlying level*/
+
+    if ( c_opnpstn_flw == BUY )
+    {
+    d_curr_cnt_opn_val = ((double)l_lst_trdd_prc * (double)l_opnpstn_qty); 
+    l_und_buy_opn_qty  = l_und_buy_opn_qty + l_opnpstn_qty; 
+    }
+    else
+    {
+    d_curr_cnt_opn_val = ((double)l_lst_trdd_prc * (double)l_opnpstn_qty * (-1)); 
+    l_und_sell_opn_qty = l_und_sell_opn_qty + l_opnpstn_qty;  
+    }
+
+    if( DEBUG_MSG_LVL_3 ) {
+    fn_userlog(c_ServiceName,"Open pstn qty is |%ld|",l_opnpstn_qty);
+    fn_userlog(c_ServiceName,"Last traded price is |%ld|",l_lst_trdd_prc);
+    fn_userlog(c_ServiceName,"Open pstn flow is |%c|",c_opnpstn_flw);
+    fn_userlog(c_ServiceName,"Open Position value of contract is |%lf|",d_curr_cnt_opn_val);
+    fn_userlog(c_ServiceName,"Underlying level BUY open qty is |%ld|",l_und_buy_opn_qty);
+    fn_userlog(c_ServiceName,"Underlying level SELL open qty is |%ld|",l_und_sell_opn_qty);
+    }
+
+    d_curr_uopn_val = d_curr_uopn_val + d_curr_cnt_opn_val;
+
+  	l_tot_buy_qty = l_tot_buy_qty + li_bo_qty;  
+    l_tot_sell_qty = l_tot_sell_qty + li_so_qty;  
+
+	}
+
+	return i_ch_val;
+}
+
+/*********************************************************************
+Function: fn_cal_min_mrgn
+
+Description: FUNCTION calculates MIN MARGIN AMOUNT and MTM loss of
+             underlying at group level.
+
+Input Parameters: Service name,Match accnt,undrlyng,contract tag,
+                  Exchange code,product type,category stock indicator,
+                  Exercise type and address of mtm loss.
+
+Output Parameters: Total Minimum Margin amont
+
+Called by: SFO_CNTFUT_PSTN
+
+Calling Programs/Sub-routines : None
+
+Author : Wipro Infotech
+
+Created On: 18-Aug-2008
+
+Modification History:
+Date       Version No.    Modified by   Modification Description
+
+18-Aug-08  Initial        Wipro         Available Margin CR changes
+
+To Do/ Fix Me list:
+
+*********************************************************************/
+
+double fn_cal_min_mrgn(char *c_ServiceName,char *c_mtch_accnt,char *c_undrlyng,char c_cntrct_tag,
+																char *c_xchng_cd,char c_prdct_typ,char c_ctgry_indstk,char c_exrc_typ,
+																long gl_lst_trdd_prc, double d_curr_uopn_val, long l_spread_qty)
+{
+  /*Host variable declaration*/
+  EXEC SQL BEGIN DECLARE SECTION;
+  char    c_expry_dt[12];
+  long    l_uopnpstn_qty = 0;
+  long    l_lst_trd_prc =0;
+  double  d_mtm_opn_val =0.0;
+  double  d_opnpstn_qty =0.0;
+  sql_cursor    sys_mmcur;
+  EXEC SQL END DECLARE SECTION;
+
+  /* Local variable declaration*/
+  int     i_fn_stts=0;
+  long    l_tmp_uopnpstn_qty=0;
+  double  d_exectd_mrgn_cmp=0;
+  double  d_spread_mrgn_cmp =0;
+  double  d_sprd_profit_loss=0;
+  double  d_und_opn_pos_val_cmp=0;
+  double  d_min_mrgn_prcnt=0;
+  double  d_fut_opn_pos_val_cmp=0;
+  double  d_min_spread_mrgn=0;
+  double  d_mtm_loss=0;
+
+  MEMSET(c_expry_dt);
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName,"INSIDE fn_cal_min_mrgn");}
+
+  /*  Function for geting Minimum amd Spread Minimum margin percentages */
+  i_fn_stts=fn_get_mm_and_smm(c_ServiceName,c_mtch_accnt,c_undrlyng,c_cntrct_tag,&d_min_mrgn_prcnt,&d_min_spread_mrgn,
+															c_prdct_typ);
+  if(i_fn_stts==FAIL)
+  {
+    return FAIL;
+  }
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName,"d_min_mrgn_per is |%lf| and d_min_spread_mrgn is |%lf|",d_min_mrgn_prcnt,d_min_spread_mrgn);}
+
+  EXEC SQL
+  SELECT  fup_uopnpstn_qty
+  into    :l_uopnpstn_qty
+  FROM    fup_fut_undrlyng_pstn
+  WHERE   fup_clm_mtch_accnt = :c_mtch_accnt
+  AND     fup_xchng_cd  = :c_xchng_cd
+  AND     fup_undrlyng  = :c_undrlyng
+  AND     fup_cntrct_tag  = :c_cntrct_tag
+  AND     FUP_PRDCT_TYP = :c_prdct_typ;
+  if( SQLCODE != SUCCESS )
+  {
+  fn_userlog(c_ServiceName," ERROR AT FETCHING spread_qty and -->ERRMSG IS [%s]",sqlca.sqlerrm.sqlerrmc);
+    return  FAIL;
+  }
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName," Underlying level open position qty is |%ld|",l_uopnpstn_qty);
+  fn_userlog(c_ServiceName," Spread qty is |%ld|",l_spread_qty);
+  fn_userlog(c_ServiceName," c_ctgry_indstk  is |%c|",c_ctgry_indstk);}
+
+  EXEC SQL ALLOCATE :sys_mmcur;
+ if(l_uopnpstn_qty>0)
+  {
+    if( DEBUG_MSG_LVL_3 ) {
+    fn_userlog(c_ServiceName," BUY POSITION");}
+
+    EXEC SQL  EXECUTE
+    BEGIN
+    OPEN    :sys_mmcur FOR
+    SELECT  ffp_mtm_opn_val,
+            ffp_opnpstn_qty,
+            FFP_EXPRY_DT
+    FROM    ffp_fo_futures_pstn
+    WHERE   FFP_CLM_MTCH_ACCNT = :c_mtch_accnt
+    AND     FFP_XCHNG_CD       = :c_xchng_cd
+    AND     FFP_PRDCT_TYP      = :c_prdct_typ
+    AND     FFP_INDSTK         = :c_ctgry_indstk
+    AND     FFP_UNDRLYNG       = :c_undrlyng
+    AND     FFP_CNTRCT_TAG     =:c_cntrct_tag
+    AND     ffp_opnpstn_qty>0
+    order by FFP_EXPRY_DT ASC;
+    END;
+    END-EXEC;
+  }
+  else if (l_uopnpstn_qty < 0)
+  {
+    if( DEBUG_MSG_LVL_3 ) {
+    fn_userlog(c_ServiceName," SELL POSITION");}
+
+    EXEC SQL  EXECUTE
+    BEGIN
+    OPEN    :sys_mmcur FOR
+    SELECT  ffp_mtm_opn_val,
+            ffp_opnpstn_qty,
+            FFP_EXPRY_DT
+    FROM    ffp_fo_futures_pstn
+    WHERE   FFP_CLM_MTCH_ACCNT = :c_mtch_accnt
+    AND     FFP_XCHNG_CD       = :c_xchng_cd
+    AND     FFP_PRDCT_TYP      = :c_prdct_typ
+    AND     FFP_INDSTK         = :c_ctgry_indstk
+    AND     FFP_UNDRLYNG       = :c_undrlyng
+    AND     FFP_CNTRCT_TAG     =:c_cntrct_tag
+    AND     ffp_opnpstn_qty<0
+    order by FFP_EXPRY_DT ASC;
+    END;
+    END-EXEC;
+  }
+  else
+  {
+      d_und_opn_pos_val_cmp = 0;
+  }
+
+    l_tmp_uopnpstn_qty=l_uopnpstn_qty;
+
+    while(l_tmp_uopnpstn_qty!=0)
+    {
+    /*Fetching the values from cursor*/
+    EXEC SQL FETCH :sys_mmcur
+    into :d_mtm_opn_val,
+         :d_opnpstn_qty,
+         :c_expry_dt;
+    if( SQLCODE != SUCCESS )
+    {
+      /* Ver 1.8 Additional close cursor added for production issue resolution*/
+      EXEC SQL CLOSE :sys_mmcur;
+      EXEC SQL FREE :sys_mmcur;
+      /*Ver 1.8*/
+      fn_userlog(c_ServiceName," Error at fetching contract values from cursor -->ERRMSG IS [%s]",sqlca.sqlerrm.sqlerrmc);
+      return  -1;
+    }
+
+    if(l_uopnpstn_qty>0)
+      d_opnpstn_qty=fn_mind(d_opnpstn_qty,(double)l_tmp_uopnpstn_qty);
+    else
+      d_opnpstn_qty=fn_maxd(d_opnpstn_qty,(double)l_tmp_uopnpstn_qty);
+
+    /*Fetching L.T.P*/
+    EXEC SQL
+    SELECT  nvl(FTQ_LST_TRD_PRC,0)
+    INTO  :l_lst_trd_prc
+    FROM  ftq_fo_trd_qt
+    WHERE FTQ_XCHNG_CD  =:c_xchng_cd
+    AND   FTQ_PRDCT_TYP =decode(:c_prdct_typ,'P','F','F')
+    AND   FTQ_UNDRLYNG  =:c_undrlyng
+    AND   FTQ_EXPRY_DT  =:c_expry_dt
+    AND   FTQ_INDSTK    =:c_ctgry_indstk
+    AND   FTQ_EXER_TYP  =:c_exrc_typ;
+    if(( SQLCODE != 0) && ( SQLCODE != NO_DATA_FOUND ))
+    {
+      if(DEBUG_MSG_LVL_3)
+      /* Ver 1.8 Additional close cursor added for production issue resolution*/
+        EXEC SQL CLOSE :sys_mmcur;
+        EXEC SQL FREE :sys_mmcur;
+      /*Ver 1.8*/
+
+      fn_userlog(c_ServiceName,"Fetch from ftq_fo_trd_qt table failed with [%s]",SQLMSG);
+      return(-1);
+    }
+    else if ( SQLCODE == NO_DATA_FOUND )
+    {
+     l_lst_trd_prc = 0;
+    }
+
+    if( DEBUG_MSG_LVL_3 ) {
+    fn_userlog(c_ServiceName,"L.T.P IS |%ld|",l_lst_trd_prc);
+    fn_userlog(c_ServiceName," open position qty is |%lf|",d_opnpstn_qty);}
+
+    d_fut_opn_pos_val_cmp=d_opnpstn_qty * (double)l_lst_trd_prc;/*contract open position value*/
+    d_und_opn_pos_val_cmp= d_und_opn_pos_val_cmp + d_fut_opn_pos_val_cmp;/*underlying open position value*/
+
+    if( DEBUG_MSG_LVL_3 ) {
+    fn_userlog(c_ServiceName," d_fut_opn_pos_val_cmp is |%lf|",d_fut_opn_pos_val_cmp);
+    fn_userlog(c_ServiceName," d_mtm_opn_val is |%lf|",d_mtm_opn_val);}
+
+
+    l_tmp_uopnpstn_qty= l_tmp_uopnpstn_qty - d_opnpstn_qty;
+  }
+
+ d_exectd_mrgn_cmp=d_und_opn_pos_val_cmp * d_min_mrgn_prcnt/100.00;
+
+  if(l_uopnpstn_qty<0)
+    d_exectd_mrgn_cmp=d_exectd_mrgn_cmp * (-1);
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName," Underlying unmatched open position value at cmp IS |%lf|",d_und_opn_pos_val_cmp);
+  fn_userlog(c_ServiceName," Current Underlying open position value is |%lf|",d_curr_uopn_val);
+  fn_userlog(c_ServiceName," Far month contract CMP is |%ld|",gl_lst_trdd_prc);}
+
+  d_sprd_profit_loss=d_und_opn_pos_val_cmp - d_curr_uopn_val;
+
+  if((int)l_spread_qty!=0)
+  {
+    d_spread_mrgn_cmp= ((double)l_spread_qty * (double)gl_lst_trdd_prc * (d_min_spread_mrgn / 100.00));/*undrlying spread ma
+rgin value*/
+  }
+  else
+  {
+    d_spread_mrgn_cmp=0;
+  }
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName," Executed Margin is |%lf|",d_exectd_mrgn_cmp);
+  fn_userlog(c_ServiceName," Spread  Margin is |%lf|",d_spread_mrgn_cmp);
+  fn_userlog(c_ServiceName," Spread profit loss is |%lf|",d_sprd_profit_loss);}
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName,"EXITING fn_cal_min_mrgn");
+  }
+
+  /*  Minimum margin=Executed margin + spread margin - spread profit loss */
+  /* Return 0 if Minimum margin is negative*/
+
+  /* Ver 1.8 Additional close cursor added for production issue resolution*/
+    EXEC SQL CLOSE :sys_mmcur;
+    EXEC SQL FREE :sys_mmcur;
+  /* Ver 1.8 */
+
+  if ( d_spread_mrgn_cmp + d_exectd_mrgn_cmp <= d_sprd_profit_loss )
+       return (0);
+  else
+  return (d_exectd_mrgn_cmp + d_spread_mrgn_cmp - d_sprd_profit_loss);
+}
+
+
+/*********************************************************************
+Function: fn_get_mm_and_smm
+
+Description: This function fetches the  minimum margin and spread minimum
+             margin percentages for a  particular Match a/c ,Underlying
+             and contract tag considering split case also.
+
+Input Parameters: Service name,accnt,undrlyng,contract tag, minimum margin,
+                  spread minimum margin percentages and product type.
+
+Output Parameters: SUCCESS/FAIL(0/-1)
+
+Called by: fn_cal_min_mrgn
+
+Calling Programs/Sub-routines : None
+
+Author : Wipro Infotech
+
+Created On: 18-Aug-2008
+
+Modification History:
+Date       Version No.    Modified by   Modification Description
+
+18-Aug-08  Initial        Wipro         Available Margin CR changes
+
+To Do/ Fix Me list:
+
+*********************************************************************/
+
+int fn_get_mm_and_smm(char *c_ServiceName,char *c_mtch_accnt,char *c_undrlyng,char c_cntrct_tag,
+														   double *d_min_mrgn_prcnt,double *d_min_sprd_mrgn_prcnt,char c_prdct_typ)
+{
+  EXEC SQL BEGIN DECLARE SECTION;
+    long  l_basket_id;
+  EXEC SQL END DECLARE SECTION;
+
+  /** contract tag A is reserved for near month contract in split **/
+  /**                 which attracts 100 % margin                 **/
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName," INSIDE fn_get_mm_and_smm");}
+
+  if(c_cntrct_tag=='A')
+  {
+    *d_min_mrgn_prcnt=100.00;
+    *d_min_sprd_mrgn_prcnt=100.00;
+    return SUCCESS;
+  }
+
+  EXEC SQL
+  SELECT  fcb_undrlyng_bskt_id
+  INTO  :l_basket_id
+  FROM  fcb_fo_cln_bskt_alltd
+  WHERE fcb_cln_lvl = ( SELECT clm_clnt_lvl
+        FROM  clm_clnt_mstr
+        WHERE clm_mtch_accnt =:c_mtch_accnt );
+  if ( SQLCODE != SUCCESS )
+  {
+    fn_userlog(c_ServiceName,"Error at Fetching basket id in fn_get_mm_and_smm function");
+    return FAIL;
+  }
+
+  EXEC SQL
+  SELECT  decode(:c_prdct_typ,'P', fmm_thrshd_mrgn_prcnt*fmm_fp_multplr,fmm_min_mrgn_prcnt), /*Added in Ver 1.9 for Future P
+lus*/
+          fmm_min_spread_mrgn
+  INTO    :d_min_mrgn_prcnt,
+          :d_min_sprd_mrgn_prcnt
+  FROM    fmm_fo_mrgn_mstr
+  WHERE   fmm_undrlyng_bskt_id=:l_basket_id
+  AND     fmm_prdct_typ=decode(:c_prdct_typ,'P','F','F')
+  AND     fmm_undrlyng= :c_undrlyng;
+
+  if ( SQLCODE != SUCCESS )
+  {
+    fn_userlog(c_ServiceName,"Error at Fetching margin percerentages in fn_get_mm_and_smm");
+    return FAIL;
+  }
+
+  if( DEBUG_MSG_LVL_3 ) {
+  fn_userlog(c_ServiceName,"Margin values" );
+  fn_userlog(c_ServiceName,"Minimum margin :%lf:",*d_min_mrgn_prcnt);
+  fn_userlog(c_ServiceName,"Min Spread Mrgn:%lf:",*d_min_sprd_mrgn_prcnt);
+  fn_userlog(c_ServiceName,"EXITING fn_get_mm_and_smm ");}
+  return SUCCESS;
+}

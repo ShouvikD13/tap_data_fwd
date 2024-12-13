@@ -1,0 +1,947 @@
+/***********************************************************************************/
+/* Program           : SFO_OPT_CHAIN                                               */
+/*                                                                                 */
+/* Input             :                                                             */
+/*                                                                                 */
+/* Output            :                                                             */
+/*                                                                                 */
+/*                                                                                 */
+/* Description       : This service will accept underlying and expiry date as input*/
+/*                     and will return option list as output, with 15 contract  	 */
+/*										 above and 15 contracts below the spot price.          			 */
+/*                                                                                 */
+/* Log               : 1.0   Ravindra Panda | ISEC | 04-Mar-2022                   */
+/* 										 1.1	 Ravindra Panda | ISEC | 18-Aug-2022									 */
+/*										 1.2   Ravindra Panda | ISEC | 22-Aug-2022									 */
+/*										 1.3	 Ravindra Panda | ISEC | 13-Dec-2022									 */
+/***********************************************************************************/
+/* 1.0    -  New Release ( Strategy Builder )                                      */
+/* 1.1		-	 Minor Changes																												 */
+/* 1.2    -  Minor Changes																												 */
+/* 1.3    -  MIS report changes																										 */
+/***********************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo_view_def.h>
+#include <sqlca.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_session.h>
+#include <fn_pos.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+
+#define max_val(x,y) (((x) >= (y)) ? (x) : (y))
+
+/**** Added in ver 1.2 : Structure for stroing contract details ****/
+struct st_contract_dtls
+{
+  char  c_expry_dt[22];
+  double  d_strike_prc;
+  double  d_lst_trd_prc;
+  double  d_imp_vol;
+};
+
+/******** Added in Ver 1.2 : Function for computation of Implied Volatility *********/
+
+int fn_calc_implied_volatility( char  *c_ServiceName,
+                                char  c_opt_typ,
+                                double  d_spt_prc,
+                                struct st_contract_dtls *ptr_st_cntct,
+                                char *c_err_msg );
+ 
+void SFO_OPT_CHAIN(TPSVCINFO * rqst)
+{
+
+	double  d_undrlyn_spot_prc = 0.0;
+	double  d_rsk_free_rt = 0.0;
+	double  d_call_strk_prc = 0.0;
+  double  d_call_oi = 0.0;
+  double  d_call_chng_oi = 0.0;
+  double  d_call_iv = 0.0;
+  double  d_call_ltp = 0.0;
+  double  d_call_change = 0.0;
+  double  d_put_oi = 0.0;
+  double  d_put_chng_oi = 0.0;
+  double  d_put_iv = 0.0;
+  double  d_put_ltp = 0.0;
+  double  d_put_change = 0.0;
+	double  d_put_iv_tmp = 0.0;
+	double  d_call_iv_tmp = 0.0;
+	double  d_intrnsc_val_call = 0.0;
+	double  d_intrnsc_val_put = 0.0;
+
+  long  l_call_volume = 0;
+  long  l_call_bid_prc = 0;
+  long  l_call_bid_qty = 0;
+  long  l_call_offr_prc = 0;
+  long  l_call_offr_qty = 0;
+  long  l_put_volume = 0;
+  long  l_put_bid_prc = 0;
+  long  l_put_bid_qty = 0;
+  long  l_put_offr_prc = 0;
+  long  l_put_offr_qty = 0;
+	long  l_min_lot_qty = 0;
+	long	l_undrlyn_spot_prc = 0;
+
+	char  c_err_msg[256];
+	char  c_undrlyng[7];
+	char  c_xchng_cd[4];
+	char  c_expry_dt[22];
+	char  c_opt_typ = '\0';
+	char  c_ServiceName[33];
+	char	c_sys_date[30];
+	char  c_idx_stck = '\0';
+	
+	/** Added in VER 1.3 **/
+	int  i_updtd_cnt = 0;
+	int  i_srvc_cnt = 0;
+	int  i_trnsctn = 0;
+  char  c_match_accnt[11];
+	long  l_session_id = 0.0;
+  char  c_user_id[11];
+	char  c_src_typ = '\0';  /*** I : call from another service, L : logged in section, N : Non-logged in section  ***/
+  /** VER 1.3 ends here **/
+
+  int  i_err[36];
+  int  i_ferr[36];
+  int  i_cnt;
+	int  i_retcode_vols_call = 0;
+	int  i_retcode_vols_put = 0;
+
+	/* tuxedo variables */
+  FBFR32 *ptr_fml_Ibuf; /* pointer to FML input */
+  FBFR32 *ptr_fml_Obuf; /* pointer to FML output */
+
+  ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+  fn_userlog(c_ServiceName, "----------------- service %s starts here --------------------",c_ServiceName);
+
+	/**************************** Fetching values passed as input ****************************/
+	
+	i_err[0] = Fget32(ptr_fml_Ibuf, FFO_UNDRLYNG, 0, (char *)c_undrlyng, 0);
+  i_ferr[0] = Ferror32;
+  i_err[1] = Fget32(ptr_fml_Ibuf, FFO_EXPRY_DT, 0, (char *)c_expry_dt, 0);
+  i_ferr[1] = Ferror32;
+	i_err[2] = Fget32(ptr_fml_Ibuf, FFO_XCHNG_CD, 0, (char *)c_xchng_cd, 0);
+  i_ferr[2] = Ferror32;
+
+	for ( i_cnt = 0; i_cnt < 3; i_cnt++ ) 
+  {
+    if (i_err[i_cnt] == -1)
+    {
+      fn_errlog(c_ServiceName, "S31005", Fstrerror32(i_ferr[0]),c_err_msg);
+      fn_userlog(c_ServiceName, "Unable to fget the input value");
+      Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+      tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+    }
+  }
+
+	/*** Added in VER 1.3 : To fetch Match_ID, Session_ID, User_ID and call type value ***/
+
+	if(Fget32(ptr_fml_Ibuf, FFO_EBA_MTCH_ACT_NO, 0, (char *)c_match_accnt, 0) == -1)
+	{
+  	if( Ferror32 == FNOTPRES )
+  	{
+    	strcpy(c_match_accnt,"0000000000"); 
+  	}
+ 	  else
+  	{
+    	fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg  );
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+	}
+
+	if(Fget32(ptr_fml_Ibuf, FFO_USR_ID, 0, (char*)c_user_id, 0) == -1)
+	{
+  	if( Ferror32 == FNOTPRES )
+  	{
+    	strcpy(c_user_id,"system");
+  	}
+  	else
+  	{
+    	fn_errlog( c_ServiceName, "S31015", LIBMSG, c_err_msg  );
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+	}
+
+
+	if( Fget32(ptr_fml_Ibuf, FFO_SSSN_ID, 0, (char*)&l_session_id, 0) == -1)
+	{
+  	if( Ferror32 == FNOTPRES )
+  	{
+    	l_session_id = 0;
+  	}
+  	else
+  	{
+    	fn_errlog( c_ServiceName, "S31020", LIBMSG, c_err_msg  );
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+	}
+
+	if(Fget32( ptr_fml_Ibuf,FFO_RQST_TYP,0,(char *)&c_src_typ,0 ) == -1)
+  {
+    if( Ferror32 != FNOTPRES )
+    {
+      fn_errlog( c_ServiceName, "S31025", LIBMSG, c_err_msg  );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+		else
+		{
+			if ( strcmp(c_user_id,"system") != 0 && l_session_id != 0)
+  			c_src_typ = 'L';
+			else
+  			c_src_typ = 'N';
+		}
+  }
+
+	/*** VER 1.3 ends here ***/
+
+	if( DEBUG_MSG_LVL_3 )
+	{
+		fn_userlog(c_ServiceName,"********************* Values fetched from input are **********************");
+		fn_userlog(c_ServiceName,"UNDERLYING :%s:", c_undrlyng);
+		fn_userlog(c_ServiceName,"EXPIRY DATE :%s:", c_expry_dt);
+		fn_userlog(c_ServiceName,"EXCHANGE CODE :%s:", c_xchng_cd);
+		fn_userlog(c_ServiceName, "VER 1.3 : Match ID fetched is :%s:",c_match_accnt);
+    fn_userlog(c_ServiceName, "VER 1.3 : User ID is :%s:",c_user_id);
+    fn_userlog(c_ServiceName, "VER 1.3 : Session ID is :%ld:", l_session_id);
+		fn_userlog(c_ServiceName, "VER 1.3 : Call type is :%c:", c_src_typ);
+	}
+
+	/*** VER 1.3 : Adding entry to table to maintain count of call and request type for report ***/
+
+  EXEC SQL
+  SELECT FSB_COUNT
+  INTO  i_srvc_cnt
+  FROM  FSB_STRTGY_BLDR_COUNT
+  WHERE  FSB_MATCH_ACNT = :c_match_accnt
+  AND  FSB_SRVC_NM = :c_ServiceName
+  AND  FSB_SRC_TYP = :c_src_typ 
+  AND  FSB_TM_STMP = TRUNC(SYSDATE)
+  AND  FSB_USR_ID = :c_user_id;
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+    fn_errlog( c_ServiceName, "S31030", SQLMSG,c_err_msg);
+    fn_userlog(c_ServiceName,"VER 1.3 : Error while checking existance of service with req type.");
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if( DEBUG_MSG_LVL_3 )
+		fn_userlog(c_ServiceName, "VER 1.3 : Existing count is :%d:", i_srvc_cnt);
+
+  i_trnsctn = fn_begintran(c_ServiceName, c_err_msg);
+
+  if (i_trnsctn == -1)
+  {
+    fn_userlog(c_ServiceName, "Failed in initialiaze transaction");
+    fn_errlog(c_ServiceName, "S31035", TPMSG, c_err_msg);
+    tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+  }
+
+	if(i_srvc_cnt == 0)
+  {
+
+    EXEC SQL
+    INSERT INTO FSB_STRTGY_BLDR_COUNT
+    (
+      FSB_MATCH_ACNT,
+      FSB_USR_ID,
+      FSB_SRVC_NM,
+      FSB_SRC_TYP,
+      FSB_COUNT,
+      FSB_TM_STMP
+    )
+     VALUES
+    (
+      :c_match_accnt,
+      :c_user_id,
+      :c_ServiceName,
+      :c_src_typ,
+      1,
+      TRUNC(sysdate)
+    );
+
+		if(SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31040", SQLMSG,c_err_msg);
+      fn_userlog(c_ServiceName,"VER 1.3 : Error while INSERTING record into table FSB_STRTGY_BLDR_COUNT .");
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }
+	else
+  {
+    i_updtd_cnt = i_srvc_cnt + 1;
+
+		if( DEBUG_MSG_LVL_3 )
+			fn_userlog(c_ServiceName,"VER 1.3 : Update count is :%d:", i_updtd_cnt);
+
+    EXEC SQL
+    UPDATE FSB_STRTGY_BLDR_COUNT
+    SET FSB_COUNT = :i_updtd_cnt
+    WHERE  FSB_MATCH_ACNT = :c_match_accnt
+    AND  FSB_SRVC_NM = :c_ServiceName
+    AND  FSB_SRC_TYP = :c_src_typ 
+    AND  FSB_TM_STMP = TRUNC(SYSDATE)
+    AND  FSB_USR_ID = :c_user_id;
+
+    if(SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31045", SQLMSG,c_err_msg);
+      fn_userlog(c_ServiceName,"VER 1.3 : Error while UPDATING record in FSB_STRTGY_BLDR_COUNT .");
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+  }
+
+	i_trnsctn = fn_committran(c_ServiceName, i_trnsctn, c_err_msg);
+  if (i_trnsctn == -1)
+  {
+    fn_userlog(c_ServiceName, "Failed in committing transaction");
+    fn_errlog(c_ServiceName, "S31050", TPMSG, c_err_msg);
+    tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+  }
+
+  /*** VER 1.3 ends here ***/
+
+	/**************************** Fetching spot price for further use ************************/
+
+	EXEC SQL
+  SELECT NVL(ltq_rt,0) * 100
+  into :d_undrlyn_spot_prc
+  FROM ltq_trd_qt
+  WHERE LTQ_STCK_CD = :c_undrlyng
+  AND LTQ_XCHNG_CD = DECODE(:c_xchng_cd,'NFO','NSE','BFO','BSE');
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		fn_userlog(c_ServiceName, "Unable to SPOT PRICE value.");	
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/*************************** Fetching risk free rate *************************************/
+
+	EXEC SQL
+	SELECT FSP_RSK_FREE_RT
+	INTO  :d_rsk_free_rt
+	FROM  FNO_SYSTM_PRMTR
+	WHERE FSP_PRODCT = 'FNO';
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    fn_userlog(c_ServiceName, "Unable to fetch SPOT PRICE value.");
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	EXEC SQL
+	SELECT trunc(sysdate)
+	INTO :c_sys_date
+	FROM dual;
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    fn_userlog(c_ServiceName, "Unable to fetch sysdate value.");
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if( DEBUG_MSG_LVL_3 )
+  {
+		fn_userlog(c_ServiceName,"Spot price is :%lf:",d_undrlyn_spot_prc);
+  	fn_userlog(c_ServiceName,"Risk free rate is :%lf:",d_rsk_free_rt);
+		fn_userlog(c_ServiceName,"System Date value is :%s:",c_sys_date);
+	}
+	
+	/*************************** Allocating memory to output-buffer ************************/
+
+  ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN * 10 );
+
+  if ( ptr_fml_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31070", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/************************** Returning spot price and risk free rate to output ************/
+	
+	l_undrlyn_spot_prc = (long)d_undrlyn_spot_prc;
+
+	i_err[0] = Fadd32(ptr_fml_Obuf, FFO_CLS_PRC, (char *)&l_undrlyn_spot_prc, 0);
+  i_err[1] = Fadd32(ptr_fml_Obuf, FFO_INTRST_RT, (char * )&d_rsk_free_rt, 0);
+	i_err[2] = Fadd32(ptr_fml_Obuf, FFO_RCRD_DT, (char * )c_sys_date,0);
+
+  for(i_cnt=0;i_cnt<3;i_cnt++)
+  {
+    if(i_err[i_cnt] == -1)
+    {
+      fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i_cnt);
+      fn_errlog( c_ServiceName, "S31075", FMLMSG, c_err_msg  );
+      tpfree ( ( char * ) ptr_fml_Obuf );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }	
+
+	/************************ Fetching option chain into a CURSOR ***************************/
+
+	EXEC SQL
+	DECLARE opt_chain CURSOR FOR
+	SELECT index_stck, call_lot, call_OI,  call_COI,  call_VOL,  call_IV,  call_LTP,  call_CHNG,  call_BPRC,  call_BQTY,  call_OPRC, call_OQTY,  call_STRK,  put_OI,  put_COI,  put_VOL,  put_IV,  put_LTP,  put_CHNG,  put_BPRC,  put_BQTY,  put_OPRC,  put_OQTY
+  FROM(
+				select * from
+					(select * 
+						from
+							( select c_dw.INDX_STCK index_stck, c_dw.MIN_LOT call_lot, c_dw.CRNT_OI call_OI, c_dw.CHNG_OI call_COI, c_dw.VOL call_VOL, c_dw.IV call_IV,c_dw.LTP call_LTP, c_dw.CHANGE call_CHNG, c_dw.BID_PRC call_BPRC, c_dw.BID_QTY call_BQTY, c_dw.OFFR_PRC call_OPRC, c_dw.OFFR_QTY call_OQTY, c_dw.STRK_PRC call_STRK, p_dw.CRNT_OI put_OI, p_dw.CHNG_OI put_COI, p_dw.VOL put_VOL, p_dw.IV put_IV, p_dw.LTP put_LTP, p_dw.CHANGE put_CHNG, p_dw.BID_PRC put_BPRC, p_dw.BID_QTY put_BQTY, p_dw.OFFR_PRC put_OPRC, p_dw.OFFR_QTY put_OQTY 
+  						from
+  						( SELECT INDX_STCK, MIN_LOT, STRK_PRC, CRNT_OI, CHNG_OI, VOL, IV, LTP, CHANGE, BID_PRC, BID_QTY, OFFR_PRC,OFFR_QTY,FTQ_EXPRY_DT, FTQ_STRK_PRC
+    						FROM
+    						(
+      						SELECT  NVL(FTQ_INDSTK,'*') INDX_STCK,
+              						NVL(FTQ_MIN_LOT_QTY,0) MIN_LOT,
+              						NVL(FTQ_STRK_PRC,0) STRK_PRC,
+              						NVL(FTQ_CRNT_OI,0) CRNT_OI,
+              						/*** NVL(FTQ_CHNG_OI,0) CHNG_OI, ***/
+													/*** (NVL(FTQ_FRESH_OI,'0')) CHNG_OI, ** VER 1.1 **/
+              						(NVL(FTQ_CRNT_OI,'0') - NVL(FTQ_CLS_OI,'0')) CHNG_OI, /** Ver 1.2 **/
+													/*** NVL(FTQ_LST_TRD_QTY,0) VOL, ***/
+													NVL(FTQ_TOT_QTY_TRDD,0) VOL, /** VER 1.1 **/
+              						NVL(FTQ_CLS_IV,0) IV,
+              						NVL(FTQ_LST_TRD_PRC,0) LTP,
+              						NVL(FTQ_BST1_BID_PRC,0) BID_PRC,
+              						NVL(FTQ_BST1_BID_QTY,0) BID_QTY,
+              						NVL(FTQ_BST1_OFFR_PRC,0) OFFR_PRC,
+              						NVL(FTQ_BST1_OFFR_QTY,0) OFFR_QTY,
+              						/*** ( CASE  WHEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) > 0 THEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) ELSE (-1)*(NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) END ) CHANGE, ***/
+													/** (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_CLS_PRC,0)) CHANGE, ** VER 1.1 **/
+													decode(trunc(FSP_ATS_CLSPRC_UPDDT),trunc(FTQ_LST_TRD_TM),nvl((FTQ_LST_TRD_PRC - FTQ_ATS_CLS_PRC),0),0) CHANGE, /** Ver 1.2 **/
+												  FTQ_EXPRY_DT, 
+													FTQ_STRK_PRC
+      						FROM  FTQ_FO_TRD_QT,FSP_FO_SYSTM_PRMTR
+      						WHERE  FTQ_STRK_PRC < :d_undrlyn_spot_prc 
+      						AND  FTQ_OPT_TYP = 'P'
+      						AND  FTQ_XCHNG_CD = :c_xchng_cd
+      						AND  FTQ_UNDRLYNG = :c_undrlyng
+      						AND FTQ_EXPRY_DT = :c_expry_dt
+      						ORDER BY  FTQ_STRK_PRC DESC  /** Changed from ASC to DESC **/
+    						)
+								WHERE ROWNUM < 16 ) p_dw,
+    						( SELECT INDX_STCK, MIN_LOT, STRK_PRC, CRNT_OI, CHNG_OI, VOL, IV, LTP, CHANGE, BID_PRC, BID_QTY, OFFR_PRC, OFFR_QTY, FTQ_EXPRY_DT, FTQ_STRK_PRC
+      						FROM
+      						(
+        						SELECT  NVL(FTQ_INDSTK,'*') INDX_STCK,
+                						NVL(FTQ_MIN_LOT_QTY,0) MIN_LOT,
+                						NVL(FTQ_STRK_PRC,0) STRK_PRC,
+                						NVL(FTQ_CRNT_OI,0) CRNT_OI,
+                						/*** NVL(FTQ_CHNG_OI,0) CHNG_OI, ***/
+														/*** (NVL(FTQ_FRESH_OI,'0')) CHNG_OI, *** VER 1.1 **/
+														(NVL(FTQ_CRNT_OI,'0') - NVL(FTQ_CLS_OI,'0')) CHNG_OI, /** Ver 1.2 **/
+                						/*** NVL(FTQ_LST_TRD_QTY,0) VOL, ***/
+														NVL(FTQ_TOT_QTY_TRDD,0) VOL, /** VER 1.1 **/
+                						NVL(FTQ_CLS_IV,0) IV,
+                						NVL(FTQ_LST_TRD_PRC,0) LTP,
+                						NVL(FTQ_BST1_BID_PRC,0) BID_PRC,
+                						NVL(FTQ_BST1_BID_QTY,0) BID_QTY,
+                						NVL(FTQ_BST1_OFFR_PRC,0) OFFR_PRC,
+                						NVL(FTQ_BST1_OFFR_QTY,0) OFFR_QTY,
+                						/*** ( CASE  WHEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) > 0 THEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) ELSE (-1)*(NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) END ) CHANGE, ***/ 
+														/** (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_CLS_PRC,0)) CHANGE, ** VER 1.1 **/
+														decode(trunc(FSP_ATS_CLSPRC_UPDDT),trunc(FTQ_LST_TRD_TM),nvl((FTQ_LST_TRD_PRC - FTQ_ATS_CLS_PRC),0),0) CHANGE, /** Ver 1.2 **/
+														FTQ_EXPRY_DT, 
+														FTQ_STRK_PRC
+      							FROM  FTQ_FO_TRD_QT,FSP_FO_SYSTM_PRMTR
+      							WHERE  FTQ_STRK_PRC < :d_undrlyn_spot_prc
+      							AND  FTQ_OPT_TYP = 'C'
+										AND  FTQ_XCHNG_CD = :c_xchng_cd
+                  	AND  FTQ_UNDRLYNG = :c_undrlyng
+                  	AND FTQ_EXPRY_DT = :c_expry_dt
+      							ORDER BY  FTQ_STRK_PRC DESC  /** Changed from ASC to DESC **/
+     	 						)
+      						WHERE ROWNUM < 16 ) c_dw
+  							where c_dw.FTQ_EXPRY_DT  = p_dw.FTQ_EXPRY_DT
+  							and c_dw.FTQ_STRK_PRC = p_dw.FTQ_STRK_PRC
+							)
+							order by call_STRK ASC)
+							UNION ALL
+							select c_up.INDX_STCK index_stck, c_up.MIN_LOT call_lot, c_up.CRNT_OI call_OI, c_up.CHNG_OI call_COI, c_up.VOL call_VOL, c_up.IV call_IV,c_up.LTP call_LTP, c_up.CHANGE call_CHNG, c_up.BID_PRC call_BPRC, c_up.BID_QTY call_BQTY, c_up.OFFR_PRC call_OPRC, c_up.OFFR_QTY call_OQTY, c_up.STRK_PRC call_STRK, p_up.CRNT_OI put_OI, p_up.CHNG_OI put_COI, p_up.VOL put_VOL, p_up.IV put_IV, p_up.LTP put_LTP, p_up.CHANGE put_CHNG, p_up.BID_PRC put_BPRC, p_up.BID_QTY put_BQTY, p_up.OFFR_PRC put_OPRC, p_up.OFFR_QTY put_OQTY	
+  						from
+  						( SELECT INDX_STCK, MIN_LOT, STRK_PRC, CRNT_OI, CHNG_OI, VOL, IV, LTP, CHANGE, BID_PRC, BID_QTY, OFFR_PRC, OFFR_QTY,FTQ_EXPRY_DT, FTQ_STRK_PRC
+    						FROM
+    						(
+      						SELECT  NVL(FTQ_INDSTK,'*') INDX_STCK,
+              						NVL(FTQ_MIN_LOT_QTY,0) MIN_LOT,
+              						NVL(FTQ_STRK_PRC,0) STRK_PRC,
+              						NVL(FTQ_CRNT_OI,0) CRNT_OI,
+              						/*** NVL(FTQ_CHNG_OI,0) CHNG_OI, ***/
+													/*** (NVL(FTQ_FRESH_OI,'0')) CHNG_OI, *** VER 1.1 **/
+													(NVL(FTQ_CRNT_OI,'0') - NVL(FTQ_CLS_OI,'0')) CHNG_OI, /** Ver 1.2 **/
+              						/*** NVL(FTQ_LST_TRD_QTY,0) VOL, ***/
+													NVL(FTQ_TOT_QTY_TRDD,0) VOL, /** VER 1.1 **/
+              						NVL(FTQ_CLS_IV,0) IV,
+              						NVL(FTQ_LST_TRD_PRC,0) LTP,
+              						NVL(FTQ_BST1_BID_PRC,0) BID_PRC,
+              						NVL(FTQ_BST1_BID_QTY,0) BID_QTY,
+              						NVL(FTQ_BST1_OFFR_PRC,0) OFFR_PRC,
+              						NVL(FTQ_BST1_OFFR_QTY,0) OFFR_QTY,
+              						/*** ( CASE  WHEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) > 0 THEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) ELSE (-1)*(NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) END ) CHANGE, ***/
+													/** (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_CLS_PRC,0)) CHANGE, ** VER 1.1 **/
+													decode(trunc(FSP_ATS_CLSPRC_UPDDT),trunc(FTQ_LST_TRD_TM),nvl((FTQ_LST_TRD_PRC - FTQ_ATS_CLS_PRC),0),0) CHANGE, /** Ver 1.2 **/
+												  FTQ_EXPRY_DT, 
+													FTQ_STRK_PRC
+      						FROM  FTQ_FO_TRD_QT,FSP_FO_SYSTM_PRMTR
+      						WHERE  FTQ_STRK_PRC >= :d_undrlyn_spot_prc
+      						AND  FTQ_OPT_TYP = 'P'
+									AND  FTQ_XCHNG_CD = :c_xchng_cd
+                  AND  FTQ_UNDRLYNG = :c_undrlyng
+                  AND FTQ_EXPRY_DT = :c_expry_dt
+      						ORDER BY  FTQ_STRK_PRC ASC
+    						)
+    						WHERE ROWNUM < 16 ) p_up,
+    						( SELECT INDX_STCK, MIN_LOT, STRK_PRC, CRNT_OI, CHNG_OI, VOL, IV, LTP, CHANGE, BID_PRC, BID_QTY, OFFR_PRC, OFFR_QTY, FTQ_EXPRY_DT, FTQ_STRK_PRC
+    							FROM
+    							(
+      							SELECT  NVL(FTQ_INDSTK,'*') INDX_STCK,
+              							NVL(FTQ_MIN_LOT_QTY,0) MIN_LOT,
+              							NVL(FTQ_STRK_PRC,0) STRK_PRC,
+              							NVL(FTQ_CRNT_OI,0) CRNT_OI,
+              							/*** NVL(FTQ_CHNG_OI,0) CHNG_OI, ***/
+														/*** (NVL(FTQ_FRESH_OI,'0')) CHNG_OI, *** VER 1.1 **/
+              							(NVL(FTQ_CRNT_OI,'0') - NVL(FTQ_CLS_OI,'0')) CHNG_OI, /** Ver 1.2 **/
+														/*** NVL(FTQ_LST_TRD_QTY,0) VOL, ***/
+														NVL(FTQ_TOT_QTY_TRDD,0) VOL, /** Ver 1.1 **/
+              							NVL(FTQ_CLS_IV,0) IV,
+              							NVL(FTQ_LST_TRD_PRC,0) LTP,
+              							NVL(FTQ_BST1_BID_PRC,0) BID_PRC,
+              							NVL(FTQ_BST1_BID_QTY,0) BID_QTY,
+              							NVL(FTQ_BST1_OFFR_PRC,0) OFFR_PRC,
+              							NVL(FTQ_BST1_OFFR_QTY,0) OFFR_QTY,
+            								/*** ( CASE  WHEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) > 0 THEN (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) ELSE(-1)*(NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_PRVS_CLS_PRC,0)) END ) CHANGE, ***/
+													 /** (NVL(FTQ_LST_TRD_PRC,0) - NVL(FTQ_CLS_PRC,0)) CHANGE, ** VER 1.1 **/
+														decode(trunc(FSP_ATS_CLSPRC_UPDDT),trunc(FTQ_LST_TRD_TM),nvl((FTQ_LST_TRD_PRC - FTQ_ATS_CLS_PRC),0),0) CHANGE,  /** Ver 1.2 **/
+													 FTQ_EXPRY_DT, 
+													 FTQ_STRK_PRC
+      							FROM  FTQ_FO_TRD_QT,FSP_FO_SYSTM_PRMTR
+      							WHERE  FTQ_STRK_PRC >= :d_undrlyn_spot_prc
+      							AND  FTQ_OPT_TYP = 'C'
+										AND  FTQ_XCHNG_CD = :c_xchng_cd
+                  	AND  FTQ_UNDRLYNG = :c_undrlyng
+                  	AND FTQ_EXPRY_DT = :c_expry_dt
+      							ORDER BY  FTQ_STRK_PRC ASC
+    							)
+    							WHERE ROWNUM < 16 ) c_up
+  								where c_up.FTQ_EXPRY_DT  = p_up.FTQ_EXPRY_DT
+  								and c_up.FTQ_STRK_PRC = p_up.FTQ_STRK_PRC
+	);
+	
+	/******************************************* Opening cursor further use *******************************************/
+
+	EXEC SQL
+	OPEN  opt_chain;
+	if ( SQLCODE != 0 )
+	{
+    fn_errlog( c_ServiceName, "S31080", SQLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    EXEC SQL CLOSE  opt_chain;
+		tpfree ( ( char * ) ptr_fml_Obuf );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	for( ; ; )      /** Infinite loop used for cursor opt_chain starts here **/
+	{
+		c_idx_stck = '\0';
+		d_call_oi = 0.0;
+		d_call_chng_oi = 0.0;
+		l_call_volume = 0.0;
+		d_call_iv =0.0;
+		d_call_ltp = 0.0;
+		d_call_change = 0.0;
+		l_call_bid_prc = 0.0;
+		l_call_bid_qty = 0.0;
+		l_call_offr_prc = 0.0;
+		l_call_offr_qty = 0.0;
+		d_call_strk_prc = 0.0;
+		d_put_oi = 0.0;
+		d_put_chng_oi = 0.0;
+		l_put_volume = 0.0;
+		d_put_iv = 0.0;
+		d_put_ltp = 0.0;
+		d_put_change = 0.0;
+		l_put_bid_prc = 0.0;
+		l_put_bid_qty = 0.0;
+		l_put_offr_prc = 0.0;
+		l_put_offr_qty = 0.0;
+		l_min_lot_qty = 0.0;
+		d_intrnsc_val_call = 0.0;
+	  d_intrnsc_val_put = 0.0;
+
+		i_retcode_vols_call = 0;
+  	i_retcode_vols_put = 0;
+
+  	EXEC SQL
+  	FETCH  opt_chain
+    INTO  :c_idx_stck,
+					:l_min_lot_qty,
+					:d_call_oi,
+          :d_call_chng_oi,
+          :l_call_volume,
+          :d_call_iv_tmp,
+          :d_call_ltp,
+					:d_call_change,
+          :l_call_bid_prc,
+          :l_call_bid_qty,
+          :l_call_offr_prc,
+          :l_call_offr_qty,
+					:d_call_strk_prc,
+					:d_put_oi,
+          :d_put_chng_oi,
+          :l_put_volume,
+          :d_put_iv_tmp,
+          :d_put_ltp,
+					:d_put_change,
+          :l_put_bid_prc,
+          :l_put_bid_qty,
+          :l_put_offr_prc,
+          :l_put_offr_qty;
+
+  	if ( SQLCODE != 0 )
+  	{
+      if ( SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog(c_ServiceName,"NO DATA FOUND IN CURSOR opt_chain");
+        break;
+      }
+      else
+      {
+        fn_errlog( c_ServiceName, "S31085", SQLMSG, c_err_msg  );
+        fn_userlog(c_ServiceName,"error while fetching data from cursor opt_chain");
+        EXEC SQL CLOSE opt_chain;
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    }
+
+		/************ Added in ver 1.2 : Structure used for storing contract description ****************/
+  	struct st_contract_dtls st_cntrct_call;
+		struct st_contract_dtls st_cntrct_put;
+
+  	MEMSET(st_cntrct_call);
+		MEMSET(st_cntrct_put);
+
+		/*** Storing call and put contract in thier respective structure for calling IV calculation function ***/
+
+		/*** Using max of INTRINSIC or LTP for IV computation ***
+
+		d_intrnsc_val_call = d_undrlyn_spot_prc - d_call_strk_prc;
+		d_intrnsc_val_put = d_call_strk_prc - d_undrlyn_spot_prc;
+		
+		*** COMMENTED FOR CUG MOVEMENT ***/
+
+		/*** Call contract ***/
+
+		st_cntrct_call.d_strike_prc = d_call_strk_prc;
+		/*** st_cntrct_call.d_lst_trd_prc = max_val(d_intrnsc_val_call, d_call_ltp); ***/
+		st_cntrct_call.d_lst_trd_prc = d_call_ltp;
+		strcpy(st_cntrct_call.c_expry_dt, c_expry_dt);
+
+		/*** Put Contract ***/
+
+		st_cntrct_put.d_strike_prc = d_call_strk_prc;
+		/*** st_cntrct_put.d_lst_trd_prc = max_val(d_intrnsc_val_put, d_call_ltp); ***/
+		st_cntrct_put.d_lst_trd_prc = d_put_ltp;
+		strcpy(st_cntrct_put.c_expry_dt, c_expry_dt);
+
+		/*** Calling implied volatility function ***/
+
+		i_retcode_vols_call = fn_calc_implied_volatility( c_ServiceName,
+																											'C',
+																											d_undrlyn_spot_prc,
+																											&st_cntrct_call,
+                                                      c_err_msg);
+		
+		if( i_retcode_vols_call!= 0)
+    {
+      fn_errlog( c_ServiceName, "S31090", LIBMSG, c_err_msg  );
+      fn_userlog( c_ServiceName, "Error while using function fn_calc_implied_volatility for CALL contract of strike :%lf:.", d_call_strk_prc);
+      EXEC SQL CLOSE opt_chain;
+      tpfree((char * ) ptr_fml_Obuf);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+		i_retcode_vols_put = fn_calc_implied_volatility( c_ServiceName,
+                                                      'P',
+                                                      d_undrlyn_spot_prc,
+                                                      &st_cntrct_put,
+                                                      c_err_msg);
+
+    if( i_retcode_vols_put!= 0)
+    {
+      fn_errlog( c_ServiceName, "S31095", LIBMSG, c_err_msg  );
+      fn_userlog( c_ServiceName, "Error while using function fn_calc_implied_volatility for PUT contract of strike :%lf:.", d_call_strk_prc);
+      EXEC SQL CLOSE opt_chain;
+      tpfree((char * ) ptr_fml_Obuf);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+		d_call_iv = st_cntrct_call.d_imp_vol;
+		d_put_iv = st_cntrct_put.d_imp_vol;
+
+		/**************** Ver 1.2 ends here ************/
+
+		if( DEBUG_MSG_LVL_3 )
+		{
+			fn_userlog(c_ServiceName, " ****** TESTING *****");
+			fn_userlog(c_ServiceName,"STRIKE PRICE is :%lf:",d_call_strk_prc);
+			fn_userlog(c_ServiceName," CALL IV is :%lf:",d_call_iv);
+			fn_userlog(c_ServiceName," PUT IV is :%lf:",d_put_iv);  /** Added in Ver 1.2 **/	
+		}
+
+    i_err[0] = Fadd32(ptr_fml_Obuf, FFO_STRIKE_PRC, (char *)&d_call_strk_prc, 0);
+    i_err[1] = Fadd32(ptr_fml_Obuf, FFO_CRNT_OI, (char *)&d_call_oi, 0);
+    i_err[2] = Fadd32(ptr_fml_Obuf, FFO_CHNG_OI, (char *)&d_call_chng_oi, 0);
+    i_err[3] = Fadd32(ptr_fml_Obuf, FFO_INDX_VAL, (char *)&l_call_volume, 0);
+    i_err[4] = Fadd32(ptr_fml_Obuf, FFO_OPT_PREMIUM, (char *)&d_call_iv, 0);
+    i_err[5] = Fadd32(ptr_fml_Obuf, FFO_EFF_LTP, (char *)&d_call_ltp, 0);
+    i_err[6] = Fadd32(ptr_fml_Obuf, FFO_BST_BID_PRC, (char * )&l_call_bid_prc, 0);
+    i_err[7] = Fadd32(ptr_fml_Obuf, FFO_BST_BID_QTY, (char *)&l_call_bid_qty, 0);
+    i_err[8] = Fadd32(ptr_fml_Obuf, FFO_BST_OFFR_PRC, (char *)&l_call_offr_prc, 0);
+    i_err[9] = Fadd32(ptr_fml_Obuf, FFO_BST_OFFR_QTY, (char *)&l_call_offr_qty, 0);
+    i_err[10] = Fadd32(ptr_fml_Obuf, FFO_JIFFY, (char *)&d_call_change, 0);
+		i_err[11] = Fadd32(ptr_fml_Obuf, FFO_MKT_CPTLTN, (char *)&d_put_oi, 0);
+    i_err[12] = Fadd32(ptr_fml_Obuf, FFO_INDEX, (char *)&d_put_chng_oi, 0);
+    i_err[13] = Fadd32(ptr_fml_Obuf, FFO_CHNG_PRVS_CLS, (char *)&l_put_volume, 0);
+    i_err[14] = Fadd32(ptr_fml_Obuf, FFO_USER_INDEX, (char *)&d_put_iv, 0);
+    i_err[15] = Fadd32(ptr_fml_Obuf, FFO_BO_AMT_BLKD, (char *)&d_put_ltp, 0);
+    i_err[16] = Fadd32(ptr_fml_Obuf, FFO_CLS_INDX_VAL, (char * )&l_put_bid_prc, 0);
+    i_err[17] = Fadd32(ptr_fml_Obuf, FFO_HGH_INDX_VAL, (char *)&l_put_bid_qty, 0);
+    i_err[18] = Fadd32(ptr_fml_Obuf, FFO_HGH_PRC, (char *)&l_put_offr_prc, 0);
+    i_err[19] = Fadd32(ptr_fml_Obuf, FFO_YRLY_HGH_VAL, (char *)&l_put_offr_qty, 0);
+    i_err[20] = Fadd32(ptr_fml_Obuf, FFO_SO_AMT_BLKD, (char *)&d_put_change, 0);
+		i_err[21] = Fadd32(ptr_fml_Obuf, FFO_MIN_LOT_QTY, (char * )&l_min_lot_qty,0);
+		i_err[22] = Fadd32(ptr_fml_Obuf, FFO_CTGRY_INDSTK, (char * )&c_idx_stck, 0);
+
+		for(i_cnt=0;i_cnt<23;i_cnt++)
+    {
+      if(i_err[i_cnt] == -1)
+      {
+        fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i_cnt);
+        fn_errlog( c_ServiceName, "S31100", FMLMSG, c_err_msg  );
+				EXEC SQL CLOSE opt_chain;
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    }
+    if(Fneeded32(1,MIN_FML_BUF_LEN) > Funused32(ptr_fml_Obuf))  /** Checking available buffer size **/
+    {
+      ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf, Fsizeof32(ptr_fml_Obuf) + MIN_FML_BUF_LEN * 5 );
+      if ( ptr_fml_Obuf == NULL )
+      {
+        fn_errlog( c_ServiceName, "S31105", TPMSG, c_err_msg  );
+				EXEC SQL CLOSE opt_chain;
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    }
+	}   // Infinite for loop used for cursor opt_chain ends here.
+
+	EXEC SQL
+  CLOSE opt_chain; /*** opt_chain CURSOR closed ***/
+
+  fn_userlog( c_ServiceName," contents of cursor opt_chain moved sucessfully");
+
+	tpreturn(TPSUCCESS, SUCC_BFR, (char *)ptr_fml_Obuf, 0, 0);
+
+} /*** Function definition ends here ***/
+
+/******** Added in Ver 1.2 : Function for computation of Implied Volatility *********/
+
+int fn_calc_implied_volatility( char  *c_ServiceName,
+                                char  c_opt_typ,
+                                double  d_spt_prc,
+                                struct st_contract_dtls *ptr_st_cntct,
+                                char *c_err_msg )
+{
+  double d_days_to_exp=0.0;
+  double d_days_to_exp_temp=0.0;
+  double d_ltp = 0.00;
+  double d_imp_vol = 0.00;
+  double d_strk_price = 0.00;
+  double d_dividend = 25.00;
+  double d_interest_rt = 10.00; /** Changed to 10 in ver 1.2 **/
+  double d_undrlyng_val= 0.00;
+  double d_undrlyng_val_rupee= 0.00;
+  double d_lst_trd_prc_rupee=0.00;
+
+  long l_spot_prc=0;
+  long l_bufferlength = 0;
+  long l_session_id_tmp=0;
+
+  int  i_err[10];
+  int  i_ferr[10];
+  int i_cnt = 0;
+  int i_date_diff=0;
+  int i_returncode=0;
+
+  char c_user_id_tmp[7]="\0";
+  char c_exer_typ = 'E';
+
+  FBFR32 *ptr_Ibuf;
+  FBFR32 *ptr_Obuf;
+
+  /* Initializing input buffer */
+
+  ptr_Ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN*10 );
+
+  if ( ptr_Ibuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31110", TPMSG, c_err_msg  );
+    return -1;
+  }
+
+  /* Initializing output buffer */
+
+  ptr_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN*10 );
+
+  if ( ptr_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31115", TPMSG, c_err_msg  );
+    tpfree ( ( char * )ptr_Ibuf);
+    return -1;
+  }
+
+  /*** Using "system" and "0" as user id and session id respectively ***/
+
+  strcpy(c_user_id_tmp,"system");
+  l_session_id_tmp=0;
+
+  /*** Days to expiry computation ***/
+
+  EXEC SQL
+  SELECT NVL((to_date(:ptr_st_cntct->c_expry_dt,'dd-Mon-YYYY') - to_date(sysdate,'dd-Mon-YYYY') + 1 ),1),
+         NVL(to_date(:ptr_st_cntct->c_expry_dt,'dd-Mon-YYYY') - to_date(sysdate,'dd-Mon-YYYY') ,0),
+         NVL(to_date(:ptr_st_cntct->c_expry_dt,'dd-Mon-YYYY') - to_date(sysdate,'dd-Mon-YYYY'),0)
+  INTO   :d_days_to_exp ,
+         :d_days_to_exp_temp ,
+         :i_date_diff
+  FROM   DUAL;
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : error while computing days to expiry.");
+    fn_errlog( c_ServiceName, "S31120", SQLMSG, c_err_msg );
+    tpfree ( ( char * )ptr_Ibuf);
+    tpfree ( ( char * )ptr_Obuf);
+    return -1;
+  }
+
+  if(DEBUG_MSG_LVL_5)
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : date_diff is :%d:",i_date_diff);
+
+	if(i_date_diff != 0 )
+     d_days_to_exp = d_days_to_exp_temp;
+
+  d_undrlyng_val_rupee = d_spt_prc/100;
+  d_lst_trd_prc_rupee = ptr_st_cntct->d_lst_trd_prc/100;
+  d_strk_price = ptr_st_cntct->d_strike_prc/100;
+  
+
+  i_err[0] = Fadd32(ptr_Ibuf, FFO_USR_ID,        (char *)c_user_id_tmp, 0 );
+  i_err[1] = Fadd32(ptr_Ibuf, FFO_SSSN_ID,       (char *)&l_session_id_tmp, 0 );
+  i_err[2] = Fadd32(ptr_Ibuf, FFO_EFF_LTP,       (char *)&d_lst_trd_prc_rupee, 0);
+  i_err[3] = Fadd32(ptr_Ibuf, FFO_STCK_PRICE,    (char *)&d_undrlyng_val_rupee, 0);
+  i_err[4] = Fadd32(ptr_Ibuf, FFO_STRIKE_PRC,    (char *)&d_strk_price, 0);
+  i_err[5] = Fadd32(ptr_Ibuf, FFO_OPT_TYP,       (char *)&c_opt_typ, 0);
+  i_err[6] = Fadd32(ptr_Ibuf, FFO_EXER_TYP,      (char *)&c_exer_typ, 0);
+  i_err[7] = Fadd32(ptr_Ibuf, FFO_INTRST_RT,     (char *)&d_interest_rt, 0 );
+  i_err[8] = Fadd32(ptr_Ibuf, FFO_PLG_RT,        (char *)&d_dividend, 0 );
+  i_err[9] = Fadd32(ptr_Ibuf, FFO_DAY_TO_EXP,    (char *)&d_days_to_exp, 0 );
+
+  for( i_cnt = 0; i_cnt < 10; i_cnt++ )
+  {
+     if( i_err[i_cnt] == -1 )
+     {
+       fn_userlog(c_ServiceName,"fn_calc_implied_volatility : error whicking variable at position :%d:",i_cnt);
+       fn_errlog( c_ServiceName, "S31125",FMLMSG, c_err_msg);
+       tpfree ( ( char * )ptr_Ibuf);
+       tpfree ( ( char * )ptr_Obuf);
+       return -1;
+     }
+  }
+
+  l_bufferlength = Fsizeof32(ptr_Obuf) + MIN_FML_BUF_LEN * 10;
+
+  if(DEBUG_MSG_LVL_3)
+    fn_userlog( c_ServiceName,"Calling SFO_CAL_GREEKS");
+
+  i_returncode=tpcall("SFO_CAL_GREEKS",(char*)ptr_Ibuf,0,(char **)&ptr_Obuf,&l_bufferlength,0);
+
+  if( i_returncode== -1 )
+  {
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Error while calling service sfo_cal_greeks.");
+    fn_userlog( c_ServiceName," Call to service for fetching implied volatility failed " );
+    tpfree ( ( char * )ptr_Ibuf);
+    tpfree ( ( char * )ptr_Obuf);
+    return -1;
+  }
+
+  /*** Fetching values returned by service : SFO_CAL_GREEKS ***/
+  i_err[0] = Fget32( ptr_Obuf, FFO_EFF_LMT_RT, 0, (char *)&d_imp_vol,0) ;
+
+  if(i_err[0]==-1)
+  {
+    fn_userlog( c_ServiceName, "Error in Fadd for i_cnt=%d", i_cnt);
+    fn_errlog( c_ServiceName, "S31130", FMLMSG, c_err_msg  );
+    tpfree ( ( char * )ptr_Ibuf);
+    tpfree ( ( char * )ptr_Obuf);
+    return -1;
+  }
+
+  ptr_st_cntct->d_imp_vol = d_imp_vol;
+
+  if( DEBUG_MSG_LVL_3 )
+	{
+		fn_userlog(c_ServiceName,"fn_calc_implied_volatility : **** TESTING ****");
+		fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Option Type :%c:",c_opt_typ);
+		fn_userlog(c_ServiceName,"fn_calc_implied_volatility : c_user_id :%s:", c_user_id_tmp);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : l_session_id :%ld:", l_session_id_tmp);
+		fn_userlog(c_ServiceName,"fn_calc_implied_volatility : d_dividend :%lf:",    d_dividend);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : d_interest_rt :%lf:", d_interest_rt);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : d_days_to_exp :%lf:", d_days_to_exp);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : c_exrc_typ :%c:",     c_exer_typ);	
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Last Trade Price used is :%lf:",  d_lst_trd_prc_rupee);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Spot Price used is :%lf:",d_undrlyng_val_rupee);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Strike Price Used is :%lf:",d_strk_price );
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Vols:%lf:",d_imp_vol);
+	}
+
+
+  tpfree ( ( char * )ptr_Ibuf);
+  tpfree ( ( char * )ptr_Obuf);
+
+  return 0;
+}

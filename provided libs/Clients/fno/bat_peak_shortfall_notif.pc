@@ -1,0 +1,787 @@
+/********************************************************************************************
+* Name                    :bat_peak_shortfall_notif                                         *
+*                                                                                           *
+* Version                 :1.0                                                              *
+*                                                                                           *
+* Author                  :Samip M																													*
+*                                                                                           *
+* Description             :Peak Margin Short fall notification															*
+*                                                                                           *
+* Log :                                                                                     *
+* 1.0 - 31-Jan-2022 - CR-ISEC10-165254_FNO Peak Margin shortfall notification								*
+* 1.1 - 25-Feb-2022 - Minor Change																													*
+* 1.2 - 05-Apr-2022 - Samip M - Minor Change																								*
+* 1.3 - 17-Jun-2022 - Ravi M - Minor Change																									*
+********************************************************************************************/
+
+#include  <stdio.h>
+#include  <strings.h>
+#include  <stdlib.h>
+#include  <sqlca.h>
+#include  <atmi.h>
+#include  <userlog.h>
+#include  <fml32.h>
+#include  <Usysflds.h>
+#include  <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_preprcs_varg.h>
+#include <fml_def.h>
+#include <eba.h>
+#include <fn_log.h>
+#include <fn_battmpt.h>
+#define LIMIT_X_GID 'B'		/** Ver 1.2 **/
+#define MIN(a,b) ((a) < (b) ? (a) : (b))  /** Ver 1.2**/
+
+int fn_snd_mymsg_sms_notfcn(char *c_ServiceName,
+                            FBFR32 **ptr_fml_Sendbuffer,
+                            char *c_user_id,
+                            long l_sssn_id,
+                            char *c_mtch_acc,
+                            char *c_csm_msg_typ,
+                            char c_msg_rqst_typ,
+                            char *c_err_msg);
+
+int fn_update_stts(char *c_rowid, char *c_stts);
+
+char    c_ServiceName[33];
+
+void BAT_PEAK_SHORTFALL_NOTIF( int argc, char **argv)
+{
+
+  char    c_tag[32];
+  char    c_pipe_id[3];
+  char    c_xchng_cd[4];
+	long l_run_no=0;
+	long sql_run_no=0;
+	char c_run_mode = '\0';
+	int i_trnsctn = 0;
+	int i_err[5];
+	char c_rowid[19];
+	long l_rec_cnt = 0;
+	int i_cnt = 0;
+	int i_num_files = 0;
+	char c_filetime[9];
+	char c_file_name[27];
+	char c_file_path[100];
+	int d_fetch_cnt = 0;
+	int loop_cnt = 0;
+	int i_msg_code = 501;
+	int i_return_cd = 0;
+ 	char     c_command[256];
+	char sql_trade_date[12];
+	char sql_match_accnt[11];
+	char c_fpms_match_accnt[11];
+	char c_sysdate[11];
+	char c_msg_typ ='M';	/* changed from G to M -> to send only my messages Ver 1.3 */
+	double sql_exchng_peak_mrgn = 0.0;
+	double d_eba_mrgn = 0.0;
+	double d_peak_mrgn = 0.0;
+	double d_fpms_eba_mrgn_shrtfl = 0.0;
+	int l_sms_shrtfl_cnt = 0;
+
+	/** Ver 1.2 **/
+	int ret_val = 0;
+	long li_grpid = 0;
+	char c_shrtfl_flg = '\0';
+	char c_rqst_type = '\0';
+	double d_shrtfl_amt = 0;
+	double limit = 0.0;
+	double d_limit = 0.0;
+	double d_cash = 0.0;
+	double d_fno_sam = 0.0;
+	double d_nwb_amt = 0.0;
+	double d_free_cash = 0.0;
+	double d_free_sam = 0.0;
+	double d_total_free_sam_avlbl = 0.0;
+	/** Ver 1.2 **/
+
+	EXEC SQL INCLUDE "table/lsm_lck_sms_msg_mstr.h";
+
+	FBFR32* ptr_fml_Sendbuffer;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		varchar v_mbl_no[11];
+		varchar v_gsd_usr_id[8+1];
+	EXEC SQL END DECLARE SECTION;
+
+
+	strcpy(c_ServiceName ,"bat_peak_shortfall_notif");
+  INITBATDBGLVL(argv[0]);
+
+	if(argc != 5)
+	{
+		fn_userlog(c_ServiceName, "Usage: bat_peak_shortfall_notif <ExchangeCode> <NA> <BO> <Run_No>");
+		exit(-1);
+	}
+
+	l_run_no = atol(argv[4]);
+	strcpy(c_xchng_cd,argv[1]);
+
+	i_trnsctn = tpbegin(0,0);
+
+  if ( i_trnsctn == -1 )
+  {
+    fn_userlog (c_ServiceName,"Failed in initial begin transaction ");
+    fn_errlog ( c_ServiceName, "S31005", TPMSG, c_err_msg  );
+    return ;
+  }
+
+	fn_userlog(c_ServiceName,"Inserting data to Request History");
+
+		EXEC SQL
+			INSERT INTO FMS_MRGN_XCHNG_SNAPSHOT_HSTRY
+			SELECT * FROM FMS_MRGN_XCHNG_SNAPSHOT
+			WHERE FMS_RUN_NO <> :l_run_no;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31010", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+		fn_userlog(c_ServiceName,"Delete data from Snapshot");
+
+		EXEC SQL
+			DELETE FROM FMS_MRGN_XCHNG_SNAPSHOT WHERE FMS_RUN_NO <> :l_run_no;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31015", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+		fn_userlog(c_ServiceName,"Inserting data to FPMS history");
+
+		EXEC SQL
+			INSERT INTO FPMS_FO_PEAKMRGN_SHRTFL_HSTRY
+			SELECT * FROM FPMS_FO_PEAKMRGN_SHRTFL
+			WHERE FPMS_RUN_NO <> :l_run_no;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31020", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+		EXEC SQL
+			DELETE FROM FPMS_FO_PEAKMRGN_SHRTFL WHERE FPMS_RUN_NO <> :l_run_no;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31025", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+		fn_userlog(c_ServiceName,"Insert into Temp");
+
+		EXEC SQL
+			INSERT INTO TMP_PEAK_MRGN_SHRTFL
+				(FPMS_RUN_NO,
+				FPMS_TRADE_DATE,
+				FPMS_MATCH_ACCNT,
+				FPMS_EXCHNG_PEAK_MRGN)
+			SELECT
+				FMS_RUN_NO,
+				FMS_TRD_DT,
+      	CLM_MTCH_ACCNT,
+      	MAX(FMS_TOTAL_MRGN)
+			FROM FMS_MRGN_XCHNG_SNAPSHOT,CLM_CLNT_MSTR
+			WHERE
+				TRIM(NVL(TRIM(CLM_CLNT_CD), CLM_MTCH_ACCNT)) = FMS_CLI_CODE
+				AND FMS_RUN_NO = :l_run_no
+			GROUP BY
+				FMS_RUN_NO,FMS_TRD_DT,CLM_MTCH_ACCNT;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31030", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				fn_userlog(c_ServiceName,"No Previous data to load");
+			}
+
+			fn_userlog(c_ServiceName,"Total Records into Temp table :%d:",sqlca.sqlerrd[2]);
+
+		l_rec_cnt = 0;
+		while(1)
+		{
+
+			sql_exchng_peak_mrgn = 0.0;
+			MEMSET(c_rowid);
+			sql_run_no = 0;
+			MEMSET(sql_trade_date);
+			MEMSET(sql_match_accnt);
+
+			EXEC SQL
+				SELECT 	ROWID,
+								FPMS_RUN_NO,
+								FPMS_TRADE_DATE,
+								FPMS_MATCH_ACCNT,
+								FPMS_EXCHNG_PEAK_MRGN
+				INTO		:c_rowid,
+								:sql_run_no,
+								:sql_trade_date,
+								:sql_match_accnt,
+								:sql_exchng_peak_mrgn
+				FROM		TMP_PEAK_MRGN_SHRTFL
+				WHERE		ROWNUM < 2;
+			
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31035", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				fn_userlog(c_ServiceName,"End of Data");
+				break;
+			}
+
+			EXEC SQL
+				DELETE FROM TMP_PEAK_MRGN_SHRTFL
+				WHERE ROWID = :c_rowid;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31040", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+			l_rec_cnt++;
+			fn_userlog(c_ServiceName,"Value of l_rec_cnt :%ld:",l_rec_cnt);
+			fn_userlog(c_ServiceName,"Value of sql_match_accnt :%s:",sql_match_accnt);
+			fn_userlog(c_ServiceName,"Value of sql_exchng_peak_mrgn :%lf:",sql_exchng_peak_mrgn);
+
+			EXEC SQL
+				SELECT NVL(SUM(mrgn)/100,0)
+				INTO	:d_eba_mrgn
+				FROM
+				(
+			  	SELECT  FUP_XCHNG_CD xchng  ,
+					  	FUP_CLM_MTCH_ACCNT  mtch,
+					  	NVL(SUM (FUP_UTRD_MRGN ),0) mrgn
+			  	FROM    FUP_FUT_UNDRLYNG_PSTN
+			  	WHERE   FUP_UTRD_MRGN > 0
+			  	AND     FUP_XCHNG_CD = :c_xchng_cd
+			  	AND	  FUP_CLM_MTCH_ACCNT = :sql_match_accnt
+			  	GROUP BY FUP_XCHNG_CD, FUP_CLM_MTCH_ACCNT
+		  	UNION ALL
+			  	SELECT  FOP_XCHNG_CD xchng  ,
+					  	FOP_CLM_MTCH_ACCNT  mtch,
+					  	NVL(SUM (FOP_UEXCTD_MRGN ),0) mrgn
+				  FROM    FOP_FO_OPTIONS_PSTN
+				  WHERE   FOP_UEXCTD_MRGN > 0
+				  AND     FOP_XCHNG_CD = :c_xchng_cd
+				  AND	  FOP_CLM_MTCH_ACCNT = :sql_match_accnt
+			  	GROUP BY FOP_XCHNG_CD, FOP_CLM_MTCH_ACCNT
+			  UNION ALL
+				  SELECT  FUS_XCHNG_CD xchng  ,
+						  FUS_CLM_MTCH_ACCNT  mtch,
+						  NVL(SUM (FUS_INITIAL_MRGN ),0) mrgn
+			  	FROM    FUS_FO_UNDRLYNG_SPN_PSTN
+				  WHERE   FUS_INITIAL_MRGN > 0
+				  AND     FUS_XCHNG_CD = :c_xchng_cd
+				  AND	  FUS_CLM_MTCH_ACCNT = :sql_match_accnt
+				  GROUP BY FUS_XCHNG_CD, FUS_CLM_MTCH_ACCNT
+				UNION ALL
+			  	SELECT  FOP_XCHNG_CD xchng  ,
+						  FOP_CLM_MTCH_ACCNT  mtch,
+					  	NVL(SUM (FOP_UDLVRY_MRGN ),0) mrgn
+				  FROM    FOP_FO_OPTIONS_PSTN
+				  WHERE   NVL(FOP_UDLVRY_MRGN,0) > 0
+				  AND     FOP_XCHNG_CD = :c_xchng_cd
+				  AND	  FOP_CLM_MTCH_ACCNT = :sql_match_accnt
+			  	GROUP BY FOP_XCHNG_CD, FOP_CLM_MTCH_ACCNT
+			 UNION ALL
+					SELECT    FCP_XCHNG_CD xchng  ,
+						  FCP_CLM_MTCH_ACCNT  mtch,
+						  NVL(SUM (FCP_UDLVRY_MRGN ),0) mrgn
+				  FROM    FCP_FO_SPN_CNTRCT_PSTN
+			  	WHERE   NVL(FCP_UDLVRY_MRGN,0) > 0
+				  AND     FCP_XCHNG_CD = :c_xchng_cd
+				  AND	  FCP_CLM_MTCH_ACCNT = :sql_match_accnt
+				  GROUP BY FCP_XCHNG_CD, FCP_CLM_MTCH_ACCNT
+				);
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31045", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				fn_userlog(c_ServiceName,"No EBA Margin available for Match ID :%s:",sql_match_accnt);
+				d_eba_mrgn = 0.0;
+				break;
+			}
+
+			/**
+			if(d_eba_mrgn == 0.0)
+			{
+				fn_userlog(c_ServiceName,"Record skipped for :%s: as no EBA Margin",sql_match_accnt);
+				continue;
+			}
+			**/
+
+			d_peak_mrgn = 0.0;
+
+			EXEC SQL
+			SELECT -1 * NVL(MIN((FLL_NET_BAL - FLL_ISEC_WITHHELD_AMT))/100,0)
+     	INTO   :d_peak_mrgn
+     	FROM   FLL_FO_LMTUPD_LOG
+     	WHERE  FLL_TRD_DT = :sql_trade_date
+     		AND  FLL_CLM_MTCH_ACCNT = :sql_match_accnt
+     		AND  FLL_GRP_ID = 1;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31050", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+			if(SQLCODE == NO_DATA_FOUND || d_eba_mrgn == 0)
+			{
+				fn_userlog(c_ServiceName,"No EBA Peak Margin available for Match ID :%s:",sql_match_accnt); 
+				d_peak_mrgn = 0.0;
+			}
+
+			EXEC SQL
+				INSERT INTO FPMS_FO_PEAKMRGN_SHRTFL(
+					FPMS_RUN_NO,
+					FPMS_TRADE_DATE,
+					FPMS_MATCH_ACCNT,
+					FPMS_EXCHNG_PEAK_MRGN,
+					FPMS_EBA_MRGN,
+					FPMS_EBA_PEAK_MRGN,
+					FPMS_PEAK_MRGN_SHRTFL,
+					FPMS_EBA_MRGN_SHRTFL,
+					FPMS_SHRTFL_FLG,
+					FPMS_SHRTFL_NOTIF)
+				VALUES(
+					:sql_run_no,
+					:sql_trade_date,
+					:sql_match_accnt,
+					:sql_exchng_peak_mrgn,
+					:d_eba_mrgn,
+					:d_peak_mrgn,
+					/** DECODE(SIGN(:sql_exchng_peak_mrgn - :d_peak_mrgn),-1,0,:sql_exchng_peak_mrgn - :d_peak_mrgn),
+					DECODE(SIGN(:sql_exchng_peak_mrgn - :d_peak_mrgn),-1,0,:sql_exchng_peak_mrgn - :d_eba_mrgn),
+					DECODE(SIGN(:sql_exchng_peak_mrgn - :d_peak_mrgn),-1,'N',DECODE(:d_eba_mrgn,0,'N','Y')), **/	/** Ver 1.1 **/
+					DECODE(SIGN(:sql_exchng_peak_mrgn - :d_peak_mrgn),1,:sql_exchng_peak_mrgn - :d_peak_mrgn,0),
+					DECODE(SIGN(:sql_exchng_peak_mrgn - :d_peak_mrgn),1,:sql_exchng_peak_mrgn - :d_eba_mrgn,0),
+					DECODE(SIGN(:sql_exchng_peak_mrgn - :d_peak_mrgn),1,DECODE(:d_eba_mrgn,0,'N','Y'),'N'),
+					'N');
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31055", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+
+			/** Ver 1.2 Start **/
+
+			EXEC SQL
+				SELECT FPMS_SHRTFL_FLG,FPMS_EBA_MRGN_SHRTFL
+				INTO :c_shrtfl_flg,d_shrtfl_amt
+				FROM FPMS_FO_PEAKMRGN_SHRTFL
+				WHERE FPMS_MATCH_ACCNT = :sql_match_accnt
+				AND FPMS_TRADE_DATE = :sql_trade_date
+				AND FPMS_RUN_NO = :sql_run_no;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31060", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				tpabort(0);
+				return;
+			}
+		
+			if(c_shrtfl_flg == 'Y')
+			{
+
+     		c_rqst_type = LIMIT_X_GID ;
+      	li_grpid  = 1 ;
+
+    		EXEC SQL
+    		EXECUTE
+     		BEGIN
+     		LIMIT_CAL
+      	(:sql_match_accnt,
+       	:sql_trade_date,
+       	:c_rqst_type,
+       	:li_grpid,
+       	:c_xchng_cd,
+       	:limit,
+       	:ret_val
+      	);
+     		END;
+    		END-EXEC;
+
+				if(SQLCODE != 0)
+				{
+					fn_errlog(c_ServiceName , "S31065", SQLMSG,c_err_msg);
+					fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+					tpabort(0);
+					return;
+				}
+
+				if(ret_val == -1)
+				{
+					fn_errlog(c_ServiceName , "S31070", SQLMSG,c_err_msg);
+					fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+					tpabort(0);
+					return;
+				}
+
+				fn_userlog(c_ServiceName,"Value of limit :%lf: for Match :%s:",limit,sql_match_accnt);
+
+					EXEC SQL
+						SELECT	(NVL(FAB_ALCTD_AMT,0) + NVL(FAB_BFT_AMT,0) + NVL(FAB_ISEC_MRGN_AMT,0) + NVL(FAB_ISEC_MRGN_AMT_BSE,0))/100,
+										(NVL(FAB_PLG_AMT,0))/100,
+									 	(NVL(FAB_NWB_AMT,0))/100,
+										:limit/100
+						INTO		:d_cash,
+										:d_fno_sam,
+										:d_nwb_amt,
+										:d_limit
+						FROM		FAB_FO_ALC_BFT_SMRY
+						WHERE		FAB_CLM_MTCH_ACCNT = :sql_match_accnt;
+
+					if(SQLCODE != 0)
+					{
+						fn_errlog(c_ServiceName , "S31075", SQLMSG,c_err_msg);
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						tpabort(0);
+						return;
+					}
+					
+					fn_userlog(c_ServiceName,"Value of d_cash :%lf:",d_cash);
+					fn_userlog(c_ServiceName,"Value of d_fno_sam :%lf:",d_fno_sam);
+					fn_userlog(c_ServiceName,"Value of d_nwb_amt :%lf:",d_nwb_amt);
+					fn_userlog(c_ServiceName,"Value of d_limit :%lf:",d_limit);
+
+					if(d_fno_sam + d_nwb_amt <= 0)
+					{
+						continue;
+					}
+
+					if(d_cash <= d_limit)
+					{
+						d_free_cash = d_cash;
+						d_free_sam = MIN(d_limit - d_free_cash , d_fno_sam);
+					}
+					else
+					{
+						d_free_cash = d_limit;
+						d_free_sam = 0;
+					}
+
+					fn_userlog(c_ServiceName,"Value of d_free_cash :%lf:",d_free_cash);
+					fn_userlog(c_ServiceName,"Value of d_free_sam :%lf:",d_free_sam);
+
+					d_total_free_sam_avlbl = d_free_sam + d_nwb_amt;
+
+					fn_userlog(c_ServiceName,"Value of d_total_free_sam_avlbl :%lf:",d_total_free_sam_avlbl);
+					fn_userlog(c_ServiceName,"Value of d_shrtfl_amt :%lf:",d_shrtfl_amt);
+
+					if(d_shrtfl_amt <= d_total_free_sam_avlbl)
+					{
+
+						EXEC SQL
+							UPDATE FPMS_FO_PEAKMRGN_SHRTFL
+							SET FPMS_SHRTFL_FLG = 'N'
+							WHERE FPMS_MATCH_ACCNT = :sql_match_accnt
+							AND FPMS_TRADE_DATE = :sql_trade_date
+							AND FPMS_RUN_NO = :sql_run_no;
+
+						if(SQLCODE != 0)
+						{
+							fn_errlog(c_ServiceName , "S31080", SQLMSG,c_err_msg);
+							fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+							tpabort(0);
+							return;
+						}
+					}
+			}
+
+			/** End for Ver 1.2 **/
+
+		}
+
+ 	if( tpcommit(0) == -1 )
+  {
+		fn_userlog (c_ServiceName,"Failed in commit transaction");
+   	fn_errlog ( c_ServiceName, "S31085", SQLMSG, c_err_msg);
+   	return ;
+  }
+
+	EXEC SQL
+		SELECT TO_CHAR(SYSDATE,'DD-MM-YYYY')
+		INTO	 :c_sysdate
+		FROM	 DUAL;
+
+	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+	{
+		fn_errlog(c_ServiceName , "S31090", SQLMSG,c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		return;
+	}
+
+	fn_userlog(c_ServiceName,"Value of c_sysdate :%s:",c_sysdate);
+	fn_userlog(c_ServiceName,"Start of Sending SMS, Notification");
+
+	EXEC SQL
+		SELECT COUNT(1)
+		INTO :l_sms_shrtfl_cnt
+		FROM		FPMS_FO_PEAKMRGN_SHRTFL
+		WHERE		FPMS_SHRTFL_FLG = 'Y'
+		AND			FPMS_SHRTFL_NOTIF = 'N'
+		AND			FPMS_RUN_NO = :l_run_no;
+		
+	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+	{
+		fn_errlog(c_ServiceName , "S31095", SQLMSG,c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		return;
+	}
+
+	fn_userlog(c_ServiceName,"No of Shortfall SMS :%d:",l_sms_shrtfl_cnt);
+	
+	while(1)
+	{
+
+		MEMSET(c_rowid);
+		MEMSET(c_fpms_match_accnt);
+		d_fpms_eba_mrgn_shrtfl = 0.0;
+
+		EXEC SQL
+			SELECT 	ROWID,
+							FPMS_MATCH_ACCNT,
+							FPMS_EBA_MRGN_SHRTFL
+			INTO		:c_rowid,
+							:c_fpms_match_accnt,
+							:d_fpms_eba_mrgn_shrtfl
+			FROM		FPMS_FO_PEAKMRGN_SHRTFL
+			WHERE		FPMS_SHRTFL_FLG = 'Y'
+			AND			FPMS_SHRTFL_NOTIF = 'N'
+			AND			FPMS_RUN_NO = :l_run_no
+			AND			ROWNUM < 2;
+								
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName , "S31100", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				return;
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				fn_userlog(c_ServiceName,"No SMS pending to be sent");
+				break;
+			}
+
+			fn_userlog(c_ServiceName,"Value of c_fpms_match_accnt :%s:",c_fpms_match_accnt);
+			fn_userlog(c_ServiceName,"Value of d_fpms_eba_mrgn_shrtfl :%lf:",d_fpms_eba_mrgn_shrtfl);
+
+			MEMSET(sql_lsm_dept_id);
+			MEMSET(sql_lsm_app_id);
+			MEMSET(v_mbl_no);
+			MEMSET(sql_lsm_msg_txt);
+			MEMSET(v_gsd_usr_id);
+
+		EXEC SQL
+			 	SELECT  LSM_DEPT_ID,
+          LSM_APP_ID,
+          IAD_MOBILE_10DGT,
+          REGEXP_REPLACE(REGEXP_REPLACE(LSM_MSG_TXT,'SHRT_AMT',:d_fpms_eba_mrgn_shrtfl),'SDATE',TO_CHAR(SYSDATE,'DD-MM-YYYY')),
+					UAC_USR_ID
+  			INTO    :sql_lsm_dept_id,
+          :sql_lsm_app_id,
+          :v_mbl_no,
+          :sql_lsm_msg_txt,
+					:v_gsd_usr_id
+  			FROM    UAC_USR_ACCNTS,
+          IAD_INFO_ADDRESS_DTLS,
+          ICD_INFO_CLIENT_DTLS,
+          LSM_LCK_SMS_MSG_MSTR
+   			WHERE   UAC_USR_ID = ICD_USER_ID
+   			AND     ICD_SERIAL_NO = IAD_SERIAL_NO
+   			AND     IAD_ADDRESS_TYPE = 'APPLICANT_CORR'
+   			AND     IAD_MOBILE_10DGT IS NOT NULL
+   			AND     LSM_SMS_ID = :i_msg_code
+   			AND     UAC_CLM_MTCH_ACCNT = :c_fpms_match_accnt;
+
+			if(SQLCODE != 0)
+			{
+				fn_errlog(c_ServiceName , "S31105", SQLMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				fn_update_stts(c_rowid,"F");
+				continue;
+			}
+
+			SETLEN(sql_lsm_msg_txt);
+			SETLEN(v_gsd_usr_id);
+
+  		SETNULL(sql_lsm_app_id);
+  		SETNULL(sql_lsm_dept_id);
+  		SETNULL(v_mbl_no);
+  		SETNULL(sql_lsm_msg_txt);
+			SETNULL(v_gsd_usr_id);
+
+  		if(DEBUG_MSG_LVL_3)
+  		{
+    		fn_userlog(c_ServiceName,"Before adding in ptr_fml_Sendbuffer");
+    		fn_userlog(c_ServiceName,"Application is :%s:",sql_lsm_app_id.arr);
+    		fn_userlog(c_ServiceName,"Department is  :%s:",sql_lsm_dept_id.arr);
+    		fn_userlog(c_ServiceName,"Mobile No is   :%s:",v_mbl_no.arr);
+    		fn_userlog(c_ServiceName,"Message string :%s:",sql_lsm_msg_txt.arr);
+    		fn_userlog(c_ServiceName,"User ID :%s:",v_gsd_usr_id.arr);
+  		}
+
+  		ptr_fml_Sendbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  		if(ptr_fml_Sendbuffer == NULL)
+  		{
+    		fn_errlog(c_ServiceName, "S31110", TPMSG, c_err_msg);
+				fn_update_stts(c_rowid,"F");
+    		return ;
+  		}
+
+  	i_err[0] = Fadd32(ptr_fml_Sendbuffer,FML_ARD_APPLCTN_RFRNC,(char *)sql_lsm_app_id.arr,0);
+  	i_err[1] = Fadd32(ptr_fml_Sendbuffer,FML_ORD_DP_ID,(char *)sql_lsm_dept_id.arr,0);
+  	i_err[2] = Fadd32(ptr_fml_Sendbuffer,FML_USR_MBL_NMBRS,(char *)v_mbl_no.arr,0);
+  	i_err[3] = Fadd32(ptr_fml_Sendbuffer,FML_SYS_MSG,(char *)sql_lsm_msg_txt.arr,0);
+  	i_err[4] = Fadd32(ptr_fml_Sendbuffer,FML_USR_ID,(char *)v_gsd_usr_id.arr,0);
+
+  	for(i_cnt = 0; i_cnt < 5; i_cnt++)
+  	{
+    	if(i_err[i_cnt] == -1 )
+    	{
+      	fn_userlog(c_ServiceName,"i_cnt :%d:",i_cnt);
+      	fn_errlog(c_ServiceName, "S31115", TPMSG, c_err_msg);
+      	tpfree((char *) ptr_fml_Sendbuffer);
+				fn_update_stts(c_rowid,"F");
+      	return ;
+    	}
+  	}
+
+ 		if( fn_snd_mymsg_sms_notfcn(c_ServiceName,&ptr_fml_Sendbuffer,v_gsd_usr_id.arr,DEF_SSSN,
+                              c_fpms_match_accnt,"MRGN",c_msg_typ,c_err_msg) != 0)
+  	{
+     	fn_userlog(c_ServiceName,"Error while calling fn_snd_sms_notification");
+     	fn_errlog(c_ServiceName, "L31025", LIBMSG, c_err_msg);
+     	tpfree((char *)ptr_fml_Sendbuffer);
+			fn_update_stts(c_rowid,"F");
+			continue;
+  	}
+
+		/** comment [starts] to stop sms alerts of peak margin  Ver 1.3
+  	fn_userlog(c_ServiceName,"Calling service SVC_SND_SMSALRT ........");
+
+  	i_return_cd = tpacall("SVC_SND_SMSALRT",(char *)ptr_fml_Sendbuffer,0,TPNOTRAN | TPNOREPLY);
+
+  	if (i_return_cd == -1)
+  	{
+    	fn_errlog(c_ServiceName, "L31030", TPMSG, c_err_msg);
+    	tpfree((char *)ptr_fml_Sendbuffer);
+      fn_update_stts(c_rowid,"F");
+    	continue;
+  	}
+		comment [ends] to stop sms alerts of peak margin **/
+
+  	tpfree((char *)ptr_fml_Sendbuffer);
+		fn_update_stts(c_rowid,"Y");
+	}
+
+  /* return 0; */
+
+}
+
+int fn_update_stts(char *c_rowid, char *c_stts)
+{
+
+	int i_trnsctn = 0;
+
+	i_trnsctn = tpbegin(0,0);
+
+  if ( i_trnsctn == -1 )
+  {
+    fn_userlog (c_ServiceName,"Failed in initial begin transaction ");
+    fn_errlog ( c_ServiceName, "S31120", TPMSG, c_err_msg  );
+    return -1;
+  }
+		
+	EXEC SQL
+		UPDATE FPMS_FO_PEAKMRGN_SHRTFL
+		SET FPMS_SHRTFL_NOTIF = :c_stts
+		WHERE ROWID = :c_rowid;
+
+	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+	{
+		fn_errlog(c_ServiceName , "S31125", SQLMSG,c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		tpabort(0);
+		return -1;
+	}
+
+	if(SQLCODE == NO_DATA_FOUND)
+	{
+		fn_userlog(c_ServiceName,"No Row to update");
+	}
+
+ 	if( tpcommit(0) == -1 )
+  {
+		fn_userlog (c_ServiceName,"Failed in commit transaction");
+   	fn_errlog ( c_ServiceName, "S31130", SQLMSG, c_err_msg);
+   	return -1;
+  }
+	
+	return 0;
+
+}
+
+int fn_bat_init(int argc,char *argv[])
+{
+  fn_var=BAT_PEAK_SHORTFALL_NOTIF;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  char c_msg[256];
+  sprintf ( c_msg, "Batch process %s ended", argv[0] );
+  fn_bat_pst_msg (  argv[0], c_msg, c_tag );
+  return;
+}
+
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}
+

@@ -1,0 +1,494 @@
+/*******************************************************************************
+* Service name :  BAT_FO_TCONF                                                 *
+*                                                                              *
+* Description  :  This Batch Program does the RMS part of the trade 					 *
+*									confirmation, if the trade confiramtion is not properly 		 *
+*									updated.																										 *
+*                                                                              *
+* Log         :           04-Jul-2002 Initial Release  					- Sridhar.T.N  *
+*							: Ver 1.1		25-Apr-2008 IBM Changes	     					- Sandeep			 *
+*							: Ver 1.2   27-Jun-2008 Future Plus 		 					- Sandeep			 *
+*             : Ver 1.3   04-Apr-2009 Domain call for service                  *
+*                                                       				-Prakash       *
+* 																															 {trd reco)    *
+*							:	Ver	1.4		19-Aug-2011	Time Reduced From 5 To 1	-	Sandeep			 *
+*             : Ver 1.5   16-Aug-2011 SPAN Changes    					- Swati A.B    *
+*             : Ver 1.6   16-Aug-2011 BSE Changes    						- Sandip 		   *
+*             : Ver 1.7   02-Jul-2012 SPAN T&C Handling  				- Swati A.B    *
+*             : Ver 1.8   15-Jan-2013 SPAN FuturePLUS Handling  - Navina D.    *
+*             : Ver 1.9   07-Jun-2013 SLTP FuturePLUS Handling  - Navina D.    *
+*             : Ver 2.0   27-Sep-2013 OptionPLUS Handling       - Navina D.    *
+*             : Ver 2.1   24-Nov-2015 timimg for trade processing reduced - SN *
+*							: Ver 2.2   01-Dec-2015	Process trades in order  	-	Kishor B     *	
+*							: Ver 2.3   15-Nov-2019	Pipe Id check added in FTD-	Mrinal K     *	
+*							: Ver 2.4   14-Mar-2023	MinorChnages(1451) PipeId Change-Sachin Birje*	
+*							: Ver 2.5   01-May-2023	MinorChnages(IN:1794) Variable Size Change -Sachin Birje*	
+*             : Ver 2.6   22-May-2023 Changes to run in multiple instances -MS * 
+*             : Ver TOL   11-Aug-2023 Tux on Linux (Agam)                      *
+*******************************************************************************/
+#include <stdio.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <eba_to_ors.h>
+#include <fn_ddr.h>
+#include <errno.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>      /*** Ver 1.1 ***/
+#include <fml_rout.h>               /*** Ver 1.5 ***/
+#include <fn_env.h>									/*** Ver 2.3 ***/
+#include <stdlib.h>									/*** Ver 2.3 ***/
+#include <fn_signal.h>              /*** Ver 2.6 ***/
+#include <unistd.h>                 /*** Ver 2.6 ***/
+#include <signal.h>                 /* Added in Ver TOL */
+
+int i_exit_stts;  /*** Ver 2.6 ***/
+void fn_sgnl_usr2(int i_sig_no); /*** Ver 2.6 ***/
+
+void BAT_FO_TCONF ( int argc, char *argv[])
+{
+	EXEC SQL BEGIN DECLARE SECTION;
+		struct vw_tradebook st_tradebook;
+		long int li_tot_recs  = 0;
+		short int si_null;
+	EXEC SQL END DECLARE SECTION;
+
+  char c_ServiceName[33];
+  char c_err_msg[256];
+	char c_svc_nm[16];
+	char c_span_flag  = 'N';     /*** Ver 1.5 ***/
+	char c_bse_span_flag  = 'N';     /*** Ver 1.6 ***/
+
+  /*** Ver 2.3 starts ***/
+	char  *c_ptr_pipe_lst = NULL; 
+  char  c_ini_fname[20] = "\0";
+  /**char c_pipe_list[30] = "\0"; ** Ver 2.4 **/
+  /*char c_pipe_list[50] = "\0";  ** Ver 2.4 *** 2.5**/
+  char c_pipe_list[60] = "\0";  /** Ver 2.5 **/
+  /*** Ver 2.3 ends ***/
+
+  char  c_pipe_id [3];  /* Ver 2.6 */
+  /* added in Ver 1.3 */
+  char c_msg[256];
+  char c_buffer_typ[10];
+  char c_io_vw[32];
+  int i_err[6];
+  int i_cnt;
+  int i_ch_val;
+  long int li_len_tobuf  = 0;
+  /* ends Ver 1.3 */
+
+	int i_counter = 0;
+	int i_returncode;
+
+  FBFR32* ptr_fml_Sbuf;     /* Ver 1.3 */
+  FBFR32* ptr_fml_Rbuf;     /* Ver 1.3 */
+
+	strcpy(c_ServiceName, argv[0]);
+  strcpy(c_pipe_id,argv[3]);  /* Ver 2.6 */
+
+	INITBATDBGLVL(argv[0]);			/*** Ver 1.1 ***/
+
+  /*** Ver 2.6 ***/
+  if ( fn_set_sgn_hnd ( SIGUSR2, fn_sgnl_usr2, c_ServiceName, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31005", LIBMSG, c_err_msg );
+    return;
+  }
+  /*** Ver 2.6 ***/
+
+  /* added in Ver 1.3 */
+
+  ptr_fml_Sbuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  if ( ptr_fml_Sbuf == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31010", TPMSG, c_err_msg);
+    return;
+  }
+  ptr_fml_Rbuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  if ( ptr_fml_Rbuf == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31015", TPMSG, c_err_msg);
+    tpfree((char *)ptr_fml_Sbuf);
+    return;
+  }
+
+  /* ends Ver 1.3 */
+
+  fn_userlog(c_ServiceName, "%s - Process started", c_ServiceName);
+  sprintf( c_msg, "Batch process %s started", c_ServiceName );
+  fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+
+  /*** Ver 2.3 starts ***/
+  /*** sprintf(c_ini_fname, "%s/%s", getenv("BIN"), "NFO.ini"); **** Ver 2.6 **/
+  sprintf(c_ini_fname, "%s/%s.ini", getenv("BIN"), c_pipe_id); /**** Ver 2.6 **/
+  fn_userlog(c_ServiceName,"c_ini_fname :%s:",c_ini_fname);  /* Ver 2.6 */
+  if( fn_init_prcs_spc ( c_ServiceName,c_ini_fname,c_ServiceName) == -1 )
+  {
+    fn_userlog(c_ServiceName,"Error in Reading the ini File");
+    exit(0);
+  }
+  c_ptr_pipe_lst = (char *)fn_get_prcs_spc(c_ServiceName,"PIPE_LIST");
+  if( c_ptr_pipe_lst == NULL )
+  {
+    fn_userlog(c_ServiceName,"Unable to read PIPE_LIST from ini File");
+    exit(0);
+  }
+  fn_userlog(c_ServiceName,"The List Of Pipe No.s is :%s:",c_ptr_pipe_lst);
+  strcpy(c_pipe_list,c_ptr_pipe_lst);
+  /*** Ver 2.3 ends ***/
+
+  while ( i_exit_stts == DONT_EXIT) /*** Added in Ver 2.6 ***/
+  {
+	  li_tot_recs = 0;
+	  EXEC SQL 
+	  SELECT count(*) 
+		INTO :li_tot_recs
+		FROM ftd_fo_trd_dtls,FOD_FO_ORDR_DTLS					/*** FOD added in Ver 2.3 ***/
+		WHERE ftd_rms_prcsd_flg = 'N'
+		AND ( ((sysdate - ftd_trd_dt) * 24 * 60) > 0.18 )			/***  Ver 1.4 Time Reduced From 5 To 1  ***/
+		/*** Ver 2.3 Starts ***/
+		AND	FOD_ORDR_RFRNC = FTD_ORDR_RFRNC
+		AND	FOD_XCHNG_CD = FTD_XCHNG_CD
+		AND   FOD_PIPE_ID IN (SELECT REGEXP_SUBSTR ( :c_pipe_list ,'[^,]+',1,ROWNUM)
+		 											FROM DUAL
+		 											CONNECT BY REGEXP_SUBSTR(:c_pipe_list,'[^,]+',1,ROWNUM) IS NOT NULL);
+		/*** Ver 2.3 Ends ***/
+/*SN reduce 1 */
+
+	if ( SQLCODE != 0)
+	{
+		fn_errlog(c_ServiceName, "S31020", SQLMSG, c_err_msg);
+    strcpy( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+    tpfree((char *)ptr_fml_Sbuf);                /* Ver 1.3 */
+    tpfree((char *)ptr_fml_Rbuf);                /* Ver 1.3 */
+		return;
+	}
+	
+	fn_userlog(c_ServiceName, "No. of trade confirmations not updated - %ld", 
+																												li_tot_recs);
+
+  /** Commented in Ver 2.6 *****
+	if ( li_tot_recs == 0 )
+	{
+    tpfree((char *)ptr_fml_Sbuf);                * Ver 1.3 *
+    tpfree((char *)ptr_fml_Rbuf);                * Ver 1.3 *
+		return;
+	}
+  ****************************************/
+
+ 	EXEC SQL
+    DECLARE cur_trd CURSOR FOR
+    SELECT  ftd_clm_mtch_accnt,
+            ftd_xchng_cd,
+            ftd_prdct_typ,
+            ftd_indstk,
+            ftd_undrlyng,
+            to_char(ftd_expry_dt,'DD-Mon-YYYY'),
+            ftd_exer_typ,
+            ftd_opt_typ,
+            ftd_strk_prc,
+            ftd_ordr_rfrnc,
+            ftd_eba_trd_ref,
+            ftd_ord_ack_nmbr,
+            ftd_xchng_trd_no,
+            to_char(ftd_trd_dt,'DD-Mon-YYYY hh24:mi:ss'),
+            ftd_trnsctn_typ,
+            ftd_trd_flw,
+            ftd_exctd_qty,
+            ftd_exctd_rt,
+						ftd_jiffy
+    FROM    ftd_fo_trd_dtls,FOD_FO_ORDR_DTLS							/*** FOD added in Ver 2.3 ***/
+    WHERE   ftd_rms_prcsd_flg = 'N'
+		AND ( ((sysdate - ftd_trd_dt) * 24 * 60) > 0.18 )			/***	Ver	1.4 Time Reduced From 5 To 1	***/
+    /*** Ver 2.3 Starts ***/
+    AND FOD_ORDR_RFRNC = FTD_ORDR_RFRNC
+    AND FOD_XCHNG_CD = FTD_XCHNG_CD
+    AND   FOD_PIPE_ID IN (SELECT REGEXP_SUBSTR ( :c_pipe_list ,'[^,]+',1,ROWNUM)
+                          FROM DUAL
+                          CONNECT BY REGEXP_SUBSTR(:c_pipe_list,'[^,]+',1,ROWNUM) IS NOT NULL)
+    /*** Ver 2.3 Ends ***/
+		ORDER BY FTD_TRD_DT;			/*** Order by added in Ver 2.2 ***/
+/*SN reduce 1 */
+
+  EXEC SQL
+    OPEN  cur_trd;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog ( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+    strcpy( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+    EXEC SQL
+      CLOSE cur_trd;
+    tpfree((char *)ptr_fml_Sbuf);                /* Ver 1.3 */
+    tpfree((char *)ptr_fml_Rbuf);                /* Ver 1.3 */
+		return;
+  }
+
+	for(i_counter = 1; i_counter <= li_tot_recs; i_counter++)
+  {
+    MEMSET(st_tradebook);
+    Finit32(ptr_fml_Sbuf, (FLDLEN32) Fsizeof32(ptr_fml_Sbuf));   /* Ver 1.3 */
+    Finit32(ptr_fml_Rbuf, (FLDLEN32) Fsizeof32(ptr_fml_Rbuf));   /* Ver 1.3 */
+
+    Fvsinit32( (char *)&st_tradebook, (char *)c_io_vw );     /* Ver 1.3 */
+
+    EXEC SQL
+      FETCH cur_trd
+      INTO  :st_tradebook.c_cln_mtch_accnt,
+            :st_tradebook.c_xchng_cd,
+            :st_tradebook.c_prd_typ,
+            :st_tradebook.c_ctgry_indstk,
+            :st_tradebook.c_undrlyng,
+            :st_tradebook.c_expry_dt,
+            :st_tradebook.c_exrc_typ,
+            :st_tradebook.c_opt_typ,
+            :st_tradebook.l_strike_prc,
+            :st_tradebook.c_ordr_rfrnc,
+            :st_tradebook.c_trd_rfrnc,
+            :st_tradebook.c_xchng_ack,
+            :st_tradebook.l_xchng_trd_no,
+            :st_tradebook.c_trd_dt,
+            :st_tradebook.c_trnsctn_typ:si_null,
+            :st_tradebook.c_trd_flw,
+            :st_tradebook.l_exctd_qty,
+            :st_tradebook.l_exctd_rt,
+            :st_tradebook.d_jiffy;
+
+    if ( (SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+    {
+      fn_errlog ( c_ServiceName, "S31030", SQLMSG, c_err_msg );
+      strcpy( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+      EXEC SQL
+        CLOSE cur_trd;
+			tpfree((char *)ptr_fml_Sbuf);                /* Ver 1.3 */
+			tpfree((char *)ptr_fml_Rbuf);                /* Ver 1.3 */
+			return;
+    }
+
+    if ( SQLCODE == NO_DATA_FOUND )
+    {
+      break;
+    }
+
+    rtrim(st_tradebook.c_trd_dt);
+
+		fn_userlog(c_ServiceName, 
+							 "Processing record %d of %ld [ord_ref-%s] [trd_ref-%s]",
+							 i_counter, li_tot_recs, st_tradebook.c_ordr_rfrnc,
+							 st_tradebook.c_trd_rfrnc);
+
+    EXEC  SQL                                                           /*** Ver 1.5 ***/
+     SELECT  nvl(CLM_SPAN_ALLWD,'N'),
+						 NVL(CLM_BSESPAN_ALLWD,'N')																 /** ver 1.6 **/
+     INTO    :c_span_flag,
+						 :c_bse_span_flag																					 /** Ver 1.6 **/
+     FROM    CLM_CLNT_MSTR
+     WHERE   CLM_MTCH_ACCNT =:st_tradebook.c_cln_mtch_accnt;
+
+    if(SQLCODE !=0 && SQLCODE != NO_DATA_FOUND )
+    {
+     fn_errlog ( c_ServiceName, "S31035", SQLMSG, c_err_msg );
+     strcpy( c_msg, "System error. Contact system support" );
+     fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+     EXEC SQL
+      CLOSE cur_trd;
+     tpfree((char *)ptr_fml_Sbuf);
+     tpfree((char *)ptr_fml_Rbuf);
+     return;
+    }
+
+    fn_userlog(c_ServiceName," SPAN FLAG IS :%c:",c_span_flag);            /** Ver 1.5 **/
+    fn_userlog(c_ServiceName,"BSE SPAN FLAG IS :%c:",c_bse_span_flag);     /** Ver 1.6 **/
+
+   /* if( c_span_flag == 'Y')                                        ** Ver 1.5 **  ver1.6 comment*/
+   /*** if( ( c_span_flag == 'Y' 		 && strcmp(st_tradebook.c_xchng_cd,"NFO")==0 ) ||  commented In Ver 1.7 ***/
+    
+		/*** Commented in Ver 1.8 ***
+		if( ( ( c_span_flag == 'Y' || c_span_flag == 'Z')  && strcmp(st_tradebook.c_xchng_cd,"NFO")==0 ) ||
+			  ( c_bse_span_flag == 'Y' && strcmp(st_tradebook.c_xchng_cd,"BFO")==0 )	
+			) ** Ver 1.6 **  *** Ver 1.7 ***
+		***/
+		if ( ( ( ( c_span_flag == 'Y' || c_span_flag == 'Z')  && strcmp(st_tradebook.c_xchng_cd,"NFO")==0 ) ||
+			( c_bse_span_flag == 'Y' && strcmp(st_tradebook.c_xchng_cd,"BFO")==0 )) && (st_tradebook.c_prd_typ != 'P') )	/*** Ver 1.8 ***/
+    {
+      fn_userlog(c_ServiceName, " Inside SPAN Customer ");
+
+      fn_init_ddr_val("110");
+      fn_cpy_ddr ( st_tradebook.c_rout_crt );
+
+      i_returncode = fn_call_svc_fml ( c_ServiceName,
+                                       c_err_msg,
+                                       "SFO_PRCS_TRD",
+                                       0,
+                                       18,
+                                       0,
+                                       FFO_ROUT_CRT, (char *)st_tradebook.c_rout_crt,   /** Need to get ***/
+                                       FFO_ORDR_RFRNC, (char *)st_tradebook.c_ordr_rfrnc,
+                                       FFO_TRD_RFRNC, (char *)st_tradebook.c_trd_rfrnc,
+                                       FFO_EBA_MTCH_ACT_NO, (char *)st_tradebook.c_cln_mtch_accnt,
+                                       FFO_EBA_CNTRCT_ID, (char *)&st_tradebook.l_eba_cntrct_id,/* Needtoget */
+                                       FFO_XCHNG_CD, (char *)st_tradebook.c_xchng_cd,
+                                       FFO_PRDCT_TYP, (char *)&st_tradebook.c_prd_typ,
+                                       FFO_UNDRLYNG, (char *)st_tradebook.c_undrlyng,
+                                       FFO_EXPRY_DT, (char *)st_tradebook.c_expry_dt,
+                                       FFO_EXER_TYP, (char *)&st_tradebook.c_exrc_typ,
+                                       FFO_OPT_TYP, (char *)&st_tradebook.c_opt_typ,
+                                       FFO_STRK_PRC, (char *)&st_tradebook.l_strike_prc,
+                                       FFO_CTGRY_INDSTK, (char *)&st_tradebook.c_ctgry_indstk,
+                                       FFO_CA_LVL, (char *)&st_tradebook.l_ca_lvl,    /*** Need to get ***/
+                                       FFO_TRD_FLW, (char *)&st_tradebook.c_trd_flw,
+                                       FFO_EXEC_QTY, (char *)&st_tradebook.l_exctd_qty,
+                                       FFO_EXCTD_RT, (char *)&st_tradebook.l_exctd_rt,
+                                       FFO_TRD_DT, (char *)st_tradebook.c_trd_dt
+                                     );
+      if(i_returncode == -1)
+      {
+       fn_userlog(c_ServiceName, "[ord_ref-%s] [trd_ref-%s] failed",
+                                  st_tradebook.c_ordr_rfrnc,st_tradebook.c_trd_rfrnc );
+       continue;
+      }
+
+    }
+   /** else	Ver 1.6 comment **/
+
+    else if( ( c_span_flag == 'N' 		 && strcmp(st_tradebook.c_xchng_cd,"NFO")==0 ) ||
+			  		 ( c_bse_span_flag == 'N'  && strcmp(st_tradebook.c_xchng_cd,"BFO")==0 ) ||
+						 ( st_tradebook.c_prd_typ == 'P')		/*** Ver 1.8 ***/
+					 )/** Ver 1.6 **/
+    {
+
+     fn_userlog(c_ServiceName, " Inside Normal Customer ");
+
+		 /*** if ( st_tradebook.c_prd_typ == 'F' || st_tradebook.c_prd_typ == 'P' )  ** Ver 1.2 **		***Commented in ver 1.9 ***/
+		 if ( st_tradebook.c_prd_typ == 'F' || st_tradebook.c_prd_typ == 'P' || st_tradebook.c_prd_typ == 'U' )  /** Ver 1.9 **/
+		 {
+			strcpy(c_svc_nm, "SFO_FUT_TCONF");
+		 }
+		 else if ( st_tradebook.c_prd_typ == 'O' ||  st_tradebook.c_prd_typ == 'I' )	/*** Ver 2.0 OptionPLUS handing added ***/
+		 {
+			strcpy(c_svc_nm, "SFO_OPT_TCONF");
+     }
+		 else
+		 {
+			fn_userlog(c_ServiceName, "Invalid product type");
+			continue;
+		 }
+		 fn_init_ddr_val("110"); 
+     fn_cpy_ddr ( st_tradebook.c_rout_crt );
+
+     /** commented in Ver 1.3
+     i_returncode = fn_call_svc( c_ServiceName,
+                                 c_err_msg,
+                                 &st_tradebook,
+                                 &st_tradebook,
+                                 "vw_tradebook",
+                                 "vw_tradebook",
+                                 sizeof( struct vw_tradebook),
+                                 sizeof( struct vw_tradebook),
+                                 0,
+                                 c_svc_nm );
+     if ( i_returncode != SUCC_BFR )
+     {
+			fn_userlog(c_ServiceName, "[ord_ref-%s] [trd_ref-%s] failed", 
+												st_tradebook.c_ordr_rfrnc,st_tradebook.c_trd_rfrnc );
+			continue;
+     }                                    **/
+  
+     /** Ver 1.3 starts **/
+
+     strcpy( c_buffer_typ, "STRUCTURE");
+     strcpy( c_io_vw, "vw_tradebook");
+
+     i_err[0] = Fadd32(ptr_fml_Sbuf,FFO_SVC_NAME,(char *)c_svc_nm,0) ;
+     i_err[1] = Fadd32(ptr_fml_Sbuf,FFO_QUEUE_NAME,(char *)c_buffer_typ,0) ;
+     i_err[2] = Fadd32(ptr_fml_Sbuf,FFO_IP_VIEW_NM,(char *)c_io_vw,0) ;
+     i_err[3] = Fadd32(ptr_fml_Sbuf,FFO_OP_VIEW_NM,(char *)c_io_vw,0) ;
+     i_err[4] = Fvstof32( ptr_fml_Sbuf, (char *)&st_tradebook, FCONCAT, (char *)c_io_vw );
+
+     for( i_cnt=0; i_cnt<5; i_cnt++ )
+     {
+       if(i_err[i_cnt] == -1)
+       {
+				fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i_cnt);
+				fn_errlog( c_ServiceName, "S31040", FMLMSG, c_err_msg  );
+        strcpy( c_msg, "System error. Contact system support" );
+        fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+				EXEC SQL
+					CLOSE cur_trd;
+				tpfree((char *)ptr_fml_Sbuf);
+				tpfree((char *)ptr_fml_Rbuf);
+				return ;
+       }
+     }
+
+     i_returncode = tpcall("SFO_NEW_ROUT", (char *)ptr_fml_Sbuf, 0, (char **)&ptr_fml_Rbuf, &li_len_tobuf, 0);
+     if(i_returncode == -1)
+     {
+			fn_userlog(c_ServiceName, "[ord_ref-%s] [trd_ref-%s] failed", 
+												st_tradebook.c_ordr_rfrnc,st_tradebook.c_trd_rfrnc );
+      continue;
+     }
+    } /*** End oF Normal Customer ***/
+
+		fn_userlog(c_ServiceName, "[trd_ref-%s] processed successfully",
+															st_tradebook.c_trd_rfrnc);
+    /** Ver 1.3 ends **/
+  }
+
+    EXEC SQL
+    CLOSE cur_trd;
+    sleep(2);   /*** Ver 2.6 ***/
+  }
+	tpfree((char *)ptr_fml_Sbuf);                /* Ver 1.3 */
+	tpfree((char *)ptr_fml_Rbuf);                /* Ver 1.3 */
+	return;
+}
+
+int fn_bat_init( int argc, char *argv[])
+{
+  i_exit_stts = DONT_EXIT;    /*** Ver 2.6 ***/
+  fn_var = BAT_FO_TCONF;
+  return 0;
+}
+
+void fn_bat_term( int argc, char *argv[])
+{
+  char c_msg[256];
+	fn_userlog(argv[0], "%s - Process Ended", argv[0]);
+  sprintf( c_msg, "%s - Process Ended", argv[0] );
+  fn_bat_pst_msg( argv[0], c_msg, c_tag );
+	return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  /*** Ver 2.6 ***/
+  if ( i_trg_typ == SYSTM_TRG )
+  {
+    i_exit_stts = EXIT;
+    return ( -1 );
+  }
+  /*** Ver 2.6 ***/
+  return 0;
+}
+
+/*** Ver 2.6 ***/
+void fn_sgnl_usr2(int i_sig_no)
+{
+  fn_userlog("bat_fo_tconf","bat_fo_tconf SIGUSER2 exit");
+  i_exit_stts = EXIT;
+  return;
+}
+/*** Ver 2.6 ***/

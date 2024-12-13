@@ -1,0 +1,413 @@
+/*******************************************************************************/
+/*	Program	    			:	SFO_PRC_SCLSOUT                                        */
+/*                                                                             */
+/*  Input             : FFO_EBA_MTCH_ACT_NO                                    */
+/*                      FFO_XCHNG_CD                                           */
+/*                      FFO_PRDCT_TYP                                          */
+/*                      FFO_UNDRLYNG                                           */
+/*                      FFO_EXPRY_DT                                           */
+/*                      FFO_EXER_TYP                                           */
+/*                      FFO_OPT_TYP                                            */
+/*                      FFO_STRK_PRC                                           */
+/*                      FFO_CTGRY_INDSTK                                       */
+/*                                                                             */
+/*  Output            : Success / Failure                                      */
+/*                                                                             */
+/*  Description       : To process the records of close out deals in futures   */
+/*                      & Option for SPAN customer called by the batch program */
+/*                                                                             */
+/*  Log               :                                                        */
+/*                                                                             */
+/*******************************************************************************/
+/* 25-Aug-2011     Ver 1.0        Navina D.      Release 1.0                   */
+/* 05-May-2013     Ver 1.1				Bhushan Sonwane   CR-ISEC04-39734_FNO_EXPIRY */
+/* 22-Jun-2015		 Ver 1.3				Navina D.						Double close out changes*/
+/*																										for Adhoc expiry        */
+/* 13-Aug-2015     Ver 1.4 		    Ritesh Deolekar   Contract Master and Trade  */ 
+/*																									Quote Table Merger Changes */ 
+/* 13-JUL-2021     VER 1.5        SUCHITA DABIR     CR_ISEC04_132410 changes  */
+/* 06-Mar-2023     VER 1.6        Ravi Malla     changing fn_lock_usr to fn_lock_fno  */
+/*******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+
+#include <fml_def.h>
+/* COMMENTED IN VER TOL : TUX on LINUX (Ravindra) * #include <fo_view_def.h> */
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_tuxlib.h>
+#include <fml_rout.h> 
+#include <fo.h>
+#include <fn_ddr.h>
+#include <fn_log.h> 
+#include <fn_session.h> 
+#include <fn_read_debug_lvl.h> 
+#include <fn_span_lib.h> 
+
+void SFO_PRC_SCLSOUT( TPSVCINFO *rqst )
+{
+  FBFR32 *ptr_fml_Ibuf;
+
+  char c_ServiceName [ 33 ];
+  char c_err_msg [ 256 ];
+  int i_returncode;
+  int i_ip_len;
+  int i_op_len;
+  int i_trnsctn;
+	int i_rec_exists;
+  char c_del_intent_flg = '\0'; /** verr 1.5 ***/
+
+	char c_trd_dt [12] = "\0";		 /*** Ver 1.3 ***/
+	char c_sys_dt [23] = "\0";		 /*** Ver 1.3 ***/
+
+  char c_tag [ 256 ];
+  char c_msg [ 256 ];
+  long int li_cnt;
+
+  EXEC SQL BEGIN DECLARE SECTION;
+		long	l_cls_rt ;
+  	struct st_pstn_actn st_pstnactn;
+  EXEC SQL END DECLARE SECTION;
+
+  ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);
+
+
+  i_returncode = fn_unpack_fmltovar ( c_ServiceName,
+                                    c_err_msg,
+                                    ptr_fml_Ibuf,
+                                    12,
+                                    FFO_EBA_MTCH_ACT_NO,( char *)st_pstnactn.c_cln_mtch_accnt, NULL,
+																		FFO_XCHNG_CD,( char * )st_pstnactn.c_xchng_cd, NULL,
+																		FFO_PRDCT_TYP,( char * )&st_pstnactn.c_prd_typ, NULL,
+																		FFO_UNDRLYNG,( char * )st_pstnactn.c_undrlyng, NULL,
+																		FFO_EXPRY_DT,( char * )st_pstnactn.c_expry_dt, NULL,
+																		FFO_EXER_TYP,( char * )&st_pstnactn.c_exrc_typ, NULL,
+																		FFO_OPT_TYP,( char * )&st_pstnactn.c_opt_typ, NULL,
+																		FFO_STRK_PRC,( char * )&st_pstnactn.l_strike_prc, NULL,
+																		FFO_CTGRY_INDSTK,( char * )&st_pstnactn.c_ctgry_indstk,  NULL,
+																		FFO_BAT_TAG, ( char * )c_tag, NULL,
+																		FFO_REC_NO, ( char * )&li_cnt, NULL,
+																		FFO_ROUT_CRT, (char*) st_pstnactn.c_rout_crt, NULL);
+	if( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( st_pstnactn.c_rout_crt );
+
+  if(DEBUG_MSG_LVL_3){
+    fn_userlog( c_ServiceName, "Match Account :%s:", st_pstnactn.c_cln_mtch_accnt );
+    fn_userlog( c_ServiceName, "Exchange code :%s:", st_pstnactn.c_xchng_cd );
+    fn_userlog( c_ServiceName, "Product Type  :%c:", st_pstnactn.c_prd_typ );
+    fn_userlog( c_ServiceName, "Underlyng     :%s:", st_pstnactn.c_undrlyng );
+    fn_userlog( c_ServiceName, "Expiry date   :%s:", st_pstnactn.c_expry_dt );
+    fn_userlog( c_ServiceName, "Excercise Type:%c:", st_pstnactn.c_exrc_typ );
+    fn_userlog( c_ServiceName, "Category      :%c:", st_pstnactn.c_ctgry_indstk );
+    fn_userlog( c_ServiceName, "Option type   :%c:", st_pstnactn.c_opt_typ );
+    fn_userlog( c_ServiceName, "Strike Price  :%ld:", st_pstnactn.l_strike_prc );
+    fn_userlog( c_ServiceName, "Tag  :%s:", c_tag );
+    fn_userlog( c_ServiceName, "li_cnt  :%d:", li_cnt );
+    fn_userlog( c_ServiceName, "Rout crt  :%s:", st_pstnactn.c_rout_crt );
+  }
+
+	/*** Added in Ver 1.3 ***/
+		EXEC SQL
+			SELECT TO_CHAR( EXG_NXT_TRD_DT ,'DD-Mon-YYYY'),
+						 TO_CHAR(SYSDATE,'DD-Mon-YYYY hh24:mi:ss')
+			INTO   :c_trd_dt,
+						 :c_sys_dt
+			FROM   EXG_XCHNG_MSTR
+			WHERE  EXG_XCHNG_CD = :st_pstnactn.c_xchng_cd
+			AND    EXG_MKT_TYP  = 'D';
+
+		if ( SQLCODE != 0 )
+		{
+			fn_errlog( c_ServiceName, "S31010",SQLMSG,c_err_msg);
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+		
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog( c_ServiceName, "Trade Date :%s:", c_trd_dt );
+			fn_userlog( c_ServiceName, "Sysdate :%s:", c_sys_dt );
+		}
+	/*** Ver 1.3 ends ***/
+
+	EXEC SQL
+		SELECT  1
+		INTO		:i_rec_exists
+		FROM DUAL
+		WHERE		EXISTS
+		(	SELECT 	1
+			FROM		fco_fo_fclsout
+			WHERE		fco_clm_mtch_accnt	=	:st_pstnactn.c_cln_mtch_accnt	
+			AND			fco_xchng_cd				=	:st_pstnactn.c_xchng_cd
+			AND			fco_prdct_typ				=	:st_pstnactn.c_prd_typ
+			AND			fco_indstk					=	:st_pstnactn.c_ctgry_indstk
+			AND			fco_undrlyng				=	:st_pstnactn.c_undrlyng
+			AND			fco_expry_dt				=	:st_pstnactn.c_expry_dt
+			AND			fco_exer_typ				=	:st_pstnactn.c_exrc_typ
+			AND			fco_opt_typ					=	:st_pstnactn.c_opt_typ
+			AND			fco_strk_prc				=	:st_pstnactn.l_strike_prc
+			AND     fco_cls_tm			  	= :c_trd_dt	             /*** Ver 1.1 ***/ /*** Changed from  TRUNC(sysdate) to c_trd_dt in Ver 1.3 ***/
+		);
+
+	if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+	{
+    fn_errlog( c_ServiceName, "S31015", SQLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	if( ( SQLCODE == 0 ) && (i_rec_exists == 1 ) )
+	{
+		fn_errlog( c_ServiceName, "S31020", "Record Already Processed", c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+	
+  sprintf ( c_msg, "Processing match a/c - [%s], Underlying - [%s], Expiry date - [%s], Tag - [%c] ", 
+				st_pstnactn.c_cln_mtch_accnt,
+				st_pstnactn.c_undrlyng,
+				st_pstnactn.c_expry_dt,
+				st_pstnactn.c_cntrct_tag );
+  /*fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );*/
+
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  /* i_returncode = fn_lock_usr( c_ServiceName,st_pstnactn.c_cln_mtch_accnt ); commented in 1.6 */
+  i_returncode = fn_lock_fno( c_ServiceName,st_pstnactn.c_cln_mtch_accnt );  /* added in 1.6 */
+  if ( i_returncode == -1 )
+  {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  strcpy(st_pstnactn.c_user_id,"system");
+  st_pstnactn.l_session_id  = 0; 
+  /*** st_pstnactn.c_opt_typ = '*';         
+  st_pstnactn.l_strike_prc  = 0;				Commented on 10-Dec-2011 ***/
+
+  st_pstnactn.l_actn_typ = CLOSE_OUT_DEALS;
+  st_pstnactn.c_trnsctn_flw = '*';
+  st_pstnactn.l_orgnl_qty = 0;
+  st_pstnactn.l_orgnl_rt  = 0;
+  st_pstnactn.l_new_qty = 0;
+  st_pstnactn.l_new_rt  = 0;
+  st_pstnactn.l_exec_qty  = 0;
+  st_pstnactn.l_exec_rt  = 0;
+  st_pstnactn.l_fresh_qty  = 0;
+  st_pstnactn.l_cover_qty  = 0;
+  st_pstnactn.d_add_mrgn_amt = 0;
+	fn_cpy_ddr(st_pstnactn.c_rout_crt);
+
+	i_returncode = fn_call_svc_fml ( c_ServiceName,
+																	 c_err_msg,
+																	 "SFO_SPN_CLSOUT",
+																	 0,
+																	 15,
+																	 2,
+																	 FFO_USR_ID, (char *)st_pstnactn.c_user_id,									    
+																	 FFO_SSSN_ID, (char *)&st_pstnactn.l_session_id,							    
+																	 FFO_EBA_MTCH_ACT_NO, (char *)st_pstnactn.c_cln_mtch_accnt,	    
+																	 FFO_XCHNG_CD, (char *)st_pstnactn.c_xchng_cd,								    
+																	 FFO_PRDCT_TYP, (char *)&st_pstnactn.c_prd_typ,				
+																	 FFO_UNDRLYNG, (char *)st_pstnactn.c_undrlyng,				
+																	 FFO_EXPRY_DT, (char *)st_pstnactn.c_expry_dt,				
+																	 FFO_STRK_PRC, (char *)&st_pstnactn.l_strike_prc,			
+																	 FFO_EXER_TYP, (char *)&st_pstnactn.c_exrc_typ,				
+																	 FFO_OPT_TYP, (char *)&st_pstnactn.c_opt_typ,					
+																	 FFO_ACTN_TYP, (char *)&st_pstnactn.l_actn_typ,				
+																	 FFO_TRD_FLW, (char *)&st_pstnactn.c_trnsctn_flw,			
+																	 FFO_EXEC_QTY, (char *)&st_pstnactn.l_exec_qty,	
+																	 FFO_CTGRY_INDSTK, (char *)&st_pstnactn.c_ctgry_indstk,       
+																	 FFO_ROUT_CRT, (char *)st_pstnactn.c_rout_crt,
+																	 FFO_TRD_FLW, (char *)&st_pstnactn.c_trnsctn_flw,NULL,			
+																	 FFO_EXEC_QTY, (char *)&st_pstnactn.l_orgnl_qty,NULL	
+																	);
+  if ( i_returncode != 0 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if(DEBUG_MSG_LVL_3){
+    fn_userlog( c_ServiceName, " st_pstnactn.c_trnsctn_flw :%c:", st_pstnactn.c_trnsctn_flw );
+    fn_userlog( c_ServiceName, " st_pstnactn.l_orgnl_qty :%ld:", st_pstnactn.l_orgnl_qty );
+	}
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog( c_ServiceName, "st_pstnactn.c_xchng_cd :%s:",st_pstnactn.c_xchng_cd);
+		fn_userlog( c_ServiceName, "st_pstnactn.c_prd_typ :%c:",st_pstnactn.c_prd_typ);
+		fn_userlog( c_ServiceName, "st_pstnactn.c_undrlyng :%s:",st_pstnactn.c_undrlyng);
+		fn_userlog( c_ServiceName, "st_pstnactn.c_expry_dt :%s:",st_pstnactn.c_expry_dt);
+		fn_userlog( c_ServiceName, "st_pstnactn.c_exrc_typ :%c:",st_pstnactn.c_exrc_typ);
+	}
+
+	if (st_pstnactn.c_prd_typ == 'F')
+	{
+	/*** Commented in Ver 1.4  ***
+	
+		EXEC SQL
+			SELECT  fcm_cls_prc
+			INTO    :l_cls_rt
+			FROM    fcm_fo_cntrct_mstr
+			WHERE   fcm_xchng_cd    = :st_pstnactn.c_xchng_cd
+			AND     fcm_prdct_typ   = :st_pstnactn.c_prd_typ
+			AND     fcm_undrlyng    = :st_pstnactn.c_undrlyng
+			AND     fcm_expry_dt    = to_date(:st_pstnactn.c_expry_dt,'dd-mon-yyyy')
+			AND     fcm_exer_typ    = :st_pstnactn.c_exrc_typ ;
+
+	*** Ver 1.4 comment Ends ***/
+
+	/*** Ver 1.4 Starts ***/
+
+		 EXEC SQL
+      SELECT  ftq_cls_prc
+      INTO    :l_cls_rt
+      FROM    ftq_fo_trd_qt
+      WHERE   ftq_xchng_cd    = :st_pstnactn.c_xchng_cd
+      AND     ftq_prdct_typ   = :st_pstnactn.c_prd_typ
+      AND     ftq_undrlyng    = :st_pstnactn.c_undrlyng
+      AND     ftq_expry_dt    = to_date(:st_pstnactn.c_expry_dt,'dd-mon-yyyy')
+      AND     ftq_exer_typ    = :st_pstnactn.c_exrc_typ ;
+
+	/*** Ver 1.4 Ends ***/
+
+		if ( SQLCODE != 0 )
+		{
+			if ( SQLCODE == NO_DATA_FOUND )
+			{
+				fn_errlog( c_ServiceName, "B28546",DEFMSG,c_err_msg);
+				strcpy ( c_msg, "Closing price not available for the contract" );
+			}
+			else
+			{
+				fn_errlog( c_ServiceName, "S31025",SQLMSG,c_err_msg);
+				strcpy ( c_msg, "System error. Contact system support" );
+			}
+			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+	}
+	else if(st_pstnactn.c_prd_typ == 'O')
+	{
+		l_cls_rt = 0;
+	}
+
+  if(DEBUG_MSG_LVL_3){
+    fn_userlog(c_ServiceName,"l_cls_rt[%d]",l_cls_rt);
+  }
+
+/*** ver 1.5 starts ****/
+   EXEC SQL
+   SELECT NVL(FCP_DLVRY_MODE_FLAG,'N')
+      INTO  :c_del_intent_flg 
+      FROM   FCP_FO_SPN_CNTRCT_PSTN 
+      WHERE   fcp_clm_mtch_accnt  = :st_pstnactn.c_cln_mtch_accnt
+      AND     fcp_xchng_cd        = :st_pstnactn.c_xchng_cd
+      AND     fcp_prdct_typ       = :st_pstnactn.c_prd_typ
+      AND     fcp_indstk          = :st_pstnactn.c_ctgry_indstk
+      AND     fcp_undrlyng        = :st_pstnactn.c_undrlyng
+      AND     fcp_expry_dt        = :st_pstnactn.c_expry_dt
+      AND     fcp_exer_typ        = :st_pstnactn.c_exrc_typ
+      AND     fcp_opt_typ         = :st_pstnactn.c_opt_typ
+      AND     fcp_strk_prc        = :st_pstnactn.l_strike_prc;
+
+  if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+/*** ver 1.5 ends ***********/
+	EXEC SQL
+    INSERT INTO fco_fo_fclsout 
+					(	fco_clm_mtch_accnt,
+            fco_xchng_cd,
+            fco_prdct_typ,
+            fco_indstk,
+            fco_undrlyng,
+            fco_expry_dt,
+            fco_exer_typ,
+            fco_opt_typ,
+            fco_strk_prc,
+            fco_ordr_flw,
+            fco_cls_qty,
+            fco_cls_rt,
+            fco_dlvry_mode_flg, /*** ver 1.5 ****/
+            fco_cls_tm )
+
+    VALUES 
+					( :st_pstnactn.c_cln_mtch_accnt,
+            :st_pstnactn.c_xchng_cd,
+            :st_pstnactn.c_prd_typ,
+            :st_pstnactn.c_ctgry_indstk,
+            :st_pstnactn.c_undrlyng,
+            :st_pstnactn.c_expry_dt,
+            :st_pstnactn.c_exrc_typ,
+            :st_pstnactn.c_opt_typ,
+            :st_pstnactn.l_strike_prc,
+            :st_pstnactn.c_trnsctn_flw,
+            :st_pstnactn.l_orgnl_qty,
+            :l_cls_rt,
+            :c_del_intent_flg, /*** ver 1.5 ****/
+            :c_trd_dt );	/*** Changed from sysdate to c_trd_dt in Ver 1.3 ***/
+
+	if( SQLCODE!= 0 )
+  {
+    fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  sprintf ( c_msg, "Successfully Processed match a/c - [%s], Underlying - [%s], Expiry date - [%s], Tag - [%c] ", 
+				st_pstnactn.c_cln_mtch_accnt,
+				st_pstnactn.c_undrlyng,
+				st_pstnactn.c_expry_dt,
+				st_pstnactn.c_cntrct_tag );
+  /*fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );*/
+
+  fn_userlog( c_ServiceName, "END OF SFO_PRC_SCLSOUT" );
+
+	tpreturn( TPSUCCESS, 0, (char *)ptr_fml_Ibuf, 0 , 0 );
+}
+

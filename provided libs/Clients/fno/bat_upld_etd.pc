@@ -1,0 +1,659 @@
+/*                                                                            						*/
+/*  Program           :BAT_UPLD_ETD                                           						*/
+/*                                                                            						*/
+/*  Input             :c_flg - "D" for default mode                          							*/
+/*                             "F" for formatted mode where column positions  						*/
+/*                                  are set dynamically reading miss_trade.ini						*/ 
+/*                     exchange .csv file of mising trades                    						*/
+/*                     folder (yyyymmdd) location of trade file               						*/
+/*                                                                            						*/
+/*                        Array_Index       Content         Default_col_Pos   						*/
+/*                              0         XCHNG_TRD_NO            0           						*/
+/*                              1         UNDRLYNG                2           						*/
+/*                              2         PRDCT_TYP-INDSTK        3           						*/
+/*                              3         EXPRY_DT                4           						*/
+/*                              4         STRK_PRC                5           						*/
+/*                              5         EXER_TYP-OPT_TYP        6           						*/
+/*                              6         EXCHNG_USR_ID          10           						*/
+/*                              7         TRD_FLW                12           						*/
+/*                              8         EXCTD_QTY              13           						*/
+/*                              9         EXCTD_RT               14           						*/
+/*                              10        MTCH_ACCNT             16           						*/
+/*                              11        TRD_DT                 19           						*/
+/*                              12        ORD_ACK_NMBR           21           						*/
+/*                                                                            						*/
+/*  Output            :Success / Failure                                      						*/ 
+/*                                                                                        */
+/*  Description       :Extract Details from exchange trade (.csv) file into ETD table     */
+/*                                                                                        */
+/*  Log               :                                                                   */
+/*                                                                                        */
+/******************************************************************************************/
+/*  								   Ver 1.0        Prakash/Shailesh     Release 1.0                    */
+/*  								   Ver 1.1        Prakash              Double to long typecast BugFix */
+/*                                                       and transaction out of while loop*/
+/*										 Ver 1.2				Sandeep Patil				 SEM Mapping Changes						*/
+/*                     Ver 1.3        Amrin Khan           INDIAVIX  						          */
+/******************************************************************************************/
+
+
+#include <atmi.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h> 
+#include <eba_to_ors.h>  
+#include <sqlca.h>    
+#include <stdlib.h>   
+#include <string.h>   
+#include <errno.h>
+#include <fn_read_debug_lvl.h>  
+
+#define MAX_FILE_COL 36
+#define DEFAULT 'D'
+#define MAX_ARR_COL 13
+#define BAT_TRAN_LOCAL 2000   /* Ver 1.1 */
+
+int temp_arr[ MAX_ARR_COL ];
+
+long fn_get_flinecnt( FILE * );
+int fn_read_trdini( FILE * );
+int fn_trim( char * );
+
+void BAT_UPLD_ETD ( int argc, char *argv[] )
+{
+   int i_cnt;
+   int i_chktok;
+	 int i_tmparr_cnt;
+	 int i_ch_val;
+   int i_trnsctn;
+   char c_flg;
+   char c_msg[ 256 ];
+	 char c_err_msg [ 256 ];
+	 char c_xchng_cd [ 3+1 ];
+   char c_file_data[ MAX_ARR_COL ][ 50 ];
+	 char *ptr_c_tmp;
+	 char c_ServiceName[ 33 ];
+	 char c_File[ 256 ];
+	 char c_File_Path[ 256 ];
+   char c_data[ 1024+1 ];
+   char c_temp[ 1024+1 ];
+	 char c_prdct_typ ;
+	 char c_indstk;
+	 char c_exer_typ;
+	 char c_opt_typ;
+	 char c_trd_flw;
+	 char c_mtch_accnt[ 10+1 ];
+	 char c_ack_nmbr[ 16+1 ];
+	 char c_expry_dt[ 23+1 ];
+	 char c_trd_dt[ 23+1 ];
+	 char c_undrlyng[ 6+1 ];
+   char c_sem_map_vl[ 20+1 ];
+   long l_usr_id;
+   long l_xchng_trd_no ; 
+   long l_strk_prc;
+   long l_exec_qty;
+   long l_ffo_exctd_rt; 
+	 long l_tot_rcrds;
+   long l_cnt = 1L;	
+   double d_exec_rt;
+   double d_strk_prc;              /* Ver 1.1 */
+
+	 FILE *ptr_trd_file;
+	 FILE *ptr_ini_file;
+
+   INITBATDBGLVL( argv[0] );
+
+	 memset( c_data, 0, sizeof( c_data ) );
+	 memset( c_temp, 0, sizeof( c_temp ) );
+	 memset( c_File, 0, sizeof( c_File ) );
+	 memset( c_File_Path, 0, sizeof( c_File ) );
+	 memset( c_msg, 0, sizeof( c_msg ) );
+	 memset( c_sem_map_vl, 0, sizeof( c_sem_map_vl ) );
+
+   strcpy( c_ServiceName, argv[0] );
+   strcpy( c_xchng_cd, argv[2] );
+   c_flg = argv[4][0];
+
+   if ( argc != 7 )
+   {
+      sprintf(c_msg,"INVALID ARGUMENT: Usage- %s NFO <Exg code> NA <Default/INI file read> <File_name> <Date yyyymmdd>",argv[0]);
+      fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+      return ;
+   }
+
+
+	 /* Getting FILE path */
+   ptr_c_tmp = ( char* ) getenv( "EBALOG_PATH" );
+   if ( ptr_c_tmp == NULL )
+   {
+      fn_errlog( c_ServiceName, "S31005", UNXMSG, c_err_msg );
+      fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+      return;
+   }
+
+   sprintf( c_File_Path, "%s/%s/fno", ptr_c_tmp, argv[6] );
+   
+   if( c_flg == DEFAULT )
+   {
+       temp_arr[0] = 0;
+       temp_arr[1] = 2;
+       temp_arr[2] = 3;
+       temp_arr[3] = 4;
+       temp_arr[4] = 5;
+       temp_arr[5] = 6;
+       temp_arr[6] = 10;
+       temp_arr[7] = 12;
+       temp_arr[8] = 13;
+       temp_arr[9] = 14;
+       temp_arr[10] = 16;
+       temp_arr[11] = 19;
+       temp_arr[12] = 21;
+   } 
+
+   else
+   {
+       fn_userlog( c_ServiceName, "Reading INI file" ); 
+
+       sprintf( c_File, "%s/%s", c_File_Path, "miss_trade.ini"); 
+
+       ptr_ini_file = fopen( c_File, "r" );
+       if ( ptr_ini_file == NULL )
+       {
+            fn_errlog( c_ServiceName, "S31010", UNXMSG, c_err_msg );
+            fn_bat_pst_msg ( c_ServiceName, "System error occured. ERROR in Opening miss_trade.ini file.", c_tag );
+            return;
+       }
+   
+       i_ch_val = fn_read_trdini( ptr_trd_file );
+       if( i_ch_val == -1 )
+       {
+           fn_errlog( c_ServiceName, "S31015", DEFMSG, c_err_msg );
+           strcpy ( c_msg, "System error. Unable to read miss_trade.ini... " );
+           fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+           return;
+       }
+      
+       fn_userlog( c_ServiceName, "Success fn_read_trdini return");
+
+	     memset( c_File, 0, sizeof( c_File ) );
+   }
+
+   sprintf( c_File, "%s/%s", c_File_Path, argv[5] ); 
+
+   ptr_trd_file = fopen( c_File, "r" );
+   if ( ptr_trd_file == NULL )
+   {
+        fn_errlog( c_ServiceName, "S31020", UNXMSG, c_err_msg );
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. ERROR in Opening file.", c_tag );
+        return;
+   }
+  
+   sprintf ( c_msg, "Batch process %s started", argv[0] );
+   fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+  
+   fn_bat_pst_msg ( c_ServiceName, "Uploading missing trade details....", c_tag );
+    
+   l_tot_rcrds = fn_get_flinecnt(ptr_trd_file); 
+
+   fn_userlog(c_ServiceName, "Total Records in Exchange Trade File :%ld", l_tot_rcrds );
+
+   EXEC SQL
+   TRUNCATE table ETD_EXCH_TRD_DTLS;
+
+   if( SQLCODE!=0)
+   {
+       fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+       strcpy ( c_msg, "Could Not delete from etd table" );
+       fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+       fclose(ptr_trd_file);
+       return;
+   }
+
+   if( DEBUG_MSG_LVL_3 )
+   {
+       fn_userlog(c_ServiceName, "ETD Truncated Successfully" );
+   }
+
+	 /* Ver 1.1 starts */
+	 i_trnsctn = tpbegin(BAT_TRAN_LOCAL,0);
+   if ( i_trnsctn == -1 )
+   {
+       fn_errlog( c_ServiceName, "S31030", TPMSG, c_err_msg );
+       return;
+   }
+	 /* Ver 1.1 ends */
+  
+   while( fgets( c_data, 1024, ptr_trd_file ) != NULL )	
+   {
+      if(( l_cnt % 1000) == 0)
+      { 
+            sprintf ( c_msg, " Processed :%ld: out of :%ld:", l_cnt, l_tot_rcrds );
+            fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      }
+
+	    memset( c_file_data, 0, sizeof( c_file_data ) );
+   	  strcpy( c_temp, c_data );
+  
+  	  for( i_cnt=0 ; i_cnt<MAX_FILE_COL ; i_cnt++ )
+      {
+         i_chktok = 0;
+
+         for( i_tmparr_cnt=0 ; i_tmparr_cnt<MAX_ARR_COL ; i_tmparr_cnt++ ) 
+         {
+
+  		      if( i_cnt == temp_arr[i_tmparr_cnt] )
+            {
+               strtok( c_data, "," );
+               strcpy( c_file_data[i_tmparr_cnt], c_data );
+               strcpy( c_data, ( strstr( c_temp, "," ) + 1 ) );
+               strcpy( c_temp,c_data );
+  
+  			       fn_trim( c_file_data[i_tmparr_cnt] );	
+  
+               i_chktok = 1; 
+               break;
+            }
+         }
+
+         if( i_chktok == 0) 
+         {
+             strcpy( c_data,(strstr( c_temp,"," ) + 1 ) );
+
+             if( strcmp(c_data,NULL) == 0 ) 
+               { break; }
+
+            strcpy( c_temp, c_data );
+         }
+      }
+   
+      strcpy( c_mtch_accnt, c_file_data[10] );
+      strcpy( c_ack_nmbr, c_file_data[12] );
+      strcpy( c_sem_map_vl, c_file_data[1] );
+      strcpy( c_expry_dt, c_file_data[3] );
+      strcpy( c_trd_dt, c_file_data[11] );
+  
+      l_usr_id = atol( c_file_data[6] );
+    	l_xchng_trd_no = atol( c_file_data[0] );
+    	/* l_strk_prc = atol( c_file_data[4] );            commented Ver 1.1 */
+    	d_strk_prc = atof( c_file_data[4] );               /* Ver 1.1 */
+      /* l_strk_prc = l_strk_prc * 100;                  commented Ver 1.1 */
+    	l_exec_qty = atol( c_file_data[8] );
+    	d_exec_rt = atof( c_file_data[9] );
+    	/* l_ffo_exctd_rt = ( long ) ( d_exec_rt * 100 );   commented Ver 1.1 */
+
+      if( DEBUG_MSG_LVL_3 )
+      {   
+          fn_userlog( c_ServiceName, "c_mtch_accnt :%s:", c_mtch_accnt );
+          fn_userlog( c_ServiceName, "c_ack_nmbr :%s:", c_ack_nmbr );
+          fn_userlog( c_ServiceName, "exchange undrlyng :%s:", c_sem_map_vl );
+          fn_userlog( c_ServiceName, "c_expry_dt :%s:", c_expry_dt );
+          fn_userlog( c_ServiceName, "c_trd_dt :%s:", c_trd_dt );
+          fn_userlog( c_ServiceName, "l_usr_id :%ld:", l_usr_id );
+          fn_userlog( c_ServiceName, "l_xchng_trd_no :%ld:", l_xchng_trd_no );
+          /* fn_userlog( c_ServiceName, "l_strk_prc :%ld:", l_strk_prc );          commented in Ver 1.1 */
+          fn_userlog( c_ServiceName, "d_strk_prc :%lf:", d_strk_prc );                       /* Ver 1.1 */
+          fn_userlog( c_ServiceName, "l_exec_qty :%ld:", l_exec_qty );
+          fn_userlog( c_ServiceName, "d_exec_rt :%lf:", d_exec_rt); 
+          /* fn_userlog( c_ServiceName, "l_ffo_exctd_rt :%ld:", l_ffo_exctd_rt );  commented Ver 1.1 */
+      }
+
+  	  if( strcmp( c_file_data[2], "FUTSTK" ) == 0 )
+  	  {
+  	 	    c_prdct_typ = FUTURES;
+          c_indstk = STOCK;
+  	  }
+			/****** Added for Ver 1.3 *************/
+			else if( strcmp(c_file_data[2],"FUTIVX")== 0) 
+           {
+               c_prdct_typ = FUTURES;
+               c_indstk = INDEX;
+           }
+			/****** Added for Ver 1.3 *************/
+  	  else if( strcmp(c_file_data[2],"OPTSTK")== 0)
+  			   {
+  						 c_prdct_typ = OPTIONS;
+  						 c_indstk = STOCK;
+  			   }
+
+  			   else if( strcmp(c_file_data[2],"FUTIDX")== 0)
+  					    {
+  						 	    c_prdct_typ = FUTURES;
+  						      c_indstk = INDEX;
+  					    }
+
+  					    else if( strcmp(c_file_data[2],"OPTIDX")== 0)
+  								   {
+    										 c_prdct_typ = OPTIONS;
+  	  									 c_indstk = INDEX;
+     								 }
+
+                     else 
+	   									{
+                         fn_userlog( c_ServiceName, "Prdct Type - IndStk:%s:" , c_file_data[2]);
+                         fn_errlog( c_ServiceName, "S31035", DEFMSG, c_err_msg );
+                         sprintf( c_msg, 
+                                  "File Input error occured. Prdct Type - IndStk error for record :%d:", l_cnt );
+                         fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+                         fclose(ptr_trd_file);
+												 tpabort(0);                 /* Ver 1.1 */
+                         return;
+                      }
+
+      if( DEBUG_MSG_LVL_3 )
+      {
+          fn_userlog( c_ServiceName, "c_prdct_typ :%c:", c_prdct_typ );
+          fn_userlog( c_ServiceName, "c_indstk :%c:", c_indstk );
+      }
+  
+    	if( strcmp(c_file_data[5],"PE")== 0)
+     	{
+  			  c_exer_typ = 'E';
+          c_opt_typ = PUT;
+    	}
+
+    	else if( strcmp( c_file_data[5], "CE" ) == 0 )
+    			 {
+  	  				c_exer_typ = 'E';
+  		  			c_opt_typ = CALL;
+    			 }
+
+    			 else if( strcmp( c_file_data[5], "PA" ) == 0 )
+  	  				  {
+  		   			 	 	  c_exer_typ = 'A';
+  							    c_opt_typ = PUT;
+  					    }
+
+    					  else if( strcmp( c_file_data[5], "CA" ) == 0 )
+  		  				 		 {
+  	 			    		  	 	 c_exer_typ = 'A';
+  			  		 			  	 c_opt_typ = CALL;
+  								   }
+
+    								 else if( strcmp( c_file_data[5], "XX" ) == 0 ) 
+  	  							      {
+  			    							    c_exer_typ = 'E';
+  		  								      c_opt_typ = '*';
+  								        }
+ 
+                          else
+                          {
+                              fn_userlog( c_ServiceName, "Exer Typ - Opt Typ:%s:" , c_file_data[5]);
+                              fn_errlog( c_ServiceName, "S31040", DEFMSG, c_err_msg );
+                              sprintf( c_msg, 
+                                      "File Input error occured. Exer Typ - Opt Typ error for record :%d:", l_cnt );
+                              fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+                              fclose(ptr_trd_file);
+												 			tpabort(0);                 /* Ver 1.1 */
+                              return;
+                          }
+
+      if( DEBUG_MSG_LVL_3 )
+      {
+          fn_userlog( c_ServiceName, "c_exer_typ :%c:",c_exer_typ );
+          fn_userlog( c_ServiceName, "c_opt_typ :%c:", c_opt_typ );
+      }             
+  
+      if( strcmp( c_file_data[7], "1" ) == 0)
+      {
+          c_trd_flw = BUY;
+      }
+
+      else if( strcmp( c_file_data[7], "2" ) == 0)
+           {
+               c_trd_flw = SELL;
+           }
+
+           else
+           {
+               fn_userlog( c_ServiceName, "Trd Flw :%s:" , c_file_data[6]);
+               fn_errlog( c_ServiceName, "S31045", DEFMSG, c_err_msg );
+               sprintf( c_msg, "File Input error occured. Trd Flw error for record :%d:", l_cnt );
+               fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+               fclose(ptr_trd_file);
+							 tpabort(0);                 /* Ver 1.1 */
+               return;
+           }
+
+      if( DEBUG_MSG_LVL_3 )
+      {
+           fn_userlog( c_ServiceName, "c_trd_flw :%c:", c_trd_flw );
+      } 
+
+      /* Mapping underlying from sem */
+      EXEC SQL
+  		   SELECT  trim(sem_stck_cd)			/***	Ver	1.2	TRIM Added	***/
+         INTO    :c_undrlyng
+         FROM    sem_stck_map 
+  			 WHERE   sem_entty = 3			/***	Ver	1.2	SEM_ENTTY Changed From 1 To 3	***/
+  			 AND     sem_map_vl = :c_sem_map_vl;
+  
+    	if( SQLCODE != 0 )
+  	  {
+  		    fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+          sprintf( c_msg, "File Input error occured. undrlyng map error for record :%d:", c_sem_map_vl); 
+          fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          continue;
+  	  }
+
+      if( DEBUG_MSG_LVL_3)
+      { 
+          fn_userlog( c_ServiceName, "undrlyng :%s:", c_undrlyng );
+      }
+  
+			/* i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+			if ( i_trnsctn == -1 )
+			{
+				fn_errlog( c_ServiceName, "S31055",LIBMSG,c_err_msg);
+				fclose(ptr_trd_file);
+			  return;
+			}                                   commented in ver 1.1 */
+
+      EXEC SQL
+      INSERT INTO ETD_EXCH_TRD_DTLS
+           (
+            ETD_XCHNG_CD,
+            ETD_CLM_MTCH_ACCNT,
+            ETD_ORD_ACK_NMBR,
+            ETD_XCHNG_TRD_NO,
+            ETD_PRDCT_TYP,
+            ETD_INDSTK,
+            ETD_UNDRLYNG,
+            ETD_EXPRY_DT,
+            ETD_EXER_TYP,
+            ETD_OPT_TYP,
+            ETD_STRK_PRC,
+            ETD_TRD_DT,
+            ETD_TRD_FLW,
+            ETD_EXCTD_QTY,
+            ETD_EXCTD_RT,
+            ETD_JIFFY,
+            ETD_USR_ID,
+            ETD_TRD_UPLD_FLG
+            )
+      VALUES
+						(
+						:c_xchng_cd,
+						:c_mtch_accnt,
+						:c_ack_nmbr,
+						:l_xchng_trd_no,
+						:c_prdct_typ,
+						:c_indstk,
+						:c_undrlyng,
+						to_date(:c_expry_dt,'dd MON yyyy'),
+						:c_exer_typ,
+						:c_opt_typ,
+						/* :l_strk_prc,      commented in Ver 1.1 */
+						:d_strk_prc * 100,                   /* Ver 1.1 */
+						to_date(:c_trd_dt,'dd MON yyyy hh24:mi:ss' ),
+						:c_trd_flw,
+						:l_exec_qty,
+						/* :l_ffo_exctd_rt,  commented in Ver 1.1 */
+						:d_exec_rt * 100,              /* Ver 1.1 */
+						0,
+						:l_usr_id,
+						'N'
+            );
+
+			if( SQLCODE != 0 )
+			{
+				/* fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );          Ver 1.1 */
+				fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg );
+        fn_bat_pst_msg ( c_ServiceName, "System error occured. Contact system support", c_tag );
+				fclose(ptr_trd_file);
+				tpabort(0);                 /* Ver 1.1 */
+				return;
+			}
+
+			if( DEBUG_MSG_LVL_3 )
+			{
+				fn_userlog(c_ServiceName,"Inserted record into ETD:%c,%ld:",c_ack_nmbr,l_exec_qty);
+			}
+
+			/* if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+			{
+				fn_errlog( c_ServiceName, "S31065",LIBMSG,c_err_msg);
+				fclose(ptr_trd_file);
+			  return;
+			}                                             commentd in Ver 1.1 */
+  
+      l_cnt++;
+      memset( c_data, 0, sizeof( c_data ) );
+
+   } /* End of While */
+
+	 /* Ver 1.1 starts */
+	 if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+	 {
+		 fn_errlog( c_ServiceName, "S31070",LIBMSG,c_err_msg);
+		 fclose(ptr_trd_file);
+		 tpabort(0);
+	   return;
+	 }
+	 /* Ver 1.1 ends */
+  
+   fclose( ptr_trd_file );
+} 
+  
+long fn_get_flinecnt( FILE *fp )
+{
+   long l_cnt = 0;
+   char c_data[ 1024+1 ];
+
+   while( fgets( c_data, 1024, fp )!= NULL )
+   {
+     l_cnt++;
+   }	
+    
+   fseek(fp, 0, SEEK_SET);
+   return( l_cnt );
+}
+
+int fn_read_trdini(FILE *fp)
+{
+   char c_line[300];
+   char c_line_temp[300];
+   int i_cnt;
+   char c_ServiceName[33];
+
+   strcpy( c_ServiceName, "BAT_TRD_RECO");
+
+   while( fgets( c_line, 255, fp ) != NULL )
+   {
+     fn_trim( c_line );
+
+     if( strlen( c_line ) == 0 || c_line[0] == '#' )
+		 { continue; }   /* Blank Line and Comment passed */
+
+		 if( c_line[0] == '[' )
+		 {
+				if( DEBUG_MSG_LVL_3)
+				{ 
+					fn_userlog(c_ServiceName, "c_line:%s:", c_line );
+				}
+
+				strcpy( c_line, c_line+1);
+				c_line[strlen(c_line) - 1] = '\0';
+
+				if( DEBUG_MSG_LVL_3)
+				{ 
+					fn_userlog(c_ServiceName, "c_line:%s:", c_line );
+				}
+
+				strcpy( c_line_temp, c_line );
+
+				for( i_cnt=0; i_cnt<MAX_ARR_COL; i_cnt++)
+				{
+					 strtok( c_line, "," );
+			  	 fn_trim( c_line );
+
+					 temp_arr[i_cnt] = atoi(c_line);
+					 if( DEBUG_MSG_LVL_3)
+					 { 
+						 fn_userlog(c_ServiceName, "temp_arr[%d] :%d:",i_cnt,temp_arr[i_cnt]);
+					 }
+
+			  	 strcpy( c_line, ( strstr( c_line_temp, "," ) + 1 ) );
+
+           strcpy( c_line_temp,c_line );
+        }
+     }
+   } 
+   fclose(fp); 
+   return 0;
+}
+
+int fn_trim(char * c_str)
+{
+   int i_strlen =0;
+   int i_idx;
+
+   i_strlen = strlen(c_str);
+
+   for( i_idx = 0;i_idx < i_strlen;i_idx++)
+   {
+			if( *(c_str + 0) == ' ' || *(c_str + 0) == '\t')
+			{
+					strcpy(c_str, c_str + 1);
+			}
+			else
+			{
+					break;
+			}
+   }
+
+   for( i_idx = i_strlen - 1;i_idx > -1;i_idx--)
+   {
+			if(( *(c_str + i_idx) == ' ') || (*(c_str + i_idx) == '\t') || (*(c_str + i_idx) == '\n'))
+			{
+					 *(c_str + i_idx) = '\0';
+			}
+			else
+			{
+					break;
+			}
+   }
+  
+   return 0;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+    fn_var = BAT_UPLD_ETD;
+    return 0;
+}
+ 
+void fn_bat_term ( int argc, char *argv[] )
+{
+    char c_msg[256];
+
+    sprintf ( c_msg, "Batch process %s ended", argv[0] ); 
+    fn_bat_pst_msg (  argv[0], c_msg, c_tag );
+    return;
+}
+ 
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+    return 0;
+}

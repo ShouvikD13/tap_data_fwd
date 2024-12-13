@@ -1,0 +1,248 @@
+/**************************************************************************************/
+/*  Process Name 		 :BAT_BNKRECO_FNO																									*/
+/*																																										*/
+/*  Description 		 :This batch process selects failure records of BK (Block) and		*/
+/*							 			UB(Unblock) type transactions from BFT (For FNO)table and calls	*/
+/*							 			svc_bnk_reco service.																						*/	
+/*               																																			*/ 
+/*  Input Parameters :																																*/
+/*																																										*/
+/*      				      1.    None																											*/
+/*																																										*/
+/*  Output Parameter : Success/Failure																								*/
+/*  Called By 			 : Backoffice																											*/
+/*  Log																																								*/
+/*  Log 						 :1.0			8-Mar-2011		Sandip   																	*/
+/*                   :1.1     20-Nov-2019   Akash B                                   */
+/**************************************************************************************/
+/*  1.0   			Initial Release     																									*/
+/*  1.1         Deposit Model Changes                                                 */  
+/**************************************************************************************/
+	
+	/* Standard include files */
+
+	#include<stdio.h>
+	#include<sqlca.h>
+	#include <atmi.h>
+	#include <fn_log.h>
+	#include <string.h>
+	#include <fn_battmpt.h>	
+	#include <fml_def.h>
+	#include <fo.h>
+	#include <fn_tuxlib.h>
+	#include <fn_read_debug_lvl.h>
+
+	void BAT_BNKRECO_FNO(int argc,char *argv[])
+	{
+		EXEC SQL INCLUDE "table/bft_bnk_fld_trnsctn.h";
+
+			char   	c_err_msg[256];
+			char    c_ServiceName [ 33 ]; 
+			char    c_flag;
+			char    c_xchng_cd[4];
+  		char    c_pipe_id[3];
+  		char    c_prod_cd[3];
+
+			int  		i_ret_cd = 0;
+			int  		i_returncode = 0;
+			int     i_ch_val = 0;
+			int     i_succ_rec = 0;
+			int     i_fail_rec = 0;
+			int     i_eod_running = 0;
+	
+		  long    l_recv_buff_len=0;
+
+			strcpy ( c_ServiceName, argv[0] );
+			INITBATDBGLVL(argv[0]);
+
+			MEMSET(c_err_msg);
+			MEMSET(c_ServiceName);
+			MEMSET(c_xchng_cd);
+			MEMSET(c_pipe_id);
+			MEMSET(c_prod_cd);
+	
+
+	/* Tuxedo specific variables */
+  		FBFR32  *Sbuffer;     /* Pointer to FML input buffer    */
+  		FBFR32  *Rbuffer;     /* Pointer to FML output buffer   */
+
+			strcpy(c_prod_cd,"FNO");
+
+			if(argc!=4)
+  		{
+    		printf("No arguments expected\n");
+				fn_userlog( c_ServiceName, "Usage:bat_bnkreco_fno <ini> <Exchange_code> <NA> ");
+    	  return;	
+  		}
+
+  		strcpy( c_pipe_id, "NA" );
+  		strcpy( c_xchng_cd, "NFO" );
+
+
+
+			/****** Allocate send and receive Buffers *********/
+ 
+		  Sbuffer = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  		if(Sbuffer == NULL)
+  		{
+    		fn_errlog(c_ServiceName,"S31005",TPMSG,c_err_msg);
+				fn_destroy_pipe();
+    		tpclose();
+    		tpterm ();
+				return;
+  		}
+
+  		Rbuffer = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  		if(Rbuffer == NULL)
+  		{
+    		fn_errlog(c_ServiceName,"S31010",TPMSG,c_err_msg);
+				fn_destroy_pipe();
+				tpfree((char*)Sbuffer);
+    		tpclose();
+    		tpterm ();
+				return;
+  		}
+
+			Finit32(Sbuffer,(FLDLEN32) Fsizeof32(Sbuffer));	
+			Finit32(Rbuffer,(FLDLEN32) Fsizeof32(Rbuffer));	
+
+			if(Fadd32(Sbuffer,FML_STK_STCK_NM,(char *)c_prod_cd,0) == -1 )
+  		{
+  			fn_errlog(c_ServiceName,"S31015",FMLMSG,c_err_msg);
+				fn_destroy_pipe();
+    		tpfree((char *)Sbuffer);
+    		tpfree((char *)Rbuffer);
+    		tpclose();
+    		tpterm ();
+				return;
+  		}
+	
+     fn_userlog(c_ServiceName,"Before BFT Selection ");
+
+  	/***** Select data from BFT table to process reco ****/
+ 
+ 		EXEC  SQL
+        DECLARE  c_match_list_cursor
+        CURSOR   FOR
+        SELECT   distinct   BFT_CLM_MTCH_ACCNT
+        FROM     BFT_BNK_FLD_TRNSCTN,USR_USER_MASTER,UAC_USR_ACCNTS  /** Ver 1.1 USR,UAC tables introduced **/
+        WHERE    trunc(BFT_FLD_DT)  >= trunc(sysdate -1)
+				AND      BFT_PRCSS_STTS     = 'N' /* This will be marked as Y after reco */
+        AND      BFT_TRNSCTN_TYP    in('BK','UB')
+        AND      BFT_RSN_CD         in('10003','10004')
+				AND      BFT_ERR_CD         in (-1,-2,-3,-4,-5,-6)		/** -6 EBA Failure **/
+/**			AND 		 BFT_TBL_FLAG				= 'FNO'								** Only for FNO Failure records** commented in ver 1.1 */
+        AND      BFT_CLM_MTCH_ACCNT = UAC_CLM_MTCH_ACCNT                        /*** Ver 1.1 ***/ 
+        AND      UAC_USR_ID = USR_USR_ID                                        /*** Ver 1.1 ***/ 
+        AND     ( ( BFT_TBL_FLAG ='FNO' AND NVL(USR_FUND_MODEL_FLG,'N') = 'B')  /*** Ver 1.1 ***/
+               OR ( BFT_TBL_FLAG = 'MGB' AND NVL(USR_FUND_MODEL_FLG,'N') = 'D') ) ;         
+
+ 		  EXEC SQL OPEN c_match_list_cursor;
+
+  		if (SQLCODE != 0 )
+  		{
+    		fn_errlog(c_ServiceName,"S31020", SQLMSG,c_err_msg);
+				fn_destroy_pipe();
+				tpfree((char *)Sbuffer);
+    		tpfree((char *)Rbuffer);
+    		tpclose();
+    		tpterm ();
+				return;
+  		}
+
+		while(1)
+  	{
+  			MEMSET(sql_bft_clm_mtch_accnt);
+
+				EXEC SQL
+         FETCH  c_match_list_cursor
+         INTO   :sql_bft_clm_mtch_accnt;
+
+    		if(SQLCODE != 0)
+    		{
+        	if(SQLCODE == NO_DATA_FOUND)
+        	{
+          		fn_userlog(c_ServiceName,"Bank Reconciliation:No data to process or processing completed ");
+          		EXEC SQL CLOSE c_match_list_cursor;
+          		break;
+        	}
+        	else
+        	{
+          		EXEC SQL CLOSE c_match_list_cursor;
+							fn_destroy_pipe();
+							tpfree((char *)Sbuffer);
+							tpfree((char *)Rbuffer);
+    					tpclose();
+    					tpterm ();
+							return;
+       		}
+    		}
+			/** Fchg32 used to insure that  field occurrence 0 is set as we are reusing a buffer. */
+
+			 if(Fchg32(Sbuffer,FML_EBA_MTCH_ACT_NO,(FLDOCC32) 0,(char *)sql_bft_clm_mtch_accnt,0) == -1 )
+    		{
+    			fn_errlog(c_ServiceName,"S31025",FMLMSG,c_err_msg);
+					EXEC SQL CLOSE c_match_list_cursor;
+					fn_destroy_pipe();
+      		tpfree((char *)Sbuffer);
+      		tpfree((char *)Rbuffer);
+      		tpclose();
+      		tpterm ();
+					return;
+    		}
+			 fn_userlog(c_ServiceName,"Sandip Now calling SVC_BNK_RECO ");
+
+			 i_ret_cd = tpcall("SVC_BNK_RECO",(char *)Sbuffer,0,(char **)&Rbuffer,
+                       &l_recv_buff_len,0);
+			 if(i_ret_cd == -1)
+			 {
+					if (TPCODE != TPESVCFAIL)
+    			{
+      				fn_errlog(c_ServiceName,"S31030",TPMSG,c_err_msg);
+    			}
+    			else
+    			{
+      				i_returncode = Fget32(Rbuffer, FML_ERR_MSG,0,c_err_msg, 0);
+      				if (i_returncode == -1)
+      				{
+        				fn_errlog(c_ServiceName,"S31035",TPMSG,c_err_msg);
+      				}
+    			}
+					fn_userlog(c_ServiceName,"Bank Reconciliation failed for match |%s| with error |%s|",sql_bft_clm_mtch_accnt,c_err_msg);
+					i_fail_rec = i_fail_rec +1;
+			}
+			else
+			{
+					fn_userlog(c_ServiceName,"Bank Reconciliation process successful for match |%s|",sql_bft_clm_mtch_accnt);
+					i_succ_rec = i_succ_rec + 1;
+			}
+		} /* End of while */
+
+		
+		if(DEBUG_MSG_LVL_3){
+		fn_userlog(c_ServiceName,"Bank Reconciliation:Successfully reconciled |%d| records",i_succ_rec); 		fn_userlog(c_ServiceName,"Bank Reconciliation:Failed to reconcile |%d| records",i_fail_rec); 
+		}
+
+			fn_destroy_pipe();
+			tpfree((char *)Sbuffer);
+			tpfree((char *)Rbuffer);
+			return;
+
+ } /* End of batch process */
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+	fn_var	=	BAT_BNKRECO_FNO;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+
+	return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}

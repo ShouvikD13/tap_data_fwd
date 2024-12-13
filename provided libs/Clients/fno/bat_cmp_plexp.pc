@@ -1,0 +1,817 @@
+/******************************************************************************/
+/*  Program           : bat_cmp_plexp.pc                                      */
+/*                                                                            */
+/*  Description       : This Program fetches all the match accounts having    */
+/*                      open position from position table and passed them to  */
+/*											calculate Exposure & P/L.															*/
+/*  Log               : 1.0   30-Nov-2009  Sandeep|Infotech                   */
+/*                    : 1.1   20-Sep-2010  Swati|Infotech                     */
+/*                    : 1.2   23-Jul-2012  Swati|Infotech                     */
+/*										:	1.3		10-Oct-2012	 Sandeep|Infotech										*/
+/*										:	1.4		09-Sep-2014	 Sachin |Infotech										*/
+/******************************************************************************/
+/*  1.0    -  New Release                                                     */
+/*  1.1    -  INTERVAL added as an input parameter to the batch process       */
+/*  1.2    -  Exchsnge Code Handling 																					*/
+/*  1.3    -  Server Name Changed In the Pre Process Record Function			  	*/
+/*  1.4    -  View to FML Changes                                   			  	*/
+/******************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <userlog.h>
+#include <Usysflds.h>
+#include <fml32.h>
+/** #include <fo_view_def.h> ** Ver 1.4 **/
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <fo.h>
+#include <fn_battmpt.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h>
+#include <fn_read_debug_lvl.h>
+
+#define INTERVAL	100
+#define INSTANCE	10
+#define	FOR_ALL		'A'
+#define	FOR_UNDERLYNG	'U'
+#define	FOR_MTCHACNT	'M'
+#define FOR_MTCH_UNDRLYNG 'X'
+
+int fn_ins_rec( char *c_ServiceName,    
+                char *c_err_msg,
+                char c_ip_flg,
+                char c_prdct_typ,
+                char *c_ip_und,
+                char *c_ip_mtchacnt ,
+                char *c_xchng_cd );       /*** Ver 1.2 ***/
+
+
+void BAT_CMP_PLEXP( int argc, char* argv[] )
+{
+	char  c_ServiceName[ 33 ];
+	char  c_svc_name[ 33 ];
+  char  c_err_msg[ 256 ];
+  char  c_msg[256];
+	char	c_xchng_cd[ 4 ];
+	char	c_run_mode;
+	char  c_mtch_act_no [ 11];
+	char  c_nxt_trd_dt [ 12 ];
+	char  c_intl_spt[8];;
+	char	c_prdct_typ;
+	char 	c_ip_und [ 1200 ];
+	char 	c_ip_mtchacnt[ 1200 ];
+	char	c_ip_flg;
+
+	int		i_trnsctn = 0;
+	int		i_err [10];
+	int   i_counter = 0;
+	int		i_ch_val = 0;
+	int		i_ret_val = 0;
+	/*** int 	i_intrvl = INTERVAL;       -commented for ver 1.1***/
+	int   i_intrvl=0;                   /*** ver 1.1 ***/
+	int   i_instnc = INSTANCE;
+  int   i_record_exists=0;
+
+	long	li_run_num = 0 ;
+	long  li_crrnt_runum ;
+	long  li_frc_runum ;
+	long  li_rec_cnt;
+	long  li_total_rec;
+
+	double d_intlspt_lvl = 0.0 ;
+	
+	FBFR32* ptr_fml_Sbuf;
+	FBFR32* ptr_fml_Rbuf;
+
+	strcpy( c_ServiceName, "BAT_CMP_PLEXP");
+
+
+	if( argc <10)  		         /*** ver 1.1 --INTERVAL added as a input to the batch process***/
+  {
+    fn_userlog( c_ServiceName, "Usage: BAT_CMP_PLEXP <INI> <NFO> <NA> <PRODUCT TYPE F/O/A> <RUN MODE> <INITIAL SPOT LEVEL><INTERVAL> <RUN NUMBER>/                                                    <MATCH ACCOUNT LIST/NONE> <UNDERLYING LIST/NONE>"); 
+    fn_userlog( c_ServiceName, "Invalid Number of Arguments");
+    sprintf ( c_msg,"Invalid Number of Arguments");
+	  fn_bat_pst_msg ( c_ServiceName,c_msg, c_tag );
+		
+    return;
+  }
+
+	sprintf ( c_msg,"Batch process %s started", argv[0] );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  strcpy( c_xchng_cd, argv[2] ); 
+
+	c_prdct_typ		=	argv [4][0];
+	c_run_mode 		= argv [5][0];
+
+	strcpy(c_intl_spt,argv[6]); 
+	d_intlspt_lvl = atof((char *)c_intl_spt);
+	
+  i_intrvl = atoi(argv[7]);                 /*** ver 1.1 ***/
+
+	/***ver 1.1 --to check the INTERVAL argument is valid or not ***/
+
+	if((i_intrvl!=100) && (i_intrvl!=200) && (i_intrvl!=300))
+	{
+	 fn_userlog( c_ServiceName, "Invalid INTERVAL Argument");
+   sprintf ( c_msg,"Invalid INTERVAL Argument.Interval should be 100,200 or 300");
+   fn_bat_pst_msg ( c_ServiceName,c_msg, c_tag );
+
+    return;
+
+
+	}
+	/*** ver 1.1 ends ***/
+
+
+	
+	li_run_num	=	atoi(argv[8]);
+
+	strcpy(c_ip_mtchacnt,(char *) argv[9]);
+	strcpy(c_ip_und,(char *) argv[10]);
+	
+	if (DEBUG_MSG_LVL_0)
+	{
+  	fn_userlog(c_ServiceName,"BAT_CMP_PLEXP Started .......");
+		fn_userlog(c_ServiceName,"Exchange Code Is :%s:",c_xchng_cd);
+		fn_userlog(c_ServiceName,"Product Type Is :%c:",c_prdct_typ);
+		fn_userlog(c_ServiceName,"Run Mode Flag Is :%c:",c_run_mode);
+		fn_userlog(c_ServiceName,"Initial Spot Level Is :%lf:",d_intlspt_lvl);
+		fn_userlog(c_ServiceName,"Match Account Is :%s:",c_ip_mtchacnt);
+		fn_userlog(c_ServiceName,"Underlying Is :%s:",c_ip_und);
+		fn_userlog(c_ServiceName,"Run Number Is :%ld:",li_run_num);
+		fn_userlog(c_ServiceName,"Interval:%d:",i_intrvl);
+		fn_userlog(c_ServiceName,"Instance:%d:",i_instnc);
+	}
+
+	INITBATDBGLVL(argv[0]);
+
+	EXEC SQL
+  	SELECT  to_char(exg_nxt_trd_dt,'DD-Mon-YYYY')
+    INTO    :c_nxt_trd_dt
+    FROM    exg_xchng_mstr
+    /*** WHERE   exg_xchng_cd = 'NFO'  commented In Ver 1.2 ***/
+    WHERE   exg_xchng_cd = :c_xchng_cd      /*** Ver 1.2 ***/  
+    AND     exg_mkt_typ  = 'D';
+
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog(c_ServiceName, "S31005", SQLMSG, c_err_msg );
+    fn_userlog(c_ServiceName,"Error While Fetching Trade Date ");
+		sprintf ( c_msg,"Failed To Get Trade Date");
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    tpfree((char *)ptr_fml_Sbuf);
+    tpfree((char *)ptr_fml_Rbuf);
+    return ;
+  }
+
+	if (DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Trade Date Is :%s:",c_nxt_trd_dt);
+	}
+
+	EXEC SQL
+		SELECT	1
+		INTO		:i_record_exists
+		FROM 		dual
+		WHERE EXISTS
+		(
+			SELECT	frc_fo_xchng_cd
+			FROM		frc_fo_rsk_cumltv
+			WHERE		frc_fo_trd_dt	=	:c_nxt_trd_dt
+			AND			frc_fo_run_no	=	:li_run_num
+		);
+
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+    fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_msg );
+    fn_userlog(c_ServiceName,"Error While Fetching Trade Date ");
+		sprintf ( c_msg,"Failed To Check Whether Record Already Exist In Cumulative Table For Run no. & Trade Date"  );
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    tpfree((char *)ptr_fml_Sbuf);
+    tpfree((char *)ptr_fml_Rbuf);
+    return ;
+  }
+
+	if( i_record_exists	==	1	)
+	{
+
+		EXEC SQL
+  		SELECT  LAST_NUMBER
+  		INTO    :li_crrnt_runum
+  		FROM    all_sequences
+  		WHERE   SEQUENCE_NAME like '%CMP_PLEXP_SEQ%';
+
+		if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+		{
+  		fn_errlog(c_ServiceName, "S31015", SQLMSG, c_err_msg );
+  		fn_userlog(c_ServiceName,"Error While Fetching Trade Date ");
+			sprintf ( c_msg,"Record Already Exist In Cumulative Table For Run no. & Trade Date");
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+  		tpfree((char *)ptr_fml_Sbuf);
+  		tpfree((char *)ptr_fml_Rbuf);
+  		return ;
+		}
+
+		fn_userlog(c_ServiceName,"You Can Run Process For Run Number :%ld:",li_crrnt_runum);
+		fn_errlog(c_ServiceName,"S31020",SQLMSG,c_err_msg);
+		return;
+	}
+
+
+	 EXEC SQL
+    TRUNCATE TABLE  fcp_fo_cmp_plexp;
+
+  if(SQLCODE!=0)
+  {
+    fn_errlog(c_ServiceName,"S31025",SQLMSG,c_err_msg);
+    return;
+  }
+
+	if ( strcmp(c_ip_mtchacnt,"NONE") == 0 )
+	{
+
+		if( strcmp(c_ip_und,"NONE") == 0 )
+		{
+			c_ip_flg	=	FOR_ALL;
+			
+			if (DEBUG_MSG_LVL_3)
+			{
+				fn_userlog(c_ServiceName,"c_ip_flg Is :%c:",c_ip_flg);
+			}
+		}
+		else
+		{
+			c_ip_flg  = FOR_UNDERLYNG;
+
+			if (DEBUG_MSG_LVL_3)
+      {
+      	fn_userlog(c_ServiceName,"c_ip_flg Is :%c:",c_ip_flg);
+			}
+		}
+	}
+	else if ( strcmp(c_ip_und,"NONE") == 0 )
+	{
+		if( strcmp(c_ip_mtchacnt,"NONE") == 0 )
+		{
+    	c_ip_flg  = FOR_ALL;
+
+			if (DEBUG_MSG_LVL_3)
+      {
+      	fn_userlog(c_ServiceName,"c_ip_flg Is :%c:",c_ip_flg);
+			}
+		}
+		else
+		{
+			c_ip_flg  =	FOR_MTCHACNT;
+
+			if (DEBUG_MSG_LVL_3)
+      {
+      	fn_userlog(c_ServiceName,"c_ip_flg Is :%c:",c_ip_flg);
+			}
+		}
+	}
+	else
+	{
+		c_ip_flg	=	FOR_MTCH_UNDRLYNG;
+
+		if (DEBUG_MSG_LVL_3)
+    {
+    	fn_userlog(c_ServiceName,"c_ip_flg Is :%c:",c_ip_flg);
+		}
+	}
+
+	i_ret_val = fn_ins_rec( c_ServiceName,
+                          c_err_msg,
+                          c_ip_flg,
+                          c_prdct_typ,
+                          c_ip_und,
+                          c_ip_mtchacnt,
+                          c_xchng_cd);       /*** Ver 1.2 ***/
+
+	if ( i_ret_val == -1 )
+  {
+  	fn_userlog(c_ServiceName,"Failed For Future FOR_ALL ");
+		return;
+  }
+
+	EXEC SQL
+		SELECT	COUNT(*)
+		INTO		:li_total_rec
+		FROM		fcp_fo_cmp_plexp;
+
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+  	fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg );
+    return;
+  }
+
+	if (DEBUG_MSG_LVL_0)
+  {
+		fn_userlog(c_ServiceName,"Total No. Of Records Is :%ld:",li_total_rec);
+	}
+
+	for(li_rec_cnt = 1; li_rec_cnt <= li_total_rec; li_rec_cnt ++)
+	{
+
+		EXEC SQL
+      SELECT 	fcp_clm_mtch_accnt
+      INTO    :c_mtch_act_no
+      FROM    fcp_fo_cmp_plexp
+      WHERE   rownum <2;
+
+    if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg );
+      return;
+    }
+
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"NO DATA FOUND");
+      break;
+    }
+
+
+		if (DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"Match Account Is :%s:",c_mtch_act_no);
+		}
+
+		sprintf ( c_msg, "Processing record %ld of %ld", li_rec_cnt, li_total_rec);
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+    i_ch_val = fn_pre_prcs_rcrd ( c_ServiceName,
+                                  c_err_msg,
+                              /***	"sfr_cal_sys_rsk",			Commented In Ver 1.3			***/
+                                  "sfr_cal_cln_rsk",
+                                  li_rec_cnt,
+                                  li_total_rec );
+    if ( i_ch_val == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31040", LIBMSG, c_err_msg );
+      fn_dstry_rs (ptr_fml_Sbuf);
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      return;
+    }
+
+		 strcpy( c_svc_name,"SFO_CAL_SYS_RSK");
+		if (DEBUG_MSG_LVL_0)
+    {	
+			fn_userlog(c_ServiceName,"Run mode :%c:",c_run_mode);
+     }
+       i_ch_val = fn_acall_svc_fml ( c_ServiceName,
+                                    c_err_msg,
+                                    "SFO_CAL_SYS_RSK",
+                                    0,
+                                    12,                  /*** ver 1.1-parameter changed from 11 to 12 as INTERVAL is addd***/
+																		FFO_RUN_NUM,(char *) &li_run_num,
+																		FFO_XCHNG_CD,(char *)&c_xchng_cd,
+																		FFO_RQST_TYP,(char *)&c_run_mode,
+																		FFO_TRD_DT,(char *)&c_nxt_trd_dt,
+																		FFO_CRNT_OI,(char *)&d_intlspt_lvl,
+																		FFO_INTERVAL,(char *)&i_intrvl,          /*** ver 1.1 ---INTERVAL argument added***/ 
+																		FFO_PRCS_NO,(char *)&i_instnc,
+																		FFO_PRDCT_TYP,(char *)&c_prdct_typ,
+																		FFO_UNDRLYNG,(char *)&c_ip_und,
+																		FFO_BNK_ACT_NO,(char *)&c_ip_mtchacnt,
+																		FFO_EBA_MTCH_ACT_NO,(char *)&c_mtch_act_no,
+																		FFO_USR_FLG, (char *)&c_ip_flg
+                                  );
+
+
+		if ( i_ch_val == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31045", LIBMSG, c_err_msg );
+      fn_dstry_rs ( ptr_fml_Sbuf );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      return;
+    }
+
+		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+  	if( i_trnsctn == -1 )
+  	{
+    	fn_errlog(c_ServiceName, "S31050", LIBMSG, c_err_msg);
+    	fn_userlog(c_ServiceName, "Error while beginning the transaction");
+    	return;
+  	}
+
+		EXEC SQL
+			DELETE	FROM	fcp_fo_cmp_plexp
+			WHERE 	fcp_clm_mtch_accnt	=	:c_mtch_act_no;
+
+		if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  	{
+    	fn_errlog(c_ServiceName, "S31055", SQLMSG, c_err_msg);
+    	fn_userlog(c_ServiceName, "Error in commit [%s] exiting..", c_err_msg);
+    	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    	return;
+  	}
+
+	}
+
+	sprintf ( c_msg, "Batch process %s ended", argv[0] );
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	return;
+
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+  {
+    fn_var = BAT_CMP_PLEXP;
+    return 0;
+  }
+
+void fn_bat_term ( int argc, char *argv[] )
+  {
+    return;
+  }
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+  {
+    return 0;
+  }
+
+int fn_ins_rec( char *c_ServiceName,
+                char *c_err_msg,
+                char c_ip_flg,
+                char c_prdct_typ,
+                char *c_ip_und,
+                char *c_ip_mtchacnt,
+                char *c_xchng_cd )     /*** Ver 1.2 ***/
+{
+
+	char sql_mtch_accnt[11];
+
+	varchar select_stmt[500];
+
+	int i_trnsctn;
+
+ 	if (DEBUG_MSG_LVL_0)
+  {
+		fn_userlog(c_ServiceName,"Inside Function fn_ins_rec");
+	}
+	
+	rtrim(c_xchng_cd); /*** Ver 1.2 ***/	
+	switch(c_ip_flg)
+	{
+		case	FOR_ALL :
+
+
+			if( c_prdct_typ == 'F')
+			{
+				if (DEBUG_MSG_LVL_3)
+      	{
+					fn_userlog(c_ServiceName,"Inside Case FOR_ALL FOR Future");
+				}
+
+				strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE	fup_prdct_typ	= 'F'");
+				strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd = '");   /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");                      /*** Ver 1.2 ***/
+
+			}
+			else if ( c_prdct_typ == 'O')
+			{
+			 	if (DEBUG_MSG_LVL_3)
+      	{
+        	fn_userlog(c_ServiceName,"Inside Case FOR_ALL FOR Option");
+				}
+
+				strcpy((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+				strcat((char *)select_stmt.arr," AND (fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");                      /*** Ver 1.2 ***/
+
+			}
+			else 
+			{
+			 	if (DEBUG_MSG_LVL_3)
+      	{
+        	fn_userlog(c_ServiceName,"Inside Case FOR_ALL FOR Future/Option");
+				}
+
+				strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE fup_prdct_typ = 'F'");
+				strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");                      /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr," UNION ");
+				strcat((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+				strcat((char *)select_stmt.arr,"AND (fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");                       /*** Ver 1.2 ***/
+
+			}
+
+			break;
+
+		case	FOR_UNDERLYNG	:
+
+	
+			if( c_prdct_typ == 'F')
+      {
+
+				if (DEBUG_MSG_LVL_3)
+      	{
+					fn_userlog(c_ServiceName,"Inside Case FOR_UNDERLYNG For Future");
+				}
+
+        strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE fup_prdct_typ = 'F'");
+				strcat((char *)select_stmt.arr,"AND fup_undrlyng IN (");
+				strcat((char *)select_stmt.arr,c_ip_und);
+				strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");                       /*** Ver 1.2 ***/
+
+      }
+      else if ( c_prdct_typ == 'O')
+      {
+			 	if (DEBUG_MSG_LVL_3)
+      	{
+        	fn_userlog(c_ServiceName,"Inside Case FOR_UNDERLYNG For Option");
+				}
+	
+				strcpy((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+				strcat((char *)select_stmt.arr,"AND fop_undrlyng IN (");
+				strcat((char *)select_stmt.arr,c_ip_und);
+				strcat((char *)select_stmt.arr,")");
+				strcat((char *)select_stmt.arr,"AND ( fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");                       /*** Ver 1.2 ***/
+
+      }
+      else
+      {
+			 	if (DEBUG_MSG_LVL_3)
+      	{
+        	fn_userlog(c_ServiceName,"Inside Case FOR_UNDERLYNG For Future/Option");
+				}
+				
+				strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE fup_prdct_typ = 'F'");
+        strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+        strcat((char *)select_stmt.arr,"AND fup_undrlyng IN (");
+        strcat((char *)select_stmt.arr,c_ip_und);
+        strcat((char *)select_stmt.arr,")");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/	
+				strcat((char *)select_stmt.arr,"'"); 											/*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr," UNION ");
+        strcat((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+        strcat((char *)select_stmt.arr,"AND ( fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+        strcat((char *)select_stmt.arr,"AND  fop_undrlyng IN (");
+        strcat((char *)select_stmt.arr,c_ip_und);
+        strcat((char *)select_stmt.arr,")");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										  /*** Ver 1.2 ***/
+
+      }
+
+			break;
+
+		case	FOR_MTCHACNT  :
+
+
+			if( c_prdct_typ == 'F')
+      {
+		  	if (DEBUG_MSG_LVL_3)
+      	{
+					fn_userlog(c_ServiceName,"Inside FOR_MTCHACNT & FUTURE Case");
+					fn_userlog(c_ServiceName,"Match Accnt Is :%s:",c_ip_mtchacnt);
+				}
+
+  			strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE fup_prdct_typ = 'F'");
+       	strcat((char *)select_stmt.arr,"AND  fup_clm_mtch_accnt IN (");
+       	strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										   /*** Ver 1.2 ***/
+
+      }
+      else if ( c_prdct_typ == 'O')
+      {
+				if (DEBUG_MSG_LVL_3)
+      	{
+					fn_userlog(c_ServiceName,"Inside FOR_MTCHACNT & Option Case");
+				}
+
+  			strcpy((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+        strcat((char *)select_stmt.arr,"AND  fop_clm_mtch_accnt IN (");
+        strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										   /*** Ver 1.2 ***/
+
+      }
+      else
+      {
+		 		if (DEBUG_MSG_LVL_3)
+      	{
+					fn_userlog(c_ServiceName,"Inside FOR_MTCHACNT  FUTURE/OPTION Case");
+				}
+
+				strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE fup_prdct_typ = 'F'");
+        strcat((char *)select_stmt.arr,"AND  fup_clm_mtch_accnt IN (");
+        strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd = '");    /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										   /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr," UNION ");
+			  strcat((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+        strcat((char *)select_stmt.arr,"AND  fop_clm_mtch_accnt IN (");
+        strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										  /*** Ver 1.2 ***/
+
+      }
+
+			break;
+
+		case	FOR_MTCH_UNDRLYNG :
+
+
+			if( c_prdct_typ == 'F')
+      {
+				if (DEBUG_MSG_LVL_3)
+      	{
+      		fn_userlog(c_ServiceName,"Inside Case FOR_MTCH_UNDRLYNG For Future");
+      		fn_userlog(c_ServiceName,"Inside Case FOR_MTCH_UNDRLYNG Mtch Accnt Is :%s:",c_ip_mtchacnt);
+      		fn_userlog(c_ServiceName,"Inside Case FOR_MTCH_UNDRLYNG underlying Is :%s:",c_ip_und);
+				}
+
+        strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE fup_prdct_typ = 'F' ");
+        strcat((char *)select_stmt.arr,"AND  fup_clm_mtch_accnt IN (");
+        strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND fup_undrlyng IN (");
+        strcat((char *)select_stmt.arr,c_ip_und);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										  /*** Ver 1.2 ***/
+
+      }
+      else if ( c_prdct_typ == 'O')
+      {
+		  	if (DEBUG_MSG_LVL_3)
+      	{
+        	fn_userlog(c_ServiceName,"Inside Case FOR_MTCH_UNDRLYNG For Option");
+				}
+
+        strcpy((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+        strcat((char *)select_stmt.arr,"AND  fop_clm_mtch_accnt IN (");
+        strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND  fop_undrlyng IN (");
+        strcat((char *)select_stmt.arr,c_ip_und);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);               /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										  /*** Ver 1.2 ***/
+
+      }
+      else
+      {
+				if (DEBUG_MSG_LVL_3)
+      	{
+        	fn_userlog(c_ServiceName,"Inside Case FOR_MTCH_UNDRLYNG For Future/Option");
+				}
+
+				strcpy((char *)select_stmt.arr,"SELECT distinct fup_clm_mtch_accnt FROM fup_fut_undrlyng_pstn WHERE fup_prdct_typ = 'F' ");
+        strcat((char *)select_stmt.arr,"AND  fup_clm_mtch_accnt IN (");
+        strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND fup_undrlyng IN (");
+        strcat((char *)select_stmt.arr,c_ip_und);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fup_uopnpstn_qty != 0 OR fup_utrd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fup_xchng_cd =  '");   /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/	
+				strcat((char *)select_stmt.arr,"'");										   /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr," UNION ");
+				strcat((char *)select_stmt.arr,"SELECT distinct fop_clm_mtch_accnt FROM fop_fo_options_pstn WHERE fop_prdct_typ = 'O'");
+        strcat((char *)select_stmt.arr,"AND  fop_clm_mtch_accnt IN (");
+        strcat((char *)select_stmt.arr,c_ip_mtchacnt);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND  fop_undrlyng IN (");
+        strcat((char *)select_stmt.arr,c_ip_und);
+        strcat((char *)select_stmt.arr,")");
+        strcat((char *)select_stmt.arr,"AND ( fop_opnpstn_qty != 0 OR fop_uexctd_mrgn <> 0 ) ");
+				strcat((char *)select_stmt.arr,"AND fop_xchng_cd = '");    /*** Ver 1.2 ***/
+        strcat((char *)select_stmt.arr,c_xchng_cd);                /*** Ver 1.2 ***/
+				strcat((char *)select_stmt.arr,"'");										   /*** Ver 1.2 ***/
+
+      }
+
+			break;
+
+		default	:
+
+			fn_userlog(c_ServiceName,"Invalid InPut Flag");
+			break;
+	}
+
+	select_stmt.len = strlen((char *)select_stmt.arr);
+
+	EXEC SQL PREPARE sql_stmt FROM :select_stmt;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg );
+		return -1;
+  }
+
+	EXEC SQL DECLARE cur_dyn CURSOR FOR sql_stmt;
+
+  EXEC SQL OPEN cur_dyn ;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg );
+		return -1;
+  }
+
+
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+  if( i_trnsctn == -1 )
+  {
+  	fn_errlog(c_ServiceName, "S31070", LIBMSG, c_err_msg);
+    fn_userlog(c_ServiceName, "Error while beginning the transaction");
+    return -1;
+  }
+
+	for( ; ; )
+	{
+		MEMSET(sql_mtch_accnt);
+
+		EXEC SQL FETCH cur_dyn
+             INTO :sql_mtch_accnt;
+
+		if ( SQLCODE != 0 )
+    {
+      if( SQLCODE == NO_DATA_FOUND )
+      {
+        break;
+      }
+
+      fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg );
+		  fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      EXEC SQL CLOSE cur_dyn;
+			return -1;
+    }
+		
+
+		EXEC SQL
+			INSERT INTO fcp_fo_cmp_plexp
+			values(:sql_mtch_accnt);
+			
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    {
+    	fn_errlog( c_ServiceName, "S31080", SQLMSG, c_err_msg );
+		  fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return -1;
+    }
+
+	}
+
+
+  if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+  	fn_errlog(c_ServiceName, "S31085", SQLMSG, c_err_msg);
+    fn_userlog(c_ServiceName, "Error in commit [%s] exiting..", c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return -1;
+  }
+
+	EXEC SQL CLOSE cur_dyn;
+
+	return 0;
+
+}

@@ -1,0 +1,406 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_QTY_CALC                                          */
+/*                                                                            */
+/*  Input             :		                                                    */
+/*                                                                            */
+/*  Output            : FFO_AVL_QTY - Final available quantity	              */
+/*									                                                          */
+/*                                                                            */
+/*  Description       : Program calculates the maximum quantity possible for  */
+/*                      given contract in multiple of  lot based on the       */ 
+/*										  current limit / limit amount entered by the customer  */ 
+/*                                                                            */
+/*  Log               : 1.0	18-Feb-2011		Nitin Save                          */
+/*  Log               : 1.1	23-Jan-2012		Nitin Save                          */
+/*  Log               : 1.2	01-Sep-2014		Samip M															*/
+/*  Log               : 1.4 23-Aug-2016   Bhupendra Malik                     */
+/*  Log               : 1.5 24-Oct-2016   Kishor Borkar                       */
+/*  Log								:	VQC 06-Apr-2016		Swapnil More												*/
+/******************************************************************************/
+/* 1.0	-	 New Release                                                        */
+/* 1.1	-	 BSE- Change -Exchange code added in select criteria                */
+/* 1.2	-	 View to FML changes																                */
+/* 1.4  -  Hard Parsing Optimization                                          */
+/* 1.5  -  Check Session IP -- PHASE_III                                      */
+/* VQC  -  Version Quality Control                                            */
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <sqlca.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>
+#include <fn_getref.h>    			
+#include <userlog.h>	 											/* TUXEDO Header File */
+#include <fml32.h>       										/* TUXEDO Header File */
+#include <Usysflds.h>    										/* TUXEDO Field Definitions */ 
+#include <fml_def.h>	 											/* User defined h files */
+#include <fo_fml_def.h>  										/* User defined h files */
+/** #include <fo_view_def.h> **/ 						/* User defined h files */ /** Commented for Ver 1.2 **/
+#include <fn_read_debug_lvl.h> 							/* User defined h files */
+/** #include <eba.h>												 *Commented in Ver 1.5 *** User defined h files */
+#include <fo_view_def.h> 									/* Added in Ver 1.5 */
+#include <fn_session.h> 										/* Added in Ver 1.5 */
+#include <fo.h> 														/* Added in Ver 1.5 */
+#include <fml_rout.h>     									/* Added in Ver 1.5 */
+
+void SFO_QTY_CALC( TPSVCINFO *rqst )
+{
+	char   c_ServiceName[33];
+  varchar c_errmsg[256];			/** Changed datatype from char to varchar in VQC**/	
+	char   c_err_msg[256];   		/** Ver 1.5 **/
+  char   c_prdct_typ	='\0';  /** Ver 1.4 **/
+  char   c_exer_typ		='\0';  /** Ver 1.4 **/
+  char   c_opt_typ		='\0';  /** Ver 1.4 **/
+  long   l_strk_prc		= 0;    /** Ver 1.4 **/
+	long   l_sssn_id;
+	int    i_err[12];
+/*int    i_ferr[12];					*** Commented in VQC **/ 
+	long   l_sssn_id_chk;
+/*int    i_trnsctn = 0;				*** Commented in VQC **/
+	int    i= 0;
+	int    i_returncode=0;			 /** Ver 1.5 **/
+
+	FBFR32 *ptr_fml_Ibuffer;
+	FBFR32 *ptr_fml_Obuffer;
+
+	/*** Commenyted in VQC ***
+  FBFR32  *ptr_fml_Rbuffer;
+  FBFR32  *ptr_fml_Sbuffer;
+	***/
+
+	varchar     sql_urd_usr_user_id[10+1]; 
+	double d_tot_avl_limit = 0;
+	double d_limit_price = 0;
+	char c_mkt_type;
+	double d_user_input_amt = 0;
+	double 	d_ltp=0.0;
+	double 	d_init_mrgn_percnt = 0;
+	double	d_99_lmt = 0;
+	long l_invest_amt = 0;
+	int i_min_lot_qty = 0;
+	int i_qty = 0;															
+
+/*int i_basket_id = 0;							*** Commented in VQC **/
+
+  EXEC SQL BEGIN DECLARE SECTION;
+		int   i_lot = 0;
+		char	c_cln_mtch_accnt [ 11 ];
+		char	c_xchng_cd [ 4 ];
+		char	c_ip_undrlying [ 7 ];
+/**	char	c_prd_typ;								*** Commented in VQC **/
+		varchar c_exp_date [ 19 ];
+
+  EXEC SQL END DECLARE SECTION;
+
+  /*** Ver 1.5 Starts Here ***/
+  struct vw_usr_prfl st_usr_prfl;
+  struct vw_err_msg st_err_msg;		
+
+  MEMSET(st_usr_prfl);
+  MEMSET(st_err_msg);
+  /*** Ver 1.5 Ends Here ***/
+
+  /*** struct vw_err_msg st_err_msg;	***/	/** Commented for Ver 1.2 ****/
+
+  strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);
+
+  ptr_fml_Ibuffer = (FBFR32 *)rqst->data;
+  ptr_fml_Obuffer = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+  MEMSET(sql_urd_usr_user_id);
+  MEMSET(c_exp_date);
+
+  /* Retrieve the data from the input FML buffer  */
+
+  i_err[0]=Fget32(ptr_fml_Ibuffer,FFO_USR_ID,0,(char *)sql_urd_usr_user_id.arr,0);
+  i_err[1]=Fget32(ptr_fml_Ibuffer,FFO_SSSN_ID,0,(char *)&l_sssn_id,0);
+  i_err[2]=Fget32(ptr_fml_Ibuffer,FFO_EBA_MTCH_ACT_NO,0,(char *)c_cln_mtch_accnt,0);
+  i_err[3]=Fget32(ptr_fml_Ibuffer,FFO_LIMIT,0,(char *)&d_tot_avl_limit,0);
+  i_err[4]=Fget32(ptr_fml_Ibuffer,FFO_EFF_LMT_RT,0,(char *)&d_limit_price,0);
+  i_err[5]=Fget32(ptr_fml_Ibuffer,FFO_LMT_MKT_SL_FLG,0,(char *)&c_mkt_type,0);
+  i_err[6]=Fget32(ptr_fml_Ibuffer,FFO_BASE_ORD_VAL,0,(char *)&d_user_input_amt,0);
+  i_err[7]=Fget32(ptr_fml_Ibuffer,FFO_XCHNG_CD,0,(char *)c_xchng_cd,0);
+  i_err[8]=Fget32(ptr_fml_Ibuffer,FFO_UNDRLYNG,0,(char *)c_ip_undrlying,0);
+  /*i_err[9]=Fget32(ptr_fml_Ibuffer,FFO_PRDCT_TYP,0,(char *)&c_prd_typ,0);		** Commented in VQC **/
+  i_err[9]=Fget32(ptr_fml_Ibuffer,FFO_EXPRY_DT,0,(char *)c_exp_date.arr,0);	/** Changed i_err[10] to i_err[9] in VQC **/
+  i_err[10]=Fget32(ptr_fml_Ibuffer,FFO_MIN_LOT_QTY,0,(char *)&i_min_lot_qty,0);/** Changed i_err[11] to i_err[10] in VQC **/
+
+  for(i=0;i<11;i++)				/*** Changed i<12 to i<11 in VQC ***/
+  {
+   	if(i_err[i]==-1)
+		{
+	 		fn_userlog(c_ServiceName,"Error in Fget for i [%d]",i);
+	 		fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+  /**	Fadd32(ptr_fml_Obuffer,FFO_ERR_MSG,c_err_msg,0 );					 ** Commented in VQC **/
+      Fadd32(ptr_fml_Ibuffer,FFO_ERR_MSG,c_err_msg,0 );         /** Added in VQC **/
+      tpfree ( ( char * ) ptr_fml_Obuffer );                    /** Added in VQC **/	  
+	 		tpreturn(TPFAIL,0L,(char *)ptr_fml_Ibuffer,0L,0);
+		}
+  }
+
+	/*** Ver 1.5 Starts Here ***/
+	  i_returncode = Fvftos32( ptr_fml_Ibuffer,
+                           (char *) &st_usr_prfl,
+                           "vw_usr_prfl" );
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31010", FMLMSG, c_err_msg  );
+/** Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_err_msg, 0 );				** Commented in VQC **/
+    Fadd32(ptr_fml_Ibuffer,FFO_ERR_MSG,c_err_msg,0 );         /** Added in VQC **/
+    tpfree ( ( char * ) ptr_fml_Obuffer );                    /** Added in VQC **/
+    tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+  }
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( st_usr_prfl.c_rout_crt );
+
+  i_returncode = fn_chk_sssn( c_ServiceName, &st_usr_prfl,
+                                             &st_err_msg ) ;
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31015", LIBMSG, st_err_msg.c_err_msg);
+ /**Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );			** Commented in VQC **/
+		Fadd32(ptr_fml_Ibuffer,FFO_ERR_MSG,c_err_msg,0 );       /** Added in VQC **/
+		tpfree ( ( char * ) ptr_fml_Obuffer );                  /** Added in VQC **/		
+    tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+  }
+	/*** Ver 1.5 Ends Here ***/
+	/**** Commented in Ver 1.5 
+  l_sssn_id_chk=chk_sssn(c_ServiceName,sql_urd_usr_user_id.arr,l_sssn_id,c_err_msg);
+
+  if(l_sssn_id_chk == -1)
+  {	
+    fn_errlog( c_ServiceName, "S31020", FMLMSG, c_err_msg  );
+	  strcpy(c_err_msg,"Session Timed Out");
+ 		Fadd32( ptr_fml_Obuffer,FFO_ERR_MSG, c_err_msg, 0 ); 		
+		tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuffer, 0L, 0);
+  }
+	 Comment Ends for Ver 1.5 ****/
+
+  if(DEBUG_MSG_LVL_3)
+  {
+		fn_userlog(c_ServiceName,"Exchange Code [%s]",c_xchng_cd);
+		fn_userlog(c_ServiceName,"Underlying [%s]",c_ip_undrlying) ;
+		/** fn_userlog(c_ServiceName,"Product Type [%c]",c_prd_typ) ;				*** Commented in VQC **/
+		fn_userlog(c_ServiceName,"INPUT for SFO_QTY_CALC..");
+		fn_userlog(c_ServiceName,"c_user_id [%s]",sql_urd_usr_user_id.arr);
+		fn_userlog(c_ServiceName,"session_id [%ld]",l_sssn_id);
+		fn_userlog(c_ServiceName,"Match Act [%s]",c_cln_mtch_accnt);
+		fn_userlog(c_ServiceName,"Total Available Limit in Rs.[%lf]",d_tot_avl_limit);
+		fn_userlog(c_ServiceName,"Min Lot Qty [%d]",i_min_lot_qty) ;
+		fn_userlog(c_ServiceName,"Limit Price [%lf]",d_limit_price) ;
+		fn_userlog(c_ServiceName,"Limit/Market Type [%c]",c_mkt_type);
+		fn_userlog(c_ServiceName,"User input amount [%lf]",d_user_input_amt) ;
+  }
+
+  SETLEN(sql_urd_usr_user_id);
+  SETLEN(c_exp_date);
+
+		/************************************************/
+		/*To Calculate Initial Margin for given Stock   */
+		/************************************************/
+
+	EXEC SQL 
+			SELECT nvl(fmm_span_mrgn_prcnt,0) 
+		  INTO    :d_init_mrgn_percnt
+			FROM		fum_fo_undrlyng_mstr fum, fmm_fo_mrgn_mstr fmm
+			WHERE		fum.fum_undrlyng = fmm.fmm_undrlyng
+			AND     fmm.fmm_xchng_cd = :c_xchng_cd  		/** Added in Ver 1.1 **/
+			AND     fmm.fmm_xchng_cd = fum.fum_xchng_cd /** Added in Ver 1.1 **/
+			AND     fmm.fmm_prdct_typ = fum.fum_prdct_typ
+			AND			fum.fum_qt_trdng_flg	= 'T'
+			AND			fum.fum_prdct_typ     = 'F'
+			AND     fum.fum_undrlyng      = :c_ip_undrlying
+			AND			fmm.fmm_undrlyng_bskt_id = (SELECT  fcb_undrlyng_bskt_id
+		  																	  FROM    FCB_FO_CLN_BSKT_ALLTD
+																				  WHERE   fcb_cln_lvl = ( SELECT clm_clnt_lvl
+												 																			FROM   clm_clnt_mstr
+												 																					WHERE  clm_mtch_accnt = :c_cln_mtch_accnt ));
+  if (SQLCODE != 0 )
+  {
+   	fn_errlog( c_ServiceName, "S31025", SQLMSG, c_errmsg.arr );
+   	Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_errmsg.arr, 0 );
+		tpfree ( ( char * ) ptr_fml_Obuffer );                      /** Added in VQC **/
+   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Value of Initial Margin percent: <%lf>", d_init_mrgn_percnt);
+  }
+	
+  if(c_mkt_type == 'M')
+  {
+		/** Get LTP for the given exchange and stock. **/
+
+      /*** Ver 1.4 Starts****/
+
+      c_prdct_typ='F';
+      c_exer_typ ='E';
+      c_opt_typ  ='*';
+      l_strk_prc =0;
+
+      /*** Ver 1.4 Ends ***/
+
+     if(DEBUG_MSG_LVL_3)
+     {
+       fn_userlog(c_ServiceName,"Limit Price is ZERO. Its a Market Order.");
+       fn_userlog(c_ServiceName,"Val of c_ip_undrlying  <%s>",c_ip_undrlying);
+       fn_userlog(c_ServiceName,"Val of c_xchng_cd  <%s>",c_xchng_cd);
+       fn_userlog(c_ServiceName,"Val of c_exp_date  <%s>",c_exp_date.arr);
+       fn_userlog(c_ServiceName,"Val of c_prdct_typ  <%c>",c_prdct_typ);
+       fn_userlog(c_ServiceName,"Val of c_exer_typ  <%c>",c_exer_typ);
+       fn_userlog(c_ServiceName,"Val of c_opt_typ  <%c>",c_opt_typ);
+       fn_userlog(c_ServiceName,"Val of l_strk_prc  <%ld>",l_strk_prc);
+     }
+
+		 /***  commmented in Ver 1.4 ***
+     EXEC SQL
+         SELECT  FTQ_LST_TRD_PRC
+         INTO    :d_ltp
+         FROM    FTQ_FO_TRD_QT
+         WHERE   FTQ_XCHNG_CD = :c_xchng_cd  
+	       AND     FTQ_PRDCT_TYP = 'F'
+         AND     FTQ_UNDRLYNG  = :c_ip_undrlying
+	       AND     FTQ_EXPRY_DT  = :c_exp_date
+				 AND     FTQ_EXER_TYP  = 'E'
+	       AND     FTQ_OPT_TYP   = '*'
+	       AND     FTQ_STRK_PRC  = '0';
+			*** Ver 1.4 ***/
+
+		 /***  Added for Ver 1.4 ***/
+     EXEC SQL
+         SELECT  FTQ_LST_TRD_PRC
+         INTO    :d_ltp
+         FROM    FTQ_FO_TRD_QT
+         WHERE   FTQ_XCHNG_CD = :c_xchng_cd  
+	       AND     FTQ_PRDCT_TYP = :c_prdct_typ
+         AND     FTQ_UNDRLYNG  = :c_ip_undrlying
+	       AND     FTQ_EXPRY_DT  = :c_exp_date
+				 AND     FTQ_EXER_TYP  = :c_exer_typ
+	       AND     FTQ_OPT_TYP   = :c_opt_typ
+	       AND     FTQ_STRK_PRC  = :l_strk_prc;
+			/*** Ver 1.4 ***/
+
+     if(SQLCODE != 0)
+     {
+	    	fn_userlog(c_ServiceName,"Error while getting LTP.");
+        fn_errlog(c_ServiceName, "S31030", SQLMSG, c_err_msg);
+        Fadd32(ptr_fml_Ibuffer, FFO_ERR_MSG, c_err_msg, 0);
+				tpfree ( ( char * ) ptr_fml_Obuffer );                /** Added in VQC **/
+        tpreturn(TPFAIL, 0, (char *)ptr_fml_Ibuffer, 0, 0);
+     }
+     /* Converting LTP in Rs */
+     d_ltp = d_ltp /100;
+
+		 if(DEBUG_MSG_LVL_3)
+		 {
+		  fn_userlog(c_ServiceName,"Last Traded Price(LTP) :%lf:",d_ltp);
+		 }
+
+     /** Get 99% of the entered or total available amount. **/
+     if (d_user_input_amt == 0)
+     {
+       d_99_lmt = d_tot_avl_limit * 99/100;
+     }
+     else
+     {
+       d_99_lmt = d_user_input_amt * 99/100;
+     }
+
+     if(DEBUG_MSG_LVL_3)
+     {	
+       fn_userlog(c_ServiceName,"Val of d_99_lmt in Market: <%lf>",d_99_lmt);
+	     fn_userlog(c_ServiceName,"Val of d_ltp in Market: <%lf>",d_ltp);
+		   fn_userlog(c_ServiceName,"Val of i_min_lot_qty in Market: <%d>",i_min_lot_qty);
+		   fn_userlog(c_ServiceName,"Val of d_init_mrgn_percnt in Market: <%lf>",d_init_mrgn_percnt);
+     }
+
+     i_lot = ( (d_99_lmt / (d_ltp * d_init_mrgn_percnt/100))  / i_min_lot_qty ) ; 
+
+	   i_qty = i_lot * i_min_lot_qty; 
+     
+     if(DEBUG_MSG_LVL_3)
+     {
+      fn_userlog(c_ServiceName,"Val of i_lot in Market: <%d>",i_lot);
+	    fn_userlog(c_ServiceName,"Final Qty in case of Market order: <%d>",i_qty);
+     }
+  }
+  else if(c_mkt_type == 'L')
+  {
+     if (d_user_input_amt == 0)
+     {
+       l_invest_amt = d_tot_avl_limit;
+        
+       if(DEBUG_MSG_LVL_3)
+       {  
+         fn_userlog(c_ServiceName,"Val of l_invest_amt when limit = 0 is : <%ld>",l_invest_amt);
+       }
+     }
+     else
+     {
+       l_invest_amt = d_user_input_amt ;
+       
+       if(DEBUG_MSG_LVL_3)
+       {
+         fn_userlog(c_ServiceName,"Val of l_invest_amt when limit is not 0 is : <%ld>",l_invest_amt);
+       }
+     }
+
+		 i_lot = ( (l_invest_amt / (d_limit_price * d_init_mrgn_percnt/100))  / i_min_lot_qty ) ;
+		 /**** Commented in VQC
+     if(DEBUG_MSG_LVL_3)
+     {
+       fn_userlog(c_ServiceName,"Val of i_lot in Limit: <%d>",i_lot);
+     }
+		 ******/  
+
+		 i_qty =  i_lot * i_min_lot_qty ;
+	   
+     if(DEBUG_MSG_LVL_3)
+     {
+       fn_userlog(c_ServiceName,"Val of i_lot in Limit: <%d>",i_lot);
+       fn_userlog(c_ServiceName,"Final Qty in case of Limit order: <%d>",i_qty);
+     }
+  }	
+
+	/** Check if derived quantity is ZERo. **/
+  if( i_qty <=  0 )
+	{
+	 if(DEBUG_MSG_LVL_3)
+	 {
+		fn_userlog(c_ServiceName,"Derived Quantity is ZERO.");
+    fn_userlog(c_ServiceName,"User input Amount should be greater than minimum margin required for single Lot");
+   }
+		fn_errlog(c_ServiceName, "B81066",(char *)(char *)sql_urd_usr_user_id.arr,c_err_msg);
+    Fadd32(ptr_fml_Ibuffer,FFO_ERR_MSG,c_err_msg,0 );
+		tpfree ( ( char * ) ptr_fml_Obuffer );        /** Added in Version VQC */
+   	/*** Commented in VQC 
+		tpfree((char *)ptr_fml_Sbuffer);
+    tpfree((char *)ptr_fml_Rbuffer);
+		*****/
+    tpreturn(TPFAIL,0L,(char *)ptr_fml_Ibuffer,0L,0);
+	}
+
+  /**Return Quantity in o/p buffer. **/
+
+  if((Fadd32(ptr_fml_Obuffer,FFO_AVL_QTY,(char *)&i_qty,0))== -1)
+  {
+     fn_userlog(c_ServiceName,"Error in Fadd for i for op buffer [%d]",i);
+     fn_errlog( c_ServiceName, "S31035", FMLMSG, c_errmsg.arr  );
+     tpfree ( ( char * ) ptr_fml_Obuffer );
+     Fadd32( ptr_fml_Ibuffer, FFO_ERR_MSG, c_errmsg.arr, 0 );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuffer, 0, 0 );
+  }
+
+  fn_userlog(c_ServiceName,"Quantity Calculated Properly as: <%d>",i_qty);
+
+  tpreturn( TPSUCCESS, 0, (char *)ptr_fml_Obuffer, 0 , 0 );
+}
+

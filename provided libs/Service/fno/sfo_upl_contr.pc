@@ -1,0 +1,4242 @@
+/*************************************************************************************
+
+Service       : sfo_upl_contr.pc
+
+Purpose       : To get the details of contract notes from match and upload into EBA
+                Calls service SFO_GET_CONTR
+
+Input Param   :
+                For date            FFO_TRD_DT
+                Exchange Code       FFO_XCHNG_CD
+                FNO or E/A upload   FFO_OPERATION_TYP
+
+Output        :  Number of Contract Notes uploaded FFO_EXPRD_QTY,
+                                                   FFO_EXEC_QTY,FFO_ORD_TOT_QTY
+
+Tables        : FNO_CNTRCT_MSTR       I
+                FNO_CNTRCT_DTLS       I
+
+Stored Procedure     : stp_NetgetContractNote
+
+Author        : ICICI Infotech
+                Ver 1.1 SN changes for update in TRD tables for brokerage
+                Ver 1.2 SN changes for STT.
+                Ver 1.3 FP changes as per CR1610
+                Ver 1.4 Fixing of brokerage updation  problem 
+                Ver 1.5 setting order date time null for old contract
+                Ver 1.6 NNF808 Changes by Vidyayini Krish
+                Ver 1.7 SN Bug fix for order date time 
+                Ver 1.8 Vidya & SN  : IBM changes 
+                Ver 1.9 STT changes for EXERCISE by Shamili
+                Ver 2.0 Display of additional changes by Shamili
+                Ver 2.1 Bug fix for STT and additional charges updates ( Prakash 05-May-2009 )
+                Ver 2.2 Venture M : Close out Notes changes
+                Ver 2.3 Venture M : Changes for checking the undrlyng from SEM and not MATCH
+                Ver 2.4 Shamili  : TV-18 handling 
+								Ver	2.5	Sandeep	 : SEM Mapping Changes
+								Ver 2.6 Shamili  : Type conversion 
+								Ver 2.7 Sandeep  : SilverLight Changes 
+                Ver 2.8 Sachin B : Brokerage Updation for mapped customer
+								Ver 2.9 Prakhar T: CRCSN44167 Prepaid Brokerage
+								Ver 3.0 Sandip Tambe: FNO BSE Changes
+								Ver 3.1 Sandip Tambe: ver 3.0 BUG FIX 
+								Ver 3.2 Sandip Tambe: OPM Front End CR changes
+								Ver 3.3 Sandip Tambe: BSE STOCK handling changes
+								Ver 3.4 Sandip Tambe: BSE STOCK handling changes[E/A]
+                Ver 3.5 Navina Dhumal: OptionPLUS handling
+								Ver 3.6 Sachin Birje: Contract Note Changes for RMS System Squareoff  
+								Ver 3.7 Sandeep     : BFO Ack Number Changes  
+								Ver 3.8 Mahesh Shinde : Brokerage updation for portfolio
+                Ver 3.9 Sachin Birje : Memset Added
+								Ver 4.0 Sandip Tambe : COntract Note Format Changes CR-ISEC27-53835[28-Jul-2014]
+								Ver 4.1 Sandip Tambe : CR-ISEC14-55222_I_Gain_Profit_Pricing_Model [08-Oct-2014]
+								Ver 4.2 Vishnu Nair  : Changes for HTML 5                          [08-Jul-2014] 
+                Ver 4.3 Sandip Tambe : NDF handling for 0 obligation               [07-Apr-2015]
+                Ver 4.4 Sandip Tambe : Count check added to find missing records from class CN file [19-May-2015]
+                Ver 4.6 Bhupendra Malik : Double close out changes for Adhoc expiry [10-Jun-2015] 
+                Ver 4.7 Sandip Tambe : Optimization [10-Oct-2015]
+								Ver 4.8 Vishal Borhade : UCC code population on FNO Daily,EA,Closeout Contract notes CR-ISEC03-90143 [23-Jan-                                         2017]  
+								Ver 4.9 Sandip Tambe : GST Changes  [22-Jun-2017]  
+								Ver 5.0	Mrinal Kishore : Tagging of physically settled contract
+                Ver 5.1 Sandip Tambe : CR-ISEC03-116924 -corp action trade skipped in validation[21-Nov-2018]
+								Ver 5.2	Mrinal Kishore : optimise query for physically settled contract Update [19-Apr-2019]
+								Ver 5.3 Mrinal Kishore : Optimization of FNO Contract Note Download [26-Apr-2019]
+                Ver 5.4 Anand Dhopte : Optimization of EA and Closeout Note Download[25-Jul-2019]
+                Ver 5.5 Sachin Birje : Minor Changes for group id 3 handling [31-Dec-2021] 
+**********************************************************************************************/
+
+#include <stdio.h>      /* C Header File                */
+#include <stdlib.h>     /* C Header File                */
+#include <sqlca.h>      /* Oracle header file           */
+#include <atmi.h>       /* TUXEDO Header File           */
+#include <fml32.h>      /* TUXEDO Header File           */
+#include <Usysflds.h>   /* TUXEDO Field Definitions  */
+#include <fo_fml_def.h>
+#include <unistd.h>
+# define TOTAL_FML 3
+# define CDATA_LEN 2000
+#include <fo.h>
+#include <fo_view_def.h>
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h>
+#include <math.h>
+#include <eba_to_ors.h> /* Ver 1.6 */
+#include <string.h>     /* VEr 1.8 */
+#include <fn_read_debug_lvl.h> /* Ver 1.8 */
+
+void SFO_UPL_CONTR(TPSVCINFO *rqst)
+{
+    EXEC SQL INCLUDE "table/fno_cntrct_dtls.h";
+    EXEC SQL INCLUDE "table/fno_cntrct_mstr.h";
+    EXEC SQL INCLUDE "table/ea_conf_dtls.h";
+    EXEC SQL INCLUDE "table/ea_conf_mstr.h";
+
+    EXEC SQL INCLUDE "table/ccm_cntrct_clsout_mstr.h"; /* 2.2 */ 
+    EXEC SQL INCLUDE "table/ccd_cntrct_clsout_dtls.h"; /* 2.2 */
+
+    FBFR32  *ptr_Ibuf;     /* Pointer to FML input   buffer    */
+    FBFR32  *ptr_Obuf;     /* Pointer to FML output  buffer    */
+    FBFR32  *ptr_Sbuf;     /* Pointer to FML send buffer       */
+    FBFR32  *ptr_Rbuf;     /* Pointer to FML receive buffer    */
+
+    FILE *fpfile;
+    FILE *fpfile_ea;
+    char *null_ptr = 0;
+    char c_oper_typ;
+    char c_data[CDATA_LEN];
+    char c_temp[CDATA_LEN];
+    char c_event[1000];
+    char c_file_data[TOTAL_FML][260];
+    char c_file_path[256];
+    char temp_contr[25];
+    /* char temp_conf[25];      commented in Ver 2.1 */
+    char c_ServiceName[33];
+    char c_errmsg[100];
+    char temp_date[24];
+    char c_counter[20];
+    char c_no_rec[20];
+    char c_upl_rec[20];
+    long l_recvbuff;
+    long l_session_id=0;
+    double temp_order; 
+    char c_ord_ack[LEN_XCHNG_ACK]; /* Ver 1.6 */
+   
+    double temp_trd;
+    double d_stt_tx;        /*** Ver 1.2 ***/
+    double d_stt_tx1;       /*** Ver 1.9 ***/
+    double d_incl_brkg;       /*** Ver 1.2 ***/
+    long  l_incl_brkg;        /*** Ver 1.2 ***/
+    long l_incl_all=0;      /*** Ver 2.0 **/
+
+		/* commented in ver 2.6 ***************** 
+    * long l_stamp_dty;       *** Ver 2.0 **
+    * long l_sebi_tt;         *** Ver 2.0 **
+    * long l_tran_chrg;       *** Ver 2.0 **
+    * long l_stt;             *** Ver 2.0 **
+		* long l_src_tx;          *** Ver 2.0 **/ 
+
+    int i_returncode;
+    int i_err[TOTAL_FML];
+    int i,i_counter=0;
+    int i_no_rec=0;
+    int i_upl_rec=0;
+    int i_upldtls=0;
+    int i_upldtls_ea=0;
+    int tran_counter=0;
+    int i_counter_ea=0;
+    int i_upd_brk;
+    int i_upd;
+    int i_upd_brk_hstry;
+		int i_trd_count=0;					/** Ver 4.4 **/
+
+    char c_ordr_ref[25];
+    char c_trd_ref[25];
+    char c_fcd_prc[25];
+    char c_fcd_qty[25];
+    char c_fcd_brk[25];
+    char c_fcd_src[25]; 
+    char c_fcd_stt[25];       /*** Ver 1.2 ***/
+    char c_fcd_stk_prc[25];
+    char c_fcd_trd[3];
+    char c_val;               /** Ver 1.7 **/
+    char c_ecd_stt[25];       /** Ver 1.9 **/
+    char c_fcd_sq_flg[2];     /** Ver 3.6 **/
+
+    /* ver 2.1 starts */
+    char c_ea_prdct_typ;
+    char c_ea_indstk;
+    char c_ea_exer_typ;
+    char c_ea_opt_typ;
+    char c_ea_undrlyng[6+1];
+    long l_ea_strk_prc;
+    char c_ea_strk_prc[10];	 /** Ver 3.4 **/
+    /* ver 2.1 ends */
+
+		/**** Ver 3.8 Starts ***/
+
+		char c_cln_mtch_accnt[11];
+  	char c_xchng_cd[4];
+  	char c_prd_typ;
+  	char c_ind_typ;
+  	char c_opt_typ;
+  	char c_undrlyng[7];
+  	char c_expry_dt[LEN_DATE];
+  	char c_exrc_typ;
+		long int l_strike_prc = 0;
+		int  i_pcp_hstry = 0;
+
+		/**** Ver 3.8 Ends ***/
+    /*** Ver 4.9 GST Specific changes ***/
+    double sql_ecd_igst = 0.0 ;
+    double sql_ecd_cgst = 0.0 ;
+    double sql_ecd_sgst = 0.0 ;
+    double sql_ecd_ugst = 0.0 ;
+    double sql_ccd_igst = 0.0 ;
+    double sql_ccd_cgst = 0.0 ;
+    double sql_ccd_sgst = 0.0 ;
+    double sql_ccd_ugst = 0.0 ;
+    double sql_ecd_igst_prcnt = 0.0 ;
+    double sql_ecd_cgst_prcnt = 0.0 ;
+    double sql_ecd_sgst_prcnt = 0.0 ;
+    double sql_ecd_ugst_prcnt = 0.0 ;
+    double sql_ccd_igst_prcnt = 0.0 ;
+    double sql_ccd_cgst_prcnt = 0.0 ;
+    double sql_ccd_sgst_prcnt = 0.0 ;
+    double sql_ccd_ugst_prcnt = 0.0 ;
+		int i_nll_cnt=0;            
+    /*** Ver 4.9 Ends ***/
+
+    EXEC SQL BEGIN DECLARE SECTION ;
+      varchar d_trd_dt[22+1];
+      varchar c_corp_actn_dt[22+1];     /** Ver 5.1 **/
+      char c_fco_undrlyng[7];
+			long l_stamp_dty;						/** Ver 2.6 */
+			long l_sebi_tt;							/** Ver 2.6 */
+			long l_tran_chrg;						/** Ver 2.6 */
+			long l_stt;									/** Ver 2.6 */
+			long l_src_tx;							/** Ver 2.6 */
+      char c_brkr_upd_flg;        /** Ver 2.8 */
+			int i_opm_igain_count=0;			/** Ver 4.1 */
+      char c_brkr_upd_flg_op;     /** Ver 4.1 */
+      char c_brkr_upd_flg_fp;     /** Ver 4.1 */
+			varchar v_sql_fcm_upd[15000]; /** Ver 4.7 **/
+			varchar v_sql_ftd_upd[15000]; /** Ver 4.7 **/
+			varchar v_sql_fod_upd[15000]; /** Ver 4.7 **/
+			varchar v_sql_pcp_upd[15000]; /** Ver 4.7 **/
+			varchar v_sql_pcp_hupd[15000]; /** Ver 4.7 **/
+			varchar v_sql_fcd_upd[15000];	 /** Ver 5.0 **/
+			varchar c_cust_st_cd[10];				/** Ver 4.9 **/		
+			varchar c_isec_st_cd[10];				/** Ver 4.9 **/
+      varchar v_sql_fec_upd[15000];          /** Ver 5.4 **/
+      varchar v_sql_fab_upd[15000];          /** Ver 5.4 **/
+      varchar v_sql_fec_hstry_upd[15000];    /** Ver 5.4 **/
+      varchar v_sql_fab_hstry_upd[15000];    /** Ver 5.4 **/
+      varchar v_sql_pcpea_upd[15000];          /** Ver 5.4 **/
+      varchar v_sql_pcpea_hstry_upd[15000];    /** Ver 5.4 **/
+      varchar v_sql_fco_upd[15000];            /** Ver 5.4 **/
+      varchar v_sql_fco_hstry_upd[15000];      /** Ver 5.4 **/
+      varchar v_sql_pcpco_upd[15000];          /** Ver 5.4 **/
+      varchar v_sql_pcpco_hstry_upd[15000];          /** Ver 5.4 **/
+      int i_count = 0;                               /** Ver 5.4 **/  
+ 
+    EXEC SQL END DECLARE SECTION;
+		char c_cntrct_specs_tmp[150]={'\0'};		/*** Ver 3.0 ***/
+		char c_cntrct_specs_new[150]={'\0'};		/*** Ver 3.0 ***/
+		char c_token_no[7]={'\0'};							/*** Ver 3.0 ***/
+    char c_cntrct_symbl[24]={'\0'};         /*** Ver 3.0 ***/
+    char c_series_id[24]   ={'\0'};         /*** Ver 3.0 ***/
+		char c_opt_exer_type[2 + 1]={'\0'};			/*** Ver 3.3 ***/
+		char c_opt_type;												/*** Ver 3.3 ***/
+		char c_exer_type;												/*** Ver 3.3 ***/
+		char c_exp_dt_tkn[10]={'\0'};						/*** Ver 3.3 ***/
+		char c_strk_prc_tkn[10]={'\0'};					/*** Ver 3.3 ***/
+
+    ptr_Ibuf = (FBFR32 *)rqst->data;
+    ptr_Obuf = (FBFR32 *)NULL;
+
+    strcpy(c_ServiceName, rqst->name);
+
+    INITDBGLVL(c_ServiceName);  /* ver 1.8 */
+
+    i_counter=0;  /* To count no of Uploaded Contract Notes */
+
+    fn_userlog(c_ServiceName,"=========  SFO_UPL_CONTR   started  =========");
+
+    if(Fget32(ptr_Ibuf,FFO_XCHNG_CD,0,(char *)sql_fcm_excng_cd.arr,0) == -1)
+    {
+      fn_userlog(c_ServiceName,"Exchange code not received");
+      fn_errlog(c_ServiceName,"S31005",FMLMSG,c_errmsg);
+      Fadd32( ptr_Ibuf,FFO_ERR_MSG, c_errmsg, 0 );
+      tpreturn(TPFAIL, 0L, (char *)ptr_Ibuf, 0L, 0);
+    }
+    if(Fget32(ptr_Ibuf,FFO_TRD_DT,0,(char *)d_trd_dt.arr,0) == -1)
+    {
+      fn_userlog(c_ServiceName,"Date not received");
+      fn_errlog(c_ServiceName,"S31010",FMLMSG,c_errmsg);
+      Fadd32( ptr_Ibuf,FFO_ERR_MSG, c_errmsg, 0 );
+      tpreturn(TPFAIL, 0L, (char *)ptr_Ibuf, 0L, 0);
+    }
+
+    if(Fget32(ptr_Ibuf,FFO_OPERATION_TYP,0,(char *)&c_oper_typ,0) == -1)
+    {
+      fn_userlog(c_ServiceName,"FNO or E/A or ClsOut not received");
+      fn_errlog(c_ServiceName,"S31015",FMLMSG,c_errmsg);
+      Fadd32( ptr_Ibuf,FFO_ERR_MSG, c_errmsg, 0 );
+      tpreturn(TPFAIL, 0L, (char *)ptr_Ibuf, 0L, 0);
+    }
+
+    SETLEN(d_trd_dt);
+    SETLEN(sql_fcm_excng_cd); /** Ver 4.4 **/
+
+    /* Ver 1.8 add */
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Exchange code <%s>",sql_fcm_excng_cd.arr);
+      fn_userlog(c_ServiceName,"Trade date <%s>",d_trd_dt.arr);
+      fn_userlog(c_ServiceName,"Trade type <%c>",c_oper_typ);
+    }
+    /* Ver 1.8 add ends */
+		/** ver 4.7 Starts **/
+
+
+
+   if (c_oper_typ == 'F')   /*** if condition added in Ver 5.4 ***/
+   {
+    EXEC SQL
+      TRUNCATE TABLE FCN_FO_CNTRCT_NOTES;
+
+    if(SQLCODE != 0)
+    {
+      fn_errlog(c_ServiceName, "S31020", SQLMSG,c_errmsg);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+    }
+   }
+   else if (c_oper_typ == 'E')   /*** Added in Ver 5.4 ***/
+   {
+
+    fn_userlog(c_ServiceName,"INSIDE TRUNCATE ECN_EA_CNTRCT_NOTES");
+
+    EXEC SQL 
+    TRUNCATE TABLE ECN_EA_CNTRCT_NOTES; 
+
+    if(SQLCODE != 0)
+    {
+      fn_errlog(c_ServiceName, "S31025", SQLMSG,c_errmsg);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+    }
+
+   }
+   else if (c_oper_typ == 'C')   /*** Added in Ver 5.4 ***/
+   {
+  
+    fn_userlog(c_ServiceName,"INSIDE TRUNCATE CCN_CO_CNTRCT_NOTES");   
+ 
+    EXEC SQL
+    TRUNCATE TABLE CCN_CO_CNTRCT_NOTES;
+ 
+    if(SQLCODE != 0)
+    {
+      fn_errlog(c_ServiceName, "S31030", SQLMSG,c_errmsg);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+    }  
+
+   }
+
+
+		/** Ver 4.7 Ends***/
+    if(tuxgetenv("TEMP")== NULL)
+    {
+      fn_errlog(c_ServiceName, "S31035", TPMSG,c_errmsg);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+    }
+
+    /* Populate Send buffer and Return buffer for service SFO_GET_CONTR */
+
+    ptr_Sbuf = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+    if (ptr_Sbuf == NULL)
+    {
+      fn_errlog(c_ServiceName,"S31040",TPMSG,c_errmsg);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+    }
+
+    ptr_Rbuf= (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+    if (ptr_Rbuf== NULL)
+    {
+      fn_errlog(c_ServiceName, "S31045", TPMSG,c_errmsg);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpfree((char *)ptr_Sbuf);
+      tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+    }
+
+    i_err[0]=Fchg32(ptr_Sbuf,FFO_XCHNG_CD,0,(char *)sql_fcm_excng_cd.arr,0);
+    i_err[1]=Fchg32(ptr_Sbuf,FFO_TRD_DT,0,(char *)d_trd_dt.arr,0);
+    i_err[2]=Fchg32(ptr_Sbuf,FFO_OPERATION_TYP,0,(char *)&c_oper_typ,0);
+
+    if(i_err[0]==-1 || i_err[1]==-1 || i_err[2]==-1)
+    {
+      fn_userlog(c_ServiceName,"Error in Input <%d> <%d> <%d>",i_err[0],i_err[1],i_err[2]);
+      tpfree((char*)ptr_Obuf);
+      tpfree((char*)ptr_Rbuf);
+      tpfree((char*)ptr_Sbuf);
+      fn_errlog(c_ServiceName,"S31050",FMLMSG,c_errmsg);
+      Fadd32( ptr_Ibuf,FFO_ERR_MSG, c_errmsg, 0 );
+      tpreturn(TPFAIL, 0L,(char*)ptr_Ibuf,0L, 0);
+    }
+
+    /* call service SFO_GET_CONTR   */
+    i_returncode = tpcall("SFO_GET_CONTR", (char *)ptr_Sbuf, 0,(char **)&ptr_Rbuf, &l_recvbuff, TPNOTRAN|TPNOTIME);
+
+    fn_userlog(c_ServiceName,"193 i_returncode : %d ",i_returncode);
+
+    if (i_returncode == -1)
+    {
+      if (TPCODE != TPESVCFAIL)
+      {
+        fn_userlog(c_ServiceName,"199 i_returncode : %d ",i_returncode);
+        fn_errlog(c_ServiceName, "S31055", TPMSG,c_errmsg);
+      }
+      else
+      {
+        fn_userlog(c_ServiceName,"204 i_returncode : %d ",i_returncode);
+        i_returncode = Fget32(ptr_Rbuf, FFO_ERR_MSG, 0, c_errmsg, 0);
+        if (i_returncode == -1)
+        {
+          fn_errlog(c_ServiceName,"S31060",FMLMSG,c_errmsg);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG, c_errmsg, 0);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+        }
+      }
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG, c_errmsg, 0);
+      tpfree((char*)ptr_Obuf);
+      tpfree((char *)ptr_Sbuf);
+      tpfree((char *)ptr_Rbuf);
+      tpreturn(TPFAIL, 0, (char *)ptr_Ibuf, 0, 0);
+    }
+    /* Get the number of records returned by match */
+
+    Fget32(ptr_Rbuf, FFO_ORD_TOT_QTY,0,(char *)&i_no_rec, 0); 
+
+
+		/** 4.9 add**/
+
+		i_nll_cnt =0;
+
+		EXEC SQL
+      select count(1)
+      into :i_nll_cnt
+      from FCN_FO_CNTRCT_NOTES
+      where FCN_CUST_ST_CD is null;
+    if(SQLCODE !=0 )
+    {
+      fn_errlog(c_ServiceName,"S31065",SQLMSG,c_errmsg);
+      tpfree((char*)ptr_Obuf);
+      tpfree((char *)ptr_Sbuf);
+      tpfree((char *)ptr_Rbuf);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+    }
+    if(i_nll_cnt >0 )
+    {
+      fn_userlog(c_ServiceName,"There are certain record with state code as null from class");
+      tpfree((char*)ptr_Obuf);
+      tpfree((char *)ptr_Sbuf);
+      tpfree((char *)ptr_Rbuf);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+    }
+
+		/** 4.9 add ends **/
+    /** Ver 5.1 starts **/
+    MEMSET(c_corp_actn_dt);
+    if(c_oper_typ =='F' && i_no_rec != 0 )
+    {
+      EXEC SQL
+        select max(FCM_ACTN_DT)
+        into  :c_corp_actn_dt
+        from  FCM_FO_CORP_MSTR
+        where FCM_ACTN_DT <=:d_trd_dt;
+
+      if(SQLCODE !=0  && SQLCODE != NO_DATA_FOUND)
+      {
+        fn_errlog(c_ServiceName,"S31070",SQLMSG,c_errmsg);
+        tpfree((char*)ptr_Obuf);
+        tpfree((char *)ptr_Sbuf);
+        tpfree((char *)ptr_Rbuf);
+        tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+      }
+    }
+    SETNULL(c_corp_actn_dt);
+    fn_userlog(c_ServiceName,"Last corp action date is :%s:",c_corp_actn_dt.arr);
+
+    /** Ver 5.1  Ends **/
+		/*** Ver 4.4 starts **/
+
+		/** join on ftd and fod on order reference taken to skip the trade count mismatch in EBA and CLASS.
+				In coreporate action trade date fod and ftd are different hence join will give only trades 
+				for the day except ofilne corporate action trades 
+		***/ 
+
+		fn_userlog(c_ServiceName,"Number of contracts from class=:%d:",i_no_rec);
+		if(c_oper_typ =='F' && i_no_rec != 0 )				/*** Ver 4.7 record check added for BFO ***/
+		{
+			i_trd_count=0;
+			c_brkr_upd_flg='N';												/** Ver 4.7 */
+			EXEC SQL
+				SELECT sum(trd_cnt),date_flg						/** Ver 4.7 date flag added **/
+				into   :i_trd_count,
+							 :c_brkr_upd_flg
+				from (
+							select 	count(1) trd_cnt,'H' date_flg	from (
+              select FTD_EBA_TRD_REF                          /** Ver 5.1 **/
+							from 		ftd_fo_trd_dtls_hstry,fod_fo_ordr_dtls_hstry		
+							where 	trunc(ftd_trd_dt)= :d_trd_dt
+							and     trunc(ftd_trd_Dt)= fod_trd_dt										
+							and     ftd_ordr_rfrnc = fod_ordr_rfrnc									
+							and   	ftd_xchng_cd = decode(:sql_fcm_excng_cd,'NSE','NFO','BSE','BFO') 
+							and  		ftd_fut_conv_flg ='N'
+              minus
+               select FCT_EBA_TRD_REF from FCT_FO_CORP_TRADES where FCT_TRD_DT= :c_corp_actn_dt
+              minus
+               select FCT_EBA_TRD_REF from FCT_FO_CORP_TRADES_HSTRY where FCT_TRD_DT=:c_corp_actn_dt )
+                      /** Ver 5.1 corp action trades skipped **/
+							union
+							select 	count(1)  trd_cnt,'D' date_flg from (
+              select FTD_EBA_TRD_REF                          /** Ver 5.1 **/
+							from 		ftd_fo_trd_dtls,fod_fo_ordr_dtls
+							where 	trunc(ftd_trd_dt)=:d_trd_dt
+							and     trunc(ftd_trd_Dt)= fod_trd_dt                  
+							and     ftd_ordr_rfrnc = fod_ordr_rfrnc								
+							and     ftd_xchng_cd= decode(:sql_fcm_excng_cd,'NSE','NFO','BSE','BFO')
+							and 		ftd_fut_conv_flg ='N'
+              minus
+               select FCT_EBA_TRD_REF from FCT_FO_CORP_TRADES where FCT_TRD_DT= :c_corp_actn_dt
+              minus
+               select FCT_EBA_TRD_REF from FCT_FO_CORP_TRADES_HSTRY where FCT_TRD_DT=:c_corp_actn_dt )
+                      /** Ver 5.1 corp action trades skipped **/
+					 	) group by date_flg having sum(trd_cnt) > 0;
+			if(SQLCODE != 0 )
+			{
+      	fn_errlog(c_ServiceName,"S31075",SQLMSG,c_errmsg);
+      	tpfree((char*)ptr_Obuf);
+      	tpfree((char *)ptr_Sbuf);
+      	tpfree((char *)ptr_Rbuf);
+      	Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      	tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+			}
+			
+			fn_userlog(c_ServiceName,"Total Trade count for :%s: is=:%d: source_flg:%c:",d_trd_dt.arr,i_trd_count,c_brkr_upd_flg);
+			if ( i_no_rec < i_trd_count)
+			{
+				fn_userlog(c_ServiceName,"Class EBA trade count mismatch. Pls rerun the process and check");
+				strcpy(c_errmsg,"Contract Note count from CLASS seems to be incorrect");
+      	tpfree((char*)ptr_Obuf);
+      	tpfree((char *)ptr_Sbuf);
+      	tpfree((char *)ptr_Rbuf);
+      	Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      	tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+			} 
+		 }
+		
+		/*** Ver 4.4 Ends ***/
+    strcpy(temp_contr,"");
+    /* strcpy(temp_conf,"");        commented in Ver 2.1 */
+    strcpy(c_file_path,tuxgetenv("TEMP"));
+
+		if(strcmp(sql_fcm_excng_cd.arr,"NSE" ) == 0 )			/** Ver 3.0 added if else if **/
+		{
+    	if(c_oper_typ =='F')
+      	strcat(c_file_path,"/fno.txt");
+    	else if(c_oper_typ =='E')
+      	strcat(c_file_path,"/ea.txt");
+
+	/******************************************************************************/      
+	/*  Ver 2.2 */
+    	else if(c_oper_typ =='C')
+      	strcat(c_file_path,"/co.txt");
+	/******************************************************************************/
+	 }
+		/***** Ver 3.0 New Code Starts ****/
+
+	 else if( strcmp(sql_fcm_excng_cd.arr,"BSE" ) == 0 )
+	 {
+    	if(c_oper_typ =='F')
+      	strcat(c_file_path,"/fno_bse.txt");
+    	else if(c_oper_typ =='E')
+      	strcat(c_file_path,"/ea_bse.txt");
+    	else if(c_oper_typ =='C')
+      	strcat(c_file_path,"/co_bse.txt");
+	 }
+		/***** Ver 3.0 New Code Ends ****/
+
+    fn_userlog(c_ServiceName,"Reading from the file  :%s: ",c_file_path);
+    
+    fpfile=(FILE *)fopen(c_file_path,"r");
+
+    if (fpfile == NULL)
+    {
+      fn_errlog(c_ServiceName,"S31080",TPMSG,c_errmsg);
+      Fadd32(ptr_Ibuf,FFO_ERR_MSG,c_errmsg,0);
+        tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+    }
+
+    if( tpbegin(2000,0)== -1)
+    {
+      fn_userlog(c_ServiceName,"TPBEGIN failed");
+      fn_errlog(c_ServiceName,"S31085",TPMSG,c_errmsg);
+      tpfree((char*)ptr_Obuf);
+      tpfree((char *)ptr_Sbuf);
+      tpfree((char *)ptr_Rbuf);
+      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+      tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+    }
+    
+    i_upldtls=0;
+    i_upldtls_ea=0;
+
+    if (c_oper_typ=='F'  && i_no_rec != 0 ) 	/** Ver 4.7 record check added **/
+    {
+				/** Ver 4.7 New Code Starts **/
+        SETLEN(sql_fcm_excng_cd);
+        i_upldtls = 0;
+
+			  /** Ver 4.8 starts here **/
+
+				EXEC SQL
+					UPDATE FCN_FO_CNTRCT_NOTES                                      
+					SET    UCCCODE = ( select CLM_CLNT_CD                       
+                   					 from   CLM_CLNT_MSTR      
+                   					 where  CLM_MTCH_ACCNT = CLIENTCODE       
+                 					 );                                             
+
+				 
+			  if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+        {
+          fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+          fn_errlog(c_ServiceName,"S31090",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+			 /** Ver 4.8 ends here **/
+			 /** Ver 4.8 starts **/
+				fn_userlog(c_ServiceName,"Updating Records in Temp Contract master for GST Values");
+				EXEC SQL
+					UPDATE FCN_FO_CNTRCT_NOTES 
+					set 	FCN_BRKRG_IGST=(BROKERAGE * (FCN_IGST_PRCNT/100)),
+								FCN_BRKRG_CGST=(BROKERAGE * (FCN_CGST_PRCNT/100)),
+								FCN_BRKRG_SGST=(BROKERAGE * (FCN_SGST_PRCNT/100)),
+								FCN_BRKRG_UGST=(BROKERAGE * (FCN_UGST_PRCNT/100)),
+								FCN_TRN_IGST=((TURNOVER_CHARGE+TRANSACTION_CHARGE)* (FCN_IGST_PRCNT/100)),
+								FCN_TRN_CGST=((TURNOVER_CHARGE+TRANSACTION_CHARGE)* (FCN_CGST_PRCNT/100)),
+								FCN_TRN_SGST=((TURNOVER_CHARGE+TRANSACTION_CHARGE)* (FCN_SGST_PRCNT/100)),
+								FCN_TRN_UGST=((TURNOVER_CHARGE+TRANSACTION_CHARGE)* (FCN_UGST_PRCNT/100)) ;
+        if (SQLCODE !=0)
+        {
+          fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+          fn_errlog(c_ServiceName,"S31095",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+			 /** Ver 4.9 ends here **/
+
+				fn_userlog(c_ServiceName,"Inserting Records in Contract master");
+        EXEC SQL
+        INSERT INTO  FNO_CNTRCT_MSTR
+        (
+          FCM_USR_MTCH_ACCNO,
+          FCM_USR_NM,
+          FCM_ADD_LN1,
+          FCM_ADD_LN2,
+          FCM_ADD_LN3,
+          FCM_ADD_LN4,
+          FCM_PAN_NO,
+          FCM_TEL_NO,
+          FCM_EXCNG_CD,
+          FCM_CNTRCT_NMBR,
+          FCM_CNTRCT_DT,
+          FCM_CNTRCT_FLG, 
+          FCM_UCC_CD,
+					FCM_PRNCPL_BUIS_STATE_CD,					/** ver 4.9 GST columns introduced **/
+					FCM_PRNCPL_BUIS_BRNCH_CD,
+					FCM_CUST_GST_ST_CD,
+					FCM_ISEC_GSTIN,
+					FCM_CUST_GSTIN,
+					FCM_CGST_PRCNT,
+					FCM_SGST_PRCNT,
+					FCM_IGST_PRCNT,
+					FCM_UGST_PRCNT
+        )
+				SELECT distinct  
+							trim(CLIENTCODE),
+							rtrim(CLIENTNAME),
+							rtrim(ADDRESSLINE1),
+							rtrim(ADDRESSLINE2),
+							rtrim(ADDRESSLINE3),
+							rtrim(ADDRESSLINE4),
+							trim(PANNO),
+							trim(TELNO),
+							:sql_fcm_excng_cd,
+							trim(CONTRACTNO),
+							to_date(substr(CONTRACTDATE,1,11),'yyyy-mm-dd'),
+							'',
+							trim(UCCCODE),
+							NVL(GSTM_ISEC_STATE_CD,' '),
+							/** nvl(decode(ICD_CUST_TYPE,'NRI','NR','APO','AP',FCN_ISEC_ST_CD),' '),		** ver 4.9 GST columns introduced **/
+							NVL(GSTM_ISEC_BRANCH_CD,' '),
+							/** NVL(FCN_CUST_ST_CD, ' '), **/
+							/*NVL(DECODE(ICD_CUST_TYPE,'NRI','NR',DECODE(FCN_CUST_ST_CD,'00','AP',FCN_CUST_ST_CD)),' '), **Post live chng*/
+							DECODE(FCN_CUST_ST_CD,'00','27',FCN_CUST_ST_CD),
+							NVL(GSTM_ISEC_GST_NO,' '),
+							NVL(ICD_GSTIN,' '),
+							NVL(FCN_CGST_PRCNT, 0) ,
+							NVL(FCN_SGST_PRCNT, 0) ,
+							NVL(FCN_IGST_PRCNT, 0) ,
+							NVL(FCN_UGST_PRCNT, 0) 
+				FROM FCN_FO_CNTRCT_NOTES,
+	           UAC_USR_ACCNTS,						 /** Ver 4.9 GST Specific Tables introduced **/
+             ICD_INFO_CLIENT_DTLS,
+						 GSTM_GST_STATE_MSTR
+				WHERE uac_clm_mtch_accnt=trim(CLIENTCODE)
+				AND   ICD_USER_ID = UAC_USR_ID
+				AND   GSTM_STATE_CD =FCN_CUST_ST_CD;
+
+        if (SQLCODE !=0)
+        {
+					if(SQLCODE  == -1 )
+					{
+						 fn_userlog(c_ServiceName,"Process Already Run Once Pls check.");
+					}
+          fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+          fn_errlog(c_ServiceName,"S31100",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+				fn_userlog(c_ServiceName,"No of orws inserted in FCM :%d:",sqlca.sqlerrd[2]);
+				i_counter =sqlca.sqlerrd[2];
+
+				fn_userlog(c_ServiceName,"Now inserting records in FNO_CNTRCT_DTLS");
+				EXEC SQL  
+				 INSERT INTO FNO_CNTRCT_DTLS
+									(
+										FCD_CNTRCT_NMBR,
+										FCD_USR_MTCH_ACCNO,
+										FCD_ORDR_REF,
+										FCD_TRD_REF,
+										FCD_TRD_DT,
+										FCD_TRD_FLW,
+										FCD_PRC,
+										FCD_QTY,
+										FCD_BRKG,
+										FCD_SRC_TX,
+										FCD_STRK_PRC,
+										FCD_CNTRCT_AMT,
+										FCD_CNTRCT_SPECS,
+										FCD_CNTRCT_INST_TYP,
+										FCD_CNTRCT_SYMBL,
+										FCD_CNTRCT_OPTN_TYP,
+										FCD_EXPR_DT,
+										FCD_CA_LEVEL,
+										FCD_STT ,     
+										FCD_ORD_DT_TM ,
+										FCD_AMT_INSTT , 
+										FCD_TOTAL,     
+										FCD_STAMP_DUTY,
+										FCD_SEBI_TT,   
+										FCD_TRAN_CHRG, 
+										FCD_OTHER_CHRG,
+										FCD_SERIES_CD,
+										FCD_MKT_LOT,
+										FCD_NO_OF_CNTRCTS, 
+										FCD_BRKRG_PER_CNTRCT,
+										FCD_SQ_FLG,
+										FCD_TOTAL_CGST,									/** ver 4.9 GST columns introduced **/
+										FCD_TOTAL_SGST,
+										FCD_TOTAL_IGST,
+										FCD_TOTAL_UGST,
+										FCD_BRKRG_CGST,
+										FCD_BRKRG_SGST,
+										FCD_BRKRG_IGST,
+										FCD_BRKRG_UGST,
+										FCD_TRN_CGST,
+										FCD_TRN_SGST,
+										FCD_TRN_IGST,
+										FCD_TRN_UGST
+									)
+					SELECT trim(CONTRACTNO),
+										trim(CLIENTCODE),
+										to_number(trim(ORDERNO),'99999999999999999999'),
+										trim(TRADE_NO),
+										to_date(substr(TRADEDATE,1,19),'YYYY-MM-dd hh24:mi:ss'),
+										BUYSELL,
+										PRICE,
+										QUANTITY,
+										BROKERAGE,
+										SERVICETAX,
+										STRIKEPRICE,
+										AMOUNT_WITH_STT,
+										rtrim(SCRIPNAME),
+										rtrim(INSTRUMENTTYPE),
+										rtrim(SYMBOL),
+										rtrim(OPTION_TYPE),
+										/*to_date(substr(EXPIRYDATE,1,19),'YYYY-MM-DD HH24:MI:SS'), **/
+										to_date(EXPIRYDATE,'dd-mm-yyyy'),
+										CALEVEL,
+										STT,
+										to_date(substr(ORDERDATETIME,1,19),'YYYY-MM-DD HH24:MI:SS'),
+										AMOUNT_WITH_STT,
+										TRADEAMOUNT,
+										STAMP_DUTY,
+										TURNOVER_CHARGE,
+										TRANSACTION_CHARGE,
+										OTHER_CHARGES,
+										SERIES_CD,
+										MKT_LOT,
+										BRKRG_PER_CNTRCT,
+										NO_OF_CNTRCTS,
+										rtrim(EBA_SQ_FLAG),
+										FCN_TOTAL_CGST,
+										FCN_TOTAL_SGST,
+										FCN_TOTAL_IGST,
+										FCN_TOTAL_UGST,
+										FCN_BRKRG_CGST,							/** Ver 4.9 GST values included ***/
+										FCN_BRKRG_SGST,
+										FCN_BRKRG_IGST,						
+										FCN_BRKRG_UGST,
+										FCN_TRN_CGST,
+										FCN_TRN_SGST,
+										FCN_TRN_IGST,
+										FCN_TRN_UGST
+										from FCN_FO_CNTRCT_NOTES;
+
+					if(SQLCODE != 0  && SQLCODE != -1)
+					{
+						fn_errlog(c_ServiceName,"S31105",SQLMSG,c_errmsg);
+						tpfree((char*)ptr_Obuf);
+						tpfree((char *)ptr_Sbuf);
+						tpfree((char *)ptr_Rbuf);
+						Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+						tpabort(0);
+						tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+					}
+					fn_userlog(c_ServiceName,"No of orws inserted in FCD :%d:",sqlca.sqlerrd[2]);
+					i_upl_rec = sqlca.sqlerrd[2];
+					fn_userlog(c_ServiceName,"Now Updating Principal buisness GST Details");
+					/** GST Code to be written **/	
+					fn_userlog(c_ServiceName,"Now Updating FTD_FO_TRD_DTLS_HSTRY");
+
+      		MEMSET(v_sql_fcm_upd);
+      		MEMSET(v_sql_ftd_upd);
+      		MEMSET(v_sql_fod_upd);
+      		MEMSET(v_sql_pcp_upd);
+      		MEMSET(v_sql_pcp_hupd);
+					MEMSET(v_sql_fcd_upd);		/** Ver 5.0 **/
+          /**** Ver 5.5 *** FBD_GRP_ID!=3 added in below query ***/
+					sprintf(v_sql_fcm_upd.arr,
+							"MERGE INTO fno_cntrct_mstr A \
+		      	 	 USING (SELECT FBD_CLM_MTCH_ACCNT, \
+													 FBD_TRD_DT, \
+													 NVL(FBD_DC_AMT,0)/100 FBD_AMNT, \
+													 NVL(FBD_DC_FLG,'D') CNTRCT_FLG \
+											FROM 		FBD_FO_BNK_DRCR  \
+											WHERE 	FBD_TRD_DT = TO_DATE('%s','DD-MON-YYYY') \
+                      AND  FBD_GRP_ID!=3 \
+			     						AND  FBD_XCHNG_CD =decode('%s','NSE','NFO','BSE','BFO')) TEMP \
+		      		ON    (A.FCM_USR_MTCH_ACCNO  = TEMP.FBD_CLM_MTCH_ACCNT \
+		      		AND     trunc(A.FCM_CNTRCT_DT) = TEMP.FBD_TRD_DT ) \
+		      		WHEN MATCHED  THEN  UPDATE  SET \
+		      		A.FCM_NET_PAY_AMNT   = TEMP.FBD_AMNT, \
+		      		A.FCM_CNTRCT_FLG	   = TEMP.CNTRCT_FLG",d_trd_dt.arr,sql_fcm_excng_cd.arr);	
+
+					if(c_brkr_upd_flg == 'H' )
+					{
+						/*** Comment Starts in Ver 5.3 ***
+	      		sprintf(v_sql_ftd_upd.arr,
+								"MERGE INTO FTD_FO_TRD_DTLS_HSTRY A \
+		      			 USING (SELECT * FROM FNO_CNTRCT_DTLS WHERE TRUNC(FCD_TRD_DT) = TO_DATE('%s','DD-MON-YYYY')) TEMP \
+		      			 ON    (A.FTD_CLM_MTCH_ACCNT  = TEMP.FCD_USR_MTCH_ACCNO \
+		      			 AND   trunc(a.ftd_trd_dt) = trunc(TEMP.FCD_TRD_DT) \
+		      			 AND   A.FTD_XCHNG_CD  = decode('%s','NSE','NFO','BSE','BFO') \
+                 AND  A.FTD_TRD_FLW = TEMP.FCD_TRD_FLW \
+		      			 AND   (A.FTD_XCHNG_TRD_NO) = trim(TEMP.FCD_TRD_REF) ) \
+		      			 WHEN MATCHED  THEN  UPDATE  SET \
+		      			 A.FTD_BRKG    		=  decode(nvl(FTD_BRKG_TYPE,'N'),'N',TEMP.FCD_BRKG *100,a.FTD_BRKG), \
+		      			 A.FTD_SRC_TX			= TEMP.FCD_SRC_TX*100, \
+		      			 A.FTD_BRKRG_IGST			= TEMP.FCD_TOTAL_IGST*100, \
+		      			 A.FTD_BRKRG_CGST			= TEMP.FCD_TOTAL_CGST*100, \
+		      			 A.FTD_BRKRG_SGST			= TEMP.FCD_TOTAL_SGST*100, \
+		      			 A.FTD_BRKRG_UGST			= TEMP.FCD_TOTAL_UGST*100, \
+		      			 A.FTD_STAMP_DUTY = TEMP.FCD_STAMP_DUTY*100, \
+		      			 A.FTD_SEBI_TT 		= TEMP.FCD_SEBI_TT*100, \
+		      			 A.FTD_TRAN_CHRG 	= TEMP.FCD_TRAN_CHRG*100, \
+		      			 A.FTD_OTHER_CHRG = TEMP.FCD_OTHER_CHRG*100, \
+		      			 A.FTD_TRD_NET_VAL= nvl(a.FTD_TRD_NET_VAL,0) + \
+																			(TEMP.FCD_CNTRCT_AMT * 100), \
+		      			 A.FTD_CNTRCTNT_NMBR = TEMP.FCD_CNTRCT_NMBR, \
+		      			 A.FTD_STT      	= TEMP.FCD_STT*100",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+							*** Comment Ends for Ver 5.3 ***/
+							/*** Ver 5.3 Starts ***/
+							fn_userlog(c_ServiceName,"**** FTD_HISTORY Querry ****");
+					    sprintf(v_sql_ftd_upd.arr,
+                "MERGE INTO FTD_FO_TRD_DTLS_HSTRY A \
+                 USING (SELECT FCD_USR_MTCH_ACCNO, trunc(FCD_TRD_DT) FCD_TRD_DT, FCD_TRD_FLW,FCD_TRD_REF,FCD_BRKG,FCD_SRC_TX,FCD_TOTAL_IGST,FCD_TOTAL_CGST,FCD_TOTAL_SGST,FCD_TOTAL_UGST,FCD_STAMP_DUTY,FCD_SEBI_TT,FCD_TRAN_CHRG,FCD_OTHER_CHRG,FCD_CNTRCT_AMT,FCD_CNTRCT_NMBR,FCD_STT FROM FNO_CNTRCT_DTLS WHERE TRUNC(FCD_TRD_DT) = TO_DATE('%s','DD-MON-YYYY')) TEMP \
+                 ON    (A.FTD_CLM_MTCH_ACCNT  = TEMP.FCD_USR_MTCH_ACCNO \
+                 AND   trunc(a.ftd_trd_dt) = TEMP.FCD_TRD_DT \
+                 AND   A.FTD_XCHNG_CD  = decode('%s','NSE','NFO','BSE','BFO') \
+                 AND  A.FTD_TRD_FLW = TEMP.FCD_TRD_FLW \
+                 AND   (A.FTD_XCHNG_TRD_NO) = trim(TEMP.FCD_TRD_REF) ) \
+                 WHEN MATCHED  THEN  UPDATE  SET \
+                 A.FTD_BRKG       =  decode(nvl(FTD_BRKG_TYPE,'N'),'N',TEMP.FCD_BRKG *100,a.FTD_BRKG), \
+                 A.FTD_SRC_TX     = TEMP.FCD_SRC_TX*100, \
+                 A.FTD_BRKRG_IGST     = TEMP.FCD_TOTAL_IGST*100, \
+                 A.FTD_BRKRG_CGST     = TEMP.FCD_TOTAL_CGST*100, \
+                 A.FTD_BRKRG_SGST     = TEMP.FCD_TOTAL_SGST*100, \
+                 A.FTD_BRKRG_UGST     = TEMP.FCD_TOTAL_UGST*100, \
+                 A.FTD_STAMP_DUTY = TEMP.FCD_STAMP_DUTY*100, \
+                 A.FTD_SEBI_TT    = TEMP.FCD_SEBI_TT*100, \
+                 A.FTD_TRAN_CHRG  = TEMP.FCD_TRAN_CHRG*100, \
+                 A.FTD_OTHER_CHRG = TEMP.FCD_OTHER_CHRG*100, \
+                 A.FTD_TRD_NET_VAL= nvl(a.FTD_TRD_NET_VAL,0) + \
+                                      (TEMP.FCD_CNTRCT_AMT * 100), \
+                 A.FTD_CNTRCTNT_NMBR = TEMP.FCD_CNTRCT_NMBR, \
+                 A.FTD_STT        = TEMP.FCD_STT*100",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+
+							/*** Ver 5.3 Ends ***/
+	  
+					 sprintf(v_sql_fod_upd.arr,
+		      		"MERGE INTO FOD_FO_ORDR_DTLS_HSTRY A \
+		      	 	USING (select trunc(ftd_trd_dt) TRD_DT, \
+				    							 FTD_CNTRCTNT_NMBR, \
+				    							 FTD_CLM_MTCH_ACCNT, \
+				    							 FTD_ORD_ACK_NMBR, \
+				    							 FTD_XCHNG_CD, \
+				    							 FTD_ORDR_RFRNC, \
+				    						sum(ftd_brkg+FTD_SRC_TX+FTD_STT+FTD_TRAN_CHRG+FTD_SEBI_TT+FTD_STAMP_DUTY+FTD_OTHER_CHRG+FTD_BRKRG_IGST+FTD_BRKRG_CGST+FTD_BRKRG_SGST+FTD_BRKRG_UGST) TOTAL_BRKG \
+			      				from  ftd_fo_trd_dtls_hstry \
+			      				where trunc(ftd_trd_dt)=TO_DATE('%s','DD-MON-YYYY') \
+			      				AND   FTD_XCHNG_CD= decode('%s','NSE','NFO','BSE','BFO') \
+			      				group by  FTD_CNTRCTNT_NMBR, \
+															FTD_CLM_MTCH_ACCNT, \
+															FTD_XCHNG_CD, \
+														  FTD_ORDR_RFRNC, \
+															FTD_ORD_ACK_NMBR, \
+															trunc(ftd_trd_dt) \
+			    					) TEMP \
+		      		ON  ( A.FOD_CLM_MTCH_ACCNT =TEMP.FTD_CLM_MTCH_ACCNT \
+		      		AND 	A.FOD_ORDR_RFRNC = TEMP.FTD_ORDR_RFRNC \
+		      		AND  	A.FOD_ACK_NMBR = TEMP.FTD_ORD_ACK_NMBR \
+		      		AND  	A.FOD_XCHNG_CD = TEMP.FTD_XCHNG_CD \
+		      		AND  	A.FOD_TRD_DT = TEMP.TRD_DT) \
+		      		WHEN 	MATCHED  THEN \
+		     	 		UPDATE  SET \
+		      					A.FOD_TRD_BRKG = TEMP.TOTAL_BRKG, \
+		      					A.FOD_CNTRCTNT_NMBR = TEMP.FTD_CNTRCTNT_NMBR",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+
+          		/*** Add Start in Ver 5.0 *** Comment starts in Ver 5.2 
+          	fn_userlog(c_ServiceName,"Now Updating FCD_SQ_FLG in FNO_CNTRCT_DTLS table");
+          	sprintf(v_sql_fcd_upd.arr,
+            	"MERGE INTO FNO_CNTRCT_DTLS A \
+            	USING (SELECT FTD_CLM_MTCH_ACCNT, \
+                          FTD_XCHNG_TRD_NO, \
+                          FTD_TRD_FLW, \
+                          FTD_TRD_DT, \
+                          FTD_XCHNG_CD, \
+                          FOD_SETLMNT_FLG \
+                    	FROM    FOD_FO_ORDR_DTLS_HSTRY, FTD_FO_TRD_DTLS_HSTRY  \
+                    	WHERE   FOD_TRD_DT = TO_DATE('%s','DD-MON-YYYY') \
+                    	AND  FOD_XCHNG_CD = decode('%s','NSE','NFO','BSE','BFO') \
+                    	AND  FOD_ORDR_RFRNC = FTD_ORDR_RFRNC \
+                    	AND  FOD_ACK_NMBR = FTD_ORD_ACK_NMBR \
+                    	) TEMP \
+             		ON    (A.FCD_USR_MTCH_ACCNO  = TEMP.FTD_CLM_MTCH_ACCNT \
+             		AND    trim(A.FCD_TRD_REF) = TEMP.FTD_XCHNG_TRD_NO \
+             		AND    trunc(A.FCD_TRD_DT) = trunc(TEMP.FTD_TRD_DT) \
+             		AND  	 A.FCD_TRD_FLW = TEMP.FTD_TRD_FLW \
+             		AND    TEMP.FOD_SETLMNT_FLG = 'P') \
+             		WHEN MATCHED  THEN  UPDATE  SET \
+             		A.FCD_SQ_FLG   = DECODE(NVL(A.FCD_SQ_FLG,'N'),'Y','B','P')",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+
+          		SETLEN(v_sql_fcd_upd);
+
+          	*** Add Ends in Ver 5.0 *** Comment ends for ver 5.2 ***/
+              /*** Add Start in Ver 5.2 ***/
+            	fn_userlog(c_ServiceName,"Now Updating FCD_SQ_FLG in FNO_CNTRCT_DTLS table");
+            	sprintf(v_sql_fcd_upd.arr,
+              "MERGE INTO FNO_CNTRCT_DTLS A \
+              USING (SELECT FTD_CLM_MTCH_ACCNT, \
+                          FTD_XCHNG_TRD_NO, \
+                          FTD_TRD_FLW, \
+                          FOD_TRD_DT, \
+                          FTD_XCHNG_CD, \
+                          FOD_SETLMNT_FLG \
+                      FROM    FOD_FO_ORDR_DTLS_HSTRY, FTD_FO_TRD_DTLS_HSTRY  \
+                      WHERE   FOD_TRD_DT = TO_DATE('%s','DD-MON-YYYY') \
+                      AND  FOD_XCHNG_CD = decode('%s','NSE','NFO','BSE','BFO') \
+                      AND  FOD_ORDR_RFRNC = FTD_ORDR_RFRNC \
+                      AND  FOD_ACK_NMBR = FTD_ORD_ACK_NMBR \
+                      ) TEMP \
+                ON    (A.FCD_USR_MTCH_ACCNO  = TEMP.FTD_CLM_MTCH_ACCNT \
+                AND    trim(A.FCD_TRD_REF) = TEMP.FTD_XCHNG_TRD_NO \
+                AND    trunc(A.FCD_TRD_DT) = TEMP.FOD_TRD_DT \
+                AND    A.FCD_TRD_FLW = TEMP.FTD_TRD_FLW \
+                AND    TEMP.FOD_SETLMNT_FLG = 'P') \
+                WHEN MATCHED  THEN  UPDATE  SET \
+                A.FCD_SQ_FLG   = DECODE(NVL(A.FCD_SQ_FLG,'N'),'Y','B','P')",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+
+              SETLEN(v_sql_fcd_upd);
+
+            /*** Add Ends in Ver 5.2 ***/
+				  }	
+					else if(c_brkr_upd_flg == 'D' )
+					{
+						/*** Comment Starts in Ver 5.3 ***
+	      		sprintf(v_sql_ftd_upd.arr,
+								"MERGE INTO FTD_FO_TRD_DTLS A \
+		      			 USING (SELECT * FROM FNO_CNTRCT_DTLS WHERE TRUNC(FCD_TRD_DT) = TO_DATE('%s','DD-MON-YYYY')) TEMP \
+		      			 ON    (A.FTD_CLM_MTCH_ACCNT  = TEMP.FCD_USR_MTCH_ACCNO \
+		      			 AND   trunc(a.ftd_trd_dt) = trunc(TEMP.FCD_TRD_DT) \
+                 AND  A.FTD_TRD_FLW = TEMP.FCD_TRD_FLW \
+		      			 AND   A.FTD_XCHNG_CD  = decode('%s','NSE','NFO','BSE','BFO') \
+		      			 AND   (A.FTD_XCHNG_TRD_NO) = trim(TEMP.FCD_TRD_REF) ) \
+		      			 WHEN MATCHED  THEN  UPDATE  SET \
+		      			 A.FTD_BRKG    		=  decode(nvl(FTD_BRKG_TYPE,'N'),'N',TEMP.FCD_BRKG *100,a.FTD_BRKG), \
+		      			 A.FTD_SRC_TX			= TEMP.FCD_SRC_TX*100, \
+		      			 A.FTD_BRKRG_IGST			= TEMP.FCD_TOTAL_IGST*100, \
+		      			 A.FTD_BRKRG_CGST			= TEMP.FCD_TOTAL_CGST*100, \
+		      			 A.FTD_BRKRG_SGST			= TEMP.FCD_TOTAL_SGST*100, \
+		      			 A.FTD_BRKRG_UGST			= TEMP.FCD_TOTAL_UGST*100, \
+		      			 A.FTD_STAMP_DUTY = TEMP.FCD_STAMP_DUTY*100, \
+		      			 A.FTD_SEBI_TT 		= TEMP.FCD_SEBI_TT*100, \
+		      			 A.FTD_TRAN_CHRG 	= TEMP.FCD_TRAN_CHRG*100, \
+		      			 A.FTD_OTHER_CHRG = TEMP.FCD_OTHER_CHRG*100, \
+		      			 A.FTD_TRD_NET_VAL	= nvl(a.FTD_TRD_NET_VAL,0) + \
+																			(TEMP.FCD_CNTRCT_AMT * 100), \
+		      			 A.FTD_CNTRCTNT_NMBR = TEMP.FCD_CNTRCT_NMBR, \
+		      			 A.FTD_STT      	= TEMP.FCD_STT*100",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+             *** Comment Ends for Ver 5.3 ***/
+						 /*** Ver 5.3 Starts ***/
+             fn_userlog(c_ServiceName,"**** FTD_MAIN Querry ****");
+						 sprintf(v_sql_ftd_upd.arr,
+                "MERGE INTO FTD_FO_TRD_DTLS A \
+                 USING (SELECT FCD_USR_MTCH_ACCNO, trunc(FCD_TRD_DT) FCD_TRD_DT, FCD_TRD_FLW,FCD_TRD_REF,FCD_BRKG,FCD_SRC_TX,FCD_TOTAL_IGST,FCD_TOTAL_CGST,FCD_TOTAL_SGST,FCD_TOTAL_UGST,FCD_STAMP_DUTY,FCD_SEBI_TT,FCD_TRAN_CHRG,FCD_OTHER_CHRG,FCD_CNTRCT_AMT,FCD_CNTRCT_NMBR,FCD_STT FROM FNO_CNTRCT_DTLS WHERE TRUNC(FCD_TRD_DT) = TO_DATE('%s','DD-MON-YYYY')) TEMP \
+                 ON    (A.FTD_CLM_MTCH_ACCNT  = TEMP.FCD_USR_MTCH_ACCNO \
+                 AND   trunc(a.ftd_trd_dt) = TEMP.FCD_TRD_DT \
+                 AND  A.FTD_TRD_FLW = TEMP.FCD_TRD_FLW \
+                 AND   A.FTD_XCHNG_CD  = decode('%s','NSE','NFO','BSE','BFO') \
+                 AND   (A.FTD_XCHNG_TRD_NO) = trim(TEMP.FCD_TRD_REF) ) \
+                 WHEN MATCHED  THEN  UPDATE  SET \
+                 A.FTD_BRKG       =  decode(nvl(FTD_BRKG_TYPE,'N'),'N',TEMP.FCD_BRKG *100,a.FTD_BRKG), \
+                 A.FTD_SRC_TX     = TEMP.FCD_SRC_TX*100, \
+                 A.FTD_BRKRG_IGST     = TEMP.FCD_TOTAL_IGST*100, \
+                 A.FTD_BRKRG_CGST     = TEMP.FCD_TOTAL_CGST*100, \
+                 A.FTD_BRKRG_SGST     = TEMP.FCD_TOTAL_SGST*100, \
+                 A.FTD_BRKRG_UGST     = TEMP.FCD_TOTAL_UGST*100, \
+                 A.FTD_STAMP_DUTY = TEMP.FCD_STAMP_DUTY*100, \
+                 A.FTD_SEBI_TT    = TEMP.FCD_SEBI_TT*100, \
+                 A.FTD_TRAN_CHRG  = TEMP.FCD_TRAN_CHRG*100, \
+                 A.FTD_OTHER_CHRG = TEMP.FCD_OTHER_CHRG*100, \
+                 A.FTD_TRD_NET_VAL  = nvl(a.FTD_TRD_NET_VAL,0) + \
+                                      (TEMP.FCD_CNTRCT_AMT * 100), \
+                 A.FTD_CNTRCTNT_NMBR = TEMP.FCD_CNTRCT_NMBR, \
+                 A.FTD_STT        = TEMP.FCD_STT*100",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+						 /*** Ver 5.3 Ends ***/
+
+	  
+					sprintf(v_sql_fod_upd.arr,
+		      	"MERGE INTO FOD_FO_ORDR_DTLS A \
+		      	 USING (select trunc(ftd_trd_dt) TRD_DT, \
+				    							 FTD_CNTRCTNT_NMBR, \
+				    							 FTD_CLM_MTCH_ACCNT, \
+				    							 FTD_ORD_ACK_NMBR, \
+				    							 FTD_XCHNG_CD, \
+				    							 FTD_ORDR_RFRNC, \
+				    						sum(ftd_brkg+FTD_SRC_TX+FTD_STT+FTD_TRAN_CHRG+FTD_SEBI_TT+FTD_STAMP_DUTY+FTD_OTHER_CHRG+FTD_BRKRG_IGST+FTD_BRKRG_CGST+FTD_BRKRG_SGST+FTD_BRKRG_UGST) TOTAL_BRKG \
+			      				from  ftd_fo_trd_dtls_hstry \
+			      				where trunc(ftd_trd_dt)=TO_DATE('%s','DD-MON-YYYY') \
+			      				AND   FTD_XCHNG_CD= decode('%s','NSE','NFO','BSE','BFO') \
+			      				group by  FTD_CNTRCTNT_NMBR, \
+															FTD_CLM_MTCH_ACCNT, \
+															FTD_XCHNG_CD, \
+														  FTD_ORDR_RFRNC, \
+															FTD_ORD_ACK_NMBR, \
+															trunc(ftd_trd_dt) \
+			    					) TEMP \
+		      		ON  ( A.FOD_CLM_MTCH_ACCNT =TEMP.FTD_CLM_MTCH_ACCNT \
+		      		AND 	A.FOD_ORDR_RFRNC = TEMP.FTD_ORDR_RFRNC \
+		      		AND  	A.FOD_ACK_NMBR = TEMP.FTD_ORD_ACK_NMBR \
+		      		AND  	A.FOD_XCHNG_CD = TEMP.FTD_XCHNG_CD \
+		      		AND  	A.FOD_TRD_DT = TEMP.TRD_DT) \
+		      		WHEN 	MATCHED  THEN \
+		     	 		UPDATE  SET \
+		      					A.FOD_TRD_BRKG = TEMP.TOTAL_BRKG, \
+		      					A.FOD_CNTRCTNT_NMBR = TEMP.FTD_CNTRCTNT_NMBR",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+
+
+            /*** Add Start in Ver 5.0 *** Comment starts for Ver 5.2 **
+            fn_userlog(c_ServiceName,"Now Updating FCD_SQ_FLG in FNO_CNTRCT_DTLS table");
+            sprintf(v_sql_fcd_upd.arr,
+            "MERGE INTO FNO_CNTRCT_DTLS A \
+              USING (SELECT FTD_CLM_MTCH_ACCNT, \
+                          FTD_XCHNG_TRD_NO, \
+                          FTD_TRD_FLW, \
+                          FTD_TRD_DT, \
+                          FTD_XCHNG_CD, \
+                          FOD_SETLMNT_FLG \
+                      FROM    FOD_FO_ORDR_DTLS, FTD_FO_TRD_DTLS  \
+                      WHERE   FOD_TRD_DT = TO_DATE('%s','DD-MON-YYYY') \
+                      AND  FOD_XCHNG_CD = decode('%s','NSE','NFO','BSE','BFO') \
+                      AND  FOD_ORDR_RFRNC = FTD_ORDR_RFRNC \
+                      AND  FOD_ACK_NMBR = FTD_ORD_ACK_NMBR \
+                     ) TEMP \
+              ON    (A.FCD_USR_MTCH_ACCNO  = TEMP.FTD_CLM_MTCH_ACCNT \
+              AND    trim(A.FCD_TRD_REF) = TEMP.FTD_XCHNG_TRD_NO \
+              AND     trunc(A.FCD_TRD_DT) = trunc(TEMP.FTD_TRD_DT) \
+              AND  A.FCD_TRD_FLW = TEMP.FTD_TRD_FLW \
+              AND     TEMP.FOD_SETLMNT_FLG = 'P') \
+              WHEN MATCHED  THEN  UPDATE  SET \
+              A.FCD_SQ_FLG   = DECODE(NVL(A.FCD_SQ_FLG,'N'),'Y','B','P')",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+
+            SETLEN(v_sql_fcd_upd);
+            *** Add Ends in Ver 5.0 *** Comments ends for Ver 5.2 ***/
+          	/*** Add Start in Ver 5.2 ***/
+          	fn_userlog(c_ServiceName,"Now Updating FCD_SQ_FLG in FNO_CNTRCT_DTLS table");
+          	sprintf(v_sql_fcd_upd.arr,
+            "MERGE INTO FNO_CNTRCT_DTLS A \
+            	USING (SELECT FTD_CLM_MTCH_ACCNT, \
+                          FTD_XCHNG_TRD_NO, \
+                          FTD_TRD_FLW, \
+                          FOD_TRD_DT, \
+                          FTD_XCHNG_CD, \
+                          FOD_SETLMNT_FLG \
+              	      FROM    FOD_FO_ORDR_DTLS, FTD_FO_TRD_DTLS  \
+                	    WHERE   FOD_TRD_DT = TO_DATE('%s','DD-MON-YYYY') \
+                  	  AND  FOD_XCHNG_CD = decode('%s','NSE','NFO','BSE','BFO') \
+                    	AND  FOD_ORDR_RFRNC = FTD_ORDR_RFRNC \
+                    	AND  FOD_ACK_NMBR = FTD_ORD_ACK_NMBR \
+                     ) TEMP \
+             	ON    (A.FCD_USR_MTCH_ACCNO  = TEMP.FTD_CLM_MTCH_ACCNT \
+             	AND    trim(A.FCD_TRD_REF) = TEMP.FTD_XCHNG_TRD_NO \
+             	AND     trunc(A.FCD_TRD_DT) = TEMP.FOD_TRD_DT \
+             	AND  A.FCD_TRD_FLW = TEMP.FTD_TRD_FLW \
+             	AND     TEMP.FOD_SETLMNT_FLG = 'P') \
+             	WHEN MATCHED  THEN  UPDATE  SET \
+             	A.FCD_SQ_FLG   = DECODE(NVL(A.FCD_SQ_FLG,'N'),'Y','B','P')",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+
+          	SETLEN(v_sql_fcd_upd);
+          	/*** Add Ends in Ver 5.2 ***/
+					}
+					else
+					{
+							fn_userlog(c_ServiceName,"Need to check the trade details in History or main table");
+					}
+		
+					sprintf(v_sql_pcp_upd.arr,
+		      		"MERGE INTO PCP_PRTFL_CNTRCT_PRDCT A \
+		     			 USING (SELECT FTD_CLM_MTCH_ACCNT, \
+				    								 FTD_XCHNG_CD, \
+				    								 FTD_PRDCT_TYP, \
+				    								 FTD_INDSTK, \
+				    								 FTD_UNDRLYNG, \
+				    								 FTD_EXER_TYP, \
+				    								 FTD_EXPRY_DT, \
+				    								 FTD_OPT_TYP, \
+				    								 FTD_STRK_PRC, \
+				    					sum(ftd_brkg+FTD_SRC_TX+FTD_STT+FTD_TRAN_CHRG+FTD_SEBI_TT+FTD_STAMP_DUTY+FTD_OTHER_CHRG+FTD_BRKRG_IGST+FTD_BRKRG_CGST+FTD_BRKRG_SGST+FTD_BRKRG_UGST) TOTAL_BRKG \
+			    						FROM 	FTD_FO_TRD_DTLS_HSTRY \
+			    						WHERE trunc(ftd_trd_dt)=TO_DATE('%s','DD-MON-YYYY') \
+			    						AND   FTD_XCHNG_CD= decode('%s','NSE','NFO','BSE','BFO') \
+			    						group by FTD_CLM_MTCH_ACCNT, \
+				      									FTD_XCHNG_CD, \
+				      									FTD_PRDCT_TYP, \
+				      									FTD_INDSTK, \
+				      									FTD_UNDRLYNG, \
+				      									FTD_EXER_TYP, \
+				      									FTD_EXPRY_DT, \
+				      									FTD_OPT_TYP, \
+				      									FTD_STRK_PRC \
+			  						) TEMP \
+		    			ON 	(  A.PCP_CLM_MTCH_ACCNT = TEMP.FTD_CLM_MTCH_ACCNT \
+		    			and 	 A.PCP_XCHNG_CD = TEMP.FTD_XCHNG_CD \
+		    			and  	 A.PCP_PRDCT_TYP = TEMP.FTD_PRDCT_TYP \
+		    			and 	 A.PCP_INDSTK = TEMP.FTD_INDSTK \
+		    			and 	 A.PCP_UNDRLYNG = TEMP.FTD_UNDRLYNG \
+		    			and 	 A.PCP_EXPRY_DT = TEMP.FTD_EXPRY_DT \
+		    			and 	 A.PCP_EXER_TYP =TEMP.FTD_EXER_TYP \
+		    			and 	 A.PCP_STRK_PRC = TEMP.FTD_STRK_PRC \
+		    			and 	 A.PCP_OPT_TYP = TEMP.FTD_OPT_TYP) \
+		    		  WHEN   MATCHED THEN UPDATE SET \
+		    			A.PCP_BRKG_VAL = nvl(A.PCP_BRKG_VAL,0)+TEMP.TOTAL_BRKG",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+		
+		
+		   		sprintf(v_sql_pcp_hupd.arr,
+		      	"MERGE INTO PCP_PRTFL_CNTRCT_PRDCT_HSTRY A	\
+		      	USING (SELECT FTD_CLM_MTCH_ACCNT,	\
+				    							FTD_XCHNG_CD,	\
+				    							FTD_PRDCT_TYP,	\
+				    							FTD_INDSTK,	\
+				    							FTD_UNDRLYNG,	\
+				    							FTD_EXER_TYP,	\
+				    							FTD_EXPRY_DT,	\
+				    							FTD_OPT_TYP,	\
+				    							FTD_STRK_PRC,	\
+				    						sum(ftd_brkg+FTD_SRC_TX+FTD_STT+FTD_TRAN_CHRG+FTD_SEBI_TT+FTD_STAMP_DUTY+FTD_OTHER_CHRG+FTD_BRKRG_IGST+FTD_BRKRG_CGST+FTD_BRKRG_SGST+FTD_BRKRG_UGST) TOTAL_BRKG \
+			    					FROM 	FTD_FO_TRD_DTLS_HSTRY	\
+			    					WHERE trunc(ftd_trd_dt)=TO_DATE('%s','DD-MON-YYYY')	\
+			    					AND   FTD_XCHNG_CD= decode('%s','NSE','NFO','BSE','BFO')	\
+			    					group by FTD_CLM_MTCH_ACCNT,	\
+				      							 FTD_XCHNG_CD,	\
+				      							 FTD_PRDCT_TYP,	\
+				      							 FTD_INDSTK,	\
+				      							 FTD_UNDRLYNG,	\
+				      							 FTD_EXER_TYP,	\
+				      							 FTD_EXPRY_DT,	\
+				      							 FTD_OPT_TYP,	\
+				      							 FTD_STRK_PRC	\
+			  						) TEMP	\
+		    	 	ON (  A.PCP_CLM_MTCH_ACCNT = TEMP.FTD_CLM_MTCH_ACCNT	\
+		    		and 	A.PCP_XCHNG_CD = TEMP.FTD_XCHNG_CD	\
+		    		and 	A.PCP_PRDCT_TYP = TEMP.FTD_PRDCT_TYP	\
+		    		and 	A.PCP_INDSTK = TEMP.FTD_INDSTK	\
+		    		and 	A.PCP_UNDRLYNG = TEMP.FTD_UNDRLYNG	\
+		    		and 	A.PCP_EXPRY_DT = TEMP.FTD_EXPRY_DT	\
+		    		and 	A.PCP_EXER_TYP =TEMP.FTD_EXER_TYP	\
+		    		and 	A.PCP_STRK_PRC = TEMP.FTD_STRK_PRC	\
+		    		and 	A.PCP_OPT_TYP = TEMP.FTD_OPT_TYP)	\
+		    		WHEN 	MATCHED THEN UPDATE SET	\
+		    					A.PCP_BRKG_VAL = nvl(A.PCP_BRKG_VAL,0)+TEMP.TOTAL_BRKG",d_trd_dt.arr,sql_fcm_excng_cd.arr);
+		
+		  	SETLEN(v_sql_fcm_upd);
+		  	SETLEN(v_sql_ftd_upd);
+		  	SETLEN(v_sql_fod_upd);
+		  	SETLEN(v_sql_pcp_upd);
+		  	SETLEN(v_sql_pcp_hupd);
+		  	fn_userlog(c_ServiceName,"FCM UPD  Query string length :%d:",v_sql_fcm_upd.len);
+				fn_userlog(c_ServiceName,"FCD UPD  Query string length :%d:",v_sql_fcd_upd.len);	/** Ver 5.0 **/
+		  	fn_userlog(c_ServiceName,"FTD Query string length :%d:",v_sql_ftd_upd.len);
+		  	fn_userlog(c_ServiceName,"FOD Query string length :%d:",v_sql_fod_upd.len);
+		  	fn_userlog(c_ServiceName,"PCP_M Query string length :%d:",v_sql_pcp_upd.len);
+		  	fn_userlog(c_ServiceName,"PCP_H Query string length :%d:",v_sql_pcp_hupd.len);
+		  	/*fn_userlog(c_ServiceName,"FOD Query String :%s:",v_sql_fod_upd.arr);	
+		  	fn_userlog(c_ServiceName,"FTD Query String :%s:",v_sql_ftd_upd.arr);
+		  	fn_userlog(c_ServiceName,"PCP_M Query String :%s:",v_sql_pcp_upd.arr);       
+		  	fn_userlog(c_ServiceName,"PCP_H Query String :%s:",v_sql_pcp_hupd.arr); */
+		
+		  	EXEC SQL DECLARE sql_fcm_stmt STATEMENT;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31110",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}	
+
+				/*** Add Starts in Ver 5.0 ***/
+				EXEC SQL DECLARE sql_fcd_stmt STATEMENT;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31115",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+				/*** Add Ends in Ver 5.0 ***/
+		
+		  	EXEC SQL DECLARE sql_ftd_stmt STATEMENT;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31120",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}	
+				EXEC SQL DECLARE sql_fod_stmt STATEMENT;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31125",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}	
+				EXEC SQL DECLARE sql_pcpm_stmt STATEMENT;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31130",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}	
+		
+				EXEC SQL DECLARE sql_pcph_stmt STATEMENT;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31135",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+		
+		  	EXEC SQL PREPARE sql_fcm_stmt FROM :v_sql_fcm_upd ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31140",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+	
+				/*** Add Starts in Ver 5.0 ***/
+				EXEC SQL PREPARE sql_fcd_stmt FROM :v_sql_fcd_upd ;
+				if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31145",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+				/*** Add Ends in Ver 5.0 ***/
+		
+		  	EXEC SQL PREPARE sql_ftd_stmt FROM :v_sql_ftd_upd ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31150",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+		  	EXEC SQL PREPARE sql_fod_stmt FROM :v_sql_fod_upd ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31155",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}	
+		  	EXEC SQL PREPARE sql_pcpm_stmt FROM :v_sql_pcp_upd ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31160",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}	
+		  	EXEC SQL PREPARE sql_pcph_stmt FROM :v_sql_pcp_hupd ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31165",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+
+		 		EXEC SQL EXECUTE sql_fcm_stmt ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31170",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+		  	fn_userlog(c_ServiceName,"Total FCM rows Updated for Payin and amount and flag :%d:",sqlca.sqlerrd[2]);
+
+				/*** Add Starts in Ver 5.0 ***/
+        EXEC SQL EXECUTE sql_fcd_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31175",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+				fn_userlog(c_ServiceName,"FCD rows Updated for Physical and Cash Settlement :%d:",sqlca.sqlerrd[2]);
+				/*** Add Ends in Ver 5.0 ***/
+
+
+		 		EXEC SQL EXECUTE sql_ftd_stmt ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31180",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+		  	fn_userlog(c_ServiceName,"Total Trades Updated:%d:",sqlca.sqlerrd[2]);
+		  	EXEC SQL EXECUTE sql_fod_stmt ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31185",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+		  	fn_userlog(c_ServiceName,"Total Orders Updated:%d:",sqlca.sqlerrd[2]);
+
+		  	EXEC SQL EXECUTE sql_pcpm_stmt ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31190",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+		  	fn_userlog(c_ServiceName,"Total Portfolio Updated IN main :%d:",sqlca.sqlerrd[2]);
+
+		  	EXEC SQL EXECUTE sql_pcph_stmt ;
+		  	if(SQLCODE != 0 )
+		  	{
+		      fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+		      fn_errlog(c_ServiceName,"S31195",SQLMSG,c_errmsg);
+		      tpfree((char*)ptr_Obuf);
+		      tpfree((char *)ptr_Sbuf);
+		      tpfree((char *)ptr_Rbuf);
+		      Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+		      tpabort(0);
+		      tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+		  	}
+		  	fn_userlog(c_ServiceName,"Total Portfolio Updated IN hisory :%d:",sqlca.sqlerrd[2]);
+				fn_userlog(c_ServiceName,"End of operation Type F processing");
+				/** ver 4.7 New Code Ends **/
+		}/*End of if */
+		else if (c_oper_typ=='E')
+		{
+      /*** Commented in Ver 5.4 ******************************************************************
+
+							while ( fgets(c_data, CDATA_LEN, fpfile))
+							{
+								sql_ecd_cgst=0.0;											** ver 4.9 GST variables introduced **
+								sql_ecd_sgst=0.0;
+								sql_ecd_igst=0.0;
+								sql_ecd_ugst=0.0;
+	 							sql_ecd_igst_prcnt = 0.0 ;
+	 							sql_ecd_cgst_prcnt = 0.0 ;
+	 							sql_ecd_sgst_prcnt = 0.0 ;
+	 							sql_ecd_ugst_prcnt = 0.0 ;
+								MEMSET(c_cust_st_cd);
+								MEMSET(c_isec_st_cd);
+								tran_counter=tran_counter+1;
+								strcpy(c_temp,c_data);
+
+								strcpy(sql_ecm_usr_mtch_accno.arr,strtok(c_data,"|"));
+								strcpy(sql_ecm_usr_nm.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_add_ln1.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_add_ln2.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_add_ln3.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_add_ln4.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_pan_no.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_tel_no.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_cntrct_nmbr.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecm_cntrct_dt.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecd_cntrct_specs.arr,strtok(null_ptr,"|"));
+
+								sscanf((char *)strtok(null_ptr,"|"),"%c",&sql_ecd_ea_flg);
+
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_cntrct_amt);
+								sscanf((char *)strtok(null_ptr,"|"),"%d",&sql_ecd_qty);
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_brkg);
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_src_tx);
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecm_total_amount);
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_setlmnt_prc);
+
+								strcpy(sql_ecd_cntrct_inst_typ.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecd_cntrct_symbl.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecd_expr_dt.arr,strtok(null_ptr,"|"));
+								strcpy(sql_ecd_cntrct_optn_typ.arr,strtok(null_ptr,"|"));
+
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_strk_prc);
+
+								strcpy(sql_ecd_ca_level.arr,strtok(null_ptr,"|"));
+								MEMSET(c_ecd_stt);                                  * Ver 1.9 *
+								strcpy(c_ecd_stt,strtok(null_ptr,"|"));             * Ver 1.9 *
+								d_stt_tx1=atof(c_ecd_stt);                          * Ver 1.9 *
+						
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_sebi_tt);    ** Ver 2.0 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_tran_chrg);  ** Ver 2.0 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_other_chrg); ** Ver 2.0 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_stamp_duty); ** Ver 2.0 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_cgst); ** Ver 4.9 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_sgst); ** Ver 4.9 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_igst); ** Ver 4.9 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_ugst); ** Ver 4.9 **
+								strcpy(c_cust_st_cd.arr,strtok(null_ptr,"|"));					** Ver 4.9 **
+								strcpy(c_isec_st_cd.arr,strtok(null_ptr,"|"));					** Ver 4.9 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_cgst_prcnt); ** Ver 4.9 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_sgst_prcnt); ** Ver 4.9 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_igst_prcnt); ** Ver 4.9 **
+								sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ecd_ugst_prcnt); ** Ver 4.9 **
+					
+								* SQL returns date-time with milliseconds.
+									Hence truncate date string as Oracle does not support this date format *
+
+								sql_ecm_cntrct_dt.arr[19]='\0';
+								sql_ecd_expr_dt.arr[19]='\0';
+
+								if(DEBUG_MSG_LVL_3)     
+								{
+									fn_userlog(c_ServiceName,"sql_ecm_usr_nm <%s>",sql_ecm_usr_nm.arr);
+									fn_userlog(c_ServiceName,"sql_ecm_add_ln1 <%s>",sql_ecm_add_ln1.arr);
+									fn_userlog(c_ServiceName,"sql_ecm_add_ln2 <%s>",sql_ecm_add_ln2.arr);
+									fn_userlog(c_ServiceName,"sql_ecm_add_ln3 <%s>",sql_ecm_add_ln3.arr);
+									fn_userlog(c_ServiceName,"sql_ecm_add_ln4 <%s>",sql_ecm_add_ln4.arr);
+									fn_userlog(c_ServiceName,"sql_ecm_pan_no <%s>",sql_ecm_pan_no.arr);
+									fn_userlog(c_ServiceName,"sql_ecm_tel_no <%s>",sql_ecm_tel_no.arr);
+									fn_userlog(c_ServiceName,"sql_ecd_cntrct_specs <%s>",sql_ecd_cntrct_specs.arr);
+									fn_userlog(c_ServiceName,"Contract note <%s>",sql_ecm_cntrct_nmbr.arr);
+									fn_userlog(c_ServiceName,"Match accnt <%s>",sql_ecm_usr_mtch_accno.arr);
+									fn_userlog(c_ServiceName,"sql_ecm_cntrct_dt <%s>",sql_ecm_cntrct_dt.arr);
+									fn_userlog(c_ServiceName,"Transaction Type(match) <%c>",c_oper_typ);
+									*fn_userlog(c_ServiceName,"STT E(match) double <%lf>",d_stt_tx1);    ***Ver 1.9 ***
+									fn_userlog(c_ServiceName,"STT E(match) char <%s>",c_ecd_stt);    ***Ver 1.9 ***
+									fn_userlog(c_ServiceName,"STT E(match) double <%lf>",d_stt_tx1);          ***Ver 1.9 ***
+									fn_userlog(c_ServiceName,"sql_fcm_excng_cd <%s>",sql_fcm_excng_cd.arr);       ***Ver 1.9 ***
+									fn_userlog(c_ServiceName,"sql_ecd_sebi_tt <%lf>",sql_ecd_sebi_tt);            ***Ver 2.0 ***
+									fn_userlog(c_ServiceName,"sql_ecd_tran_chrg <%lf>",sql_ecd_tran_chrg);        ***Ver 2.0 ***
+									fn_userlog(c_ServiceName,"sql_sql_ecd_other_chrg <%lf>",sql_ecd_other_chrg);  ***Ver 2.0 ***
+									fn_userlog(c_ServiceName,"sql_ecd_stamp_duty <%lf>",sql_ecd_stamp_duty);      ***Ver 2.0 ***
+								}
+
+								SETLEN(sql_ecm_usr_mtch_accno);
+								SETLEN(sql_ecm_usr_nm);
+								SETLEN(sql_ecm_add_ln1);
+								SETLEN(sql_ecm_add_ln2);
+								SETLEN(sql_ecm_add_ln3);
+								SETLEN(sql_ecm_add_ln4);
+								SETLEN(sql_ecm_pan_no);
+								SETLEN(sql_ecm_tel_no);
+								SETLEN(sql_ecm_cntrct_nmbr);
+								SETLEN(sql_ecd_expr_dt);
+								SETLEN(sql_ecm_cntrct_dt);
+								SETLEN(sql_ecd_cntrct_specs);
+								SETLEN(sql_ecd_cntrct_inst_typ);
+								SETLEN(sql_ecd_cntrct_symbl);
+								SETLEN(sql_ecd_cntrct_optn_typ);
+								SETLEN(sql_ecd_ca_level);
+								SETLEN(c_cust_st_cd);					** Ver 4.9 **
+								SETLEN(c_isec_st_cd);					** Ver 4.9 **
+
+								fn_userlog(c_ServiceName,"111");    
+								if(DEBUG_MSG_LVL_3)
+								{
+									fn_userlog(c_ServiceName,"cust state code:%s:",c_cust_st_cd.arr);
+									fn_userlog(c_ServiceName,"isec state code:%s:",c_isec_st_cd.arr);
+									fn_userlog(c_ServiceName,"cgst val :%lf:",sql_ecd_cgst);
+									fn_userlog(c_ServiceName,"sgst val :%lf:",sql_ecd_sgst);
+									fn_userlog(c_ServiceName,"igst val :%lf:",sql_ecd_igst);
+									fn_userlog(c_ServiceName,"ugst val :%lf:",sql_ecd_ugst);
+									fn_userlog(c_ServiceName,"cgst per val :%lf:",sql_ecd_cgst_prcnt);
+									fn_userlog(c_ServiceName,"sgst per val :%lf:",sql_ecd_sgst_prcnt);
+									fn_userlog(c_ServiceName,"igst per val :%lf:",sql_ecd_igst_prcnt);
+									fn_userlog(c_ServiceName,"ugst per val :%lf:",sql_ecd_ugst_prcnt);
+								}
+								* Ver 2.1 starts *
+								c_ea_prdct_typ = sql_ecd_cntrct_inst_typ.arr[0];
+								c_ea_indstk = sql_ecd_cntrct_inst_typ.arr[3];
+								c_ea_exer_typ = sql_ecd_cntrct_optn_typ.arr[1];
+								c_ea_opt_typ = sql_ecd_cntrct_optn_typ.arr[0];
+
+								EXEC SQL
+								SELECT :sql_ecd_strk_prc*100
+								INTO   :l_ea_strk_prc
+								FROM DUAL;
+								if( SQLCODE != 0 )
+								{
+									tpabort(0);
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									fn_errlog(c_ServiceName,"S31200",SQLMSG,c_errmsg);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,c_errmsg, 0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+
+								MEMSET( c_ea_undrlyng );
+
+								fn_userlog(c_ServiceName,"Map Val Is :%s:",sql_ecd_cntrct_symbl.arr);
+								****** Ver 3.0 Comment Starts *************
+									EXEC SQL
+									SELECT rtrim(sem_stck_cd)
+									INTO :c_ea_undrlyng
+									FROM sem_stck_map
+									WHERE sem_map_vl= :sql_ecd_cntrct_symbl
+									AND sem_entty = 3;     ** Sem entity is 1 for NSE **				***	Ver	2.5	Sem Entty Changed From 1 To 3	***
+								***************** Ver 3.0 comment Ends **********
+
+								MEMSET(c_xchng_cd); *** Ver 3.8 ***
+
+								****** Ver 3.0 New code Starts **********
+								if( strcmp(sql_fcm_excng_cd.arr ,"NSE") == 0)							
+								{
+									EXEC SQL
+									SELECT rtrim(sem_stck_cd)
+									INTO :c_ea_undrlyng
+									FROM sem_stck_map
+									WHERE sem_map_vl= :sql_ecd_cntrct_symbl
+									AND sem_entty = 3; 
+
+									strcpy(c_xchng_cd,"NFO"); *** Ver 3.8 ***
+								}
+								else if(strcmp(sql_fcm_excng_cd.arr ,"BSE") == 0)	
+								{
+									if(strncmp(sql_ecd_cntrct_specs.arr,"MSX",3) == 0)
+									{
+										strcpy(sql_ecd_cntrct_symbl.arr,"MSX");
+										fn_userlog(c_ServiceName,"symbol for SEM MAP val is :%S:",sql_ecd_cntrct_symbl);
+										SETLEN(sql_ecd_cntrct_symbl);
+									}
+							 
+									EXEC SQL
+										SELECT rtrim(sem_stck_cd)
+										INTO :c_ea_undrlyng
+										FROM sem_stck_map
+										WHERE sem_map_vl= :sql_ecd_cntrct_symbl
+										AND sem_entty = 13;		
+
+									strcpy(c_xchng_cd,"BFO"); *** Ver 3.8 ***
+								}		
+								********* Ver 3.0 New Code Ends *********	
+								if( SQLCODE !=0 )
+								{
+									tpabort(0);
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									fn_errlog(c_ServiceName,"S31205",SQLMSG,c_errmsg);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,c_errmsg, 0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+
+								if(DEBUG_MSG_LVL_3)
+								{
+									fn_userlog(c_ServiceName,"c_ea_prdct_typ <%c>", c_ea_prdct_typ);
+									fn_userlog(c_ServiceName,"c_ea_indstk <%c>", c_ea_indstk);
+									fn_userlog(c_ServiceName,"c_ea_exer_typ <%c>", c_ea_exer_typ);
+									fn_userlog(c_ServiceName,"c_ea_opt_typ <%c>", c_ea_opt_typ);
+									fn_userlog(c_ServiceName,"l_ea_strk_prc <%ld>", l_ea_strk_prc);
+									fn_userlog(c_ServiceName,"c_ea_undrlyng <%s>", c_ea_undrlyng);
+									fn_userlog(c_ServiceName,"sql_ecd_cntrct_symbl <%s>", sql_ecd_cntrct_symbl.arr);
+									fn_userlog(c_ServiceName,"sql_ecd_expr_dt <%s>", sql_ecd_expr_dt.arr);
+									fn_userlog(c_ServiceName,"c_xchng_cd <%s>", c_xchng_cd); *** Ver 3.8 ***
+								}
+								* Ver 2.1 ends *
+
+								if( tpcommit(0)== -1)
+								{
+									tpabort(0);
+									fn_userlog(c_ServiceName,"TPCOMMIT failed");
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									fn_errlog(c_ServiceName,"S31210",TPMSG,c_errmsg);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,c_errmsg, 0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+								if( tpbegin(2000,0)== -1)
+								{
+									fn_userlog(c_ServiceName,"TPBEGIN failed");
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									fn_errlog(c_ServiceName,"S31215",TPMSG,c_errmsg);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+
+								i_upldtls_ea=0;
+								SETLEN(sql_fcm_excng_cd);             ** Ver 1.9**
+
+ 
+								EXEC SQL
+								INSERT INTO  EA_CONF_MSTR
+								( ECM_USR_MTCH_ACCNO,
+									ECM_USR_NM,
+									ECM_ADD_LN1,
+									ECM_ADD_LN2,
+									ECM_ADD_LN3,
+									ECM_ADD_LN4,
+									ECM_PAN_NO,
+									ECM_TEL_NO,
+									ECM_EXCNG_CD, 
+									ECM_CNTRCT_NMBR,
+									ECM_CNTRCT_DT,
+									ECM_TOTAL_AMOUNT,
+									ECM_CUST_ST_CD,															** Ver 4.9 GST specific column added **
+									ECM_ISEC_ST_CD,
+									ECM_IGST_PRCNT,										
+									ECM_CGST_PRCNT,
+									ECM_SGST_PRCNT,
+									ECM_UGST_PRCNT
+								)
+								values
+								(
+									:sql_ecm_usr_mtch_accno,
+									:sql_ecm_usr_nm,
+									:sql_ecm_add_ln1,
+									:sql_ecm_add_ln2,
+									:sql_ecm_add_ln3,
+									:sql_ecm_add_ln4,
+									:sql_ecm_pan_no,
+									:sql_ecm_tel_no,
+									:sql_fcm_excng_cd,
+									:sql_ecm_cntrct_nmbr,
+									to_date(:sql_ecm_cntrct_dt,'yyyy-mm-dd HH24:MI:SS'),
+									:sql_ecm_total_amount,
+									trim(:c_cust_st_cd),												** Ver 4.9 GST specific column added **
+									trim(:c_isec_st_cd),
+									:sql_ecd_igst_prcnt,
+									:sql_ecd_cgst_prcnt,
+									:sql_ecd_sgst_prcnt,
+									:sql_ecd_ugst_prcnt
+								);
+
+								if(SQLCODE == -1)
+								{
+									if(strcmp(temp_contr,sql_ecm_cntrct_nmbr.arr) ==0)
+									i_upldtls_ea = 1;
+								}
+								else if (SQLCODE !=0)
+								{
+									 fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+									 fn_errlog(c_ServiceName,"S31220",SQLMSG,c_errmsg);
+									 tpfree((char*)ptr_Obuf);
+									 tpfree((char *)ptr_Sbuf);
+									 tpfree((char *)ptr_Rbuf);
+									 Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+									 tpabort(0);
+									 tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+							}
+
+
+							* Increment counter only if record is uploaded *
+
+							if(SQLCODE == 0)
+							{
+								strcpy(temp_contr,sql_ecm_cntrct_nmbr.arr);
+								i_counter = i_counter + 1;
+								i_upldtls_ea = 1;
+							}
+									
+							sqlca.sqlerrd[2]=0;
+							strcpy(SQLMSG,"");
+								
+						  ** Ver 4.8 starts here **
+
+              EXEC SQL
+                UPDATE EA_CONF_MSTR 
+                SET    ECM_UCC_CD  = ( select CLM_CLNT_CD
+                                       from   CLM_CLNT_MSTR
+                                       where  CLM_MTCH_ACCNT = ECM_USR_MTCH_ACCNO 
+                                     ),
+											 (ECM_PRNCPL_BUIS_STATE_CD,
+												ECM_PRNCPL_BUIS_BRNCH_CD,
+												ECM_CUST_ST_CD,
+												ECM_ISEC_GSTIN,
+												ECM_CUST_GSTIN
+											 )=	(select NVL(GSTM_ISEC_STATE_CD,' '),
+			     												NVL(GSTM_ISEC_BRANCH_CD,' '),
+																*	nvl(decode(ICD_CUST_TYPE,'NRI','NR',DECODE(ECM_CUST_ST_CD,'00','AP',ECM_CUST_ST_CD)),' '), ** post live comment*
+																	DECODE(ECM_CUST_ST_CD,'00','27',ECM_CUST_ST_CD),
+			     												NVL(GSTM_ISEC_GST_NO,' '),
+																	NVL(ICD_GSTIN,' ')
+														FROM GSTM_GST_STATE_MSTR,UAC_USR_ACCNTS,ICD_INFO_CLIENT_DTLS
+		       									WHERE UAC_CLM_MTCH_ACCNT=ECM_USR_MTCH_ACCNO
+		       									AND   ICD_USER_ID = UAC_USR_ID
+		       									AND   GSTM_STATE_CD =ECM_CUST_ST_CD
+													)																	** Ver 4.9 added GST column updates ***
+								WHERE trunc(ECM_CNTRCT_DT)=:d_trd_dt ;
+
+							if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+                {
+                   fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+                   fn_errlog(c_ServiceName,"S31225",SQLMSG,c_errmsg);
+                   tpfree((char*)ptr_Obuf);
+                   tpfree((char *)ptr_Sbuf);
+                   tpfree((char *)ptr_Rbuf);
+                   Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+                   tpabort(0);
+                   tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+              }
+
+							** Ver 4.8 Ends here **
+
+
+							* Insert record in details table only if a record is inserted in master table   *
+
+							**** Ver 3.0 Starts **
+							if( strcmp(sql_fcm_excng_cd.arr,"BSE" ) == 0 ) 
+							{
+								strcpy(c_cntrct_specs_tmp," ");
+								strcpy(c_cntrct_specs_new," ");
+								strcpy(c_cntrct_specs_tmp,sql_ecd_cntrct_specs.arr);
+								fn_userlog(c_ServiceName,"Contract Specification From Class:%s:",c_cntrct_specs_tmp);
+								fn_userlog(c_ServiceName,"Symbol From Class:%s:",sql_ecd_cntrct_symbl.arr);
+
+							** Ver 3.4 starts **
+
+								MEMSET(c_ea_strk_prc);
+								sprintf(c_ea_strk_prc,"%.2f",(double)l_ea_strk_prc/100);
+
+								if(DEBUG_MSG_LVL_3)
+								{
+									fn_userlog(c_ServiceName,"sql_ecd_cntrct_inst_typ From Class:%s:",sql_ecd_cntrct_inst_typ.arr);
+									fn_userlog(c_ServiceName,"sql_ecd_expr_dt From Class:%s:",sql_ecd_expr_dt.arr);
+									fn_userlog(c_ServiceName,"sql_ecd_cntrct_optn_typ From Class:%s:",sql_ecd_cntrct_optn_typ.arr);
+									fn_userlog(c_ServiceName,"sql_ecd_strk_prc From Class:%d:",sql_ecd_strk_prc);
+									fn_userlog(c_ServiceName,"l_ea_strk_prc/100 From Class:%ld:",l_ea_strk_prc/100);
+									fn_userlog(c_ServiceName,"c_ea_strk_prc for Contr Spec is  :%ld:",c_ea_strk_prc);
+								}
+								*** Ver 3.4 Ends **
+
+								if(strncmp(sql_ecd_cntrct_inst_typ.arr,"OPT",3) == 0)
+								{
+									EXEC SQL
+								**		SELECT substr(:c_cntrct_specs_tmp,8,3)   ||
+													 '-'                               ||
+													 SEM_STCK_CD                      ||
+													 substr(:c_cntrct_specs_tmp,14,10) ||
+													 substr(:c_cntrct_specs_tmp,27,9)  ||
+													 substr(:c_cntrct_specs_tmp,24,3)    *** ver 3.4 comment **
+
+									SELECT   'OPT'             || '-'  ||
+													 SEM_STCK_CD       || '-'  ||
+													 to_char(to_date(:sql_ecd_expr_dt,'DD-MM-YYYY'),'DDMONYYYY')  || '-'  ||
+													 :c_ea_strk_prc 	 || '-'   ||
+													 :sql_ecd_cntrct_optn_typ              ** Ver 3.4 Select clause changed **
+										INTO   :c_cntrct_specs_new
+										FROM  sem_stck_map
+										WHERE SEM_MAP_VL = :sql_ecd_cntrct_symbl 
+										AND 	SEM_ENTTY = 13;
+								}  
+								else
+								{
+									 EXEC SQL
+										* SELECT substr(:c_cntrct_specs_tmp,8,3)   ||
+														 '-'                              ||
+														SEM_STCK_CD                     ||
+														substr(:c_cntrct_specs_tmp,14,10)					*** ver 3.4 Comment **
+										 SELECT  'FUT'        || '-' ||
+														 SEM_STCK_CD  || '-' ||
+														 to_char(to_date(:sql_ecd_expr_dt,'DD-MM-YYYY'),'DDMONYYYY')
+																																	** Ver 3.4 Select clause changed **
+											INTO   :c_cntrct_specs_new
+											FROM  sem_stck_map
+											WHERE SEM_MAP_VL = :sql_ecd_cntrct_symbl
+											AND 	SEM_ENTTY = 13;
+								}
+
+								if(SQLCODE != 0)
+								{
+									fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+									fn_errlog(c_ServiceName,"S31230",SQLMSG,c_errmsg);
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+									tpabort(0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+								if(SQLCODE != NO_DATA_FOUND)
+								{
+										fn_userlog(c_ServiceName,"NO data found in SEM for :%s:",sql_ecd_cntrct_symbl.arr);
+								}
+								strcpy(sql_ecd_cntrct_specs.arr,c_cntrct_specs_new);
+								rtrim(c_cntrct_specs_new);
+								fn_userlog(c_ServiceName,"Formatted Contract Specification :%s:",c_cntrct_specs_new);
+								fn_userlog(c_ServiceName,"Formatted Contract Specification :%s:",sql_ecd_cntrct_specs.arr);
+							}
+
+									**** Ver 3.0 Ends ***
+
+							fn_userlog(c_ServiceName,"Inserting EA_CONF_DTLS ");
+							if(i_upldtls_ea ==1)
+							{
+							 EXEC SQL
+							 INSERT INTO  EA_CONF_DTLS
+								 (ECD_CNTRCT_NMBR,
+									ECD_USR_MTCH_ACCNO,
+									ECD_EA_DT,
+									ECD_QTY,
+									ECD_BRKG,
+									ECD_SRC_TX,
+									ECD_STRK_PRC,
+									ECD_EA_FLG,
+									ECD_CNTRCT_SPECS,
+									ECD_SETLMNT_PRC,
+									ECD_EXPR_DT,
+									ECD_CNTRCT_AMT,
+									ECD_CNTRCT_OPTN_TYP,
+									ECD_CNTRCT_INST_TYP,
+									ECD_CNTRCT_SYMBL,
+									ECD_CA_LEVEL,
+									ECD_STT,                          ** Ver 1.9**
+									ECD_STAMP_DUTY,                   ** Ver 2.0 **
+									ECD_SEBI_TT,                      ** Ver 2.0 **
+									ECD_TRAN_CHRG,                    ** Ver 2.0 **
+									ECD_OTHER_CHRG ,                   ** Ver 2.0 **
+									ECD_TOTAL_CGST,
+									ECD_TOTAL_SGST,
+									ECD_TOTAL_IGST,
+									ECD_TOTAL_UGST,
+									ECD_BRKRG_IGST,
+									ECD_BRKRG_CGST,
+									ECD_BRKRG_SGST,
+									ECD_BRKRG_UGST,
+									ECD_TRN_IGST,
+									ECD_TRN_CGST,
+									ECD_TRN_SGST,
+									ECD_TRN_UGST
+								)
+							 VALUES
+								(
+									:sql_ecm_cntrct_nmbr,
+									trim(:sql_ecm_usr_mtch_accno),
+									to_date(:sql_ecm_cntrct_dt,'yyyy-mm-dd HH24:MI:SS'),
+									:sql_ecd_qty,
+									:sql_ecd_brkg,
+									:sql_ecd_src_tx,
+									:sql_ecd_strk_prc,
+									:sql_ecd_ea_flg,
+									:sql_ecd_cntrct_specs,
+									:sql_ecd_setlmnt_prc,
+									to_date(:sql_ecd_expr_dt,'DD-MM-YYYY'),
+									:sql_ecd_cntrct_amt,
+									:sql_ecd_cntrct_optn_typ,
+									:sql_ecd_cntrct_inst_typ,
+									:sql_ecd_cntrct_symbl,
+									:sql_ecd_ca_level,
+									:d_stt_tx1,                         ** Ver 1.9 **
+									:sql_ecd_stamp_duty,                ** Ver 2.0 **
+									:sql_ecd_sebi_tt,                   ** Ver 2.0 **
+									:sql_ecd_tran_chrg,                 ** Ver 2.0 **
+									:sql_ecd_other_chrg,                ** Ver 2.0 **
+									:sql_ecd_cgst,
+									:sql_ecd_sgst,
+									:sql_ecd_igst,
+									:sql_ecd_ugst,
+									round((:sql_ecd_brkg * (:sql_ecd_igst_prcnt/100)),4),
+									round((:sql_ecd_brkg * (:sql_ecd_cgst_prcnt/100)),4),
+									round((:sql_ecd_brkg * (:sql_ecd_sgst_prcnt/100)),4),
+									round((:sql_ecd_brkg * (:sql_ecd_ugst_prcnt/100)),4),
+									round(((:sql_ecd_tran_chrg+:sql_ecd_sebi_tt) * (:sql_ecd_igst_prcnt/100)),4),
+									round(((:sql_ecd_tran_chrg+:sql_ecd_sebi_tt) * (:sql_ecd_cgst_prcnt/100)),4),
+									round(((:sql_ecd_tran_chrg+:sql_ecd_sebi_tt) * (:sql_ecd_sgst_prcnt/100)),4),
+									round(((:sql_ecd_tran_chrg+:sql_ecd_sebi_tt) * (:sql_ecd_ugst_prcnt/100)),4)
+								);
+
+								if(SQLCODE != 0  && SQLCODE != -1)
+								{
+									fn_userlog(c_ServiceName,"SQLCODE4 is <%d>",SQLCODE);
+									fn_errlog(c_ServiceName,"S31235",SQLMSG,c_errmsg);
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+									tpabort(0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+								if(SQLCODE ==0)
+								{
+									i_upl_rec = i_upl_rec + 1;
+									i_upd=1;
+								}
+							}*SN inserts for dtls *
+							sqlca.sqlerrd[2]=0;
+							strcpy(SQLMSG," ");
+							if(sql_ecd_ea_flg == 'E')
+							{
+
+
+								* commented in Ver 2.1 to avoid C doble to long typecasting problem 
+								 * Ver 2.0 Conversion to paise*
+
+								l_incl_brkg = (long)(sql_ecd_brkg *100);
+								l_stamp_dty = (long)(sql_ecd_stamp_duty *100);
+								l_sebi_tt = (long)(sql_ecd_sebi_tt *100);
+								l_tran_chrg = (long)(sql_ecd_tran_chrg *100);
+								l_stt = (long)(d_stt_tx *100);
+								l_src_tx = (long)((sql_ecd_src_tx *100)+(sql_ecd_cgst *100)+(sql_ecd_sgst*100)+(sql_ecd_igst*100)+(sql_ecd_ugst*100));
+
+								l_incl_all = l_incl_brkg+l_stamp_dty+l_sebi_tt+l_tran_chrg+l_stt+l_src_tx;			
+								
+								** Ver 2.0 Ends*
+								*
+
+								if(i_upd ==1)
+								{
+									fn_userlog(c_ServiceName,"Updating Brokerage Excercise Conf :<%lf> ",sql_ecd_brkg);
+									fn_userlog(c_ServiceName,"Contract Code :<%s>",sql_ecm_cntrct_nmbr.arr);
+									fn_userlog(c_ServiceName,"Match Accnt No :<%s>",sql_ecm_usr_mtch_accno.arr);
+									fn_userlog(c_ServiceName,"incl_brkg :<%lf>",l_incl_brkg);
+									fn_userlog(c_ServiceName,"stamp_duty :<%lf>",l_stamp_dty);
+									fn_userlog(c_ServiceName,"Sebi tt :<%lf>",l_sebi_tt);
+									fn_userlog(c_ServiceName,"tran charg :<%lf>",l_tran_chrg);
+									fn_userlog(c_ServiceName,"STT :<%lf>",l_stt);
+
+									EXEC SQL 
+									UPDATE FEC_FO_EXRC_CONF
+									*SET FEC_BRKG_VAL=:sql_ecd_brkg,*
+									* commented in Ver 2.1 to avoid double to long typecasting problem
+									 SET fec_brkg_val = NVL(fec_brkg_val,0) + :l_incl_brkg,        *Ver 2.0*
+											fec_stamp_duty = NVL(fec_stamp_duty,0) + :l_stamp_dty,      * Ver 2.0*
+											fec_sebi_tt = NVL(fec_sebi_tt,0) + :l_sebi_tt,              * Ver 2.0*
+											fec_tran_chrg = NVL(fec_tran_chrg,0) + :l_tran_chrg,        * Ver 2.0*
+											fec_stt = NVL(fec_stt,0) + :l_stt,                           *Ver 2.0*
+											fec_src_tx = NVL(fec_src_tx,0) + :l_src_tx                 * Ver 2.0*
+									*
+									SET   fec_brkg_val = NVL(fec_brkg_val,0) + ( :sql_ecd_brkg *100 ),
+												fec_stamp_duty = NVL(fec_stamp_duty,0) + ( :sql_ecd_stamp_duty *100 ),
+												fec_sebi_tt = NVL(fec_sebi_tt,0) + (:sql_ecd_sebi_tt *100 ),
+												fec_tran_chrg = NVL(fec_tran_chrg,0) + ( :sql_ecd_tran_chrg *100 ),
+												fec_stt = NVL(fec_stt,0) + ( :d_stt_tx1 *100 ),
+												fec_src_tx = NVL(fec_src_tx,0) + ( :sql_ecd_src_tx *100 )+(:sql_ecd_cgst*100)+(:sql_ecd_sgst*100)+(:sql_ecd_igst*100)+(:sql_ecd_ugst*100)					* Ver 4.9 GST columns added **
+									WHERE fec_clm_mtch_accnt=:sql_ecm_usr_mtch_accno
+									* Ver 2.1 starts *
+									* AND fec_exrc_rfrnc_no=:temp_conf; *
+									AND   fec_prdct_typ = :c_ea_prdct_typ
+									AND   fec_indstk = :c_ea_indstk
+									AND   fec_undrlyng = :c_ea_undrlyng
+									AND   fec_expry_dt = to_date( :sql_ecd_expr_dt, 'DD-MM-YYYY' )
+									AND   fec_exer_typ = :c_ea_exer_typ
+									AND   fec_opt_typ = :c_ea_opt_typ
+									AND   fec_strk_prc = :l_ea_strk_prc
+									AND   trunc(fec_exrc_dt) = trunc(to_date( :sql_ecm_cntrct_dt, 'YYYY-MM-DD HH24:MI:SS' ))
+									AND   FEC_XCHNG_CD = :c_xchng_cd;  *** Ver 3.8 *** 
+									* Ver 2.1 ends *
+						
+									if(SQLCODE == NO_DATA_FOUND)
+									{
+										fn_userlog(c_ServiceName,"NO DATA IN CONF");
+										i_upd_brk=1;
+									}
+									else if(SQLCODE  != 0 || (sqlca.sqlerrd[2] > 1))
+									{
+										fn_userlog(c_ServiceName,"SQLCODE FEC_FO_EXRC_CONF is <%d>",SQLCODE);
+										fn_errlog(c_ServiceName,"S31240",SQLMSG,c_errmsg);
+										fn_userlog(c_ServiceName,"Contract Code :%s",sql_ecm_cntrct_nmbr.arr);
+										fn_userlog(c_ServiceName,"Match Accnt No :%s",sql_ecm_usr_mtch_accno.arr);
+										fn_userlog(c_ServiceName,"Brokerage Amount :%lf",sql_ecd_brkg);
+									}
+									fn_userlog(c_ServiceName,"*****i_upd_brk %d*****",i_upd_brk);
+									i_upd=0;
+							}*upd *
+							sqlca.sqlerrd[2]=0;
+							strcpy(SQLMSG," ");
+									if(i_upd_brk==1)
+									{
+
+									* commented in Ver 2.1
+									** Ver 2.0**
+									fn_userlog(c_ServiceName,"l_incl_brkg :<%lf>",l_incl_brkg);
+									fn_userlog(c_ServiceName,"l_stamp_dty :<%lf>",l_stamp_dty);
+									fn_userlog(c_ServiceName,"l_sebi_tt :<%lf>",l_sebi_tt);
+									fn_userlog(c_ServiceName,"l_tran_chrg :<%lf>",l_tran_chrg);
+									fn_userlog(c_ServiceName,"l_stt :<%lf>",l_stt);
+									*
+
+												
+										EXEC SQL
+										UPDATE FEC_FO_EXRC_CONF_HSTRY
+										*SET FEC_BRKG_VAL=:sql_ecd_brkg, *                *Ver 2.0*
+										* changed in Ver 2.1 to avoid double to long typecasting problem
+										SET fec_brkg_val=NVL(fec_brkg_val,0)+:sql_ecd_brkg,
+										fec_stamp_duty = NVL(fec_stamp_duty,0) + :l_stamp_dty,      * Ver 2.0*
+										fec_sebi_tt = NVL(fec_sebi_tt,0) + :l_sebi_tt,              * Ver 2.0*
+										fec_tran_chrg = NVL(fec_tran_chrg,0) + :l_tran_chrg,        * Ver 2.0*
+										fec_stt = NVL(fec_stt,0) + :l_stt,                          *Ver 2.0*
+										fec_src_tx = NVL(fec_src_tx,0) + :l_src_tx                 * Ver 2.0*
+										*
+										SET   fec_brkg_val = NVL(fec_brkg_val,0) + ( :sql_ecd_brkg *100 ),
+													fec_stamp_duty = NVL(fec_stamp_duty,0) + ( :sql_ecd_stamp_duty *100 ),
+													fec_sebi_tt = NVL(fec_sebi_tt,0) + (:sql_ecd_sebi_tt *100 ),
+													fec_tran_chrg = NVL(fec_tran_chrg,0) + ( :sql_ecd_tran_chrg *100 ),
+													fec_stt = NVL(fec_stt,0) + ( :d_stt_tx1 *100 ),
+													fec_src_tx = NVL(fec_src_tx,0) + ( :sql_ecd_src_tx *100 )+(:sql_ecd_cgst*100)+(:sql_ecd_sgst*100)+(:sql_ecd_igst*100)+(:sql_ecd_ugst*100)         ** Ver 4.9 GST columns added **
+										WHERE fec_clm_mtch_accnt=:sql_ecm_usr_mtch_accno
+										* Ver 2.1 starts *
+										* AND fec_exrc_rfrnc_no=:temp_conf; *
+										AND   fec_prdct_typ = :c_ea_prdct_typ
+										AND   fec_indstk = :c_ea_indstk
+										AND   fec_undrlyng = :c_ea_undrlyng
+										AND   fec_expry_dt = to_date( :sql_ecd_expr_dt, 'DD-MM-YYYY' )
+										AND   fec_exer_typ = :c_ea_exer_typ
+										AND   fec_opt_typ = :c_ea_opt_typ
+										AND   fec_strk_prc = :l_ea_strk_prc
+										AND   trunc(fec_exrc_dt) = trunc(to_date( :sql_ecm_cntrct_dt, 'YYYY-MM-DD HH24:MI:SS' ))
+										AND   FEC_XCHNG_CD = :c_xchng_cd;  *** Ver 3.8 ***
+										* Ver 2.1 ends *
+
+									 if(SQLCODE == NO_DATA_FOUND)
+										{
+											fn_userlog(c_ServiceName,"No data2 for follow combination ");
+											sprintf(c_event,"Contract Code :%s",sql_ecm_cntrct_nmbr.arr);
+											sprintf(c_event,"Match Accnt No :%s",sql_ecm_usr_mtch_accno.arr);
+											sprintf(c_event,"Brokerage Amount :%lf",sql_ecd_brkg);
+										 }
+										else if(SQLCODE  != 0 || (sqlca.sqlerrd[2] > 1))
+										{
+											fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+											fn_errlog(c_ServiceName,"S31245",SQLMSG,c_errmsg);
+											tpfree((char*)ptr_Obuf);
+											tpfree((char *)ptr_Sbuf);
+											tpfree((char *)ptr_Rbuf);
+											Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+											tpabort(0);
+											tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+										} 
+
+										if(SQLCODE ==0)
+											i_upl_rec = i_upl_rec + 1;
+										i_upd_brk=1;
+									}
+								}
+								else if (sql_ecd_ea_flg=='A')
+								{
+								
+								* commented in Ver 2.1 to avoid C double to long typecasting problem 
+								* Ver 2.0 Conversion to paise*
+
+								l_incl_brkg = (long)(sql_ecd_brkg *100);
+								l_stamp_dty = (long)(sql_ecd_stamp_duty *100);
+								l_sebi_tt = (long)(sql_ecd_sebi_tt *100);
+								l_tran_chrg = (long)(sql_ecd_tran_chrg *100);
+								l_stt = (long)(d_stt_tx *100);
+								l_src_tx = (long)(sql_ecd_src_tx *100);
+
+								l_incl_all = l_incl_brkg+l_stamp_dty+l_sebi_tt+l_tran_chrg+l_stt+l_src_tx;
+								
+
+								** Ver 2.0 Ends*
+									fn_userlog(c_ServiceName,"l_incl_brkg :<%lf>",l_incl_brkg);
+									fn_userlog(c_ServiceName,"l_stamp_dty :<%lf>",l_stamp_dty);
+									fn_userlog(c_ServiceName,"l_sebi_tt :<%lf>",l_sebi_tt);
+									fn_userlog(c_ServiceName,"l_tran_chrg :<%lf>",l_tran_chrg);
+									fn_userlog(c_ServiceName,"l_stt :<%lf>",l_stt);
+									*
+									
+									if(i_upd==1)
+									{
+										EXEC SQL
+										UPDATE FAB_FO_ASGNMNT_BOOK
+										*SET fab_brkrg_val =:sql_ecd_brkg, *              *Ver 2.0*
+										* changed in Ver 2.1 to avoid C double to long typecasting problem 
+										SET fab_brkrg_val = nvl(fab_brkrg_val,0)+:l_incl_brkg,        *Ver 2.0*
+										fab_stamp_duty = NVL(fab_stamp_duty,0) + :l_stamp_dty,      * Ver 2.0*
+										fab_sebi_tt = NVL(fab_sebi_tt,0) + :l_sebi_tt,              * Ver 2.0*
+										fab_tran_chrg = NVL(fab_tran_chrg,0) + :l_tran_chrg,        * Ver 2.0*
+										fab_stt = NVL(fab_stt,0) + :l_stt,                          *Ver 2.0*
+										fab_src_tx = NVL(fab_src_tx,0) + :l_src_tx                 * Ver 2.0*
+										*
+										SET   fab_brkrg_val = nvl(fab_brkrg_val,0) + ( :sql_ecd_brkg *100 ),
+													fab_stamp_duty = NVL(fab_stamp_duty,0) + ( :sql_ecd_stamp_duty *100 ),
+													fab_sebi_tt = NVL(fab_sebi_tt,0) + ( :sql_ecd_sebi_tt *100 ),
+													fab_tran_chrg = NVL(fab_tran_chrg,0) + ( :sql_ecd_tran_chrg *100 ),
+													fab_stt = NVL(fab_stt,0) + ( :d_stt_tx1 *100 ),
+													fab_src_tx = NVL(fab_src_tx,0) + ( :sql_ecd_src_tx *100 )+(:sql_ecd_cgst*100) + (:sql_ecd_sgst*100) + (:sql_ecd_igst*100) +(:sql_ecd_ugst*100)			** ver 4.9** 
+										WHERE fab_clm_mtch_accnt=:sql_ecm_usr_mtch_accno
+										* Ver 2.1 starts *
+										* AND fab_asgn_rfrnc_no=:temp_conf; *
+										AND   fab_prdct_typ = :c_ea_prdct_typ
+										AND   fab_indstk = :c_ea_indstk
+										AND   fab_undrlyng = :c_ea_undrlyng
+										AND   fab_expry_dt = to_date( :sql_ecd_expr_dt, 'DD-MM-YYYY' )
+										AND   fab_exer_typ = :c_ea_exer_typ
+										AND   fab_opt_typ = :c_ea_opt_typ
+										AND   fab_strk_prc = :l_ea_strk_prc
+										AND   trunc(fab_asgnd_dt) = trunc(to_date( :sql_ecm_cntrct_dt, 'YYYY-MM-DD HH24:MI:SS' ))
+										AND   FAB_XCHNG_CD = :c_xchng_cd;  *** Ver 3.8 ***
+										* Ver 2.1 ends *
+
+										if(SQLCODE ==NO_DATA_FOUND) 
+										{
+											i_upd_brk=1;
+										}
+										else if(SQLCODE  != 0 || (sqlca.sqlerrd[2] > 1))
+										{
+											fn_userlog(c_ServiceName,"SQLCODE FAB_FO_ASGNMNT_BOOK <%d>",SQLCODE);
+											fn_errlog(c_ServiceName,"S31250",SQLMSG,c_errmsg);
+											fn_userlog(c_ServiceName,"Contract Code :%s",sql_ecm_cntrct_nmbr.arr);
+											fn_userlog(c_ServiceName,"Match Accnt No :%s",sql_ecm_usr_mtch_accno.arr);
+											fn_userlog(c_ServiceName,"Brokerage Amount :%lf",sql_ecd_brkg);
+											
+										}
+										i_upd=0;
+									}*upd *
+									
+									if(i_upd_brk ==1) 
+									{   
+										EXEC SQL 
+										UPDATE fab_fo_asgnmnt_book_hstry
+										*SET fab_brkrg_val =:sql_ecd_brkg, *              * Ver 2.0*
+										* changed in Ver 2.1 to avoid C double to long typecasting problem 
+										SET fab_brkrg_val = NVL(fab_brkrg_val,0)+:sql_ecd_brkg,
+										fab_stamp_duty = NVL(fab_stamp_duty,0) + :l_stamp_dty,      * Ver 2.0*
+										fab_sebi_tt = NVL(fab_sebi_tt,0) + :l_sebi_tt,              * Ver 2.0*
+										fab_tran_chrg = NVL(fab_tran_chrg,0) + :l_tran_chrg,        * Ver 2.0*
+										fab_stt = NVL(fab_stt,0) + :l_stt,                          *Ver 2.0*
+										fab_src_tx = NVL(fab_src_tx,0) + :l_src_tx                 * Ver 2.0*
+										*
+										SET   fab_brkrg_val = nvl(fab_brkrg_val,0) + ( :sql_ecd_brkg *100 ),
+													fab_stamp_duty = NVL(fab_stamp_duty,0) + ( :sql_ecd_stamp_duty *100 ),
+													fab_sebi_tt = NVL(fab_sebi_tt,0) + ( :sql_ecd_sebi_tt *100 ),
+													fab_tran_chrg = NVL(fab_tran_chrg,0) + ( :sql_ecd_tran_chrg *100 ),
+													fab_stt = NVL(fab_stt,0) + ( :d_stt_tx1 *100 ),
+													fab_src_tx = NVL(fab_src_tx,0) + ( :sql_ecd_src_tx *100 ) +(:sql_ecd_cgst*100) + (:sql_ecd_sgst*100) + (:sql_ecd_igst*100) +(:sql_ecd_ugst*100)
+										WHERE fab_clm_mtch_accnt=:sql_ecm_usr_mtch_accno
+										* Ver 2.1 starts *
+										* AND fab_asgn_rfrnc_no=:temp_conf; *
+										AND   fab_prdct_typ = :c_ea_prdct_typ
+										AND   fab_indstk = :c_ea_indstk
+										AND   fab_undrlyng = :c_ea_undrlyng
+										AND   fab_expry_dt = to_date( :sql_ecd_expr_dt, 'DD-MM-YYYY' )
+										AND   fab_exer_typ = :c_ea_exer_typ
+										AND   fab_opt_typ = :c_ea_opt_typ
+										AND   fab_strk_prc = :l_ea_strk_prc
+										AND   trunc(fab_asgnd_dt) = trunc(to_date( :sql_ecm_cntrct_dt, 'YYYY-MM-DD HH24:MI:SS' ))
+										AND   FAB_XCHNG_CD = :c_xchng_cd;  *** Ver 3.8 ***
+										* Ver 2.1 ends *
+
+										if(SQLCODE == NO_DATA_FOUND)
+										{
+											fn_userlog(c_ServiceName,"NO DATA FAB_FO_ASGNMNT_BOOK_HSTRY <%d>",SQLCODE);
+											fn_errlog(c_ServiceName,"S31255",SQLMSG,c_errmsg);
+											sprintf(c_event,"Contract Code :%s",sql_ecm_cntrct_nmbr.arr);
+											sprintf(c_event,"Match Accnt No :%s",sql_ecm_usr_mtch_accno.arr);
+											sprintf(c_event,"Brokerage Amount :%lf",sql_ecd_brkg);
+										}
+										else if(SQLCODE  != 0 || (sqlca.sqlerrd[2] > 1))
+										{
+											fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+											fn_errlog(c_ServiceName,"S31260",SQLMSG,c_errmsg);
+											tpfree((char*)ptr_Obuf);
+											tpfree((char *)ptr_Sbuf);
+											tpfree((char *)ptr_Rbuf);
+											Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+											tpabort(0);
+											tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+										}
+
+										if(SQLCODE ==0)
+											i_upl_rec = i_upl_rec + 1;
+
+										i_upd_brk=0;
+									}
+								}*else of 'A'*
+
+								**** Ver 3.8 Starts ****
+
+								l_incl_all = (sql_ecd_brkg*100) + (sql_ecd_stamp_duty*100) + (sql_ecd_sebi_tt*100) + (sql_ecd_tran_chrg*100) + (d_stt_tx1*100) + (sql_ecd_src_tx*100) +(sql_ecd_sgst*100)+(sql_ecd_cgst*100)+(sql_ecd_ugst*100)+(sql_ecd_igst*100); ** Ver 4.9 gst values included **
+
+								EXEC SQL
+									UPDATE  PCP_PRTFL_CNTRCT_PRDCT
+										SET   PCP_BRKG_VAL = nvl(PCP_BRKG_VAL,0) + :l_incl_all
+									WHERE PCP_CLM_MTCH_ACCNT = :sql_ecm_usr_mtch_accno
+									AND   PCP_XCHNG_CD       = :c_xchng_cd 
+									AND   PCP_PRDCT_TYP      = :c_ea_prdct_typ
+									AND   PCP_INDSTK         = :c_ea_indstk
+									AND   PCP_UNDRLYNG       = :c_ea_undrlyng
+									AND   PCP_EXPRY_DT       = to_date( :sql_ecd_expr_dt, 'DD-MM-YYYY' )
+									AND   PCP_EXER_TYP       = :c_ea_exer_typ
+									AND   PCP_STRK_PRC       = :l_ea_strk_prc
+									AND   PCP_OPT_TYP        = :c_ea_opt_typ ;
+
+								if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+								{
+									fn_userlog(c_ServiceName,"Error while updating data in PCP Main option assign/exercise");
+									fn_errlog(c_ServiceName,"S31265",SQLMSG,c_errmsg);
+								}
+					
+								if ( SQLCODE == NO_DATA_FOUND )
+								{
+									fn_userlog(c_ServiceName,"No data available in PCP main");
+									i_pcp_hstry = 1;
+								}
+					
+								if ( i_pcp_hstry == 1 )
+								{
+									EXEC SQL
+										UPDATE  PCP_PRTFL_CNTRCT_PRDCT_HSTRY
+											SET   PCP_BRKG_VAL = nvl(PCP_BRKG_VAL,0) + :l_incl_all
+										WHERE PCP_CLM_MTCH_ACCNT = :sql_ecm_usr_mtch_accno
+										AND   PCP_XCHNG_CD       = :c_xchng_cd
+										AND   PCP_PRDCT_TYP      = :c_ea_prdct_typ
+										AND   PCP_INDSTK         = :c_ea_indstk
+										AND   PCP_UNDRLYNG       = :c_ea_undrlyng
+										AND   PCP_EXPRY_DT       = to_date( :sql_ecd_expr_dt, 'DD-MM-YYYY' )
+										AND   PCP_EXER_TYP       = :c_ea_exer_typ
+										AND   PCP_STRK_PRC       = :l_ea_strk_prc
+										AND   PCP_OPT_TYP        = :c_ea_opt_typ ;
+					
+									if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+									{
+										fn_userlog(c_ServiceName,"Error while updating data in PCP history assign/exercise");
+										fn_errlog(c_ServiceName,"S31270",SQLMSG,c_errmsg);
+									}
+					
+									if ( SQLCODE == NO_DATA_FOUND )
+									{
+										fn_userlog(c_ServiceName,"No data available in PCP history");
+									}
+								}
+
+								i_pcp_hstry     = 0;
+								l_incl_all      = 0;
+
+								**** Ver 3.8 Ends ****
+
+							}*End of while *
+
+
+     *** Ver 5.4 Comment Ends ***********************************************************************/
+
+     /*** Ver 5.4 Starts ***/
+
+    EXEC SQL
+		SELECT count(1)
+	    INTO :i_count
+			FROM ECN_EA_CNTRCT_NOTES;
+
+     if (SQLCODE !=0)
+           {
+             fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+             fn_errlog(c_ServiceName,"S31275",SQLMSG,c_errmsg);
+             tpfree((char*)ptr_Obuf);
+             tpfree((char *)ptr_Sbuf);
+             tpfree((char *)ptr_Rbuf);
+             Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+             tpabort(0);
+             tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+           } 
+
+      fn_userlog(c_ServiceName,"Total records present in ECN_EA_CNTRCT_NOTES is :%d:",i_count);
+  
+     if (i_count <= 0)
+     {
+       strcpy(c_errmsg,"No records present in ECN_EA_CNTRCT_NOTES");
+       fn_userlog(c_ServiceName,"No records present in ECN_EA_CNTRCT_NOTES");
+       goto label1;
+     }   
+
+
+     fn_userlog(c_ServiceName,"Before insert into EA_CONF_MSTR"); 
+
+     EXEC SQL
+                INSERT INTO  EA_CONF_MSTR
+                ( ECM_USR_MTCH_ACCNO,
+                  ECM_USR_NM,
+                  ECM_ADD_LN1,
+                  ECM_ADD_LN2,
+                  ECM_ADD_LN3,
+                  ECM_ADD_LN4,
+                  ECM_PAN_NO,
+                  ECM_TEL_NO,
+                  ECM_EXCNG_CD,
+                  ECM_CNTRCT_NMBR,
+                  ECM_CNTRCT_DT,
+                  ECM_TOTAL_AMOUNT,
+                  ECM_CUST_ST_CD, 
+                  ECM_ISEC_ST_CD,
+                  ECM_IGST_PRCNT,
+                  ECM_CGST_PRCNT,
+                  ECM_SGST_PRCNT,
+                  ECM_UGST_PRCNT
+                )
+                (
+                 SELECT distinct ECN_MTCH_ACCNT,
+												ECN_USER_NAME,
+												ECN_ADDR_LINE1,
+												ECN_ADDR_LINE2,
+												ECN_ADDR_LINE3,
+												ECN_ADDR_LINE4,
+												ECN_PAN_NO,
+												ECN_TELNO,
+                        ECN_XCHNG_CD, 
+                        ECN_CONTRACTNO,
+                        ECN_CONTRACTDATE,
+												ECN_TOTAL_AMT,		 
+												ECN_CUST_ST_CD,
+                        ECN_ISEC_ST_CD,
+												ECN_IGST_PRCNT,
+												ECN_CGST_PRCNT,
+												ECN_SGST_PRCNT,
+												ECN_UGST_PRCNT
+								   FROM ECN_EA_CNTRCT_NOTES
+									 WHERE NOT EXISTS (SELECT 1 FROM EA_CONF_MSTR 
+																		WHERE ECN_CONTRACTNO = ECM_CNTRCT_NMBR)
+								);
+
+        	if (SQLCODE !=0)
+           {
+             fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+             fn_errlog(c_ServiceName,"S31280",SQLMSG,c_errmsg);
+             tpfree((char*)ptr_Obuf);
+             tpfree((char *)ptr_Sbuf);
+             tpfree((char *)ptr_Rbuf);
+             Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+             tpabort(0);
+             tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+           }
+
+     
+	         fn_userlog(c_ServiceName,"Before Update of EA_CONF_MSTR");
+
+              EXEC SQL
+               UPDATE EA_CONF_MSTR
+               SET    ECM_UCC_CD  = ( select CLM_CLNT_CD
+                                      from   CLM_CLNT_MSTR
+                                      where  CLM_MTCH_ACCNT = ECM_USR_MTCH_ACCNO
+                                    ),
+                      (ECM_PRNCPL_BUIS_STATE_CD,
+                       ECM_PRNCPL_BUIS_BRNCH_CD,
+                       ECM_CUST_ST_CD,
+                       ECM_ISEC_GSTIN,
+                       ECM_CUST_GSTIN
+                      )= (select NVL(GSTM_ISEC_STATE_CD,' '),
+                                 NVL(GSTM_ISEC_BRANCH_CD,' '),
+                                 DECODE(ECM_CUST_ST_CD,'00','27',ECM_CUST_ST_CD),
+                                 NVL(GSTM_ISEC_GST_NO,' '),
+                                 NVL(ICD_GSTIN,' ')
+                            FROM GSTM_GST_STATE_MSTR,UAC_USR_ACCNTS,ICD_INFO_CLIENT_DTLS
+                           WHERE UAC_CLM_MTCH_ACCNT=ECM_USR_MTCH_ACCNO
+                           AND   ICD_USER_ID = UAC_USR_ID
+                           AND   GSTM_STATE_CD =ECM_CUST_ST_CD
+                          ) 
+                WHERE trunc(ECM_CNTRCT_DT)=:d_trd_dt ;
+
+              if (SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+               {
+                fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+                fn_errlog(c_ServiceName,"S31285",SQLMSG,c_errmsg);
+                tpfree((char*)ptr_Obuf);
+                tpfree((char *)ptr_Sbuf);
+                tpfree((char *)ptr_Rbuf);
+                Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+                tpabort(0);
+                tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+              }
+
+
+				   fn_userlog(c_ServiceName,"Inserting EA_CONF_DTLS ");
+          
+               EXEC SQL
+               INSERT INTO  EA_CONF_DTLS
+                 (ECD_CNTRCT_NMBR,
+                  ECD_USR_MTCH_ACCNO,
+                  ECD_EA_DT,
+                  ECD_QTY,
+                  ECD_BRKG,
+                  ECD_SRC_TX,
+                  ECD_STRK_PRC,
+                  ECD_EA_FLG,
+                  ECD_CNTRCT_SPECS,
+                  ECD_SETLMNT_PRC,
+                  ECD_EXPR_DT,
+                  ECD_CNTRCT_AMT,
+                  ECD_CNTRCT_OPTN_TYP,
+                  ECD_CNTRCT_INST_TYP,
+                  ECD_CNTRCT_SYMBL,
+                  ECD_CA_LEVEL,
+                  ECD_STT,                          
+                  ECD_STAMP_DUTY,                  
+                  ECD_SEBI_TT,                    
+                  ECD_TRAN_CHRG,                 
+                  ECD_OTHER_CHRG ,              
+                  ECD_TOTAL_CGST,
+                  ECD_TOTAL_SGST,
+                  ECD_TOTAL_IGST,
+                  ECD_TOTAL_UGST,
+                  ECD_BRKRG_IGST,
+                  ECD_BRKRG_CGST,
+                  ECD_BRKRG_SGST,
+                  ECD_BRKRG_UGST,
+                  ECD_TRN_IGST,
+                  ECD_TRN_CGST,
+                  ECD_TRN_SGST,
+                  ECD_TRN_UGST
+                )
+                (
+                 SELECT ECM_CNTRCT_NMBR,
+												ECM_USR_MTCH_ACCNO,
+											  ECM_CNTRCT_DT,
+												ECN_QUANTITY,
+												ECN_BROKERAGE,
+									      ECN_SRC_TAX,
+												ECN_STRIKEPRICE,
+												ECN_EA_FLG,
+												ECN_CNTRCT_DESC,
+												ECN_STTLMNT_PRICE,
+												ECN_EXPIRYDATE,
+												ECN_CNTRCT_AMT,
+												ECN_OPTION_TYPE,
+												ECN_INST_TYP,
+												ECN_SYMBOL,
+												ECN_CALEVEL,
+												ECN_STT,
+												ECN_STAMP_DUTY,
+												ECN_SEBI_TT,
+												ECN_TRAN_CHARGE,
+												ECN_OTHER_CHARGES,
+												ECN_CGST,
+												ECN_SGST,
+												ECN_IGST,
+												ECN_UGST,
+												ROUND((ECN_BROKERAGE*(ECM_IGST_PRCNT/100)),4), 
+											  ROUND((ECN_BROKERAGE*(ECM_CGST_PRCNT/100)),4),
+												ROUND((ECN_BROKERAGE*(ECM_SGST_PRCNT/100)),4),
+												ROUND((ECN_BROKERAGE*(ECM_UGST_PRCNT/100)),4),
+                        ROUND(((ECN_TRAN_CHARGE+ECN_SEBI_TT)*(ECM_IGST_PRCNT/100)),4),
+                        ROUND(((ECN_TRAN_CHARGE+ECN_SEBI_TT)*(ECM_CGST_PRCNT/100)),4),
+                        ROUND(((ECN_TRAN_CHARGE+ECN_SEBI_TT)*(ECM_SGST_PRCNT/100)),4),
+                        ROUND(((ECN_TRAN_CHARGE+ECN_SEBI_TT)*(ECM_UGST_PRCNT/100)),4)
+                   FROM ECN_EA_CNTRCT_NOTES,EA_CONF_MSTR
+									WHERE ECM_CNTRCT_NMBR = ECN_CONTRACTNO );
+ 						 
+
+      MEMSET(v_sql_fec_upd);
+      MEMSET(v_sql_fab_upd);
+      MEMSET(v_sql_fec_hstry_upd);
+      MEMSET(v_sql_fab_hstry_upd);
+      MEMSET(v_sql_pcpea_upd);
+      MEMSET(v_sql_pcpea_hstry_upd);
+      
+           fn_userlog(c_ServiceName,"Before FEC MAIN MERGE");
+ 
+      sprintf(v_sql_fec_upd.arr, 
+	    "MERGE INTO FEC_FO_EXRC_CONF A \
+      USING (SELECT distinct ECN_BROKERAGE, ECN_STAMP_DUTY, ECN_SEBI_TT, ECN_TRAN_CHARGE, ECN_STT, ECN_SRC_TAX, ECN_CGST, ECN_SGST, ECN_IGST, ECN_UGST, ECN_PRDCT_TYP, ECN_INDSTK, ECN_UNDRLYNG, ECN_EXPIRYDATE, ECN_EXER_TYP, ECN_OPT_TYP, ECN_STRIKEPRICE, ECN_CONTRACTDATE, ECN_XCHNG_CD, ECN_MTCH_ACCNT, ECN_CONTRACTNO FROM ECN_EA_CNTRCT_NOTES where exists (select 1 from EA_CONF_DTLS where ECN_CONTRACTNO = ECD_CNTRCT_NMBR and ECD_EA_FLG = 'E') )B \
+							ON ( A.fec_clm_mtch_accnt = B.ECN_MTCH_ACCNT \
+               AND A.fec_prdct_typ = B.ECN_PRDCT_TYP \
+							 AND A.fec_indstk = B.ECN_INDSTK \
+							 AND A.fec_undrlyng = B.ECN_UNDRLYNG \
+							 AND A.fec_expry_dt = to_date( B.ECN_EXPIRYDATE, 'DD-Mon-YYYY' ) \
+               AND A.fec_exer_typ = B.ECN_EXER_TYP \
+							 AND A.fec_opt_typ = B.ECN_OPT_TYP \
+							 AND A.fec_strk_prc = B.ECN_STRIKEPRICE*100 \
+							 AND trunc(A.fec_exrc_dt)= trunc(to_date( B.ECN_CONTRACTDATE, 'DD-Mon-YYYY' )) \
+               AND A.FEC_XCHNG_CD = decode(B.ECN_XCHNG_CD,'NSE','NFO','BFO')) \
+              WHEN MATCHED THEN UPDATE SET \
+							 A.fec_brkg_val = NVL(A.fec_brkg_val,0) + ( NVL(B.ECN_BROKERAGE,0) *100 ), \
+               A.fec_stamp_duty = NVL(A.fec_stamp_duty,0) + ( NVL(B.ECN_STAMP_DUTY,0) *100 ), \
+                         A.fec_sebi_tt = NVL(A.fec_sebi_tt,0) + ( NVL(B.ECN_SEBI_TT,0) *100 ), \
+                         A.fec_tran_chrg = NVL(A.fec_tran_chrg,0) + ( NVL(B.ECN_TRAN_CHARGE,0) *100 ), \
+                         A.fec_stt = NVL(A.fec_stt,0) + ( NVL(B.ECN_STT,0)  *100 ), \
+                         A.fec_src_tx = NVL(A.fec_src_tx,0) + ( NVL(B.ECN_SRC_TAX,0) *100 )+( NVL(B.ECN_CGST,0)*100 )+( NVL(B.ECN_SGST,0)*100 )+( NVL(B.ECN_IGST,0)*100 )+( NVL(B.ECN_UGST,0)*100 )"); 
+      
+       SETLEN(v_sql_fec_upd);
+
+       fn_userlog(c_ServiceName,"FEC UPD  Query string length :%d:",v_sql_fec_upd.len);
+
+      EXEC SQL DECLARE sql_fec_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31290",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+
+      EXEC SQL PREPARE sql_fec_stmt FROM :v_sql_fec_upd ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31295",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+      EXEC SQL EXECUTE sql_fec_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31300",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+      fn_userlog(c_ServiceName,"Total Exercise records Updated IN main :%d:",sqlca.sqlerrd[2]);
+
+      fn_userlog(c_ServiceName,"Before FEC HSTRY MERGE");
+ 
+      sprintf(v_sql_fec_hstry_upd.arr,
+      "MERGE INTO FEC_FO_EXRC_CONF_HSTRY A \
+      USING (SELECT distinct ECN_BROKERAGE, ECN_STAMP_DUTY, ECN_SEBI_TT, ECN_TRAN_CHARGE, ECN_STT, ECN_SRC_TAX,ECN_CGST, ECN_SGST, ECN_IGST, ECN_UGST, ECN_PRDCT_TYP, ECN_INDSTK, ECN_UNDRLYNG, ECN_EXPIRYDATE, ECN_EXER_TYP,ECN_OPT_TYP, ECN_STRIKEPRICE, ECN_CONTRACTDATE, ECN_XCHNG_CD, ECN_MTCH_ACCNT, ECN_CONTRACTNO FROM ECN_EA_CNTRCT_NOTES where exists (select 1 from EA_CONF_DTLS where ECN_CONTRACTNO = ECD_CNTRCT_NMBR and ECD_EA_FLG = 'E'))B \
+              ON ( A.fec_clm_mtch_accnt = B.ECN_MTCH_ACCNT \
+               AND A.fec_prdct_typ = B.ECN_PRDCT_TYP \
+               AND A.fec_indstk = B.ECN_INDSTK \
+               AND A.fec_undrlyng = B.ECN_UNDRLYNG \
+               AND A.fec_expry_dt = to_date( B.ECN_EXPIRYDATE, 'DD-Mon-YYYY' ) \
+               AND A.fec_exer_typ = B.ECN_EXER_TYP \
+               AND A.fec_opt_typ = B.ECN_OPT_TYP \
+               AND A.fec_strk_prc = B.ECN_STRIKEPRICE*100 \
+               AND trunc(A.fec_exrc_dt)= trunc(to_date( B.ECN_CONTRACTDATE, 'DD-Mon-YYYY' )) \
+               AND A.FEC_XCHNG_CD = decode(B.ECN_XCHNG_CD,'NSE','NFO','BFO')) \
+              WHEN MATCHED THEN UPDATE SET \
+               A.fec_brkg_val = NVL(A.fec_brkg_val,0) + ( NVL(B.ECN_BROKERAGE,0) *100 ), \
+               A.fec_stamp_duty = NVL(A.fec_stamp_duty,0) + ( NVL(B.ECN_STAMP_DUTY,0) *100 ), \
+                         A.fec_sebi_tt = NVL(A.fec_sebi_tt,0) + ( NVL(B.ECN_SEBI_TT,0) *100 ), \
+                         A.fec_tran_chrg = NVL(A.fec_tran_chrg,0) + ( NVL(B.ECN_TRAN_CHARGE,0) *100 ), \
+                         A.fec_stt = NVL(A.fec_stt,0) + ( NVL(B.ECN_STT,0)  *100 ), \
+                         A.fec_src_tx = NVL(A.fec_src_tx,0) + ( NVL(B.ECN_SRC_TAX,0) *100 )+( NVL(B.ECN_CGST,0)*100 )+( NVL(B.ECN_SGST,0)*100 )+( NVL(B.ECN_IGST,0)*100 )+( NVL(B.ECN_UGST,0)*100 )");
+ 
+     
+       SETLEN(v_sql_fec_hstry_upd);
+
+     fn_userlog(c_ServiceName,"FEC HSTRY UPD  Query string length :%d:",v_sql_fec_hstry_upd.len);
+
+     EXEC SQL DECLARE sql_fec_hstry_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31305",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+     EXEC SQL PREPARE sql_fec_hstry_stmt FROM :v_sql_fec_hstry_upd ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31310",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_fec_hstry_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31315",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     fn_userlog(c_ServiceName,"Total Exercise History records Updated IN main :%d:",sqlca.sqlerrd[2]);
+
+        fn_userlog(c_ServiceName,"Before FAB MAIN MERGE");
+ 
+         sprintf(v_sql_fab_upd.arr,
+				 "MERGE INTO FAB_FO_ASGNMNT_BOOK A \
+				 USING (SELECT distinct ECN_BROKERAGE, ECN_STAMP_DUTY, ECN_SEBI_TT, ECN_TRAN_CHARGE, ECN_STT, ECN_SRC_TAX, ECN_CGST, ECN_SGST, ECN_IGST, ECN_UGST, ECN_PRDCT_TYP, ECN_INDSTK, ECN_UNDRLYNG, ECN_EXPIRYDATE, ECN_EXER_TYP, ECN_OPT_TYP, ECN_STRIKEPRICE, ECN_CONTRACTDATE, ECN_XCHNG_CD, ECN_MTCH_ACCNT, ECN_CONTRACTNO FROM ECN_EA_CNTRCT_NOTES where exists (select 1 from EA_CONF_DTLS where ECN_CONTRACTNO = ECD_CNTRCT_NMBR and ECD_EA_FLG = 'A'))B \
+         ON ( A.fab_clm_mtch_accnt = B.ECN_MTCH_ACCNT \
+				  AND A.fab_prdct_typ = B.ECN_PRDCT_TYP \
+	        AND A.fab_indstk = B.ECN_INDSTK \
+					AND A.fab_undrlyng = B.ECN_UNDRLYNG \
+				  AND A.fab_expry_dt = to_date( B.ECN_EXPIRYDATE, 'DD-Mon-YYYY' ) \
+          AND A.fab_exer_typ = B.ECN_EXER_TYP \
+          AND A.fab_opt_typ = B.ECN_OPT_TYP \
+				  AND A.fab_strk_prc = B.ECN_STRIKEPRICE*100 \
+          AND   trunc(A.fab_asgnd_dt) = trunc(to_date( B.ECN_CONTRACTDATE, 'DD-Mon-YYYY' )) \
+          AND   A.FAB_XCHNG_CD = decode(B.ECN_XCHNG_CD,'NSE','NFO','BFO') \
+         ) WHEN MATCHED THEN UPDATE SET \
+					 A.fab_brkrg_val = nvl(A.fab_brkrg_val,0) + ( NVL(B.ECN_BROKERAGE,0) *100 ), \
+                          A.fab_stamp_duty = NVL(A.fab_stamp_duty,0) + ( NVL(B.ECN_STAMP_DUTY,0) *100 ), \
+                          A.fab_sebi_tt = NVL(A.fab_sebi_tt,0) + ( NVL(B.ECN_SEBI_TT,0) *100 ), \
+                          A.fab_tran_chrg = NVL(A.fab_tran_chrg,0) + ( NVL(B.ECN_TRAN_CHARGE,0) *100 ), \
+                          A.fab_stt = NVL(A.fab_stt,0) + ( NVL(B.ECN_STT,0) *100 ), \
+                          A.fab_src_tx = NVL(A.fab_src_tx,0) + ( NVL(B.ECN_SRC_TAX,0) *100 )+(NVl(B.ECN_CGST,0)*100) + (NVL(B.ECN_SGST,0)*100) + (NVL(B.ECN_IGST,0)*100) +(NVL(B.ECN_UGST,0)*100)"); 
+
+     SETLEN(v_sql_fab_upd); 
+
+     fn_userlog(c_ServiceName,"FAB UPD  Query string length :%d:",v_sql_fab_upd.len);
+
+     /** fn_userlog(c_ServiceName,"FAB Query String :%s:",v_sql_fab_upd.arr); **/
+
+     EXEC SQL DECLARE sql_fab_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31320",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+     EXEC SQL PREPARE sql_fab_stmt FROM :v_sql_fab_upd ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31325",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_fab_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31330",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+      fn_userlog(c_ServiceName,"Total Assignment records Updated IN main :%d:",sqlca.sqlerrd[2]);  
+
+
+      fn_userlog(c_ServiceName,"Before FAB HSTRY MERGE");
+
+         sprintf(v_sql_fab_hstry_upd.arr,
+         "MERGE INTO FAB_FO_ASGNMNT_BOOK_HSTRY A \
+         USING (SELECT distinct ECN_BROKERAGE, ECN_STAMP_DUTY, ECN_SEBI_TT, ECN_TRAN_CHARGE, ECN_STT, ECN_SRC_TAX, ECN_CGST, ECN_SGST, ECN_IGST, ECN_UGST, ECN_PRDCT_TYP, ECN_INDSTK, ECN_UNDRLYNG, ECN_EXPIRYDATE, ECN_EXER_TYP, ECN_OPT_TYP, ECN_STRIKEPRICE, ECN_CONTRACTDATE, ECN_XCHNG_CD, ECN_MTCH_ACCNT, ECN_CONTRACTNO FROM ECN_EA_CNTRCT_NOTES where exists (select 1 from EA_CONF_DTLS where ECN_CONTRACTNO = ECD_CNTRCT_NMBR and ECD_EA_FLG = 'A'))B \
+         ON ( A.fab_clm_mtch_accnt = B.ECN_MTCH_ACCNT \
+          AND A.fab_prdct_typ = B.ECN_PRDCT_TYP \
+          AND A.fab_indstk = B.ECN_INDSTK \
+          AND A.fab_undrlyng = B.ECN_UNDRLYNG \
+          AND A.fab_expry_dt = to_date( B.ECN_EXPIRYDATE, 'DD-Mon-YYYY' ) \
+          AND A.fab_exer_typ = B.ECN_EXER_TYP \
+          AND A.fab_opt_typ = B.ECN_OPT_TYP \
+          AND A.fab_strk_prc = B.ECN_STRIKEPRICE*100 \
+          AND   trunc(A.fab_asgnd_dt) = trunc(to_date( B.ECN_CONTRACTDATE, 'DD-Mon-YYYY' )) \
+          AND   A.FAB_XCHNG_CD = decode(B.ECN_XCHNG_CD,'NSE','NFO','BFO') \
+         ) WHEN MATCHED THEN UPDATE SET \
+           A.fab_brkrg_val = nvl(A.fab_brkrg_val,0) + ( NVL(B.ECN_BROKERAGE,0) *100 ), \
+                          A.fab_stamp_duty = NVL(A.fab_stamp_duty,0) + ( NVL(B.ECN_STAMP_DUTY,0) *100 ), \
+                          A.fab_sebi_tt = NVL(A.fab_sebi_tt,0) + ( NVL(B.ECN_SEBI_TT,0) *100 ), \
+                          A.fab_tran_chrg = NVL(A.fab_tran_chrg,0) + ( NVL(B.ECN_TRAN_CHARGE,0) *100 ), \
+                          A.fab_stt = NVL(A.fab_stt,0) + ( NVL(B.ECN_STT,0) *100 ), \
+                          A.fab_src_tx = NVL(A.fab_src_tx,0) + ( NVL(B.ECN_SRC_TAX,0) *100 )+(NVl(B.ECN_CGST,0)*100) + (NVL(B.ECN_SGST,0)*100) + (NVL(B.ECN_IGST,0)*100) +(NVL(B.ECN_UGST,0)*100)");
+	
+          SETLEN(v_sql_fab_hstry_upd);
+
+     fn_userlog(c_ServiceName,"FAB HSTRY UPD  Query string length :%d:",v_sql_fab_hstry_upd.len);
+
+     /* fn_userlog(c_ServiceName,"FAB HSTYR Query String :%s:",v_sql_fab_hstry_upd.arr); */
+
+     EXEC SQL DECLARE sql_fab_hstry_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31335",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+		 EXEC SQL PREPARE sql_fab_hstry_stmt FROM :v_sql_fab_hstry_upd ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31340",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+		 EXEC SQL EXECUTE sql_fab_hstry_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31345",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+		  fn_userlog(c_ServiceName,"Total Assignment HSTRY records Updated IN main :%d:",sqlca.sqlerrd[2]);
+      fn_userlog(c_ServiceName,"Before PCP MAIN MERGE");
+
+            sprintf(v_sql_pcpea_upd.arr,
+						"MERGE INTO PCP_PRTFL_CNTRCT_PRDCT A \
+            USING ( SELECT ECN_MTCH_ACCNT,ECN_XCHNG_CD,ECN_PRDCT_TYP,ECN_INDSTK,ECN_UNDRLYNG,ECN_EXPIRYDATE,ECN_EXER_TYP,ECN_STRIKEPRICE,ECN_OPT_TYP,ECN_BROKERAGE,ECN_STAMP_DUTY,ECN_SEBI_TT,ECN_TRAN_CHARGE,ECN_STT,ECN_SRC_TAX,ECN_CGST,ECN_SGST,ECN_IGST,ECN_UGST FROM ECN_EA_CNTRCT_NOTES where exists (select 1 from EA_CONF_DTLS where ECN_CONTRACTNO = ECD_CNTRCT_NMBR ) )B \
+	 					ON ( A.PCP_CLM_MTCH_ACCNT = B.ECN_MTCH_ACCNT \
+					   AND A.PCP_XCHNG_CD = decode(B.ECN_XCHNG_CD,'NSE','NFO','BFO') \
+             AND A.PCP_PRDCT_TYP = B.ECN_PRDCT_TYP \
+				     AND A.PCP_INDSTK = B.ECN_INDSTK \
+						 AND A.PCP_UNDRLYNG = B.ECN_UNDRLYNG \
+						 AND A.PCP_EXPRY_DT = to_date( B.ECN_EXPIRYDATE, 'DD-Mon-YYYY' ) \
+             AND A.PCP_EXER_TYP = B.ECN_EXER_TYP \
+             AND A.PCP_STRK_PRC = B.ECN_STRIKEPRICE*100 \
+						 AND A.PCP_OPT_TYP = B.ECN_OPT_TYP) \
+             WHEN MATCHED THEN UPDATE SET \
+             A.PCP_BRKG_VAL = nvl(A.PCP_BRKG_VAL,0) + (NVL(B.ECN_BROKERAGE,0) * 100) + (NVL(B.ECN_STAMP_DUTY,0) *100) + (NVL(B.ECN_SEBI_TT,0) *100) + (NVL(B.ECN_TRAN_CHARGE,0) *100) + (NVL(B.ECN_STT,0) *100) + (NVL(B.ECN_SRC_TAX,0) *100) + (NVL(B.ECN_CGST,0)*100) + (NVL(B.ECN_SGST,0)*100) + (NVL(B.ECN_IGST,0)*100) +(NVL(B.ECN_UGST,0)*100)");
+           
+           SETLEN(v_sql_pcpea_upd); 
+
+     fn_userlog(c_ServiceName,"PCP UPD  Query string length :%d:",v_sql_pcpea_upd.len);
+
+     EXEC SQL DECLARE sql_pcp_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31350",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+    
+     EXEC SQL PREPARE sql_pcp_stmt FROM :v_sql_pcpea_upd ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31355",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_pcp_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31360",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     fn_userlog(c_ServiceName,"Total Portfolio records Updated IN main :%d:",sqlca.sqlerrd[2]);
+     fn_userlog(c_ServiceName,"Before PCP HSTRY MERGE"); 
+     
+            sprintf(v_sql_pcpea_hstry_upd.arr,
+            "MERGE INTO PCP_PRTFL_CNTRCT_PRDCT_HSTRY A \
+            USING ( SELECT ECN_MTCH_ACCNT,ECN_XCHNG_CD,ECN_PRDCT_TYP,ECN_INDSTK,ECN_UNDRLYNG,ECN_EXPIRYDATE,ECN_EXER_TYP,ECN_STRIKEPRICE,ECN_OPT_TYP,ECN_BROKERAGE,ECN_STAMP_DUTY,ECN_SEBI_TT,ECN_TRAN_CHARGE,ECN_STT,ECN_SRC_TAX,ECN_CGST,ECN_SGST,ECN_IGST,ECN_UGST FROM ECN_EA_CNTRCT_NOTES where exists (select 1 from EA_CONF_DTLS where ECN_CONTRACTNO = ECD_CNTRCT_NMBR ) )B \
+            ON ( A.PCP_CLM_MTCH_ACCNT = B.ECN_MTCH_ACCNT \
+             AND A.PCP_XCHNG_CD = decode(B.ECN_XCHNG_CD,'NSE','NFO','BFO') \
+             AND A.PCP_PRDCT_TYP = B.ECN_PRDCT_TYP \
+             AND A.PCP_INDSTK = B.ECN_INDSTK \
+             AND A.PCP_UNDRLYNG = B.ECN_UNDRLYNG \
+             AND A.PCP_EXPRY_DT = to_date( B.ECN_EXPIRYDATE, 'DD-Mon-YYYY' ) \
+             AND A.PCP_EXER_TYP = B.ECN_EXER_TYP \
+             AND A.PCP_STRK_PRC = B.ECN_STRIKEPRICE*100 \
+             AND A.PCP_OPT_TYP = B.ECN_OPT_TYP) \
+             WHEN MATCHED THEN UPDATE SET \
+             A.PCP_BRKG_VAL = nvl(A.PCP_BRKG_VAL,0) + (NVL(B.ECN_BROKERAGE,0) * 100) + (NVL(B.ECN_STAMP_DUTY,0)*100) + (NVL(B.ECN_SEBI_TT,0) *100) + (NVL(B.ECN_TRAN_CHARGE,0) *100) + (NVL(B.ECN_STT,0) *100) + (NVL(B.ECN_SRC_TAX,0) *100) + (NVL(B.ECN_CGST,0)*100) + (NVL(B.ECN_SGST,0)*100) + (NVL(B.ECN_IGST,0)*100) +(NVL(B.ECN_UGST,0)*100)");
+
+             SETLEN(v_sql_pcpea_hstry_upd);  
+
+
+     fn_userlog(c_ServiceName,"PCP Hstry UPD  Query string length :%d:",v_sql_pcpea_hstry_upd.len);
+
+     EXEC SQL DECLARE sql_pcp_hstry_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31365",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+     EXEC SQL PREPARE sql_pcp_hstry_stmt FROM :v_sql_pcpea_hstry_upd ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31370",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_pcp_hstry_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31375",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     fn_userlog(c_ServiceName,"Total Portfolio Hstry records Updated IN main :%d:",sqlca.sqlerrd[2]); 
+
+     /*** Ver 5.4 Ends ***/
+
+
+		}/*End of elseif */
+		/******************************************************************************/
+		/*Ver 2.2 Starts */
+		else if (c_oper_typ=='C')
+		{
+       /*** Commented in Ver 5.4 *****************************************************************
+
+				********** Ver 3.0 New Code Starts ********
+				if( strcmp(sql_fcm_excng_cd.arr ,"NSE") == 0)   
+				{
+					strcpy(sql_ccm_excng_cd.arr,"NFO");
+				}
+				else if(strcmp(sql_fcm_excng_cd.arr ,"BSE") == 0)
+				{
+					strcpy(sql_ccm_excng_cd.arr,"BFO");
+				}
+				** Ver 3.0 New code Ends *******
+				*strcpy(sql_ccm_excng_cd.arr,"NFO");			***** Ver 3.0 Comment ****
+				SETLEN(sql_ccm_excng_cd);
+							
+				char c_sql_ccd_clsout_typ[2]={0};
+				char c_sql_ccd_ordr_flw[2]={0};
+						
+				fn_userlog(c_ServiceName,"Closeout Notes processing ... ");   
+
+				while ( fgets(c_data, CDATA_LEN, fpfile))
+				{
+					sql_ccd_cgst=0.0;
+					sql_ccd_sgst=0.0;
+					sql_ccd_igst=0.0;
+					sql_ccd_ugst=0.0;
+					sql_ccd_igst_prcnt = 0.0 ; 
+					sql_ccd_cgst_prcnt = 0.0 ; 
+					sql_ccd_sgst_prcnt = 0.0 ; 
+					sql_ccd_ugst_prcnt = 0.0 ; 
+					MEMSET(c_cust_st_cd);
+					MEMSET(c_isec_st_cd);
+
+					fn_userlog(c_ServiceName,"#CL Stage %d ... \n\n  ",tran_counter);
+					tran_counter=tran_counter+1;
+					*fn_userlog(c_ServiceName,"#CL Data 1 <%s> ",c_data);*
+					strcpy(c_temp,c_data);
+					*fn_userlog(c_ServiceName,"#CL Data 2 <%s> ",c_temp);*
+								
+					*
+					sscanf((char *)strtok(c_data,"|"),"%d",&sql_ccm_clsoutnote_nmbr);*
+								
+					strcpy(sql_ccm_clsoutnote_nmbr.arr,strtok(c_data,"|"));
+					strcpy(sql_ccm_usr_mtch_accno.arr,strtok(NULL,"|"));  
+					strcpy(sql_ccm_add_ln1.arr,strtok(NULL,"|"));
+					strcpy(sql_ccm_add_ln2.arr,strtok(null_ptr,"|"));
+					strcpy(sql_ccm_add_ln3.arr,strtok(null_ptr,"|"));
+					strcpy(sql_ccm_add_ln4.arr,strtok(null_ptr,"|"));
+					strcpy(sql_ccm_pan_no.arr,strtok(null_ptr,"|"));
+					strcpy(sql_ccm_tel_no.arr,strtok(null_ptr,"|"));
+					strcpy(sql_ccm_sttlmnt_dt.arr,strtok(null_ptr,"|"));
+					strcpy(c_sql_ccd_clsout_typ,strtok(null_ptr,"|"));
+					sql_ccd_clsout_typ=c_sql_ccd_clsout_typ[0];
+					strcpy(sql_ccd_cntrct_code.arr,strtok(null_ptr,"|"));
+					strcpy(sql_ccm_clsout_dt.arr,strtok(null_ptr,"|"));
+					sscanf((char *)strtok(null_ptr,"|"),"%d",&sql_ccd_mrkt_lot);
+					strcpy(c_sql_ccd_ordr_flw,strtok(null_ptr,"|"));
+					sql_ccd_ordr_flw=c_sql_ccd_ordr_flw[0];
+					sscanf((char *)strtok(null_ptr,"|"),"%d",&sql_ccd_qty);
+					sscanf((char *)strtok(null_ptr,"|"),"%d",&sql_ccd_nmbr_cntrcts);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_prc);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_brkg);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_src_tx);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_cess);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_amount);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccm_total_amount);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_stamp_duty);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_sebi_tt);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_tran_chrg);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_other_chrg);
+					sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_stt); 
+
+					** Ver 3.0 **
+
+					if(strcmp(sql_ccm_excng_cd.arr,"BFO" ) == 0)
+					{
+						strcpy(c_series_id,"");
+						strcpy(c_cntrct_symbl,"");
+						strcpy(c_series_id,strtok(null_ptr,"|"));
+						strcpy(c_cntrct_symbl,strtok(null_ptr,"|"));
+						rtrim(c_cntrct_symbl);
+						rtrim(c_series_id);
+						SETLEN(sql_ccd_cntrct_code);			*** Ver 3.1 ***
+						if(DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName,"#c_cntrct_symbl# <%s> ",c_cntrct_symbl);
+							fn_userlog(c_ServiceName,"#c_series_id# <%s> ",c_series_id);
+							fn_userlog(c_ServiceName,"conttrct spec B4 conversion# <%s> ",sql_ccd_cntrct_code.arr);
+						}
+
+						if(strncmp(sql_ccd_cntrct_code.arr,"MSX",3) == 0 )
+						{
+								EXEC SQL
+								 SELECT sem_stck_cd ||
+												substr(:sql_ccd_cntrct_code,4,7),
+												rtrim(sem_stck_cd)
+								 INTO   :sql_ccd_cntrct_code,
+														 :c_fco_undrlyng										** Ver 3.1 ***
+								 FROM   sem_stck_map
+								 WHERE  SEM_MAP_VL ='MSX'
+								 AND    SEM_ENTTY = '13';
+						}
+						else
+						{
+										EXEC SQL
+											SELECT SEM_STCK_CD ||
+														 substr(:sql_ccd_cntrct_code,4,7),
+														 rtrim(sem_stck_cd)
+											INTO   :sql_ccd_cntrct_code,
+														 :c_fco_undrlyng									 ** Ver 3.1 ***
+											FROM   sem_stck_map
+											WHERE  SEM_MAP_VL = :c_cntrct_symbl
+											AND    SEM_ENTTY = '13';
+						}
+						if(SQLCODE !=0 )
+						{
+										fn_userlog(c_ServiceName,"SQLCODE V1 is <%d>",SQLCODE);
+										fn_errlog(c_ServiceName,"S31380",SQLMSG,c_errmsg);
+										tpfree((char*)ptr_Obuf);
+										tpfree((char *)ptr_Sbuf);
+										tpfree((char *)ptr_Rbuf);
+										Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+										tpabort(0);
+										tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+						}
+									fn_userlog(c_ServiceName,"conttrct spec After conversion# <%s> ",sql_ccd_cntrct_code.arr);
+				 }
+				******* Ver 3.0 Ends ****
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_cgst); 
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_sgst); 
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_igst); 
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_ugst); 
+				strcpy(c_cust_st_cd.arr,strtok(null_ptr,"|"));					** Ver 4.9 **
+				strcpy(c_isec_st_cd.arr,strtok(null_ptr,"|"));					** Ver 4.9 **
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_cgst_prcnt); ** Ver 4.9 **
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_sgst_prcnt); ** Ver 4.9 **
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_igst_prcnt); ** Ver 4.9 **
+				sscanf((char *)strtok(null_ptr,"|"),"%lf",&sql_ccd_ugst_prcnt); ** Ver 4.9 **
+				 
+				strcpy(sql_ccm_usr_nm.arr,"NONAME");       
+		 
+				strcpy(sql_ccm_ucc_cd.arr,sql_ccm_usr_mtch_accno.arr); 
+								
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"#sql_ccm_clsoutnote_nmbr# <%s> ",sql_ccm_clsoutnote_nmbr.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_usr_mtch_accno# <%s> ",sql_ccm_usr_mtch_accno.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_add_ln1# <%s> ",sql_ccm_add_ln1.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_add_ln2# <%s> ",sql_ccm_add_ln2.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_add_ln3# <%s> ",sql_ccm_add_ln3.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_add_ln4# <%s> ",sql_ccm_add_ln4.arr);
+
+					fn_userlog(c_ServiceName,"#sql_ccm_sttlmnt_dt# <%s> ",sql_ccm_sttlmnt_dt.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_clsout_dt# <%s> ",sql_ccm_clsout_dt.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_pan_no# <%s> ",sql_ccm_pan_no.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_tel_no# <%s> ",sql_ccm_tel_no.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_ucc_cd# <%s> ",sql_ccm_ucc_cd.arr);
+					fn_userlog(c_ServiceName,"#sql_ccm_total_amount# <%lf> ",sql_ccm_total_amount);
+				}	
+				fn_userlog(c_ServiceName,"#CL After scanning <%s> ",c_data);
+								
+				*sql_ccd_strk_prc=sql_ccd_prc;*
+								
+				SETLEN(sql_ccm_usr_mtch_accno);
+				SETLEN(sql_ccm_excng_cd);
+				SETLEN(sql_ccm_clsoutnote_nmbr);
+								
+				SETLEN(sql_ccm_sttlmnt_dt);
+				SETLEN(sql_ccm_clsout_dt);
+								
+				SETLEN(sql_ccm_usr_nm);
+				SETLEN(sql_ccm_add_ln1);
+				SETLEN(sql_ccm_add_ln2);
+				SETLEN(sql_ccm_add_ln3);
+				SETLEN(sql_ccm_add_ln4);
+								
+				SETLEN(sql_ccm_pan_no);
+				SETLEN(sql_ccm_tel_no);
+												
+				SETLEN(sql_ccm_ucc_cd);
+				SETLEN(c_cust_st_cd);					** Ver 4.9 **
+				SETLEN(c_isec_st_cd);					** Ver 4.9 **
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"customer state code:%s:",c_cust_st_cd.arr);
+					fn_userlog(c_ServiceName,"Isec state code :%s:",c_isec_st_cd.arr);
+					fn_userlog(c_ServiceName,"cgst val :%lf:",sql_ccd_cgst);
+					fn_userlog(c_ServiceName,"sgst val :%lf:",sql_ccd_sgst);
+					fn_userlog(c_ServiceName,"igst val :%lf:",sql_ccd_igst);
+					fn_userlog(c_ServiceName,"ugst val :%lf:",sql_ccd_ugst);
+					fn_userlog(c_ServiceName,"cgst per val :%lf:",sql_ccd_cgst_prcnt);
+					fn_userlog(c_ServiceName,"sgst per val :%lf:",sql_ccd_sgst_prcnt);
+					fn_userlog(c_ServiceName,"igst per val :%lf:",sql_ccd_igst_prcnt);
+					fn_userlog(c_ServiceName,"ugst per val :%lf:",sql_ccd_ugst_prcnt);
+				}					
+				*Need to insert the data from these strings into the tables for EBA*
+								
+				EXEC SQL
+					INSERT INTO CCM_CNTRCT_CLSOUT_MSTR
+					(
+					CCM_USR_MTCH_ACCNO,
+					CCM_EXCNG_CD,
+					CCM_CLSOUTNOTE_NMBR,
+					CCM_STTLMNT_DT,
+					CCM_CLSOUT_DT,
+					CCM_USR_NM,
+					CCM_ADD_LN1,
+					CCM_ADD_LN2,
+					CCM_ADD_LN3,
+					CCM_ADD_LN4,
+					CCM_PAN_NO,
+					CCM_TEL_NO,
+					CCM_UCC_CD,
+					CCM_TOTAL_AMOUNT,
+					CCM_CUST_ST_CD,
+					CCM_ISEC_ST_CD,
+					CCM_IGST_PRCNT,
+					CCM_CGST_PRCNT,
+					CCM_SGST_PRCNT,
+					CCM_UGST_PRCNT
+					)
+					VALUES
+								(
+									trim(:sql_ccm_usr_mtch_accno),
+									trim(:sql_ccm_excng_cd),
+									to_char(:sql_ccm_clsoutnote_nmbr),
+									to_date(:sql_ccm_sttlmnt_dt,'dd/mm/yyyy'),
+									to_date(:sql_ccm_clsout_dt,'dd/mm/yyyy'),
+									trim(:sql_ccm_usr_nm),
+									trim(:sql_ccm_add_ln1),
+									trim(:sql_ccm_add_ln2),
+									trim(:sql_ccm_add_ln3),
+									trim(:sql_ccm_add_ln4),
+									trim(:sql_ccm_pan_no),
+									trim(:sql_ccm_tel_no),
+									trim(:sql_ccm_ucc_cd),
+									:sql_ccm_total_amount,
+								  rtrim(:c_cust_st_cd),
+									trim(:c_isec_st_cd),
+									:sql_ccd_igst_prcnt,
+									:sql_ccd_cgst_prcnt,
+									:sql_ccd_sgst_prcnt,	
+									:sql_ccd_ugst_prcnt	
+								);
+
+				*   Need to add handler      - done *
+
+								if ( SQLCODE != 0  && SQLCODE != -1 )
+								{
+									fn_userlog(c_ServiceName,"SQLCODE V1 is <%d>",SQLCODE);
+									fn_errlog(c_ServiceName,"S31385",SQLMSG,c_errmsg);
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+									tpabort(0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+								if(SQLCODE ==0)
+								{
+									 fn_userlog(c_ServiceName,"INSERT 1 Done <%d>",SQLCODE);
+									 i_counter=i_counter+1;
+								}       
+								if(SQLCODE == -1)
+								{
+									 fn_userlog(c_ServiceName,"INSERT 1 Record Already Exists <%d>",SQLCODE);
+								}
+		
+								strcpy(sql_ccd_cntrct_optn_typ.arr," ");
+								sql_ccd_strk_prc=0.00F;
+
+								MEMSET(sql_ccd_cntrct_symbl);  ** Ver 3.9 **
+
+								SETLEN(sql_ccd_cntrct_code);
+								SETLEN(sql_ccd_cntrct_symbl);
+								SETLEN(sql_ccd_cntrct_optn_typ);
+								** SETLEN(sql_ccd_cntrct_code);   *** Ver 3.9 **        
+								SETLEN(sql_ccm_usr_mtch_accno);
+								SETLEN(sql_ccm_clsoutnote_nmbr);
+								** SETLEN(sql_ccd_cntrct_code);   *** Ver 3.9 **
+							 ** SETLEN(sql_ccd_cntrct_symbl);  *** Ver 3.9 **
+								SETLEN(sql_ccm_clsout_dt);
+								SETLEN(sql_ccd_cntrct_optn_typ);
+								
+								if(DEBUG_MSG_LVL_3)
+								{
+								fn_userlog(c_ServiceName,"#sql_ccd_clsout_typ# <%c> ",sql_ccd_clsout_typ);
+								fn_userlog(c_ServiceName,"#sql_ccm_usr_mtch_accno# <%s> ",sql_ccm_usr_mtch_accno.arr);
+								fn_userlog(c_ServiceName,"#sql_ccm_excng_cd# <%s> ",sql_ccm_excng_cd.arr);
+								fn_userlog(c_ServiceName,"#sql_ccd_nmbr_cntrcts# <%d> ",sql_ccd_nmbr_cntrcts);
+								fn_userlog(c_ServiceName,"#sql_ccd_mrkt_lot# <%d> ",sql_ccd_mrkt_lot);
+								fn_userlog(c_ServiceName,"#sql_ccd_qty# <%d> ",sql_ccd_qty);
+								fn_userlog(c_ServiceName,"#sql_ccd_cntrct_code# <%s> ",sql_ccd_cntrct_code.arr);
+
+								fn_userlog(c_ServiceName,"#sql_ccd_cntrct_symbl# <%s> ",sql_ccd_cntrct_symbl.arr);
+								fn_userlog(c_ServiceName,"#sql_ccm_clsout_dt# <%s> ",sql_ccm_clsout_dt.arr);
+								fn_userlog(c_ServiceName,"#sql_ccd_cntrct_optn_typ# <%s> ",sql_ccd_cntrct_optn_typ.arr);
+								fn_userlog(c_ServiceName,"#sql_ccd_ordr_flw# <%c> ",sql_ccd_ordr_flw);
+								fn_userlog(c_ServiceName,"#sql_ccm_ucc_cd# <%s> ",sql_ccm_ucc_cd.arr);
+								fn_userlog(c_ServiceName,"#sql_ccd_brkg# <%lf> ",sql_ccd_brkg);
+								fn_userlog(c_ServiceName,"#sql_ccd_amount# <%lf> ",sql_ccd_amount);
+								fn_userlog(c_ServiceName,"#sql_ccd_qty# <%lf> ",sql_ccd_qty);
+								fn_userlog(c_ServiceName,"#sql_ccd_prc# <%lf> ",sql_ccd_prc);
+								fn_userlog(c_ServiceName,"#sql_ccd_src_tx# <%lf> ",sql_ccd_src_tx);
+								fn_userlog(c_ServiceName,"#sql_ccd_cess# <%lf> ",sql_ccd_cess);
+								fn_userlog(c_ServiceName,"#sql_ccd_stamp_duty# <%lf> ",sql_ccd_stamp_duty);
+								fn_userlog(c_ServiceName,"#sql_ccd_sebi_tt# <%lf> ",sql_ccd_sebi_tt);
+								fn_userlog(c_ServiceName,"#sql_ccd_tran_chrg# <%lf> ",sql_ccd_tran_chrg);
+								fn_userlog(c_ServiceName,"#sql_ccd_other_chrg# <%lf> ",sql_ccd_other_chrg);
+								fn_userlog(c_ServiceName,"#sql_ccd_stt# <%lf> ",sql_ccd_stt);
+								fn_userlog(c_ServiceName,"#sql_ccd_igst# <%lf> ",sql_ccd_igst);
+								fn_userlog(c_ServiceName,"#sql_ccd_cgst# <%lf> ",sql_ccd_cgst);
+								fn_userlog(c_ServiceName,"#sql_ccd_sgst# <%lf> ",sql_ccd_sgst);
+								fn_userlog(c_ServiceName,"#sql_ccd_ugst# <%lf> ",sql_ccd_ugst);
+								}
+								
+								EXEC SQL
+								INSERT INTO CCD_CNTRCT_CLSOUT_DTLS
+								(CCD_USR_MTCH_ACCNO,
+								 CCD_CLSOUTNOTE_NMBR,
+								 CCD_CLSOUT_DT,
+								 CCD_CLSOUT_TYP,
+								 CCD_NMBR_CNTRCTS,
+								 CCD_MRKT_LOT,
+								 CCD_CNTRCT_CODE,
+								 CCD_CNTRCT_SYMBL,
+								 CCD_EXPR_DT,
+								 CCD_CNTRCT_INST_TYP,
+								 CCD_CNTRCT_OPTN_TYP,
+								 CCD_STRK_PRC,
+								 CCD_ORDR_FLW,
+								 CCD_CNTRCT_AMT,
+								 CCD_QTY,
+								 CCD_PRC,
+								 CCD_BRKG,
+								 CCD_SRC_TX,
+							 	 CCD_CESS,
+								 CCD_AMOUNT,
+								 CCD_STAMP_DUTY,
+								 CCD_SEBI_TT,
+								 CCD_TRAN_CHRG,
+								 CCD_OTHER_CHRG,
+								 CCD_STT,
+								 CCD_TOTAL_IGST,
+								 CCD_TOTAL_CGST,
+								 CCD_TOTAL_SGST,
+								 CCD_TOTAL_UGST,
+								 CCD_BRKRG_IGST,
+								 CCD_BRKRG_CGST,
+								 CCD_BRKRG_SGST,
+								 CCD_BRKRG_UGST,
+								 CCD_TRN_IGST,
+								 CCD_TRN_CGST,
+								 CCD_TRN_SGST,
+								 CCD_TRN_UGST
+								 )
+								VALUES
+								(
+									:sql_ccm_usr_mtch_accno,
+									:sql_ccm_clsoutnote_nmbr,
+									to_date(:sql_ccm_clsout_dt,'dd/mm/yyyy'),
+									:sql_ccd_clsout_typ,
+									:sql_ccd_nmbr_cntrcts,
+									:sql_ccd_mrkt_lot,
+									:sql_ccd_cntrct_code,
+									:sql_ccd_cntrct_symbl,                            * Where does this come from ? *
+									to_date(:sql_ccm_clsout_dt ,'dd/mm/yyyy'),        * This is to be the expiry date as the close out occurs on the same day*
+									substr(trim(:sql_ccd_cntrct_code),4,1 ),          * Trimming it from the contract code *
+									:sql_ccd_cntrct_optn_typ,                         * This is not available - NA *
+									:sql_ccd_strk_prc,                                * This is not available - set 0 *
+									:sql_ccd_ordr_flw,                                * Assuming this is the order flow*
+									:sql_ccd_amount,
+									:sql_ccd_qty,
+									:sql_ccd_prc,
+									:sql_ccd_brkg,
+									:sql_ccd_src_tx,
+									:sql_ccd_cess,
+									:sql_ccd_amount, 
+									:sql_ccd_stamp_duty,
+									:sql_ccd_sebi_tt,
+									:sql_ccd_tran_chrg,
+									:sql_ccd_other_chrg,
+									:sql_ccd_stt ,
+									:sql_ccd_igst,
+									:sql_ccd_cgst,
+									:sql_ccd_sgst,
+									:sql_ccd_ugst,
+									(:sql_ccd_brkg * (:sql_ccd_igst_prcnt/100)),
+									(:sql_ccd_brkg * (:sql_ccd_cgst_prcnt/100)),
+									(:sql_ccd_brkg * (:sql_ccd_sgst_prcnt/100)),
+									(:sql_ccd_brkg * (:sql_ccd_ugst_prcnt/100)),
+									((:sql_ccd_tran_chrg+:sql_ccd_sebi_tt) * (:sql_ccd_igst_prcnt/100)),
+									((:sql_ccd_tran_chrg+:sql_ccd_sebi_tt) * (:sql_ccd_cgst_prcnt/100)),
+									((:sql_ccd_tran_chrg+:sql_ccd_sebi_tt) * (:sql_ccd_sgst_prcnt/100)),
+									((:sql_ccd_tran_chrg+:sql_ccd_sebi_tt) * (:sql_ccd_ugst_prcnt/100))  
+								);
+								
+								*   Need to add handler      --done *
+
+								if(SQLCODE != 0  && SQLCODE != -1)
+								{
+									fn_userlog(c_ServiceName,"SQLCODE V2 is <%d>",SQLCODE);
+									fn_errlog(c_ServiceName,"S31390",SQLMSG,c_errmsg);
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+									tpabort(0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+
+								if(SQLCODE ==0)
+								{
+									 fn_userlog(c_ServiceName,"INSERT 2 Done <%d>",SQLCODE);
+									 i_upl_rec = i_upl_rec + 1;
+								}      
+								**** Ver 3.0 Comment starts *************  
+								* Ver 2.3 Starts * 
+								EXEC SQL
+								SELECT rtrim(sem_stck_cd)
+								INTO :c_fco_undrlyng
+								FROM sem_stck_map
+								WHERE sem_map_vl= substr(:sql_ccd_cntrct_code, 0 , 
+																						*instr(:sql_ccd_cntrct_code,'-') -1 )*		** Ver 2.4 **
+																						instr(:sql_ccd_cntrct_code,'-FUT') -1 )			** Ver 2.4 **
+								AND sem_entty = 3;              ** Sem entity is 1 for NSE **				***  Ver 2.5 Sem Entty Changed From 1 To 3 ***
+								****** Ver 3.0 Comment Ends ****************
+								***** Ver 3.0 New code Starts *********
+								if( strcmp(sql_ccm_excng_cd.arr ,"NFO") == 0)            
+								{
+									EXEC SQL
+										SELECT rtrim(sem_stck_cd)
+										INTO :c_fco_undrlyng
+										FROM sem_stck_map
+										WHERE sem_map_vl= substr(:sql_ccd_cntrct_code,0,instr(:sql_ccd_cntrct_code,'-FUT') -1)
+										AND sem_entty = 3;
+								}   
+							****** Ver 3.1 Comment Starts ************************************************************
+								
+								else if(strcmp(sql_ccm_excng_cd.arr ,"BFO") == 0)
+								{
+									if (strncmp(sql_ccd_cntrct_code.arr,"MSX",3)== 0)
+									{
+										EXEC SQL
+											SELECT rtrim(sem_stck_cd)
+											INTO :c_fco_undrlyng
+											FROM sem_stck_map
+											WHERE sem_map_vl='MSX'		*symbol for BSX and MSX from class is 1 hence hardcoded* 
+											AND sem_entty = 13;	
+									}
+									else
+									{
+										EXEC SQL
+											SELECT rtrim(sem_stck_cd)
+											INTO :c_fco_undrlyng
+											FROM sem_stck_map
+										**	WHERE sem_map_vl=substr(:sql_ccd_cntrct_code,0,instr(:sql_ccd_cntrct_code,'-FUT') -1) *** Ver 3.1 Comment ***
+											WHERE sem_map_vl= :c_cntrct_symbl					** Ver 3.0 Bug Fix**
+											AND sem_entty = 13;
+									}	
+								}
+							********************** Ver 1.3 Comment Ends **********************************************
+					
+								***** Ver 3.0 New Code Ends ***********
+								if( (SQLCODE !=0 ) && (SQLCODE != NO_DATA_FOUND))
+								{
+									tpabort(0);
+									tpfree((char*)ptr_Obuf);
+									tpfree((char *)ptr_Sbuf);
+									tpfree((char *)ptr_Rbuf);
+									fn_errlog(c_ServiceName,"S31395",SQLMSG,c_errmsg);
+									Fadd32(ptr_Ibuf, FFO_ERR_MSG,c_errmsg, 0);
+									tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+								}
+									
+								* Ver 2.3 Ends *
+								
+								*      Ver 2.2 *
+								******************************************************************************
+								
+								*Need to update FCO brokerage so that the proper details are shown in portfolio*
+								if(DEBUG_MSG_LVL_3)
+								{
+								fn_userlog(c_ServiceName,"========================================== ");
+								fn_userlog(c_ServiceName,"#sql_ccm_usr_mtch_accno# <%s> ",sql_ccm_usr_mtch_accno.arr);
+								fn_userlog(c_ServiceName,"#sql_ccm_excng_cd# <%s> ",sql_ccm_excng_cd.arr);
+								fn_userlog(c_ServiceName,"#sql_ccd_clsout_typ# <%c> ",sql_ccd_clsout_typ);
+								fn_userlog(c_ServiceName,"#sql_ccd_cntrct_code# <%c> ",sql_ccd_cntrct_code);
+								fn_userlog(c_ServiceName,"#sql_ccm_sttlmnt_dt# <%s> ",sql_ccm_sttlmnt_dt.arr);
+								fn_userlog(c_ServiceName,"#c_fco_undrlyng# <%s> ",c_fco_undrlyng);	*** Ver 3.1 userlog **
+								}
+
+								SETLEN(sql_ccm_usr_mtch_accno);
+								SETLEN(sql_ccm_excng_cd);
+								SETLEN(sql_ccd_cntrct_code);
+								SETLEN(sql_ccm_sttlmnt_dt);
+								
+								if(DEBUG_MSG_LVL_3)
+								{
+								fn_userlog(c_ServiceName,"========================================== ");
+								fn_userlog(c_ServiceName,"#sql_ccd_brkg# 				<%lf> ",sql_ccd_brkg);
+								fn_userlog(c_ServiceName,"#sql_ccd_stt# 				<%lf> ",sql_ccd_stt);
+								fn_userlog(c_ServiceName,"#sql_ccd_src_tx# 			<%lf> ",sql_ccd_src_tx);
+								fn_userlog(c_ServiceName,"#sql_ccd_sebi_tt# 		<%lf> ",sql_ccd_sebi_tt);
+								fn_userlog(c_ServiceName,"#sql_ccd_tran_chrg#		<%lf> ",sql_ccd_tran_chrg);
+								fn_userlog(c_ServiceName,"#sql_ccd_stamp_duty# 		<%lf> ",sql_ccd_stamp_duty);
+								fn_userlog(c_ServiceName,"#sql_ccd_other_chrg# 		<%lf> ",sql_ccd_other_chrg);        
+								fn_userlog(c_ServiceName,"========================================== ");
+								}
+								
+								EXEC SQL
+								UPDATE FCO_FO_FCLSOUT
+								SET
+									FCO_BRKG          =   NVL(FCO_BRKG,0.00)          + (:sql_ccd_brkg*100),
+									FCO_STT           =   NVL(FCO_STT,0.00)           + (:sql_ccd_stt*100),
+									FCO_SRC_TX        =   NVL(FCO_SRC_TX,0.00)        + (:sql_ccd_src_tx*100) +(:sql_ccd_cgst*100) +(:sql_ccd_sgst *100)+(:sql_ccd_igst*100)+(:sql_ccd_ugst*100),																					*ver 4.9  GST fields added**
+									FCO_SEBI_TT       =   NVL(FCO_SEBI_TT,0.00)       + (:sql_ccd_sebi_tt*100),
+									FCO_TRAN_CHRG     =   NVL(FCO_TRAN_CHRG,0.00)     + (:sql_ccd_tran_chrg*100),
+									FCO_STAMP_DUTY    =   NVL(FCO_STAMP_DUTY,0.00)    + (:sql_ccd_stamp_duty*100)       
+								WHERE
+										FCO_CLM_MTCH_ACCNT  =  :sql_ccm_usr_mtch_accno        AND 
+										FCO_XCHNG_CD =         :sql_ccm_excng_cd              AND 
+										FCO_PRDCT_TYP =        :sql_ccd_clsout_typ            AND 
+										*FCO_INDSTK =         substr(trim(:sql_ccd_cntrct_code),instr(:sql_ccd_cntrct_code,'-')+4,1 ) AND *
+										FCO_INDSTK =          substr(trim(:sql_ccd_cntrct_code),instr(:sql_ccd_cntrct_code,'-FUT')+4,1 ) AND**Ver 2.4**
+										trim(FCO_UNDRLYNG) =   trim(:c_fco_undrlyng)  AND
+							*    FCO_EXPRY_DT =         to_date(:sql_ccm_sttlmnt_dt,'dd/mm/yyyy')   Commented in ver 4.6 * 
+										FCO_EXPRY_DT =         to_date(:sql_ccm_clsout_dt,'dd/mm/yyyy') AND      ** Ver 4.6 ** 
+										trunc(FCO_CLS_TM) = to_date(:sql_ccm_sttlmnt_dt,'dd/mm/yyyy');       ** Ver 4.6 **
+							
+							if(SQLCODE != 0  )
+							{
+								fn_userlog(c_ServiceName,"SQLCODE V3 is <%d>",SQLCODE);
+								fn_userlog(c_ServiceName,"V3 No data in FCO - Going to update in history ");
+								
+							*  Going to update the history table incase data not found in main table     *
+								EXEC SQL
+									UPDATE FCO_FO_FCLSOUT_HSTRY
+									SET
+										FCO_BRKG          =   NVL(FCO_BRKG,0.00)          + (:sql_ccd_brkg*100),
+										FCO_STT           =   NVL(FCO_STT,0.00)           + (:sql_ccd_stt*100),
+										FCO_SRC_TX        =   NVL(FCO_SRC_TX,0.00)        + (:sql_ccd_src_tx*100) +(:sql_ccd_cgst*100) +(:sql_ccd_sgst *100)+(:sql_ccd_igst*100)+(:sql_ccd_ugst*100),																				** ver 4.9  GST fields added**
+										FCO_SEBI_TT       =   NVL(FCO_SEBI_TT,0.00)       + (:sql_ccd_sebi_tt*100),
+										FCO_TRAN_CHRG     =   NVL(FCO_TRAN_CHRG,0.00)     + (:sql_ccd_tran_chrg*100),
+										FCO_STAMP_DUTY    =   NVL(FCO_STAMP_DUTY,0.00)    + (:sql_ccd_stamp_duty*100)       
+									WHERE
+											trim(FCO_CLM_MTCH_ACCNT)  =  :sql_ccm_usr_mtch_accno        AND 
+											trim(FCO_XCHNG_CD)        =  :sql_ccm_excng_cd              AND 
+											trim(FCO_PRDCT_TYP)       =  :sql_ccd_clsout_typ            AND 
+											trim(FCO_INDSTK)   =  substr(trim(:sql_ccd_cntrct_code),instr(:sql_ccd_cntrct_code,'-FUT')+4,1 )**Ver 2.4 **
+											AND trim(FCO_UNDRLYNG) =    trim(:c_fco_undrlyng)  AND
+									*  FCO_EXPRY_DT =         to_date(:sql_ccm_sttlmnt_dt,'dd/mm/yyyy')  Commented in Ver 4.6 * 
+											FCO_EXPRY_DT =         to_date(:sql_ccm_clsout_dt,'dd/mm/yyyy')  AND        ** Ver 4.6 **
+											trunc(FCO_CLS_TM) = to_date(:sql_ccm_sttlmnt_dt,'dd/mm/yyyy');       ** Ver 4.6 **
+									if(SQLCODE == NO_DATA_FOUND )
+									{
+											fn_userlog(c_ServiceName,"NO DATA FCO_FO_FCLSOUT_HSTRY <%d>",SQLCODE);
+											fn_errlog(c_ServiceName,"S31400",SQLMSG,c_errmsg);
+											sprintf(c_event,"Contract Code :%s",sql_ccd_cntrct_code.arr);
+											sprintf(c_event,"Match Accnt No :%s",sql_ccm_usr_mtch_accno.arr);
+											sprintf(c_event,"Brokerage Amount :%s",sql_ccm_sttlmnt_dt.arr);
+									}          
+									else if(SQLCODE  != 0 || (sqlca.sqlerrd[2] > 1))
+									{
+										fn_userlog(c_ServiceName,"SQLCODE V4 is <%d>",SQLCODE);
+										fn_errlog(c_ServiceName,"S31405",SQLMSG,c_errmsg);
+										tpfree((char*)ptr_Obuf);
+										tpfree((char *)ptr_Sbuf);
+										tpfree((char *)ptr_Rbuf);
+										Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+										tpabort(0);
+										tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+									}
+								 else
+								 {
+										fn_userlog(c_ServiceName,"--- Updated FCO HSTRY %d ",sqlca.sqlerrd[2]);
+								 }        
+							 }
+							 else
+							 {
+									fn_userlog(c_ServiceName,"--- Updated FCO %d ",sqlca.sqlerrd[2]);
+							 }
+								
+							 **** Ver 3.8 Starts ****
+
+								l_incl_all = (sql_ccd_brkg*100) + (sql_ccd_stt*100) + (sql_ccd_src_tx*100) + (sql_ccd_sebi_tt*100) + (sql_ccd_tran_chrg*100) + (sql_ccd_stamp_duty*100)+ (sql_ccd_cgst * 100 )+(sql_ccd_sgst*100)+(sql_ccd_igst*100)+(sql_ccd_ugst*100);
+								** ver 4.9  GST fields included**
+								if(DEBUG_MSG_LVL_3)
+								{
+									fn_userlog(c_ServiceName,"All charges are |%ld|",l_incl_all);
+								}
+
+								EXEC SQL
+									UPDATE  PCP_PRTFL_CNTRCT_PRDCT
+										SET   PCP_BRKG_VAL = nvl(PCP_BRKG_VAL,0) + :l_incl_all
+									WHERE PCP_CLM_MTCH_ACCNT = :sql_ccm_usr_mtch_accno
+									AND   PCP_XCHNG_CD       = :sql_ccm_excng_cd 
+									AND   PCP_PRDCT_TYP      = :sql_ccd_clsout_typ
+									AND   PCP_INDSTK         = substr(trim(:sql_ccd_cntrct_code),instr(:sql_ccd_cntrct_code,'-FUT')+4,1 )
+									AND   trim(PCP_UNDRLYNG) = trim(:c_fco_undrlyng) *** Trim added in Ver 4.6 ***
+						 **  AND   PCP_EXPRY_DT       = to_date(:sql_ccm_sttlmnt_dt,'dd/mm/yyyy')  Commented in Ver 4.6 **
+									AND   PCP_EXPRY_DT       = to_date(:sql_ccm_clsout_dt,'dd/mm/yyyy');      ** Ver 4.6 **
+
+								if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+								{
+									fn_userlog(c_ServiceName,"Error while updating data in PCP Main");
+									fn_errlog(c_ServiceName,"S31410",SQLMSG,c_errmsg);
+								}
+
+								if ( SQLCODE == NO_DATA_FOUND )
+								{
+									fn_userlog(c_ServiceName,"No data available in PCP main for closeout ");
+									i_pcp_hstry = 1;
+								}
+
+								if ( i_pcp_hstry == 1 )
+								{
+									EXEC SQL
+										UPDATE  PCP_PRTFL_CNTRCT_PRDCT_HSTRY
+											SET   PCP_BRKG_VAL = nvl(PCP_BRKG_VAL,0) + :l_incl_all
+										WHERE PCP_CLM_MTCH_ACCNT = :sql_ccm_usr_mtch_accno
+									AND   PCP_XCHNG_CD       = :sql_ccm_excng_cd
+									AND   PCP_PRDCT_TYP      = :sql_ccd_clsout_typ
+									AND   PCP_INDSTK         = substr(trim(:sql_ccd_cntrct_code),instr(:sql_ccd_cntrct_code,'-FUT')+4,1 )
+									AND   trim(PCP_UNDRLYNG) = trim(:c_fco_undrlyng) *** Trim added in Ver 4.6 ***
+					 **    AND   PCP_EXPRY_DT       = to_date(:sql_ccm_sttlmnt_dt,'dd/mm/yyyy')  Commented in Ver 4.6 **
+									AND   PCP_EXPRY_DT       = to_date(:sql_ccm_clsout_dt,'dd/mm/yyyy');      ** Ver 4.6 **
+
+									if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+									{
+										fn_userlog(c_ServiceName,"Error while updating data in PCP history");
+										fn_errlog(c_ServiceName,"S31415",SQLMSG,c_errmsg);
+									}
+
+									if ( SQLCODE == NO_DATA_FOUND )
+									{
+										fn_userlog(c_ServiceName,"No data available in PCP history for closeout ");
+									}
+								}
+
+								i_pcp_hstry     = 0;
+								l_incl_all      = 0;
+								
+								**** Ver 3.8 Ends ****	
+				}
+		
+				** Ver 4.8 starts here **
+	
+				EXEC SQL
+					UPDATE CCM_CNTRCT_CLSOUT_MSTR
+          SET    CCM_UCC_CD = ( select CLM_CLNT_CD
+                             		from   CLM_CLNT_MSTR
+                             		where  CLM_MTCH_ACCNT = CCM_USR_MTCH_ACCNO
+                           		),
+								( CCM_PRNCPL_BUIS_STATE_CD,
+									CCM_PRNCPL_BUIS_BRNCH_CD,
+									CCM_CUST_ST_CD,
+									CCM_ISEC_GSTIN,
+									CCM_CUST_GSTIN
+								)= (	select NVL(GSTM_ISEC_STATE_CD,' '),
+					  							 	 NVL(GSTM_ISEC_BRANCH_CD,' '),
+														 *nvl(decode(ICD_CUST_TYPE,'NRI','NR',DECODE(CCM_CUST_ST_CD,'00','AP',CCM_CUST_ST_CD)),' '), *
+														 DECODE(CCM_CUST_ST_CD,'00','27',CCM_CUST_ST_CD),
+					  							   NVL(GSTM_ISEC_GST_NO,' '),
+					  							   NVL(ICD_GSTIN,' ')
+				    					FROM 	 GSTM_GST_STATE_MSTR,UAC_USR_ACCNTS,ICD_INFO_CLIENT_DTLS
+				    					WHERE  UAC_CLM_MTCH_ACCNT=CCM_USR_MTCH_ACCNO
+				    					AND    ICD_USER_ID = UAC_USR_ID
+				    					AND    GSTM_STATE_CD =CCM_CUST_ST_CD
+				  					)                                 				*** ver 4.9 GST column update introduced **
+					 WHERE trunc(CCM_STTLMNT_DT)=:d_trd_dt ;		
+
+				if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND)
+        {
+          fn_userlog(c_ServiceName,"SQLCODE V1 is <%d>",SQLCODE);
+          fn_errlog(c_ServiceName,"S31420",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+        }	
+
+			  ** Ver 4.8 ends **
+
+      ***************************** Ver 5.4 Comment Ends **************************************************/
+
+     /**** Ver 5.4 Starts ***/ 
+
+
+    EXEC SQL
+    SELECT count(1)
+      INTO :i_count
+      FROM CCN_CO_CNTRCT_NOTES;
+
+     if (SQLCODE !=0)
+           {
+             fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+             fn_errlog(c_ServiceName,"S31425",SQLMSG,c_errmsg);
+             tpfree((char*)ptr_Obuf);
+             tpfree((char *)ptr_Sbuf);
+             tpfree((char *)ptr_Rbuf);
+             Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+             tpabort(0);
+             tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+           }
+
+      fn_userlog(c_ServiceName,"Total records present in CCN_CO_CNTRCT_NOTES is :%d:",i_count);
+
+     if (i_count <= 0)
+     {
+       strcpy(c_errmsg,"No records present in CCN_CO_CNTRCT_NOTES");
+       fn_userlog(c_ServiceName,"No records present in CCN_CO_CNTRCT_NOTES"); 
+       goto label1; 
+     }
+      
+      fn_userlog(c_ServiceName," Before Insert into CCM_CNTRCT_CLSOUT_MSTR");
+
+      EXEC SQL
+			INSERT INTO CCM_CNTRCT_CLSOUT_MSTR
+          (
+          CCM_USR_MTCH_ACCNO,
+          CCM_EXCNG_CD,
+          CCM_CLSOUTNOTE_NMBR,
+          CCM_STTLMNT_DT,
+          CCM_CLSOUT_DT,
+          CCM_USR_NM,
+          CCM_ADD_LN1,
+          CCM_ADD_LN2,
+          CCM_ADD_LN3,
+          CCM_ADD_LN4,
+          CCM_PAN_NO,
+          CCM_TEL_NO,
+          CCM_UCC_CD,
+          CCM_TOTAL_AMOUNT,
+          CCM_CUST_ST_CD,
+          CCM_ISEC_ST_CD,
+          CCM_IGST_PRCNT,
+          CCM_CGST_PRCNT,
+          CCM_SGST_PRCNT,
+          CCM_UGST_PRCNT
+          )
+					( SELECT distinct TRIM(CCN_USR_MTCH_ACCNO),
+									 TRIM(CCN_XCHNG_CD),
+									 to_char(CCN_CLSOUTNOTE_NMBR),
+									 to_date(CCN_STTLMNT_DT,'dd/mm/yyyy'),
+									 to_date(CCN_CLSOUT_DT,'dd/mm/yyyy'),
+									 'NONAME',
+									 TRIM(CCN_ADD_LN1),
+									 TRIM(CCN_ADD_LN2),
+									 TRIM(CCN_ADD_LN3),
+									 TRIM(CCN_ADD_LN4),
+									 TRIM(CCN_PAN_NO),
+									 TRIM(CCN_TEL_NO),
+                   TRIM(CCN_USR_MTCH_ACCNO),
+                   CCN_TOTAL_AMOUNT,
+									 RTRIM(CCN_CUST_ST_CD),
+                   TRIM(CCN_ISEC_ST_CD),
+                   CCN_IGST_PRCNT,
+                   CCN_CGST_PRCNT,
+                   CCN_SGST_PRCNT,
+                   CCN_UGST_PRCNT
+              FROM CCN_CO_CNTRCT_NOTES
+              WHERE NOT EXISTS (SELECT 1 FROM CCM_CNTRCT_CLSOUT_MSTR 
+                                    WHERE  CCN_CLSOUTNOTE_NMBR = CCM_CLSOUTNOTE_NMBR)
+             );				
+    
+        if (SQLCODE !=0)
+           {
+             fn_userlog(c_ServiceName,"SQLCODE1  is <%d>",SQLCODE);
+             fn_errlog(c_ServiceName,"S31430",SQLMSG,c_errmsg);
+             tpfree((char*)ptr_Obuf);
+             tpfree((char *)ptr_Sbuf);
+             tpfree((char *)ptr_Rbuf);
+             Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+             tpabort(0);
+             tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+           }
+
+
+      fn_userlog(c_ServiceName," Before Insert into CCD_CNTRCT_CLSOUT_DTLS"); 
+
+         EXEC SQL
+         INSERT INTO CCD_CNTRCT_CLSOUT_DTLS
+                (CCD_USR_MTCH_ACCNO,
+                 CCD_CLSOUTNOTE_NMBR,
+                 CCD_CLSOUT_DT,
+                 CCD_CLSOUT_TYP,
+                 CCD_NMBR_CNTRCTS,
+                 CCD_MRKT_LOT,
+                 CCD_CNTRCT_CODE,
+                 CCD_CNTRCT_SYMBL,
+                 CCD_EXPR_DT,
+                 CCD_CNTRCT_INST_TYP,
+                 CCD_CNTRCT_OPTN_TYP,
+                 CCD_STRK_PRC,
+                 CCD_ORDR_FLW,
+                 CCD_CNTRCT_AMT,
+                 CCD_QTY,
+                 CCD_PRC,
+                 CCD_BRKG,
+                 CCD_SRC_TX,
+                 CCD_CESS,
+                 CCD_AMOUNT,
+                 CCD_STAMP_DUTY,
+                 CCD_SEBI_TT,
+                 CCD_TRAN_CHRG,
+                 CCD_OTHER_CHRG,
+                 CCD_STT,
+                 CCD_TOTAL_IGST,
+                 CCD_TOTAL_CGST,
+                 CCD_TOTAL_SGST,
+                 CCD_TOTAL_UGST,
+                 CCD_BRKRG_IGST,
+                 CCD_BRKRG_CGST,
+                 CCD_BRKRG_SGST,
+                 CCD_BRKRG_UGST,
+                 CCD_TRN_IGST,
+                 CCD_TRN_CGST,
+                 CCD_TRN_SGST,
+                 CCD_TRN_UGST
+                 )
+                 ( SELECT CCN_USR_MTCH_ACCNO,
+													CCN_CLSOUTNOTE_NMBR,
+													to_date(CCN_CLSOUT_DT,'dd/mm/yyyy'),
+													CCN_CLSOUT_TYP,
+													CCN_NMBR_CNTRCTS,
+												  CCN_MARKET_LOT,
+													CCN_CNTRCT_CODE,
+											    CCN_CNTRCT_SYMBOL,
+													to_date(CCN_CLSOUT_DT,'dd/mm/yyyy'),
+                          CCN_INST_TYP,
+                          ' ',
+                          0.00,
+                          CCN_ORDR_FLOW,
+                          CCN_AMOUNT,
+													CCN_QTY,
+													CCN_PRICE,
+												  CCN_BROKERAGE,
+													CCN_SRC_TAX,
+												  CCN_CESS,
+													CCN_AMOUNT,
+													CCN_STAMP_DUTY,
+													CCN_SEBI_TT,
+													CCN_TRAN_CHRG,
+													CCN_OTHR_CHRG,
+													CCN_STT,
+													CCN_TOTAL_IGST,
+													CCN_TOTAL_CGST,
+													CCN_TOTAL_SGST,
+													CCN_TOTAL_UGST,
+                          CCN_BROKERAGE * (CCN_IGST_PRCNT/100),					
+                          CCN_BROKERAGE * (CCN_CGST_PRCNT/100),					
+                          CCN_BROKERAGE * (CCN_SGST_PRCNT/100),					
+                          CCN_BROKERAGE * (CCN_UGST_PRCNT/100),
+                          (CCN_TRAN_CHRG + CCN_SEBI_TT) * (CCN_IGST_PRCNT/100),					
+                          (CCN_TRAN_CHRG + CCN_SEBI_TT) * (CCN_CGST_PRCNT/100),					
+                          (CCN_TRAN_CHRG + CCN_SEBI_TT) * (CCN_SGST_PRCNT/100),					
+                          (CCN_TRAN_CHRG + CCN_SEBI_TT) * (CCN_UGST_PRCNT/100)
+                     FROM CCN_CO_CNTRCT_NOTES					
+                 );
+
+             
+       MEMSET(v_sql_fco_upd);
+       MEMSET(v_sql_fco_hstry_upd);
+       MEMSET(v_sql_pcpco_upd);
+       MEMSET(v_sql_pcpco_hstry_upd);
+
+      fn_userlog(c_ServiceName,"Before FCO Main Merge");
+ 
+       sprintf(v_sql_fco_upd.arr,
+      "MERGE INTO FCO_FO_FCLSOUT A \
+       USING ( SELECT CCN_BROKERAGE, CCN_STT, CCN_SRC_TAX, CCN_TOTAL_CGST, CCN_TOTAL_SGST, CCN_TOTAL_IGST, CCN_TOTAL_UGST, CCN_SEBI_TT, CCN_TRAN_CHRG, CCN_STAMP_DUTY, CCN_USR_MTCH_ACCNO, CCN_XCHNG_CD, CCN_CLSOUT_TYP, CCN_INST_TYP,CCN_UNDERLYING, CCN_CLSOUT_DT, CCN_STTLMNT_DT FROM CCN_CO_CNTRCT_NOTES)B \
+			 ON ( A.FCO_CLM_MTCH_ACCNT = B.CCN_USR_MTCH_ACCNO \
+				AND A.FCO_XCHNG_CD = B.CCN_XCHNG_CD \
+        AND A.FCO_PRDCT_TYP = B.CCN_CLSOUT_TYP \
+				AND A.FCO_INDSTK = B.CCN_INST_TYP \
+        AND trim(A.FCO_UNDRLYNG) =   trim(B.CCN_UNDERLYING) \
+        AND A.FCO_EXPRY_DT = to_date(B.CCN_CLSOUT_DT,'DD-Mon-YYYY') \
+        AND trunc(A.FCO_CLS_TM) = to_date(B.CCN_STTLMNT_DT,'DD-Mon-YYYY')) \
+        WHEN MATCHED THEN UPDATE SET \
+        A.FCO_BRKG = NVL(A.FCO_BRKG,0.00) + (NVL(B.CCN_BROKERAGE,0)*100), \
+        A.FCO_STT  = NVL(A.FCO_STT,0.00)  + (NVL(B.CCN_STT,0)*100), \
+        A.FCO_SRC_TX =   NVL(A.FCO_SRC_TX,0.00) + (NVL(B.CCN_SRC_TAX,0)*100) +(NVL(B.CCN_TOTAL_CGST,0)*100) +(NVL(B.CCN_TOTAL_SGST,0)*100)+(NVL(B.CCN_TOTAL_IGST,0)*100)+(NVL(B.CCN_TOTAL_UGST,0)*100), \
+        A.FCO_SEBI_TT = NVL(A.FCO_SEBI_TT,0.00) + (NVL(B.CCN_SEBI_TT,0)*100), \
+        A.FCO_TRAN_CHRG = NVL(A.FCO_TRAN_CHRG,0.00) + (NVL(B.CCN_TRAN_CHRG,0)*100), \
+        A.FCO_STAMP_DUTY = NVL(A.FCO_STAMP_DUTY,0.00) + (NVL(B.CCN_STAMP_DUTY,0)*100)"); 
+			
+        SETLEN(v_sql_fco_upd);
+
+
+     fn_userlog(c_ServiceName,"FCO UPD  Query string length :%d:",v_sql_fco_upd.len);
+
+
+     EXEC SQL DECLARE sql_fco_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31435",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+     EXEC SQL PREPARE sql_fco_stmt FROM :v_sql_fco_upd;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31440",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_fco_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31445",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     fn_userlog(c_ServiceName,"Total Closeout records Updated IN main :%d:",sqlca.sqlerrd[2]); 
+     fn_userlog(c_ServiceName,"Before FCO Hstry Merge");
+
+      sprintf(v_sql_fco_hstry_upd.arr,
+      "MERGE INTO FCO_FO_FCLSOUT_HSTRY A \
+       USING ( SELECT CCN_BROKERAGE, CCN_STT, CCN_SRC_TAX, CCN_TOTAL_CGST, CCN_TOTAL_SGST, CCN_TOTAL_IGST, CCN_TOTAL_UGST, CCN_SEBI_TT, CCN_TRAN_CHRG, CCN_STAMP_DUTY, CCN_USR_MTCH_ACCNO, CCN_XCHNG_CD, CCN_CLSOUT_TYP, CCN_INST_TYP,CCN_UNDERLYING, CCN_CLSOUT_DT, CCN_STTLMNT_DT FROM CCN_CO_CNTRCT_NOTES)B \
+       ON ( A.FCO_CLM_MTCH_ACCNT = B.CCN_USR_MTCH_ACCNO \
+        AND A.FCO_XCHNG_CD = B.CCN_XCHNG_CD \
+        AND A.FCO_PRDCT_TYP = B.CCN_CLSOUT_TYP \
+        AND A.FCO_INDSTK = B.CCN_INST_TYP \
+        AND trim(A.FCO_UNDRLYNG) =   trim(B.CCN_UNDERLYING) \
+        AND A.FCO_EXPRY_DT = to_date(B.CCN_CLSOUT_DT,'DD-Mon-YYYY') \
+        AND trunc(A.FCO_CLS_TM) = to_date(B.CCN_STTLMNT_DT,'DD-Mon-YYYY')) \
+        WHEN MATCHED THEN UPDATE SET \
+        A.FCO_BRKG = NVL(A.FCO_BRKG,0.00) + (NVL(B.CCN_BROKERAGE,0)*100), \
+        A.FCO_STT  = NVL(A.FCO_STT,0.00)  + (NVL(B.CCN_STT,0)*100), \
+        A.FCO_SRC_TX =   NVL(A.FCO_SRC_TX,0.00) + (NVL(B.CCN_SRC_TAX,0)*100) +(NVL(B.CCN_TOTAL_CGST,0)*100) +(NVL(B.CCN_TOTAL_SGST,0)*100)+(NVL(B.CCN_TOTAL_IGST,0)*100)+(NVL(B.CCN_TOTAL_UGST,0)*100), \
+        A.FCO_SEBI_TT = NVL(A.FCO_SEBI_TT,0.00) + (NVL(B.CCN_SEBI_TT,0)*100), \
+        A.FCO_TRAN_CHRG = NVL(A.FCO_TRAN_CHRG,0.00) + (NVL(B.CCN_TRAN_CHRG,0)*100), \
+        A.FCO_STAMP_DUTY = NVL(A.FCO_STAMP_DUTY,0.00) + (NVL(B.CCN_STAMP_DUTY,0)*100)");
+
+        SETLEN(v_sql_fco_hstry_upd);
+
+
+     fn_userlog(c_ServiceName,"FCO HSTRY UPD  Query string length :%d:",v_sql_fco_hstry_upd.len);
+
+
+     EXEC SQL DECLARE sql_fco_hstry_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31450",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+     EXEC SQL PREPARE sql_fco_hstry_stmt FROM :v_sql_fco_hstry_upd;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31455",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_fco_hstry_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31460",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     fn_userlog(c_ServiceName,"Total Closeout records Updated IN History :%d:",sqlca.sqlerrd[2]);
+     fn_userlog(c_ServiceName,"Before PCP Main Merge"); 
+
+     sprintf(v_sql_pcpco_upd.arr,
+		 "MERGE INTO PCP_PRTFL_CNTRCT_PRDCT A \
+			USING ( SELECT CCN_BROKERAGE,CCN_STT,CCN_SRC_TAX,CCN_STAMP_DUTY,CCN_TRAN_CHRG,CCN_SEBI_TT,CCN_TOTAL_CGST,CCN_TOTAL_SGST,CCN_TOTAL_IGST,CCN_TOTAL_UGST, CCN_USR_MTCH_ACCNO, CCN_XCHNG_CD, CCN_CLSOUT_TYP, CCN_INST_TYP, CCN_UNDERLYING, CCN_CLSOUT_DT FROM CCN_CO_CNTRCT_NOTES) B \
+			ON ( A.PCP_CLM_MTCH_ACCNT = B.CCN_USR_MTCH_ACCNO \
+       AND A.PCP_XCHNG_CD = B.CCN_XCHNG_CD \
+       AND A.PCP_PRDCT_TYP = B.CCN_CLSOUT_TYP \
+       AND A.PCP_INDSTK = B.CCN_INST_TYP \
+			 AND trim(A.PCP_UNDRLYNG) = trim(B.CCN_UNDERLYING) \
+       AND A.PCP_EXPRY_DT  = to_date(B.CCN_CLSOUT_DT,'DD-Mon-YYYY')) \
+      WHEN MATCHED THEN UPDATE SET \
+      A.PCP_BRKG_VAL = nvl(A.PCP_BRKG_VAL,0) + (NVL(B.CCN_BROKERAGE,0)*100) + (NVL(B.CCN_STT,0)*100) + (NVL(B.CCN_SRC_TAX,0)*100) + (NVL(B.CCN_SEBI_TT,0)*100) + (NVL(B.CCN_TRAN_CHRG,0)*100) + (NVL(B.CCN_STAMP_DUTY,0)*100) + (NVL(B.CCN_TOTAL_CGST,0)*100) + (NVL(B.CCN_TOTAL_SGST,0)*100) + (NVL(B.CCN_TOTAL_IGST,0)*100) + (NVL(B.CCN_TOTAL_UGST,0)*100)");  
+ 
+
+     SETLEN(v_sql_pcpco_upd);
+
+     fn_userlog(c_ServiceName,"PCP UPD  Query string length :%d:",v_sql_pcpco_upd.len);
+
+
+    
+     EXEC SQL DECLARE sql_pcpco_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31465",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+ 
+
+     EXEC SQL PREPARE sql_pcpco_stmt FROM :v_sql_pcpco_upd;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31470",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_pcpco_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31475",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     fn_userlog(c_ServiceName,"Total Portfolio records Updated IN Main :%d:",sqlca.sqlerrd[2]);
+     fn_userlog(c_ServiceName,"Before FCO Hstry Merge");
+
+    sprintf(v_sql_pcpco_hstry_upd.arr,
+     "MERGE INTO PCP_PRTFL_CNTRCT_PRDCT_HSTRY A \
+      USING ( SELECT CCN_BROKERAGE,CCN_STT,CCN_SRC_TAX,CCN_STAMP_DUTY,CCN_TRAN_CHRG,CCN_SEBI_TT,CCN_TOTAL_CGST,CCN_TOTAL_SGST,CCN_TOTAL_IGST,CCN_TOTAL_UGST, CCN_USR_MTCH_ACCNO, CCN_XCHNG_CD, CCN_CLSOUT_TYP, CCN_INST_TYP, CCN_UNDERLYING, CCN_CLSOUT_DT FROM CCN_CO_CNTRCT_NOTES) B \
+      ON ( A.PCP_CLM_MTCH_ACCNT = B.CCN_USR_MTCH_ACCNO \
+       AND A.PCP_XCHNG_CD = B.CCN_XCHNG_CD \
+       AND A.PCP_PRDCT_TYP = B.CCN_CLSOUT_TYP \
+       AND A.PCP_INDSTK = B.CCN_INST_TYP \
+       AND trim(A.PCP_UNDRLYNG) = trim(B.CCN_UNDERLYING) \
+       AND A.PCP_EXPRY_DT  = to_date(B.CCN_CLSOUT_DT,'DD-Mon-YYYY')) \
+      WHEN MATCHED THEN UPDATE SET \
+      A.PCP_BRKG_VAL = nvl(A.PCP_BRKG_VAL,0) + (NVL(B.CCN_BROKERAGE,0)*100) + (NVL(B.CCN_STT,0)*100) + (NVL(B.CCN_SRC_TAX,0)*100) + (NVL(B.CCN_SEBI_TT,0)*100) + (NVL(B.CCN_TRAN_CHRG,0)*100) + (NVL(B.CCN_STAMP_DUTY,0)*100) + (NVL(B.CCN_TOTAL_CGST,0)*100) + (NVL(B.CCN_TOTAL_SGST,0)*100) + (NVL(B.CCN_TOTAL_IGST,0)*100) + (NVL(B.CCN_TOTAL_UGST,0)*100)");
+
+
+     SETLEN(v_sql_pcpco_hstry_upd);
+
+     fn_userlog(c_ServiceName,"PCP History UPD  Query string length :%d:",v_sql_pcpco_hstry_upd.len);
+
+     EXEC SQL DECLARE sql_pcpco_hstry_stmt STATEMENT;
+      if(SQLCODE != 0 )
+      {
+       fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+       fn_errlog(c_ServiceName,"S31480",SQLMSG,c_errmsg);
+       tpfree((char*)ptr_Obuf);
+       tpfree((char *)ptr_Sbuf);
+       tpfree((char *)ptr_Rbuf);
+       Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+       tpabort(0);
+       tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+      }
+
+     EXEC SQL PREPARE sql_pcpco_hstry_stmt FROM :v_sql_pcpco_hstry_upd;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31485",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     EXEC SQL EXECUTE sql_pcpco_hstry_stmt ;
+        if(SQLCODE != 0 )
+        {
+          fn_userlog(c_ServiceName,"SQLCODE :%ld",SQLCODE);
+          fn_errlog(c_ServiceName,"S31490",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,ERR_BFR,(char*)ptr_Ibuf,0,0);
+        }
+
+     fn_userlog(c_ServiceName,"Total Portfolio records Updated IN History :%d:",sqlca.sqlerrd[2]);
+
+      fn_userlog(c_ServiceName,"Before Update of CCM_CNTRCT_CLSOUT_MSTR");
+
+     EXEC SQL
+          UPDATE CCM_CNTRCT_CLSOUT_MSTR
+          SET    CCM_UCC_CD = ( select CLM_CLNT_CD
+                                from   CLM_CLNT_MSTR
+                                where  CLM_MTCH_ACCNT = CCM_USR_MTCH_ACCNO
+                              ),
+                ( CCM_PRNCPL_BUIS_STATE_CD,
+                  CCM_PRNCPL_BUIS_BRNCH_CD,
+                  CCM_CUST_ST_CD,
+                  CCM_ISEC_GSTIN,
+                  CCM_CUST_GSTIN
+                )= (  select NVL(GSTM_ISEC_STATE_CD,' '),
+                             NVL(GSTM_ISEC_BRANCH_CD,' '),
+                             DECODE(CCM_CUST_ST_CD,'00','27',CCM_CUST_ST_CD),
+                             NVL(GSTM_ISEC_GST_NO,' '),
+                             NVL(ICD_GSTIN,' ')
+                      FROM   GSTM_GST_STATE_MSTR,UAC_USR_ACCNTS,ICD_INFO_CLIENT_DTLS
+                      WHERE  UAC_CLM_MTCH_ACCNT=CCM_USR_MTCH_ACCNO
+                      AND    ICD_USER_ID = UAC_USR_ID
+                      AND    GSTM_STATE_CD =CCM_CUST_ST_CD
+                    )                                         
+           WHERE trunc(CCM_STTLMNT_DT)=:d_trd_dt ;
+
+        if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND)
+        {
+          fn_userlog(c_ServiceName,"SQLCODE V1 is <%d>",SQLCODE);
+          fn_errlog(c_ServiceName,"S31495",SQLMSG,c_errmsg);
+          tpfree((char*)ptr_Obuf);
+          tpfree((char *)ptr_Sbuf);
+          tpfree((char *)ptr_Rbuf);
+          Fadd32(ptr_Ibuf, FFO_ERR_MSG,  c_errmsg, 0);
+          tpabort(0);
+          tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+        } 
+ 
+     /*** Ver 5.4 Ends ***/
+	  }
+			 /* Ver 2.2 ends */
+	 /******************************************************************************/
+
+		/********* Added Ver 2.9 *********/
+
+    label1:
+
+		SETLEN(sql_fcm_excng_cd); /* 3.9 */
+
+    /*** Commented in Ver 5.4 and moved to calling batch program
+
+		EXEC SQL	
+			INSERT INTO PRD_PGM_RUN_DTLS(
+								PRD_PGM_NAME,
+								PRD_XCHNG_CD,
+								PRD_TRD_DT,
+								PRD_INS_DT)    
+							VALUES (
+								'cln_upl_fnocontr',
+							**	'NFO',						**** Ver 3.0 Comment ***
+								:sql_fcm_excng_cd,											*** Ver 3.0 ****
+								:d_trd_dt,
+								SYSDATE);       
+
+		if(SQLCODE !=0 )
+		{
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpabort(0);
+				tpfree((char*)ptr_Obuf);
+				tpfree((char *)ptr_Sbuf);
+				tpfree((char *)ptr_Rbuf);
+				fn_errlog(c_ServiceName,"S31500",SQLMSG,c_errmsg);
+				Fadd32(ptr_Ibuf, FFO_ERR_MSG,c_errmsg, 0);
+				tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+		}
+
+    ***************************************************************/
+
+		/********* End Ver 2.9 *********/        
+						
+
+		if(tpgetlev()==1)
+		{
+				fn_userlog(c_ServiceName,"Commiting Brokerage ");
+				if( tpcommit(0)== -1)
+				{
+						tpabort(0);
+						fn_userlog(c_ServiceName,"TPCOMMIT failed");
+						tpfree((char*)ptr_Obuf);
+						tpfree((char *)ptr_Sbuf);
+						tpfree((char *)ptr_Rbuf);
+						fn_errlog(c_ServiceName,"S31505",TPMSG,c_errmsg);
+						Fadd32(ptr_Ibuf, FFO_ERR_MSG,c_errmsg, 0);
+						tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+				}
+		}
+
+		ptr_Obuf = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+		/*SNi_upl_rec=i_upl_rec+1;*/
+		fn_userlog(c_ServiceName,"No of Records uploaded =%d",i_counter);
+		fn_userlog(c_ServiceName," |%d||%d||%d| ",i_counter,i_no_rec,i_upl_rec);
+
+		i_err[0] = Fadd32(ptr_Obuf,FFO_EXPRD_QTY,(char*)&i_counter,0);
+		i_err[1] = Fadd32(ptr_Obuf,FFO_EXEC_QTY,(char*)&i_upl_rec,0);
+		i_err[2] = Fadd32(ptr_Obuf,FFO_ORD_TOT_QTY,(char*)&i_no_rec,0);
+
+		if(i_err[0]== -1 ||i_err[1]== -1 || i_err[2] == -1)
+		{
+				tpfree((char*)ptr_Obuf);
+				tpfree((char *)ptr_Sbuf);
+				tpfree((char *)ptr_Rbuf);
+				fn_errlog(c_ServiceName,"S31510",FMLMSG,c_errmsg);
+				Fadd32(ptr_Ibuf, FFO_ERR_MSG,c_errmsg, 0);
+				tpreturn(TPFAIL,0,(char*)ptr_Ibuf,0,0);
+		}
+		fn_userlog(c_ServiceName,"Number of Contract Notes Uploaded : %d",i_counter);
+		fn_userlog(c_ServiceName,"Total number of records from Match : %d",i_no_rec);
+		fn_userlog(c_ServiceName,"Total number of records uploaded :  %d",i_upl_rec);
+
+		fn_userlog(c_ServiceName," ============= End of SFO_UPL_CONTR ===================== ");
+		Fadd32(ptr_Ibuf, FFO_ERR_MSG," ============= End of SFO_UPL_CONTR ===================== ", 0);    
+		tpreturn(TPSUCCESS,0,(char*)ptr_Obuf,0,0);
+}
+
+

@@ -1,0 +1,624 @@
+/******************************************************************************/
+/*  Program           :     SFO_SPAN_MRGN                                     */
+/*                                                                            */
+/*  Input             :    																										*/ 
+/*  Output            :    																										*/
+/*  Description       :     																								  */
+/*                                                                            */
+/*                                                                            */
+/*  Log 1.0           :  Initial Release																			*/
+/*																																						*/
+/******************************************************************************/
+/*	1.1			-  Bug Fix  - 11-Apr-2012  (Navina D.)														*/
+/*	1.2			-	 Handelling of Max Packet size 10-May-2012 (Mahesh Shinde)			*/
+/*	1.3			-	 SPAN Active Fall Back Provision 12-Jun-2012 (SH)	  						*/
+/*	1.4			-	 FNO BSE SPAN Changes(Sandip Tambe)              	  						*/
+/*  1.5     -  SPAN back up impletation Changes(Mahesh Shinde)                */
+/*  1.6     -  Bug fix for NO_DATA_FOUND 30-Jan-2014	Mahesh Shinde           */
+/******************************************************************************/
+
+/**** C header ****/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <netdb.h>						/*Ver 1.5 */
+#include <netinet/in.h>		  	/*Ver 1.5 */
+
+/**** To be added for Pro c codes ****/
+#include <sqlca.h>
+
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fcntl.h>
+
+/**** Application header ****/
+#include <fo_fml_def.h>
+#include <fo.h>
+#include <fn_env.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <ud_sck.h>
+#include <fn_read_debug_lvl.h>
+
+#define TM_0 0
+#define TM_30 30
+
+extern int i_span_sck_id;
+extern int i_sck_indctr;         /*Ver 1.3 */
+extern char c_primary_ip[20];    /*Ver 1.3 */
+extern char c_backup_ip[20];     /*Ver 1.3 */
+extern char c_third_ip[20];      /*Ver 1.5 */
+extern char c_span_srvr_id[20];  /*Ver 1.5 */
+
+int fn_crt_sck ( char *c_ServiceName,
+                 char *c_err_msg);			/*Ver 1.3 */
+
+int fn_close_sck(int i_span_sck_id,				
+								 char *c_ServiceName,
+								 char *c_err_msg);	    /*Ver 1.3 */
+
+void SFO_SPAN_MRGN(TPSVCINFO *ptr_st_ti_rqst)
+{
+
+  char c_ServiceName [ 33 ];
+  char c_remarks[ 10240];
+  char c_ptr_data[ 10240];
+  char c_ptr_data_temp[ 10240];
+  char c_send_data[ 10240];
+  char c_temp[1024];
+  char *c_null_ptr=0;
+  char c_mtch_accnt[100];
+  char c_err_msg[ 256];
+	int i_slen;
+	int i_ch_val;
+ 
+	/*** Added in ver 1.5 ***/
+
+	int i_trnsctn 	 =0;
+	int i_returncode =0;
+	int i_trans_level=0;
+	char c_span_ip[20];
+	char c_hostname[50];
+	char *hname;
+	char c_hostip[50];
+	struct hostent *he;
+	struct in_addr **addr_list;
+
+	TPTRANID tranid ;
+	/*** End ver 1.5 ***/
+
+	/**** Decalre input and output buffer ****/
+  FBFR32 *ptr_fml_ibuf;
+  FBFR32 *ptr_fml_obuf;
+
+  strcpy ( c_ServiceName, "SFO_SPAN_MRGN" );
+
+	MEMSET(c_ptr_data);
+	MEMSET(c_ptr_data_temp);
+	MEMSET(c_send_data);
+	MEMSET(c_remarks);
+
+  INITDBGLVL(c_ServiceName);
+
+  /**** Read the input into a fml buffer ****/
+  ptr_fml_ibuf = (FBFR32 *)ptr_st_ti_rqst->data;
+  ptr_fml_obuf = (FBFR32*)NULL ;
+
+ 	ptr_fml_obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+  if ( ptr_fml_obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31005", TPMSG, c_err_msg  );
+    Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+  }
+
+	if(Fget32(ptr_fml_ibuf,FFO_REMARKS,0,(char *)c_remarks,0) == -1)
+	{
+		fn_errlog( c_ServiceName, "S31010", FMLMSG, c_err_msg  );
+		Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpfree((char *)ptr_fml_obuf);														/*** ver 1.1 ***/
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+	}
+	
+	i_slen = strlen(c_remarks);
+
+  if(DEBUG_MSG_LVL_5)
+	{
+		fn_userlog(c_ServiceName,"The 1st Input string is:%s:",c_remarks);  
+	}
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"The 1st input string size:%d:",i_slen);
+	}
+
+	i_ch_val = fn_send (i_span_sck_id, (char*)&c_remarks,&i_slen);
+	if(i_ch_val != 100)
+	{
+		fn_userlog(c_ServiceName,"Error in connection, sending to another socket");
+
+		/** Close the existing socket **/
+	  if( fn_close_sck(i_span_sck_id,c_ServiceName,c_err_msg) == -1 )
+    {
+      fn_userlog(c_ServiceName,"Error in closing send socket");
+    }
+
+		/*** Added in Ver 1.5 ***/
+
+		if ( i_sck_indctr == 1)
+		{
+			strcpy(c_span_ip,c_primary_ip);
+		}
+		else if( i_sck_indctr == 2)
+		{
+			strcpy(c_span_ip,c_backup_ip);
+		}
+		else if( i_sck_indctr == 3) 
+		{
+			strcpy(c_span_ip,c_third_ip);
+		}
+		else
+		{
+			fn_userlog(c_ServiceName,"wrong Socket Indicator:%d:",i_sck_indctr);
+		}
+
+		/*** End of Ver 1.5 ***/
+		
+		if(DEBUG_MSG_LVL_0)
+  	{
+			fn_userlog(c_ServiceName,"Socket Indicator:%d:",i_sck_indctr);
+			fn_userlog(c_ServiceName,"c_primary_ip:%s:",c_primary_ip);
+			fn_userlog(c_ServiceName,"c_backup_ip:%s:",c_backup_ip);
+      fn_userlog(c_ServiceName,"c_third_ip  :%s:",c_third_ip);       				 /*** Ver 1.5 ***/
+      fn_userlog(c_ServiceName,"c_span_srvr_id  :%s:",c_span_srvr_id);       /*** Ver 1.5 ***/
+      fn_userlog(c_ServiceName,"c_span_ip  :%s:",c_span_ip);       					 /*** Ver 1.5 ***/
+		}
+
+    if(fn_crt_sck (c_ServiceName, c_err_msg) == -1)
+    {
+			fn_errlog( c_ServiceName, "S31015", LIBMSG, c_err_msg  );
+			Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpfree((char *)ptr_fml_obuf);													
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+		fn_userlog(c_ServiceName,"After Creating socket");
+
+		/*** Added in ver 1.5 ***/
+
+		if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"Socket Indicator:%d:",i_sck_indctr);
+			fn_userlog(c_ServiceName,"The script with span server id |%s|",c_span_srvr_id);
+			fn_userlog(c_ServiceName,"The script with span server ip |%s|",c_span_ip);
+		}
+			
+		if ( gethostname(c_hostname,sizeof(c_hostname)) != 0)
+		{
+			fn_userlog(c_ServiceName,"Unable to find out host name");
+		}
+
+		hname=c_hostname;
+
+		he = gethostbyname(hname);
+		addr_list = (struct in_addr **) he->h_addr_list;
+		strcpy(c_hostip , inet_ntoa(*addr_list[0]) );
+			
+		if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"SPAN server id |%s| connected to |%s|",c_span_srvr_id,c_span_ip);
+      fn_userlog(c_ServiceName,"Host name   is |%s| Host ip   is |%s|",c_hostname,c_hostip);
+    }
+		
+		i_trans_level = tpgetlev();
+		
+		if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"Transaction Level is |%d| ",i_trans_level);
+		}
+
+		if(i_trans_level != 0)
+  	{
+			if ( DEBUG_MSG_LVL_0 )
+    	{
+      	fn_userlog(c_ServiceName,"Call in transaction suspend the same.");
+    	}
+
+			i_returncode = tpsuspend ( &tranid, 0 );
+
+    	if ( i_returncode == -1 )
+    	{
+				fn_errlog( c_ServiceName, "S31020", TPMSG, c_err_msg  );
+      	Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpfree((char *)ptr_fml_obuf);
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    	}
+		}
+
+    i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+    if ( i_trnsctn == -1 )
+    {
+			fn_errlog( c_ServiceName, "S31025", LIBMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+		EXEC SQL
+      INSERT INTO SSL_SPAN_SERVER_LOG_HSTRY
+                ( SSL_SPAN_SERVER_IP,
+                  SSL_SPAN_SERVER_ID,
+                  SSL_TUX_MCHN_IP,
+                  SSL_TUX_MCHN_NAME,
+                  SSL_TIME
+                )
+              VALUES
+                ( :c_span_ip,
+                  :c_span_srvr_id,
+                  :c_hostip,
+                  :c_hostname,
+                  sysdate
+                );
+
+    if ( SQLCODE != 0 )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+    EXEC SQL
+      UPDATE SSL_SPAN_SERVER_LOG
+            SET SSL_SPAN_SERVER_IP=:c_span_ip,
+                SSL_TIME= sysdate
+          WHERE rtrim(SSL_TUX_MCHN_IP)= rtrim(:c_hostip)
+          AND   rtrim(SSL_SPAN_SERVER_ID)= rtrim(:c_span_srvr_id);
+
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+		if ( SQLCODE == NO_DATA_FOUND )
+		{
+			fn_userlog(c_ServiceName,"Inside NO_DATA_FOUND Please make entry in SSL_SPAN_SERVER_LOG");
+		}
+
+		if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    {
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			fn_errlog( c_ServiceName, "S31040", LIBMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+		if(i_trans_level != 0)
+    {
+      if ( DEBUG_MSG_LVL_0 )
+      {
+        fn_userlog(c_ServiceName,"Resuming the transaction which was suspended.");
+      }
+
+    	i_returncode = tpresume ( &tranid, 0 );
+
+   	  if ( i_returncode == -1 )
+    	{
+				fn_errlog( c_ServiceName, "S31045", TPMSG, c_err_msg  );
+      	Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpfree((char *)ptr_fml_obuf);
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    	}
+		}
+
+		/*** Ver 1.5 Ends***/
+
+		i_slen = strlen(c_remarks);
+
+		if(DEBUG_MSG_LVL_5)
+		{
+			fn_userlog(c_ServiceName,"The 2nd Input string is:%s:",c_remarks);  
+		}
+
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"The 2nd input string size:%d:",i_slen);
+		}
+
+		i_ch_val = fn_send (i_span_sck_id, (char*)&c_remarks,&i_slen);
+		if(i_ch_val != 100)
+		{
+			fn_errlog( c_ServiceName, "S31050", LIBMSG, c_err_msg  );
+			Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpfree((char *)ptr_fml_obuf);													
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+		}
+
+		fn_userlog(c_ServiceName,"After Sending on New Socket");
+
+		/**Insert the details like USER,SID,IP and Port in LOG table **/
+	}
+
+	i_slen = 1024;			/**** ver 1.2 Default aligned to 1 kb *****/
+
+  i_ch_val = fn_recv (i_span_sck_id, (char *)c_ptr_data, &i_slen, TM_30);
+  if(i_ch_val != 100)
+  {
+		/** Close the existing socket **/
+	  if( fn_close_sck(i_span_sck_id,c_ServiceName,c_err_msg) == -1 )
+    {
+      fn_userlog(c_ServiceName,"Error in closing send socket");
+    }
+
+		/*** Added in Ver 1.5 ***/
+
+    if ( i_sck_indctr == 1)
+    {
+      strcpy(c_span_ip,c_primary_ip);
+    }
+    else if( i_sck_indctr == 2)
+    {
+      strcpy(c_span_ip,c_backup_ip);
+    }
+    else if( i_sck_indctr == 3)
+    {
+      strcpy(c_span_ip,c_third_ip);
+    }
+    else
+    {
+      fn_userlog(c_ServiceName,"wrong Socket Indicator:%d:",i_sck_indctr);
+    }
+
+		if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"In rescive Socket Indicator:%d:",i_sck_indctr);
+      fn_userlog(c_ServiceName,"c_primary_ip:%s:",c_primary_ip);
+      fn_userlog(c_ServiceName,"c_backup_ip:%s:",c_backup_ip);
+      fn_userlog(c_ServiceName,"c_third_ip  :%s:",c_third_ip);             
+      fn_userlog(c_ServiceName,"c_span_srvr_id  :%s:",c_span_srvr_id);    
+      fn_userlog(c_ServiceName,"c_span_ip  :%s:",c_span_ip);             
+    }
+
+    /*** End of Ver 1.5 ***/
+
+    if(fn_crt_sck ( c_ServiceName, c_err_msg) == -1)
+    {
+			fn_errlog( c_ServiceName, "S31055", LIBMSG, c_err_msg  );
+			Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpfree((char *)ptr_fml_obuf);													
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+		/*** Added in ver 1.5 ***/
+
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"Socket Indicator:%d:",i_sck_indctr);
+      fn_userlog(c_ServiceName,"The script with span server id |%s|",c_span_srvr_id);
+      fn_userlog(c_ServiceName,"The script with span server ip |%s|",c_span_ip);
+    }
+
+		if ( gethostname(c_hostname,sizeof(c_hostname)) != 0)
+    {
+      fn_userlog(c_ServiceName,"Unable to find out host name");
+    }
+
+    hname=c_hostname;
+
+    he = gethostbyname(hname);
+    addr_list = (struct in_addr **) he->h_addr_list;
+    strcpy(c_hostip , inet_ntoa(*addr_list[0]) );
+
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"SPAN server id |%s| connected to |%s|",c_span_srvr_id,c_span_ip);
+      fn_userlog(c_ServiceName,"Host name   is |%s| Host ip   is |%s|",c_hostname,c_hostip);
+    }
+
+		i_trans_level = tpgetlev();
+
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,"Transaction Level is |%d| ",i_trans_level);
+    }
+
+		if(i_trans_level != 0)
+    {
+      if ( DEBUG_MSG_LVL_0 )
+      {
+        fn_userlog(c_ServiceName,"transaction suspended.");
+      }
+
+			i_returncode = tpsuspend ( &tranid, 0 );
+
+    	if ( i_returncode == -1 )
+    	{
+      	fn_errlog( c_ServiceName, "S31060", LIBMSG, c_err_msg  );
+      	Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpfree((char *)ptr_fml_obuf);
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    	}
+		}
+
+    i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+    if ( i_trnsctn == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31065", LIBMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+		EXEC SQL
+      INSERT INTO SSL_SPAN_SERVER_LOG_HSTRY
+                ( SSL_SPAN_SERVER_IP,
+                  SSL_SPAN_SERVER_ID,
+                  SSL_TUX_MCHN_IP,
+                  SSL_TUX_MCHN_NAME,
+                  SSL_TIME
+                )
+              VALUES
+                ( :c_span_ip,
+                  :c_span_srvr_id,
+                  :c_hostip,
+                  :c_hostname,
+                  sysdate
+                );
+
+    if ( SQLCODE != 0 )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+    EXEC SQL
+      UPDATE SSL_SPAN_SERVER_LOG
+            SET SSL_SPAN_SERVER_IP=:c_span_ip,
+                SSL_TIME= sysdate
+          WHERE rtrim(SSL_TUX_MCHN_IP)= rtrim(:c_hostip)
+          AND   rtrim(SSL_SPAN_SERVER_ID)= rtrim(:c_span_srvr_id);
+
+		/** if ( SQLCODE != 0 ) Commented in ver 1.6 ***/
+
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )  /*** Added in ver 1.6 ***/
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31075", LIBMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+		
+		/*** Ver 1.6 ***/
+
+		if ( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"Inside NO_DATA_FOUND Please make entry in SSL_SPAN_SERVER_LOG");
+    }
+
+		/*** Ver 1.6 ***/
+
+    if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog( c_ServiceName, "S31080", LIBMSG, c_err_msg  );
+      Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpfree((char *)ptr_fml_obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    }
+
+		if(i_trans_level != 0)
+    {
+      if ( DEBUG_MSG_LVL_0 )
+      {
+        fn_userlog(c_ServiceName,"In Resc Resuming the transaction which was suspended.");
+      }
+
+			i_returncode = tpresume ( &tranid, 0 );
+
+    	if ( i_returncode == -1 )
+    	{
+      	fn_errlog( c_ServiceName, "S31085", LIBMSG, c_err_msg  );
+      	Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpfree((char *)ptr_fml_obuf);
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    	}
+		}
+
+    /*** Ver 1.5 Ends***/
+
+		/**Insert the details like USER,SID,IP and Port in LOG table **/
+
+		i_ch_val = fn_send (i_span_sck_id, (char*)&c_remarks,&i_slen);
+		if(i_ch_val != 100)
+		{
+			fn_errlog( c_ServiceName, "S31090", LIBMSG, c_err_msg  );
+			Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpfree((char *)ptr_fml_obuf);													
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+		}
+
+  	i_ch_val = fn_recv (i_span_sck_id, (char *)c_ptr_data, &i_slen, TM_30);
+		if(i_ch_val != 100)
+		{
+			fn_errlog( c_ServiceName, "S31095", LIBMSG, c_err_msg  );
+			Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpfree((char *)ptr_fml_obuf);													
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+		}
+  }
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"The 2nd output string is:%s:",c_ptr_data);
+	}
+
+	strcpy(c_ptr_data_temp, c_ptr_data);
+
+	/*************
+	The Output string looks like
+  "1^1001^8542999999^3000^2200^4000|1002^8542999999^2000^1500^4300"
+  "1^BSE^1001^8542999999^3000^2200^4000|1002^8542999999^2000^1500^4300"	[Ver 1.4 as per xchng_cd]
+  ***********************/
+
+	strcpy(c_temp,strtok(c_ptr_data_temp,"|"));
+
+  /*strcpy(c_temp,strtok(c_null_ptr,"^"));*/   /** Ver 1.1 Commented for improper handling of match account **/
+	strcpy(c_temp,strtok(c_temp,"^"));           /** Ver 1.1 Added for handling of match account **/
+
+
+  strcpy(c_temp,strtok(c_null_ptr,"^"));
+  strcpy(c_temp,strtok(c_null_ptr,"^"));			/*** Ver 1.4 ***/
+  strcpy(c_mtch_accnt,strtok(c_null_ptr,"^"));
+
+	if ( c_mtch_accnt[0] == '1' || c_mtch_accnt[0] == '2' || c_mtch_accnt[0] == '3' ) /*** Ver 1.1 ***/
+  {
+		if(c_mtch_accnt[0] == '1')  /*** Ver 1.1 ***/
+		{
+			strcpy(c_err_msg,"Invalid Packet");
+		}
+		else if(c_mtch_accnt[0] == '2')	 /*** Ver 1.1 ***/
+    {
+			strcpy(c_err_msg,"Packet Length Exceeds Max Length");
+    }
+		else if(c_mtch_accnt[0] == '3')   /*** Ver 1.1 ***/
+    {
+			strcpy(c_err_msg,"Unable to connect database server");
+    }
+
+		/** fn_errlog( c_ServiceName, "S31100", DEFMSG, c_err_msg  );	 Ver 1.2 ***/
+		if(DEBUG_MSG_LVL_0)
+  	{
+    	fn_userlog(c_ServiceName,"ERROR c_err_msg is :%s:",c_err_msg);
+  	}
+		/******* Ver 1.2 END 		**************************************************/
+
+		Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpfree((char *)ptr_fml_obuf);															/*** ver 1.1 ***/			
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+  }
+
+  if (Fadd32 ( ptr_fml_obuf, FFO_ABT_TRG_DATA,c_ptr_data, 0 ) == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31105", FMLMSG, c_err_msg  );
+		Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpfree((char *)ptr_fml_obuf);															/*** ver 1.1 ***/
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+	}
+
+	tpreturn(TPSUCCESS, 0, (char *)ptr_fml_obuf, 0, 0 );
+}

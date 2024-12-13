@@ -1,0 +1,914 @@
+/**********************************************************************************************************
+            Service Name          : bat_fo_dl_ordmsg
+
+            Description           : Select the order snapshot fields for FNO and call 
+                                    service sfo_dl_ordmsg to send them to sql server.
+
+            Input                 : bat_fo_dl_ordmsg <exchange code> <pipe> <N/F> 
+                                    N - New 
+                                    F - Fail
+
+            Output                : success/failure
+
+            Log                   : ver 1.0     22-Mar-2007  (AD) New Release
+																	:	ver 1.1			10-Dec-2007	 (SKS) AIX Migration.
+																	: ver 1.2     09-Sep-2009  (AD)  Changes for Multiple Setups
+																	: ver 1.3     14-Jan-2010  (AD)  Bug fix for picking up data 
+																	:	ver 1.4			20-Nov-2013	 (Bhushan)	Changes For SLTP F+ in DL.NET
+																	:	ver 1.5			20-Feb-2014  (Bhushan)  Changes For OptionPlus in DL.NET
+**********************************************************************************************************/
+/**** C header ****/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fn_read_debug_lvl.h>  /*  Ver 1.1 : Added   */
+
+/* Include the SQL Communications Area */
+#include <sqlca.h>
+
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <fml32.h>
+
+/**** Application header ****/
+#include <fo.h>
+
+/**** Process specific header ****/
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h>
+#include <fn_dlmsg.h>
+#include <fn_signal.h>		/*  Ver 1.1 : Added */
+#include <fn_env.h>				/*  Ver 1.1 : Added */
+#include <fml_rout.h>			/*  Ver 1.1 : Added */
+
+int Z;
+#define ERR_ARR 39						/*** Changed to 39 from 35 in Ver 1.4 ***/
+# define INIT(x,y)  for(Z=0; Z< y; Z++) x[Z] =0
+
+/* Register the batch code */
+int fn_rgstr_bat ( char c_flag, char *c_pgm_name, char *c_xchng_cd, char *c_pipe_id );
+
+/* function for initialising and releasing tuxedo connection */
+void fn_init_bat(char * c_ServiceName, char * c_xchng, char * c_pipe);
+void destroy_bat(char * c_svcnm,char * c_xchng,char * c_pipe);
+
+/* Siguser2 call */
+void fn_sigusr2(int i_sig_no);
+
+/* Message handler */
+
+void fn_msg(char *ptr_trg,long li_len,long li_flg);
+
+/* Global variable */
+
+int  i_exit_status;
+char c_pipe_id[5];
+char c_trg_val = 'N';
+
+int main( int argc, char *argv[])
+{
+	char	c_ServiceName[34];
+	char	c_op_typ;
+	char	c_sleep_flg = 'N';
+	char	c_fail_flg	= 'N';
+	char	c_upd_flg 	= 'N'; /* This flag indicates that there has been an error in program */
+	char	c_err_msg[256];
+	char	*ptr_c_tmp;
+	char	c_filenm[50];
+	char  c_filter[32];
+	char  c_ini_name[10];
+	char  c_setup_no[2];           /* Ver 1.2 */
+	char  c_mod_can_flg ='N';							/*** Ver 1.4 ***/
+
+
+	int  i_slp_time=0;
+	int  i_rpl_slp_time=0;
+	int	 i_ch_val;
+	int  i_loop = 0;
+	int  i_err[ERR_ARR];
+	int  i_ferr[ERR_ARR];
+	int	 i_trnsctn = 0;
+	int  i_setup_no = 0;          /* Ver 1.2 */
+	
+	long l_open_qunta = 0;
+	long l_trg_val = 0;
+
+  double d_tot_amt_blckd = 0.0 ;        /*** Ver 1.4 ***/
+	
+	EXEC SQL INCLUDE "table/dfo_dl_fo_ordbk.h";
+
+	EXEC SQL BEGIN DECLARE SECTION;
+        varchar v_channel[LEN_DFO_CHANNEL + 4];
+				varchar v_rowid[19];
+				varchar sql_dfo_seq_char[20];
+  EXEC SQL END DECLARE SECTION;
+
+	INITBATDBGLVL(argv[0]);					/*	Ver 1.1 : Added		*/
+
+	FBFR32 *ptr_fml_Sbuf = (FBFR32 *)NULL;
+		
+	if ( argc != 4 )
+	{
+/* Ver 1.2 
+			printf("Usage bat_fo_dl_ordmsg <exchange code> <pipe 01/02> <N/F>");	
+*/
+		  printf("Usage bat_fo_dl_ordmsg <exchange code> <pipe N1/F1> <N/F>");	 
+			return 0;
+	}
+
+	strcpy( c_ServiceName, argv[0] );
+
+/* Initialize the tuxedo connection and open resurce manager */
+	fn_init_bat( c_ServiceName,argv[1],argv[2] );
+
+	c_op_typ = argv[3][0];
+	c_setup_no[0] = argv[2][1];
+	c_setup_no[1] = '\0';
+
+	i_setup_no = atoi(c_setup_no);
+
+	fn_userlog(c_ServiceName,  "Setup No is :%d:", i_setup_no );
+
+	strcpy( c_pipe_id , argv[2] );
+
+	
+	if( c_op_typ != SND_NEW_MSG && c_op_typ != SND_FAILED_MSG )
+	{
+		fn_userlog(c_ServiceName,  "Operation type can only be N or F");
+		destroy_bat( c_ServiceName,argv[1],argv[2] );
+		return 0;
+	}
+
+/* Set the signal handler where fn_sigusr2 contains the steps to be taken for handling the signal */
+	if ( fn_set_sgn_hnd ( SIGUSR2, fn_sigusr2, c_ServiceName, c_err_msg ) == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31005", LIBMSG, c_err_msg );
+		destroy_bat( c_ServiceName,argv[1],argv[2] );
+		return 0;	
+	}
+
+/* Get the INI name from DLINI envoirnment variable  */ 
+	ptr_c_tmp = tuxgetenv ( "DLINI" );
+	if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg );
+    destroy_bat( c_ServiceName,argv[1],argv[2] );
+    return 0;
+  }
+		
+	strcpy( c_ini_name,ptr_c_tmp );
+	
+if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.1 : Debug level Change  */
+		fn_userlog(c_ServiceName,"INI name is :%s:",c_ini_name);	
+}	
+
+/* Get the BIN directory path from BIN enviornment variable */
+	ptr_c_tmp = tuxgetenv ( "BIN" );
+	if ( ptr_c_tmp == NULL )
+	{
+		fn_errlog( c_ServiceName, "S31015", LIBMSG, c_err_msg );
+		destroy_bat( c_ServiceName,argv[1],argv[2] );
+		return 0;
+	}
+	
+	sprintf ( c_filenm, "%s/%s", ptr_c_tmp, c_ini_name );
+
+if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.1 : Debug level Change  */
+	fn_userlog(c_ServiceName,"Full path is :%s:",c_filenm );
+}
+
+/* Initialize the process space for readint the data from file */
+	i_ch_val = fn_init_prcs_spc ( c_ServiceName,c_filenm,c_ServiceName );
+  if ( i_ch_val == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31020", LIBMSG, c_err_msg );
+    destroy_bat( c_ServiceName,argv[1],argv[2] );
+		return 0; 
+  }
+
+/* Get the token SLEEP TIME from file */
+	ptr_c_tmp = ( char * ) fn_get_prcs_spc ( c_ServiceName, "SLEEP_TIME" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31025", LIBMSG, c_err_msg );
+		destroy_bat( c_ServiceName,argv[1],argv[2] );
+		return 0;	
+  }
+
+	sscanf(ptr_c_tmp, "%d", &i_slp_time);
+
+/* Get the token REPLY SLEEP TIME from file */
+/* This sleep time is sleep time for pre process function */
+	ptr_c_tmp = ( char * ) fn_get_prcs_spc ( c_ServiceName, "REPLY_SLEEP_TIME" );
+	if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31030", LIBMSG, c_err_msg );
+    destroy_bat( c_ServiceName,argv[1],argv[2] );
+    return 0;
+  }
+	
+	sscanf(ptr_c_tmp, "%d", &i_rpl_slp_time);
+	
+if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.1 : Debug level Change  */
+	fn_userlog(c_ServiceName,"Sleep time is :%d:",i_slp_time);
+	fn_userlog(c_ServiceName,"Reply sleep time is :%d:",i_rpl_slp_time);
+}
+
+/* Set the message handler as fn_msg */
+	tpsetunsol(fn_msg);
+
+	sprintf(c_filter,"FFO_FILTER=='%s'",argv[2]);
+
+/* Subscribe to the trigger TRG_STOP_FO_DLSND with filter as pipe id */	
+	l_trg_val = tpsubscribe( "TRG_STOP_FO_DLSND", c_filter, NULL, 0 );	
+	if ( l_trg_val == -1 )
+	{
+		fn_userlog(c_ServiceName,"Error in subscribing to trigger...");
+		fn_errlog( c_ServiceName, "S31035", TPMSG, c_err_msg );
+		destroy_bat( c_ServiceName,argv[1],argv[2] );
+		return 0;
+	}
+	
+	i_exit_status = DONT_EXIT;
+
+	ptr_fml_Sbuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );	
+	if(  ptr_fml_Sbuf == NULL )
+	{
+		fn_userlog(c_ServiceName,"Error in allocating [%s] exiting the bat_upld_corp process...");
+		fn_errlog( c_ServiceName, "S31040", FMLMSG, c_err_msg );
+		destroy_bat( c_ServiceName,argv[1],argv[2] );
+		return 0;
+	}
+
+
+	while ( i_exit_status == DONT_EXIT )
+	{
+				
+		MEMSET(v_rowid);
+		MEMSET(sql_dfo_clm_mtch_accnt);
+		MEMSET(sql_dfo_xchng_cd);
+		MEMSET(sql_dfo_undrlyng);
+		MEMSET(sql_dfo_expry_dt);
+		MEMSET(sql_dfo_trd_dt);
+		MEMSET(sql_dfo_ordr_rfrnc);
+		MEMSET(v_channel);
+		MEMSET(sql_dfo_ordr_valid_dt);
+		MEMSET(sql_dfo_pipe_id);	
+		MEMSET(sql_dfo_ack_nmbr);	
+		MEMSET(sql_dfo_usr_id);	
+		MEMSET(sql_dfo_seq_char);	
+		MEMSET(sql_dfo_sltp_ordr_rfrnc);        /*** Ver 1.4 ***/
+
+		Finit32( ptr_fml_Sbuf,(FLDLEN32)Fsizeof32(ptr_fml_Sbuf) );
+
+		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+		if( i_trnsctn == -1 )
+		{
+			fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the bat_upld_corp process...",c_err_msg);
+			fn_errlog( c_ServiceName, "S31045", c_err_msg, c_err_msg );
+			tpfree( (char *) ptr_fml_Sbuf );
+			break;
+		}
+
+/*  Get the data based on operation type */	
+		if ( c_op_typ == SND_NEW_MSG )
+		{
+/* For NEW messages */
+			
+			EXEC SQL
+					 UPDATE			dfo_dl_fo_ordbk
+					 SET				dfo_snd_stts				  	 = 	'P'
+					 WHERE			nvl(dfo_snd_stts,'N')		 =  'N'
+					 AND        dfo_dl_setup_no          =  :i_setup_no    /* Ver 1.2 */
+					 AND			  DFO_PRDCT_TYP            in ('F','P','O','U','I')          /*** Ver 1.4 ***/  /*** Ver 1.5 ** 'I' added ***/
+					 AND		  	dfo_seq									 =  ( 				SELECT min(dfo_seq)
+																														FROM   dfo_dl_fo_ordbk
+																														WHERE  nvl(dfo_snd_stts,'N')    =  'N'
+																														AND    dfo_dl_setup_no          =  :i_setup_no /* 1.3 */
+																														AND    DFO_PRDCT_TYP            in ('F','P','O','U','I')          /*** Ver 1.4 ***/   /*** Ver 1.5 ** 'I' added ***/
+																									)
+					 RETURNING	rowid,
+											dfo_clm_mtch_accnt,
+											dfo_xchng_cd,
+											dfo_undrlyng,
+											dfo_expry_dt,
+											dfo_indstk,
+											dfo_prdct_typ,
+											dfo_opt_typ,
+											dfo_strk_prc,
+											dfo_exer_typ,
+											dfo_trd_dt,
+											dfo_ordr_rfrnc,
+											DECODE( ( substr (dfo_bp_id,1,1)) ,'#',dfo_channel||' DBC',dfo_channel ),
+											nvl(dfo_dsclsd_qty,0),
+											nvl(dfo_exec_qty,0),
+											nvl(dfo_cncl_qty,0),
+											nvl(dfo_exprd_qty,0),
+											dfo_lmt_mrkt_sl_flg,
+											nvl(dfo_lmt_rt,0),
+											dfo_ordr_tot_qty,
+											dfo_ordr_type,
+											nvl(dfo_ordr_valid_dt,dfo_trd_dt),
+											dfo_ordr_flw,
+											dfo_ordr_stts,
+											dfo_pipe_id,
+											dfo_spl_flag,
+											nvl(dfo_stp_lss_tgr,0),
+											nvl(dfo_ack_nmbr,'*'),
+											to_char(dfo_seq),
+											dfo_usr_id,
+											/*** Ver 1.4 ** Starts ***/
+        							NVL(DFO_SLTP_ORDR_RFRNC,'*'),
+        							NVL(DFO_AMT_BLCKD,0),
+        							NVL(DFO_LSS_AMT_BLCKD,0),
+        							NVL(DFO_FC_FLAG,'N')
+											/*** Ver 1.4 ** Ends ***/				
+					INTO				:v_rowid,
+											:sql_dfo_clm_mtch_accnt,
+											:sql_dfo_xchng_cd,
+											:sql_dfo_undrlyng,
+											:sql_dfo_expry_dt,
+											:sql_dfo_indstk,
+											:sql_dfo_prdct_typ,
+											:sql_dfo_opt_typ,
+											:sql_dfo_strk_prc,
+											:sql_dfo_exer_typ,
+											:sql_dfo_trd_dt,
+											:sql_dfo_ordr_rfrnc,
+											:v_channel,
+											:sql_dfo_dsclsd_qty,
+											:sql_dfo_exec_qty,
+											:sql_dfo_cncl_qty,
+											:sql_dfo_exprd_qty,
+											:sql_dfo_lmt_mrkt_sl_flg,
+											:sql_dfo_lmt_rt,
+											:sql_dfo_ordr_tot_qty,
+											:sql_dfo_ordr_type,
+											:sql_dfo_ordr_valid_dt,
+											:sql_dfo_ordr_flw,
+											:sql_dfo_ordr_stts,
+											:sql_dfo_pipe_id,
+											:sql_dfo_spl_flag,
+											:sql_dfo_stp_lss_tgr,
+											:sql_dfo_ack_nmbr,
+											:sql_dfo_seq_char,
+											:sql_dfo_usr_id,
+											/*** Ver 1.4 ** Starts ***/
+											:sql_dfo_sltp_ordr_rfrnc,
+											:sql_dfo_amt_blckd,
+											:sql_dfo_lss_amt_blckd,
+											:sql_dfo_fc_flag;
+											/*** Ver 1.4 ** Ends ***/
+
+		}
+		else
+		{
+/* For Failed messages */
+			EXEC SQL
+					 UPDATE			dfo_dl_fo_ordbk
+					 SET				dfo_snd_stts				  	 = 	'P'
+					 WHERE			dfo_snd_stts						 =  'F'
+					 AND        dfo_dl_setup_no          =  :i_setup_no    /* Ver 1.2 */
+					 AND        DFO_PRDCT_TYP            in ('F','P','O','U','I')          /*** Ver 1.4 ***/   /*** Ver 1.5 ** 'I' added ***/
+					 AND		  	dfo_seq									 =  ( 				SELECT min(dfo_seq)
+																														FROM   dfo_dl_fo_ordbk
+																														WHERE  dfo_snd_stts		    =  'F'
+																														AND    dfo_dl_setup_no          =  :i_setup_no /* 1.3 */
+																														AND        DFO_PRDCT_TYP        in ('F','P','O','U','I')          /*** Ver 1.4 ***/   /*** Ver 1.5 ** 'I' added ***/
+																									)
+					 RETURNING	rowid,
+											dfo_clm_mtch_accnt,
+											dfo_xchng_cd,
+											dfo_undrlyng,
+											dfo_expry_dt,
+											dfo_indstk,
+											dfo_prdct_typ,
+											dfo_opt_typ,
+											dfo_strk_prc,
+											dfo_exer_typ,
+											dfo_trd_dt,
+											dfo_ordr_rfrnc,
+											DECODE( substr (dfo_bp_id,1,1) ,'#',dfo_channel||' DBC',dfo_channel ),
+											nvl(dfo_dsclsd_qty,0),
+											nvl(dfo_exec_qty,0),
+											nvl(dfo_cncl_qty,0),
+											nvl(dfo_exprd_qty,0),
+											dfo_lmt_mrkt_sl_flg,
+											nvl(dfo_lmt_rt,0),
+											dfo_ordr_tot_qty,
+											dfo_ordr_type,
+											nvl(dfo_ordr_valid_dt,dfo_trd_dt),
+											dfo_ordr_flw,
+											dfo_ordr_stts,
+											dfo_pipe_id,
+											dfo_spl_flag,
+											nvl(dfo_stp_lss_tgr,0),
+											nvl(dfo_ack_nmbr,'*'),
+											to_char(dfo_seq),
+											dfo_usr_id,
+		      						/*** Ver 1.4 ** Starts ***/
+                      NVL(DFO_SLTP_ORDR_RFRNC,'*'),
+                      NVL(DFO_AMT_BLCKD,0),
+                      NVL(DFO_LSS_AMT_BLCKD,0),
+                      NVL(DFO_FC_FLAG,'N')
+                      /*** Ver 1.4 ** Ends ***/
+					INTO				:v_rowid,
+											:sql_dfo_clm_mtch_accnt,
+											:sql_dfo_xchng_cd,
+											:sql_dfo_undrlyng,
+											:sql_dfo_expry_dt,
+											:sql_dfo_indstk,
+											:sql_dfo_prdct_typ,
+											:sql_dfo_opt_typ,
+											:sql_dfo_strk_prc,
+											:sql_dfo_exer_typ,
+											:sql_dfo_trd_dt,
+											:sql_dfo_ordr_rfrnc,
+											:v_channel,
+											:sql_dfo_dsclsd_qty,
+											:sql_dfo_exec_qty,
+											:sql_dfo_cncl_qty,
+											:sql_dfo_exprd_qty,
+											:sql_dfo_lmt_mrkt_sl_flg,
+											:sql_dfo_lmt_rt,
+											:sql_dfo_ordr_tot_qty,
+											:sql_dfo_ordr_type,
+											:sql_dfo_ordr_valid_dt,
+											:sql_dfo_ordr_flw,
+											:sql_dfo_ordr_stts,
+											:sql_dfo_pipe_id,
+											:sql_dfo_spl_flag,
+											:sql_dfo_stp_lss_tgr,
+											:sql_dfo_ack_nmbr,
+											:sql_dfo_seq_char,
+											:sql_dfo_usr_id,
+											/*** Ver 1.4 ** Starts ***/
+                      :sql_dfo_sltp_ordr_rfrnc,
+                      :sql_dfo_amt_blckd,
+											:sql_dfo_lss_amt_blckd,
+                      :sql_dfo_fc_flag;
+                      /*** Ver 1.4 ** Ends ***/
+
+		}
+		if ( SQLCODE != 0  )
+		{
+			if ( SQLCODE == NO_DATA_FOUND )
+			{
+				if ( c_op_typ == SND_NEW_MSG )
+				{
+/* If new message then sleep */
+					c_sleep_flg = 'Y';
+/*
+#ifdef DEBUG
+					fn_userlog(c_ServiceName," Going to sleep sleep flag :%c:", c_sleep_flg );
+#endif
+*/
+				}
+				else if ( c_op_typ == SND_FAILED_MSG )
+				{
+/* If failed message the exit */
+					c_fail_flg = 'Y';
+/*
+#ifdef DEBUG
+					fn_userlog(c_ServiceName," Work done :%c:", c_fail_flg);
+#endif
+*/
+
+				}
+			}
+			else
+			{
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_userlog(c_ServiceName,"Error in sql query...");
+				fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+				c_upd_flg = 'Y';
+				break;
+			}
+		}
+		
+		if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+		{
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_userlog(c_ServiceName,"Error in commiting the transaction...");
+      fn_errlog( c_ServiceName, "S31055", c_err_msg, c_err_msg );
+			break;
+		}
+
+		if( c_sleep_flg == 'Y' )
+		{
+			sleep(i_slp_time);
+/*
+#ifdef DEBUG
+			fn_userlog(c_ServiceName," Slept ");
+#endif
+*/
+			c_sleep_flg = 'N';
+
+		}
+		else if( c_fail_flg == 'Y' )
+		{
+/*
+#ifdef DEBUG
+			fn_userlog(c_ServiceName," Breaking from loop ");
+#endif
+*/
+			break;
+
+		}
+		else
+		{
+		
+			if( sql_dfo_ordr_stts != 'J' )
+			{	
+				l_open_qunta = sql_dfo_ordr_tot_qty - ( sql_dfo_exec_qty + sql_dfo_cncl_qty + sql_dfo_exprd_qty );	
+			}
+			else  /* Added Ver 1.2 */
+			{
+				l_open_qunta = 0;
+			}
+
+			SETNULL(v_rowid);
+			SETNULL(sql_dfo_clm_mtch_accnt);
+			SETNULL(sql_dfo_xchng_cd);
+			SETNULL(sql_dfo_undrlyng);
+			SETNULL(sql_dfo_expry_dt);
+			SETNULL(sql_dfo_trd_dt);
+			SETNULL(sql_dfo_ordr_rfrnc);
+			SETNULL(v_channel);
+			SETNULL(sql_dfo_ordr_valid_dt);
+			SETNULL(sql_dfo_pipe_id);
+			SETNULL(sql_dfo_usr_id);
+			SETNULL(sql_dfo_seq_char);
+			SETNULL(sql_dfo_sltp_ordr_rfrnc);				/*** Ver 1.4 ***/
+
+			/*** Ver 1.4 Starts ***/
+			if( sql_dfo_prdct_typ == 'U' || sql_dfo_prdct_typ == 'I' )    /*** Ver 1.5 ** 'I' added in condition ***/
+      {
+        if( sql_dfo_fc_flag == 'F' )
+        {
+          c_mod_can_flg = 'N';
+        }
+        else if( sql_dfo_fc_flag == 'C' )
+        {
+          c_mod_can_flg = 'Y';
+        }
+		
+        fn_userlog(c_ServiceName," Modify cancel  Flag         :%c:",c_mod_can_flg);		
+
+				d_tot_amt_blckd = sql_dfo_amt_blckd + sql_dfo_lss_amt_blckd ;  
+			}
+			/*** Ver 1.4 Ends ***/
+			
+
+if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.1 : Debug level Change  */
+			fn_userlog(c_ServiceName," Operation type						:%c: ",c_op_typ);
+			fn_userlog(c_ServiceName," Rowid 										:%s: ",v_rowid.arr);
+			fn_userlog(c_ServiceName," Match account						:%s: ",sql_dfo_clm_mtch_accnt.arr);
+			fn_userlog(c_ServiceName," Exchange code						:%s:",sql_dfo_xchng_cd.arr);
+			fn_userlog(c_ServiceName," Underling								:%s:",sql_dfo_undrlyng.arr);
+			fn_userlog(c_ServiceName," Expiry date							:%s:",sql_dfo_expry_dt.arr);
+			fn_userlog(c_ServiceName," Category index/stock			:%c:",sql_dfo_indstk);
+			fn_userlog(c_ServiceName," Product type							:%c:",sql_dfo_prdct_typ);
+			fn_userlog(c_ServiceName," Option type							:%c:",sql_dfo_opt_typ);
+			fn_userlog(c_ServiceName," Strike price							:%ld:",sql_dfo_strk_prc);
+			fn_userlog(c_ServiceName," Exercise type						:%c:",sql_dfo_exer_typ);
+			fn_userlog(c_ServiceName," Trade date								:%s:",sql_dfo_trd_dt.arr);
+			fn_userlog(c_ServiceName," Order refrence						:%s:",sql_dfo_ordr_rfrnc.arr);
+			fn_userlog(c_ServiceName," Channel									:%s:",v_channel.arr);
+			fn_userlog(c_ServiceName," Disclosed quantity			  :%ld:",sql_dfo_dsclsd_qty);
+			fn_userlog(c_ServiceName," Executed quantity				:%ld:",sql_dfo_exec_qty);
+			fn_userlog(c_ServiceName," Cancel quantity					:%ld:",sql_dfo_cncl_qty);
+			fn_userlog(c_ServiceName," Expired quantity					:%ld:",sql_dfo_exprd_qty);
+			fn_userlog(c_ServiceName," Limit/Market flag        :%c:",sql_dfo_lmt_mrkt_sl_flg);
+			fn_userlog(c_ServiceName," Limit rate               :%ld:",sql_dfo_lmt_rt);
+			fn_userlog(c_ServiceName," Total quantity           :%ld:",sql_dfo_ordr_tot_qty);
+			fn_userlog(c_ServiceName," Order type               :%c:",sql_dfo_ordr_type);
+			fn_userlog(c_ServiceName," Order valid date         :%s:",sql_dfo_ordr_valid_dt.arr);
+			fn_userlog(c_ServiceName," Order flow               :%c:",sql_dfo_ordr_flw);
+			fn_userlog(c_ServiceName," Order status             :%c:",sql_dfo_ordr_stts);
+			fn_userlog(c_ServiceName," Pipe id                  :%s:",sql_dfo_pipe_id.arr);
+			fn_userlog(c_ServiceName," Spl flag                 :%c:",sql_dfo_spl_flag);
+			fn_userlog(c_ServiceName," Stop loss trigger price  :%ld:",sql_dfo_stp_lss_tgr);
+			fn_userlog(c_ServiceName," Acknowledgement number   :%s:",sql_dfo_ack_nmbr.arr);	
+			fn_userlog(c_ServiceName," Open quantity            :%ld:",l_open_qunta);
+			fn_userlog(c_ServiceName," Sequence			            :%s:",sql_dfo_seq_char.arr);
+			fn_userlog(c_ServiceName," User id 			            :%s:",sql_dfo_usr_id.arr);
+			
+			/*** Ver 1.4 ** Starts ***/
+			fn_userlog(c_ServiceName," SLTP Order reference			:%s:",sql_dfo_sltp_ordr_rfrnc.arr);
+			fn_userlog(c_ServiceName," Amount Blocked						:%lf:",sql_dfo_amt_blckd);
+			fn_userlog(c_ServiceName," Loss Amount Blocked 			:%lf:",sql_dfo_lss_amt_blckd);
+			fn_userlog(c_ServiceName," SLTP ordr total Amnt  Blocked  - |%lf|", d_tot_amt_blckd);
+			fn_userlog(c_ServiceName," Fresh/Cover Flag					:%c:",sql_dfo_fc_flag);
+			/*** Ver 1.4 ** Ends ***/
+}	
+			
+			INIT( i_err, ERR_ARR );
+			INIT( i_ferr, ERR_ARR );
+
+			i_err[0] = Fadd32( ptr_fml_Sbuf,FFO_EBA_MTCH_ACT_NO,(char *)sql_dfo_clm_mtch_accnt.arr,0 );
+			i_ferr[0] = Ferror32;
+			i_err[1] = Fadd32( ptr_fml_Sbuf,FFO_XCHNG_CD,(char *)sql_dfo_xchng_cd.arr,0 );
+			i_ferr[1] = Ferror32;
+			i_err[2] = Fadd32( ptr_fml_Sbuf,FFO_UNDRLYNG,(char *)sql_dfo_undrlyng.arr,0 );
+			i_ferr[2] = Ferror32;
+			i_err[3] = Fadd32( ptr_fml_Sbuf,FFO_EXPRY_DT,(char *)sql_dfo_expry_dt.arr,0 );
+			i_ferr[3] = Ferror32;
+			i_err[4] = Fadd32( ptr_fml_Sbuf,FFO_CTGRY_INDSTK,(char *)&sql_dfo_indstk,0 );
+			i_ferr[4] = Ferror32;
+			i_err[5] = Fadd32( ptr_fml_Sbuf,FFO_PRDCT_TYP,(char *)&sql_dfo_prdct_typ,0 );
+			i_ferr[5] = Ferror32;
+			i_err[6] = Fadd32( ptr_fml_Sbuf,FFO_OPT_TYP,(char *)&sql_dfo_opt_typ,0 );
+			i_ferr[6] = Ferror32;
+			i_err[7] = Fadd32( ptr_fml_Sbuf,FFO_STRK_PRC,(char *)&sql_dfo_strk_prc,0 );
+			i_ferr[7] = Ferror32;
+			i_err[8] = Fadd32( ptr_fml_Sbuf,FFO_EXER_TYP,(char *)&sql_dfo_exer_typ,0 );
+			i_ferr[8] = Ferror32;
+			i_err[9] = Fadd32( ptr_fml_Sbuf,FFO_TRD_DT,(char *)sql_dfo_trd_dt.arr,0 );
+			i_ferr[9] = Ferror32;
+			i_err[10] = Fadd32( ptr_fml_Sbuf,FML_TRD_TRD_REF,(char *)sql_dfo_ordr_rfrnc.arr,0 );
+			i_ferr[10] = Ferror32;
+			i_err[11] = Fadd32( ptr_fml_Sbuf, FFO_CHANNEL,(char *)v_channel.arr,0 );
+			i_ferr[11] = Ferror32;
+			i_err[12] = Fadd32( ptr_fml_Sbuf,FFO_DSCLSD_QTY,(char *)&sql_dfo_dsclsd_qty,0 );
+			i_ferr[12] = Ferror32;
+			i_err[13] = Fadd32( ptr_fml_Sbuf,FFO_EXEC_QTY,(char *)&sql_dfo_exec_qty,0 );
+			i_ferr[13] = Ferror32;
+			i_err[14] = Fadd32( ptr_fml_Sbuf, FFO_CANCL_QTY,(char *)&sql_dfo_cncl_qty,0 );
+			i_ferr[14] = Ferror32;
+			i_err[15] = Fadd32( ptr_fml_Sbuf,FFO_EXPRD_QTY,(char *)&sql_dfo_exprd_qty,0 );
+			i_ferr[15] = Ferror32;
+			i_err[16] = Fadd32( ptr_fml_Sbuf,FFO_LMT_MKT_SL_FLG,(char *)&sql_dfo_lmt_mrkt_sl_flg,0 );
+			i_ferr[16] = Ferror32;
+			i_err[17] = Fadd32( ptr_fml_Sbuf,FFO_LMT_RT,(char *)&sql_dfo_lmt_rt,0 );
+			i_ferr[17] = Ferror32;
+			i_err[18] = Fadd32( ptr_fml_Sbuf,FFO_ORD_TOT_QTY,(char *)&sql_dfo_ordr_tot_qty,0 );
+			i_ferr[18] = Ferror32;
+			i_err[19] = Fadd32( ptr_fml_Sbuf,FFO_ORD_TYP,(char *)&sql_dfo_ordr_type,0 );
+			i_ferr[19] = Ferror32;
+			i_err[20] = Fadd32( ptr_fml_Sbuf,FFO_ORD_VALID_DT,(char *)sql_dfo_ordr_valid_dt.arr,0 );
+			i_ferr[20] = Ferror32;
+			i_err[21] = Fadd32( ptr_fml_Sbuf,FFO_ORDR_FLW,(char *)&sql_dfo_ordr_flw,0 );
+			i_ferr[21] = Ferror32;
+			i_err[22] = Fadd32( ptr_fml_Sbuf,FFO_ORDR_STTS,(char *)&sql_dfo_ordr_stts,0 );
+			i_ferr[22] = Ferror32;
+			i_err[23] = Fadd32( ptr_fml_Sbuf,FFO_PIPE_ID,(char *)sql_dfo_pipe_id.arr,0 );
+			i_ferr[23] = Ferror32;
+			i_err[24] = Fadd32( ptr_fml_Sbuf,FFO_SPL_FLG,(char *)&sql_dfo_spl_flag,0 );
+			i_ferr[24] = Ferror32;
+			i_err[25] = Fadd32( ptr_fml_Sbuf,FFO_STP_LSS_TGR,(char *)&sql_dfo_stp_lss_tgr,0 );
+			i_ferr[25] = Ferror32;
+			i_err[26] = Fadd32( ptr_fml_Sbuf,FFO_ACK_NMBR,(char *)sql_dfo_ack_nmbr.arr,0 );
+			i_ferr[26] = Ferror32;
+			i_err[27] = Fadd32( ptr_fml_Sbuf,FFO_C_OPNPSTN_QTY,(char *)&l_open_qunta,0 );
+			i_ferr[27] = Ferror32;
+			i_err[28] = Fadd32( ptr_fml_Sbuf,FML_STATLIN,(char *)v_rowid.arr,0 );
+			i_ferr[28] = Ferror32;
+			i_err[29] = Fadd32( ptr_fml_Sbuf,FFO_SERIES,(char *)sql_dfo_seq_char.arr,0 );
+			i_ferr[29] = Ferror32;
+			i_err[30] = Fadd32( ptr_fml_Sbuf,FFO_USR_ID,(char *)sql_dfo_usr_id.arr,0 );
+			i_ferr[30] = Ferror32;
+			i_err[31] = Fadd32( ptr_fml_Sbuf,FML_GMS_ID,(char *)&i_setup_no,0 );
+			i_ferr[31] = Ferror32;
+
+			/*** Ver 1.4 ** Starts ***/
+			i_err[32] = Fadd32( ptr_fml_Sbuf,FFO_ORD_AMT_BLKD,(char *)&d_tot_amt_blckd,0 );
+      i_ferr[32] = Ferror32;
+			i_err[33] = Fadd32( ptr_fml_Sbuf,FFO_SOURCE_FLG,(char *)&c_mod_can_flg,0 );
+      i_ferr[33] = Ferror32;		
+			i_err[34] = Fadd32( ptr_fml_Sbuf,FFO_ORDR_RFRNC,(char *)sql_dfo_sltp_ordr_rfrnc.arr,0 );
+      i_ferr[34] = Ferror32;
+			/*** Ver 1.4 ** Ends ***/
+
+			for( i_loop=0;i_loop<34;i_loop++ )         /*** Changed to 34 from 31 in Ver 1.4 ***/
+			{
+				if(i_err[i_loop] == -1)
+				{
+					fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i_loop);
+					fn_errlog( c_ServiceName, "S31060", Fstrerror32(i_ferr[i_loop]), c_err_msg  );
+					c_upd_flg = 'Y';
+					break;
+				}
+			}
+
+/* Check for free instances of sfr_dl_ordmsg */
+			i_ch_val = fn_pre_prcs_dlmsg(c_ServiceName,c_err_msg,"sfr_dl_ordmsg",0,FNO_ORDBK,i_rpl_slp_time );
+			if( i_ch_val == -1)
+			{
+				fn_userlog(c_ServiceName,  "Errror in pre processing records ");
+				fn_errlog( c_ServiceName, "S31065", c_err_msg, c_err_msg );
+				c_upd_flg = 'Y';
+				break;
+			}
+/*
+#ifdef DEBUG
+	fn_userlog( c_ServiceName,"Calling SFO_DL_ORDMSG");
+#endif
+*/
+
+			i_ch_val = tpacall( "SFO_DL_ORDMSG", (char *)ptr_fml_Sbuf, 0, TPNOTRAN );
+			if( i_ch_val == -1 )
+			{
+				fn_userlog(c_ServiceName,"Error in calling service ");
+				fn_errlog( c_ServiceName, "S31070", TPMSG, c_err_msg  );	
+				c_upd_flg = 'Y';
+        break;
+			}
+		}
+
+		tpchkunsol();
+/*
+#ifdef DEBUG
+  fn_userlog( c_ServiceName,"The exit status at present is :%d:",i_exit_status);
+#endif
+*/
+
+	}/* while loop ends */
+
+	if( c_upd_flg == 'Y')
+	{
+
+		strcpy(c_err_msg,"Failure in batch updating the status to F");
+
+		fn_userlog(c_ServiceName,"%s", c_err_msg);
+
+		i_ch_val = fn_update_resp(c_ServiceName ,c_err_msg , (char *)v_rowid.arr, (char *)sql_dfo_ordr_rfrnc.arr, 'F', -1, c_err_msg, FNO_ORDBK);
+
+		if(i_ch_val == -1)
+		{
+			fn_errlog( c_ServiceName, "S31075", LIBMSG, c_err_msg);
+		}
+			
+	}
+
+/* process all the instances of sfr_dl_ordmsg and exit */	
+	i_ch_val  = fn_pre_prcs_dlmsg( c_ServiceName,c_err_msg,"sfr_dl_ordmsg",1,FNO_ORDBK,i_rpl_slp_time );
+	if(i_ch_val == -1)
+	{
+		fn_errlog( c_ServiceName, "S31080", LIBMSG, c_err_msg);
+	}
+	
+	tpfree( (char *) ptr_fml_Sbuf);
+	destroy_bat(c_ServiceName,argv[1],argv[2]);	
+	return 0;	 
+
+}/* End of main */				
+			
+/*** initialise the tuxedo connection ***/
+
+void fn_init_bat(char * c_ServiceName, char * c_xchng, char * c_pipe)
+{
+
+		TPINIT *ptr_tpinfo = (TPINIT*)NULL;
+
+    char c_err_msg[256 + 1];
+    char c_tag[35];
+
+    if ( c_ServiceName  == NULL)
+    exit(-1);
+
+    fn_userlog(c_ServiceName,"The ServiceName is :%s:",c_ServiceName);
+    fn_userlog(c_ServiceName,"The xchng is :%s:",c_xchng);
+    fn_userlog(c_ServiceName,"The pipe is :%s:",c_pipe);
+
+    if( fn_create_pipe() == -1)
+    exit(-1);
+
+    fn_userlog(c_ServiceName,"Stage I in init_bat");
+
+    ptr_tpinfo = (TPINIT *)tpalloc("TPINIT", NULL, TPINITNEED ( 0 ) );
+
+    if (ptr_tpinfo == (TPINIT *)NULL)
+    {
+        fn_errlog(c_ServiceName, "S31085", TPMSG, c_err_msg);
+        fn_destroy_pipe();
+        exit(-1);
+    }
+    fn_userlog(c_ServiceName,"Stage II in init_bat");
+
+    if(tuxgetenv("ORA_GRP")== NULL)
+    {
+        fn_errlog(c_ServiceName, "S31090", TPMSG, c_err_msg);
+        fn_destroy_pipe();
+        tpfree((char*)ptr_tpinfo);
+				exit(-1);
+    }
+    fn_userlog(c_ServiceName,"Stage III in init_bat");
+
+    if(tuxgetenv("EBALOG_PATH")== NULL)
+    {
+				fn_errlog(c_ServiceName, "S31095", TPMSG, c_err_msg);
+        fn_destroy_pipe();
+        tpfree((char*)ptr_tpinfo);
+        exit(-1);
+    }
+    fn_userlog(c_ServiceName,"Stage IV in init_bat");
+
+    strcpy(ptr_tpinfo->passwd, "\0" );
+    strcpy(ptr_tpinfo->usrname, "\0" );
+    strcpy(ptr_tpinfo->grpname, tuxgetenv("ORA_GRP")); 
+    ptr_tpinfo->flags = 0;
+    strcpy(ptr_tpinfo->cltname, c_ServiceName);
+
+    fn_userlog(c_ServiceName,"The Group Associated is :%s:",ptr_tpinfo->grpname);
+    fn_userlog(c_ServiceName,"The username Associated is :%s:",ptr_tpinfo->usrname);
+    fn_userlog(c_ServiceName,"The passwd Associated is :%s:",ptr_tpinfo->passwd);
+    fn_userlog(c_ServiceName,"The cltname Associated is :%s:",ptr_tpinfo->cltname);
+    fn_userlog(c_ServiceName,"The flag Associated is :%ld:",ptr_tpinfo->flags);
+
+    if(tpinit((TPINIT *) ptr_tpinfo)== -1)
+    {
+        fn_errlog(c_ServiceName, "S31100", TPMSG, c_err_msg);
+        fn_destroy_pipe();
+        tpfree((char*)ptr_tpinfo);
+        exit(-1);
+    }
+    tpfree((char*)ptr_tpinfo);
+    fn_userlog(c_ServiceName,"Stage V in init_bat");
+
+    if(fn_rgstr_bat('R',c_ServiceName,c_xchng,c_pipe) != 1)
+	  {
+				sprintf(c_err_msg, "Instance of Process %s Already Running",c_ServiceName);
+				fn_destroy_pipe();
+				tpterm();
+				tpfree((char*)ptr_tpinfo);
+				exit(-1);
+		 }
+		 fn_userlog(c_ServiceName,"Stage V-II in init_bat");
+		 if(tpopen() == -1)
+		 {
+				fn_errlog(c_ServiceName, "S31105", TPMSG, c_err_msg);
+				fn_rgstr_bat('U',c_ServiceName,c_xchng,c_pipe);
+				fn_destroy_pipe();
+				tpterm();
+				tpfree((char*)ptr_tpinfo);
+				exit(-1);
+		 }
+
+		 fn_userlog(c_ServiceName,"INIT DONE");
+		 tpfree((char*)ptr_tpinfo);
+		 return;
+}
+
+/*************** Exit & free Resources of batch process *********/
+
+void destroy_bat(char * c_svcnm,char * c_xchng,char * c_pipe)
+{
+    fn_rgstr_bat('U',c_svcnm,c_xchng,c_pipe);
+    fn_destroy_pipe();
+		tpunsubscribe(-1, 0);
+    tpclose();
+    tpterm();
+		return;
+}
+
+/* On Siguser2 */
+
+void fn_sigusr2(int i_sig_no)
+{
+	fn_userlog("bat_fo_dl_ordmsg","bat_fo_dl_ordmsg SIGUSER2 graceful exit");
+	i_exit_status = EXIT;
+	return;
+}
+
+/* On message handling */
+void fn_msg(char *ptr_trg, long l_len, long l_flg)
+{
+	
+if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.1 : Debug level Change  */
+	fn_userlog("bat_fo_dl_ordmsg","bat_fo_dl_ordmsg trigger handled");
+}
+	i_exit_status = EXIT;
+
+	return;
+}
+
+int fn_rgstr_bat ( char c_flag, char *c_pgm_name, char *c_xchng_cd, char *c_pipe_id )
+{
+  int     i_ch_val;
+  char    c_retmsg[256];
+
+  i_ch_val = fn_call_svc_fml ( c_pgm_name,
+                               c_retmsg,
+                               "SVC_RGSTR_BAT",
+                               TPNOTRAN,
+                               4,
+                               0,
+                               FML_GAME_REG_FLG, ( char * )&c_flag,
+                               FML_GMS_NM, ( char * )c_pgm_name,
+                               FML_ORD_XCHNG_CD, ( char * )c_xchng_cd,
+                               FML_USR_ZIP_CD, ( char * )c_pipe_id );
+  if ( i_ch_val != SUCC_BFR )
+  {
+		fn_userlog( c_pgm_name, "Error in registering the program");
+    fn_errlog ( c_pgm_name, "L31055", LIBMSG, c_retmsg );
+    return 0;
+  }
+
+  return 1;
+}
+

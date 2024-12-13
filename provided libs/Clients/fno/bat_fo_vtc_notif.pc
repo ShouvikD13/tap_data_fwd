@@ -1,0 +1,527 @@
+/**************************************************************************************/
+/* File Name        : bat_fo_vtc_notif.pc                                             */
+/*                                                                                    */
+/* Description      : This batch will send VTC expired order data to CEP				      */
+/*                                                                                    */
+/* Author           : 																																*/
+/*                                                                                    */
+/* Created on       : 19-Jul-2016                                                     */
+/*                                                                                    */
+/* Version          : 1.0   New Release (Ritesh Deolekar)										          */
+/*                                                                                    */
+/**************************************************************************************/
+#include <stdio.h>              /*C header file*/
+#include <stdlib.h>             /*C header file*/
+#include <string.h>             /*C header file*/
+#include <sqlca.h>              /*Oracle(SQL communication area) header file*/
+#include <atmi.h>               /*Tuxedo header file*/
+#include <userlog.h>            /*Tuxedo header file*/
+#include <fn_read_debug_lvl.h>  /*Tuxedo header file*/
+
+/*User defined header files*/
+#include <eba.h>
+#include <fn_eba_tuxlib.h>
+#include <ri_brdmsg.h>
+#include <ud_sck.h>
+
+#define DELIMITER '+'
+#define SETUP_NO 8
+
+char c_BatchName[33];
+char c_user_id[8+1];
+char c_errmsg[256];
+char c_record_str[200];
+
+int  i_msg_seq = 0;
+
+long int li_session_id;
+long l_fod_avg_exec_rt = 0;
+
+int  fn_init_bat(char *);
+void fn_close_bat(char *);
+
+void main(int argc, char *argv[])
+{
+	char c_msg_priority;
+	char c_mode;
+	char c_msg_flg;
+	char c_subscription[4];
+
+	int i_ret_val;
+	int i;
+	int i_setup_no;
+	int i_msg_type;
+  int c_flg = 0;
+
+	strcpy(c_user_id, DEF_USR);
+  li_session_id = DEF_SSSN;
+  strcpy(c_BatchName,"bat_fo_vtc_notif");
+
+	EXEC SQL INCLUDE "table/fod_fo_ordr_dtls.h";
+
+	EXEC SQL BEGIN DECLARE SECTION;		
+		varchar v_fbc_trd_dt[23];  
+		varchar v_exg_nxt_trd_dt[23];
+    sql_cursor  fod_vtc_rec;
+    sql_cursor  fod_pe_rec;
+	EXEC SQL END DECLARE SECTION;	
+
+	INITBATDBGLVL(argv[0]);
+
+	/*Initialise the TUXEDO Connection*/
+  if(fn_init_bat(c_BatchName) == -1)
+  {
+    userlog("Error in calling function fn_init_bat");
+    exit(-1);
+  }
+
+	/*Register the batch to EBA*/
+  if(fn_rgstr_bat('R', c_BatchName, "NA", "NA") != 1)
+  {
+    userlog( "Process |%s| is already running", c_BatchName);
+    tpclose();
+    tpterm();
+    exit(-1);
+  }
+	
+	if(DEBUG_MSG_LVL_0)
+  {
+		userlog("bat_fo_vtc_notif starts");
+		userlog("Usage: %s ", argv[0] ); 
+	}
+
+	MEMSET(v_exg_nxt_trd_dt);
+
+	EXEC SQL
+	 	SELECT 	exg_nxt_trd_dt
+		INTO		:v_exg_nxt_trd_dt
+   	FROM 		exg_xchng_mstr
+   	WHERE 	exg_xchng_cd = 'NFO';
+
+  if ( SQLCODE != 0 )
+  {
+   	errlog(c_BatchName,"S31005",SQLMSG,(char *)c_user_id, li_session_id,c_errmsg);
+   	fn_close_bat(c_BatchName);
+   	exit(-1);
+  }
+
+	EXEC SQL	
+		SELECT  1  
+		INTO		:c_flg
+    FROM 	  DUAL
+		WHERE	EXISTS	
+		(
+			SELECT  1	
+			FROM 		FOD_FO_ORDR_DTLS
+			WHERE 	FOD_ORDR_TYPE = 'V'
+			AND 		FOD_ORDR_STTS = 'X'
+			AND 		FOD_TRD_DT		= :v_exg_nxt_trd_dt
+		);
+
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  {
+		errlog(c_BatchName,"S31010",SQLMSG,(char *)c_user_id, li_session_id,c_errmsg);
+    fn_close_bat(c_BatchName);
+   	exit(-1);
+	}
+	
+	if ( SQLCODE == NO_DATA_FOUND )
+  {
+		c_flg = 0;
+  	MEMSET(v_fbc_trd_dt);
+				
+		EXEC SQL
+    	SELECT  MAX(FBC_TRD_DT)
+    	INTO    :v_fbc_trd_dt
+    	FROM    FBC_FO_BRNCH_CAL
+    	WHERE   trunc(FBC_TRD_DT) < :v_exg_nxt_trd_dt
+			AND 		FBC_XCHNG_CD  = 'NFO';
+
+		if ( SQLCODE != 0 )
+		{
+			errlog(c_BatchName,"S31015",SQLMSG,(char *)c_user_id, li_session_id,c_errmsg);
+			fn_close_bat(c_BatchName);
+			exit(-1);
+		}
+ 		SETNULL(v_fbc_trd_dt);
+  }	
+
+  EXEC SQL ALLOCATE :fod_vtc_rec;
+  EXEC SQL ALLOCATE :fod_pe_rec;
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		userlog("v_fbc_trd_dt :%s: v_exg_nxt_trd_dt :%s: c_flg :%d:",v_fbc_trd_dt.arr,v_exg_nxt_trd_dt.arr,c_flg);  
+    userlog("Usage: %s ", argv[0] ); 
+	} 
+
+	if ( c_flg == 1 )
+	{
+		EXEC SQL EXECUTE
+			BEGIN
+				OPEN :fod_vtc_rec FOR
+					SELECT  FOD_ORDR_FLW,
+									FOD_ORDR_TOT_QTY,
+									FOD_UNDRLYNG,
+									FOD_PRDCT_TYP,
+									FOD_EXPRY_DT,
+									FOD_OPT_TYP,
+									FOD_STRK_PRC,	
+									substr(FOD_USR_ID,1,LENGTH(FOD_USR_ID) -2),
+									FOD_ORDR_STTS
+					FROM    FOD_FO_ORDR_DTLS
+					WHERE   FOD_ORDR_TYPE = 'V' 
+					AND     FOD_ORDR_STTS = 'X'
+					AND			FOD_ORDR_VALID_DT <= :v_exg_nxt_trd_dt
+					AND     FOD_TRD_DT 		<= :v_exg_nxt_trd_dt				
+        	AND     EXISTS ( SELECT 1
+             		           FROM   USS_USR_SUBSCRPTN_STTS
+                        	 WHERE  USS_USR_ID = substr(FOD_USR_ID,1,length(FOD_USR_ID) - 2)
+                        	 AND    USS_NSM_TAG = 'FTC'
+                           AND    USS_NSM_STTS = 'Y');
+     	END;
+     END-EXEC;
+	}
+	else if ( c_flg == 0 ) 
+	{
+	  EXEC SQL EXECUTE 
+			BEGIN 
+				OPEN	:fod_vtc_rec FOR
+        	SELECT	FOD_ORDR_FLW,
+           	  		FOD_ORDR_TOT_QTY,
+            	    FOD_UNDRLYNG,
+              	  FOD_PRDCT_TYP,
+                	FOD_EXPRY_DT,
+                	FOD_OPT_TYP,
+                	FOD_STRK_PRC,
+                	substr(FOD_USR_ID,1,LENGTH(FOD_USR_ID) -2),
+                	FOD_ORDR_STTS
+        	FROM    FOD_FO_ORDR_DTLS_HSTRY
+        	WHERE   FOD_ORDR_TYPE = 'V'
+        	AND     FOD_ORDR_STTS = 'X'
+        	AND     FOD_ORDR_VALID_DT <= :v_fbc_trd_dt
+        	AND     FOD_TRD_DT    = :v_fbc_trd_dt  
+        	AND     EXISTS (SELECT 1
+        	                FROM   USS_USR_SUBSCRPTN_STTS
+          	              WHERE  USS_USR_ID = substr(FOD_USR_ID,1,length(FOD_USR_ID) - 2)
+          	              AND    USS_NSM_TAG = 'FTC'
+          	              AND    USS_NSM_STTS = 'Y');
+       END;
+      END-EXEC;
+	}
+
+	i_setup_no = SETUP_NO;
+	i_msg_type = FTC_NOTIF;
+	c_msg_priority = 'N';
+	c_mode = 'T';
+	c_msg_flg = 'R';
+	strcpy(c_subscription,"FTC");
+
+	while (1)		/* VTC closed orders */
+  {
+		++i_msg_seq;
+
+  	sql_fod_ordr_flw	='\0';
+    sql_fod_ordr_tot_qty = 0;
+    MEMSET(sql_fod_undrlyng);
+    sql_fod_prdct_typ	= '\0';
+    MEMSET(sql_fod_expry_dt);
+    sql_fod_opt_typ		= '\0';
+    sql_fod_strk_prc	= 0 ;
+    MEMSET(sql_fod_usr_id);	
+    sql_fod_ordr_stts	= '\0';
+
+    EXEC SQL FETCH :fod_vtc_rec
+             	INTO	:sql_fod_ordr_flw,
+										:sql_fod_ordr_tot_qty,
+										:sql_fod_undrlyng,
+										:sql_fod_prdct_typ,
+										:sql_fod_expry_dt,
+										:sql_fod_opt_typ,
+										:sql_fod_strk_prc,
+										:sql_fod_usr_id,
+										:sql_fod_ordr_stts;
+
+    if(SQLCODE != 0)
+    {
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				break;
+			}
+      errlog(c_BatchName,"S31020",SQLMSG,(char *)c_user_id, li_session_id,c_errmsg);
+      EXEC SQL CLOSE :fod_vtc_rec;
+			fn_close_bat(c_BatchName);
+			exit(-1);
+    }
+
+		rtrim(sql_fod_undrlyng);
+		rtrim(sql_fod_expry_dt.arr);
+
+		MEMSET(c_record_str);
+
+		sprintf(c_record_str,"%s%c%s%c%c%c%d%c%s%c%c%c%s%c%c%c%ld%c%s%c%c","VC",DELIMITER, \
+																		c_subscription,DELIMITER, \
+                                    sql_fod_ordr_flw,DELIMITER, \
+                                    sql_fod_ordr_tot_qty,DELIMITER, \
+                                    sql_fod_undrlyng,DELIMITER, \
+                                    sql_fod_prdct_typ,DELIMITER, \
+                                    sql_fod_expry_dt.arr,DELIMITER, \
+                                    sql_fod_opt_typ,DELIMITER, \
+                                    sql_fod_strk_prc,DELIMITER, \
+                                    sql_fod_usr_id.arr,DELIMITER, \
+                                    sql_fod_ordr_stts);
+		
+	
+		strcat(c_record_str,"\n");
+		
+		if(DEBUG_MSG_LVL_0)
+  	{
+    	userlog("Record :%s:",c_record_str);
+		}
+
+		i_ret_val = fn_crt_snd_mob_brdmsg (
+                                    sql_fod_usr_id.arr,
+                                    i_setup_no,
+                                    (char*)i_msg_seq,
+                                    i_msg_type,
+                                    c_msg_priority,
+                                    c_record_str,
+                                    c_mode,
+                                    c_BatchName,
+                                    c_msg_flg
+                             				);
+
+    if( i_ret_val ==  -1 )
+    {
+      userlog("Error in function 'fn_crt_snd_mob_brdmsg' - Service not available.");
+      errlog(c_BatchName, "S31025",LIBMSG,(char *)c_user_id, li_session_id, c_err_msg);
+			EXEC SQL CLOSE :fod_vtc_rec;
+			fn_close_bat(c_BatchName);
+      break;
+    }
+
+	}
+ 
+	EXEC SQL CLOSE :fod_vtc_rec;
+
+	if ( c_flg == 1 )
+	{
+		EXEC SQL EXECUTE 
+			BEGIN
+				OPEN	:fod_pe_rec FOR
+ 					SELECT  FOD_ORDR_FLW,
+        	        FOD_ORDR_TOT_QTY,
+        	        FOD_UNDRLYNG,
+        	        FOD_PRDCT_TYP,
+        	        FOD_EXPRY_DT,
+        	        FOD_OPT_TYP,
+        	        FOD_STRK_PRC,
+        	        substr(FOD_USR_ID,1,LENGTH(FOD_USR_ID) -2),
+        	        FOD_ORDR_STTS,
+        	        FOD_EXEC_QTY,
+        	        FOD_TRD_VAL / FOD_EXEC_QTY
+        	FROM    FOD_FO_ORDR_DTLS
+        	WHERE   FOD_EXEC_QTY	 > 0
+        	AND     FOD_ORDR_STTS != 'E'
+        	AND     FOD_TRD_DT 		 <= :v_exg_nxt_trd_dt			
+        	AND     EXISTS (SELECT 1
+        	                FROM   USS_USR_SUBSCRPTN_STTS
+        	                WHERE  USS_USR_ID = substr(FOD_USR_ID,1,length(FOD_USR_ID) - 2)
+        	                AND    USS_NSM_TAG = 'FTH'
+        	                AND    USS_NSM_STTS = 'Y');
+        END;
+       END-EXEC;
+	}
+	else if( c_flg == 0 )
+	{
+  	EXEC SQL EXECUTE
+			BEGIN 
+				OPEN	:fod_pe_rec FOR
+      	  SELECT  FOD_ORDR_FLW,
+        	        FOD_ORDR_TOT_QTY,
+          	      FOD_UNDRLYNG,
+          	      FOD_PRDCT_TYP,
+          	      FOD_EXPRY_DT,
+          	      FOD_OPT_TYP,
+          	      FOD_STRK_PRC,
+            	    substr(FOD_USR_ID,1,LENGTH(FOD_USR_ID) -2),
+            	    FOD_ORDR_STTS,
+            	    FOD_EXEC_QTY,
+            	    FOD_TRD_VAL / FOD_EXEC_QTY
+        	FROM    FOD_FO_ORDR_DTLS_HSTRY
+        	WHERE   FOD_EXEC_QTY   > 0
+        	AND     FOD_ORDR_STTS != 'E'
+        	AND     FOD_TRD_DT     = :v_fbc_trd_dt
+        	AND     EXISTS (SELECT 1
+          	              FROM   USS_USR_SUBSCRPTN_STTS
+          	              WHERE  USS_USR_ID = substr(FOD_USR_ID,1,length(FOD_USR_ID) - 2)
+          	              AND    USS_NSM_TAG = 'FTH'
+          	              AND    USS_NSM_STTS = 'Y');
+        END;
+       END-EXEC;
+	}
+
+	strcpy(c_subscription,"FTH");
+
+	while (1)			/* Part executed orders */
+  {
+		++i_msg_seq;
+
+    sql_fod_ordr_flw  ='\0';
+    sql_fod_ordr_tot_qty = 0;
+    MEMSET(sql_fod_undrlyng);
+    sql_fod_prdct_typ = '\0';
+    MEMSET(sql_fod_expry_dt);
+    sql_fod_opt_typ   = '\0';
+    sql_fod_strk_prc  = 0 ;
+    MEMSET(sql_fod_usr_id);
+    sql_fod_ordr_stts = '\0';
+    sql_fod_exec_qty  = 0 ;
+    l_fod_avg_exec_rt = 0 ;
+
+
+    EXEC SQL FETCH :fod_pe_rec
+              INTO  :sql_fod_ordr_flw,
+                    :sql_fod_ordr_tot_qty,
+                    :sql_fod_undrlyng,
+                    :sql_fod_prdct_typ,
+                    :sql_fod_expry_dt,
+                    :sql_fod_opt_typ,
+                    :sql_fod_strk_prc,
+                    :sql_fod_usr_id,
+                    :sql_fod_ordr_stts,
+                    :sql_fod_exec_qty,
+                    :l_fod_avg_exec_rt;
+
+    if(SQLCODE != 0)
+    {
+      if(SQLCODE == NO_DATA_FOUND)
+      {
+        break;
+      }
+      errlog(c_BatchName,"S31030",SQLMSG,(char *)c_user_id, li_session_id,c_errmsg);
+      EXEC SQL CLOSE :fod_pe_rec;
+      fn_close_bat(c_BatchName);
+      exit(-1);
+    }
+
+		MEMSET(c_record_str);
+
+    rtrim(sql_fod_undrlyng);
+    rtrim(sql_fod_expry_dt.arr);
+
+	  sprintf(c_record_str,"%s%c%s%c%c%c%d%c%s%c%c%c%s%c%c%c%ld%c%s%c%c%c%d%c%ld","PE",DELIMITER, \
+																		c_subscription,DELIMITER, \
+                                    sql_fod_ordr_flw,DELIMITER, \
+                                    sql_fod_ordr_tot_qty,DELIMITER, \
+                                    sql_fod_undrlyng,DELIMITER, \
+                                    sql_fod_prdct_typ,DELIMITER, \
+                                    sql_fod_expry_dt.arr,DELIMITER, \
+                                    sql_fod_opt_typ,DELIMITER, \
+                                    sql_fod_strk_prc,DELIMITER, \
+                                    sql_fod_usr_id.arr,DELIMITER, \
+                                    sql_fod_ordr_stts,DELIMITER, \
+                                    sql_fod_exec_qty,DELIMITER, \
+                                    l_fod_avg_exec_rt);
+
+    strcat(c_record_str,"\n");
+
+		if(DEBUG_MSG_LVL_0)
+  	{
+    	userlog("Record :%s:",c_record_str);
+		}
+
+		i_ret_val = fn_crt_snd_mob_brdmsg (
+                                    sql_fod_usr_id.arr,
+                                    i_setup_no,
+                                    (char*)i_msg_seq,
+                                    i_msg_type,
+                                    c_msg_priority,
+                                    c_record_str,
+                                    c_mode,
+                                    c_BatchName,
+                                    c_msg_flg
+                                    );
+
+    if( i_ret_val ==  -1 )
+    {
+      userlog("Error in function 'fn_crt_snd_mob_brdmsg' - Service not available.");
+      errlog(c_BatchName, "S31035",LIBMSG,(char *)c_user_id, li_session_id, c_err_msg);
+			EXEC SQL CLOSE :fod_pe_rec;
+      fn_close_bat(c_BatchName);
+      break;
+    }
+	
+  }
+
+	EXEC SQL CLOSE :fod_pe_rec; 
+ 
+	fn_close_bat(c_BatchName);
+  exit(0);
+}
+
+
+int fn_init_bat(char *c_srvc_nm)
+{
+  TPINIT *ptr_tpinfo = (TPINIT*)NULL;
+	
+	if(DEBUG_MSG_LVL_3)
+  {
+  	userlog("Inside fn_init_bat .........");
+	}
+
+  if(c_srvc_nm[0] == NULL)
+  {
+    return -1;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    userlog("Service Name is |%s|", c_srvc_nm);
+  }
+
+  ptr_tpinfo = (TPINIT *)tpalloc("TPINIT", NULL, MIN_FML_BUF_LEN);
+  if(ptr_tpinfo == (TPINIT *)NULL)
+  {
+    errlog(c_srvc_nm, "S31040", TPMSG, (char *)DEF_USR, DEF_SSSN, c_errmsg);
+    return -1;
+  }
+
+  if(tuxgetenv("ORA_GRP")== NULL)
+  {
+    errlog(c_srvc_nm, "S31045", TPMSG, (char *)DEF_USR, DEF_SSSN, c_errmsg);
+    tpfree((char*)ptr_tpinfo);
+    return -1;
+  }
+
+  strcpy(ptr_tpinfo->grpname, tuxgetenv("ORA_GRP"));
+  strcpy(ptr_tpinfo->usrname, c_srvc_nm);
+
+  if(tpinit((TPINIT *) ptr_tpinfo) == -1)
+  {
+    errlog(c_srvc_nm, "S31050", TPMSG, (char *)DEF_USR, DEF_SSSN, c_errmsg);
+    tpfree((char*)ptr_tpinfo);
+    return -1;
+  }
+  tpfree((char*)ptr_tpinfo);
+
+  if(tpopen() == -1)
+  {
+    errlog(c_srvc_nm, "S31055", TPMSG, (char *)DEF_USR, DEF_SSSN, c_errmsg);
+    tpterm();
+    return -1;
+  }
+	if(DEBUG_MSG_LVL_3)
+  {
+  	userlog("INIT DONE .....");
+  }
+	return 0;
+}
+
+void fn_close_bat(char *c_srvc_nm)
+{
+  fn_rgstr_bat('U', c_srvc_nm, "NA", "NA");
+  tpclose();
+  tpterm();
+}
+

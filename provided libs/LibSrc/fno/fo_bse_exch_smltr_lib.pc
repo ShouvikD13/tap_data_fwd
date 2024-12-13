@@ -1,0 +1,1152 @@
+/********************************************************************************
+ * Program Name : fo_bse_exch_smltr_lib.pc                                      * 
+ *                                                                              *
+ * Versioni - Name         -  Description                                       *
+ * 1.0      - Sachin Birje -  New Release                                       *
+ * 1.1      - Navina D     -  SLTP FuturePLUS (18-Dec-2012)                     *
+ * 1.2      - Navina D     -  OptionPLUS (30-Sep-2013)                          *
+ * 1.3      - Ritesh D     -  Contract master & Trade Quote merger Changes.     *
+*********************************************************************************/
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <Usysflds.h>
+
+#include <fo.h>
+#include <fn_msgq.h>
+#include <fn_read_debug_lvl.h>
+#include <fo_bse_exch_smltr_lib.h>
+#include <fn_scklib_tap.h>
+#include <fn_log.h>
+#include <fo_view_def.h>
+#include <fo_fml_def.h>
+#include <fml_rout.h>
+#include <fn_ddr.h>
+#include <time.h>
+#include <fn_tuxlib.h>
+#include <ctype.h>
+#include <fn_fo_bse_convrtn.h>
+#include <netinet/in.h>
+#include <sys/time.h>   /* VER TOL : TUX on LINUX -- Added for definition of function gettimeofday */
+
+int Z;
+#define INIT(x,y)  for(Z=0; Z< y; Z++) x[Z] =0
+#define TOTAL_FML 9
+#define ORDER_REJECTED 262
+
+int fn_bse_simu_ord( int i_snd_qid,
+                 union st_rcv_reply_data *st_target_rcv,
+                 int *i_read_size,
+								 char *c_xchng_cd,
+								 char *c_pipe_id,
+								 char *c_nxt_trd_date,
+								 char *c_trd_ref,
+                 char *c_ServiceName,
+                 char *c_err_msg)
+{
+  FBFR32 *ptr_fml_Sbuf;
+  FBFR32 *ptr_fml_Rbuf;
+
+	int	i_ch_val;
+	int i_temp_size;
+	int i_sprd_cnt;
+	int i_dwnld_flg;
+	int i_deferred_dwnld_flg;
+	int i_cnt;
+  int i_err[TOTAL_FML];
+  int i_ferr[TOTAL_FML];
+  int i_yyyy = 0;
+  int i_dd = 0;
+  int i_mm = 0;
+  int i_hh = 0;
+  int i_mi = 0;
+  int i_ss = 0; 
+
+
+
+	long li_qmsg_sz;
+	long l_temp_acktm;
+	long l_len_Rbuf;
+	long long ll_temp_jiffy;
+  long l_msg_typ;
+  long l_ord_seq;
+
+	double d_temp_ack;
+	char c_temp_acktm[20+1];
+	char c_temp_ack[16+1];
+	char c_make_ack[8+1];
+	char c_opt;
+	char c_skip_ordref[18+1];
+	char c_make_jiffy[6+1];
+	char c_temp_jiffy[14+1];
+
+	struct vw_xchngbook  st_rqst1;	
+	struct vw_orderbook st_i_ordrbk;
+  struct st_send_rqst_data st_req_data;
+	union st_rcv_reply_data st_temp_rcv;
+
+  struct st_ord_rqst st_lmt_mrkt_ord_rqst; 
+  struct st_stoploss_ord_rqst st_sltp_ord_rqst;
+
+  struct st_ord_rqst_rply st_ord_rqst_rply_data;
+  struct st_stoploss_ord_rply st_stoploss_ord_rply_data;
+  struct st_del_ord_rply st_del_ord_rply_data;
+
+	struct timeval tv;
+	time_t curtime;
+	gettimeofday(&tv, NULL);
+	curtime=tv.tv_sec;	
+
+	memset( &st_req_data, 0, sizeof(struct st_send_rqst_data) );
+	memset( &st_temp_rcv, 0, sizeof(union st_rcv_reply_data) );
+	
+	li_qmsg_sz = sizeof( struct st_send_rqst_data );	 
+
+	/* Read data from send queue */
+	fn_userlog(c_ServiceName,"Before reading from Send Queue");
+	i_ch_val =  fn_read_spcd_msg_q ( i_snd_qid,
+																	 0,
+                       						 &st_req_data,
+                       						 &li_qmsg_sz,
+                       						 c_ServiceName,
+                       						 c_err_msg   );
+	if(i_ch_val == -1)
+  {
+    fn_errlog(c_ServiceName,"L31005", LIBMSG, c_err_msg);
+		return -1;
+  }
+	else if (i_ch_val == NO_DATA)
+  {
+   	fn_userlog(c_ServiceName, "No order is availble");
+   	printf ( "No order is available in message queue\n" );
+   	return -2;
+  }
+
+  fn_userlog(c_ServiceName, "Message Type from SNDQ :%ld:",st_req_data.li_msg_type);
+
+	/* new ack , acktime , jiffy generation logic */
+  gettimeofday(&tv, NULL);
+	strftime( c_make_ack, 9, "%d%H%M%S", localtime(&curtime));
+	sprintf( c_temp_ack,"%d%s%06d", 11,c_make_ack,tv.tv_usec);		/* ack starting with 11 */ 
+	d_temp_ack = atof(c_temp_ack);
+  if( DEBUG_MSG_LVL_3 )
+  {
+ 	 fn_userlog(c_ServiceName, "c_temp_acktm :%s:",c_temp_acktm);
+ 	 fn_userlog(c_ServiceName, "l_temp_acktm :%ld:",l_temp_acktm);
+   fn_userlog(c_ServiceName, "c_temp_ack :%s:",c_temp_ack);
+   fn_userlog(c_ServiceName, "d_temp_ack :%lf:",d_temp_ack);
+   fn_userlog(c_ServiceName, "c_temp_jiffy :%s:",c_temp_jiffy);
+   fn_userlog(c_ServiceName, "ll_temp_jiffy :%lld:",ll_temp_jiffy);
+  }
+
+	/* Ordinary orders handling */
+	if( (st_req_data.li_msg_type == LIMIT_MARKET_ORD )  || 
+      (st_req_data.li_msg_type == ADD_STOPLOSS_BUY_ORD ) ||
+      (st_req_data.li_msg_type == UPD_STOPLOSS_BUY_ORD ) ||
+      (st_req_data.li_msg_type == ADD_STOPLOSS_SELL_ORD ) ||
+      (st_req_data.li_msg_type == UPD_STOPLOSS_SELL_ORD ) || 
+      (st_req_data.li_msg_type == DEL_STOPLOSS_BUY_ORD )  ||
+      (st_req_data.li_msg_type == DEL_STOPLOSS_SELL_ORD ) ||
+      (st_req_data.li_msg_type == UPD_SLTP_BUY_AFTER_TRG ) ||
+      (st_req_data.li_msg_type == UPD_SLTP_SELL_AFTER_TRG ) ||
+      (st_req_data.li_msg_type == DEL_SLTP_BUY_AFTER_TRIGGER ) ||
+      (st_req_data.li_msg_type == DEL_SLTP_SELL_AFTER_TRIGGER ) 
+    )
+	{
+		
+   	fn_userlog(c_ServiceName, "In Ordinary order");
+	
+	
+    if( st_req_data.li_msg_type == LIMIT_MARKET_ORD )
+    {
+     l_ord_seq = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.l_msg_tag1;
+     l_ord_seq = ntohl(l_ord_seq);
+     l_ord_seq = fn_swap_long(l_ord_seq);
+    }
+    else if( st_req_data.li_msg_type == ADD_STOPLOSS_BUY_ORD  ||
+             st_req_data.li_msg_type == UPD_STOPLOSS_BUY_ORD ||
+             st_req_data.li_msg_type == ADD_STOPLOSS_SELL_ORD  ||
+             st_req_data.li_msg_type == UPD_STOPLOSS_SELL_ORD  
+           )
+    {
+     l_ord_seq = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.l_msg_tag;
+     l_ord_seq = fn_swap_long(l_ord_seq);
+    }     
+    else if( st_req_data.li_msg_type == DEL_STOPLOSS_SELL_ORD  ||
+             st_req_data.li_msg_type == DEL_STOPLOSS_BUY_ORD   ||
+             st_req_data.li_msg_type == DEL_SLTP_BUY_AFTER_TRIGGER  ||
+             st_req_data.li_msg_type == DEL_SLTP_SELL_AFTER_TRIGGER
+           )
+    {
+     l_ord_seq = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.l_msg_tag;
+     l_ord_seq = fn_swap_long(l_ord_seq);
+    }
+    else if( st_req_data.li_msg_type == UPD_SLTP_BUY_AFTER_TRG  ||
+             st_req_data.li_msg_type == UPD_SLTP_SELL_AFTER_TRG
+           )
+    {
+     l_ord_seq = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.l_msg_tag;
+     l_ord_seq = fn_swap_long(l_ord_seq); 
+    }   
+		
+		st_rqst1.l_ord_seq = l_ord_seq; 
+  	strcpy (st_rqst1.c_xchng_cd, c_xchng_cd);
+		strcpy (st_rqst1.c_pipe_id, c_pipe_id);
+		strcpy (st_rqst1.c_mod_trd_dt, (char*) c_nxt_trd_date);
+		st_rqst1.c_oprn_typ = FOR_RCV;
+		fn_cpy_ddr(st_rqst1.c_rout_crt);
+
+		i_ch_val = fn_call_svc (c_ServiceName,
+                       			c_err_msg,
+                       			&st_rqst1,
+                       			&st_rqst1,
+                       			"vw_xchngbook",
+                       			"vw_xchngbook",
+                       			sizeof ( st_rqst1 ),
+                       			sizeof ( st_rqst1 ),
+                       			0,
+                       			"SFO_SEQ_TO_OMD" );
+		if ( i_ch_val != SUCC_BFR )
+  	{
+   		fn_errlog(c_ServiceName,"L31010", LIBMSG, c_err_msg);
+   		return -1;
+  	}
+
+		printf ( "\n\n" );
+		printf ( "Ordinary Order: \n" );	
+		printf ( "\t-Order reference            : %s\n", st_rqst1.c_ordr_rfrnc );
+		printf ( "\t-Modification counter       : %ld\n", st_rqst1.l_mdfctn_cntr );
+		printf ( "\t-Type of request            : %c\n", st_rqst1.c_req_typ );
+		printf ( "\t-S / L / M type             : %d\n", st_rqst1.c_slm_flg );
+		printf ( "\t-Disclosed quantity         : %ld\n", st_rqst1.l_dsclsd_qty );
+		printf ( "\t-Order quantity             : %ld\n", st_rqst1.l_ord_tot_qty );
+		printf ( "\t-Limit rate ( in paise )    : %ld\n", st_rqst1.l_ord_lmt_rt );
+		printf ( "\t-Trigger rate ( in paise )  : %ld\n", st_rqst1.l_stp_lss_tgr );
+		printf ( "\t-Valid date                 : %s\n", st_rqst1.c_valid_dt );
+
+	  printf ( "\n\t-Accept / Reject [ a / j ]  : " );
+    scanf  ( "\n%c", &c_opt );	
+
+		if( toupper( c_opt ) == 'J' )
+		{
+			if( DEBUG_MSG_LVL_3 )  {
+			fn_userlog(c_ServiceName, "In reject");
+			}
+      EXEC SQL
+            SELECT TO_NUMBER( TO_CHAR(SYSDATE,'YYYY')) - 1900,
+                   TO_NUMBER( TO_CHAR(SYSDATE,'DD')) ,
+                   TO_NUMBER( TO_CHAR(SYSDATE,'MM')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'HH')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'MI')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'SS'))
+            INTO  :i_yyyy,
+                  :i_dd,
+                  :i_mm,
+                  :i_hh,
+                  :i_mi,
+                  :i_ss
+            FROM  DUAL;
+
+      if( st_req_data.li_msg_type == LIMIT_MARKET_ORD )
+      {
+       st_temp_rcv.st_ord_rqst_rply_data.l_msg_typ = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.l_msg_typ;
+       st_temp_rcv.st_ord_rqst_rply_data.l_msg_tag1= st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.l_msg_tag1;
+       st_temp_rcv.st_ord_rqst_rply_data.s_rply_cd = ORDER_REJECTED;
+       st_temp_rcv.st_ord_rqst_rply_data.l_amended_qty = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.l_qty;
+       if( st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ordr_actn_cd == 'A')
+       {
+
+        st_temp_rcv.st_ord_rqst_rply_data.ll_ord_id = fn_swap_ulnglng(atoll(c_temp_ack));
+       }
+       else
+       {
+        st_temp_rcv.st_ord_rqst_rply_data.ll_ord_id = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.ll_ordr_id;
+       }
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_year = i_yyyy;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_month = i_mm;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_day = i_dd;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_hour = i_hh;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_min  = i_mi;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_sec  = i_ss;
+       st_temp_rcv.st_ord_rqst_rply_data.c_ordr_actn_cd = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ordr_actn_cd;
+       st_temp_rcv.st_ord_rqst_rply_data.c_buysell_flg=st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ordr_buysell_flg;
+       st_temp_rcv.st_ord_rqst_rply_data.c_ord_typ = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ord_typ;
+       strcpy(st_temp_rcv.st_ord_rqst_rply_data.c_rply_txt," Order Rejected by Exchange");
+      }
+      else if(st_req_data.li_msg_type== ADD_STOPLOSS_BUY_ORD  ||
+             st_req_data.li_msg_type== UPD_STOPLOSS_BUY_ORD  ||
+             st_req_data.li_msg_type== ADD_STOPLOSS_SELL_ORD  ||
+             st_req_data.li_msg_type== UPD_STOPLOSS_SELL_ORD
+           )
+      {
+       st_temp_rcv.st_stoploss_ord_rply_data.l_msg_typ = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.l_msg_typ;
+       st_temp_rcv.st_stoploss_ord_rply_data.l_msg_tag = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.l_msg_tag;
+       st_temp_rcv.st_stoploss_ord_rply_data.s_rply_cd = ORDER_REJECTED;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_day= i_dd;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_month=i_mm;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_year=i_yyyy;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_hour=i_hh;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_min=i_mi;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_sec=i_ss;
+       if( st_req_data.li_msg_type== UPD_STOPLOSS_BUY_ORD ||
+           st_req_data.li_msg_type== UPD_STOPLOSS_SELL_ORD
+         )
+       {
+        st_temp_rcv.st_stoploss_ord_rply_data.ll_transn_id = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.ll_ordr_id;
+        strcpy(st_temp_rcv.st_stoploss_ord_rply_data.c_reply_txt," Order Updated Successfully");
+       }
+       else
+       {
+         st_temp_rcv.st_stoploss_ord_rply_data.ll_transn_id = fn_swap_ulnglng(atoll(c_temp_ack));;
+         strcpy(st_temp_rcv.st_stoploss_ord_rply_data.c_reply_txt," Order Rejected by Exchange");
+       }
+
+      }
+      else if(st_req_data.li_msg_type == DEL_STOPLOSS_SELL_ORD  ||
+           st_req_data.li_msg_type  == DEL_STOPLOSS_BUY_ORD   ||
+           st_req_data.li_msg_type == DEL_SLTP_BUY_AFTER_TRIGGER  ||
+           st_req_data.li_msg_type  == DEL_SLTP_SELL_AFTER_TRIGGER  ||
+           st_req_data.li_msg_type  == UPD_SLTP_BUY_AFTER_TRG  ||
+           st_req_data.li_msg_type  == UPD_SLTP_SELL_AFTER_TRG
+           )
+      {
+        st_temp_rcv.st_del_ord_rply_data.l_msg_typ = st_req_data.st_bsnd_rqst_data.st_del_ord_request.l_msg_typ;
+        st_temp_rcv.st_del_ord_rply_data.l_msg_tag = st_req_data.st_bsnd_rqst_data.st_del_ord_request.l_msg_tag;
+        st_temp_rcv.st_del_ord_rply_data.s_rply_cd = ORDER_REJECTED;
+        st_temp_rcv.st_del_ord_rply_data.s_ratediff=0;
+        st_temp_rcv.st_del_ord_rply_data.ll_transn_id= st_req_data.st_bsnd_rqst_data.st_del_ord_request.ll_transn_id;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_day = i_dd;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_month = i_mm;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_year = i_yyyy;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_hour = i_hh;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_min = i_mi;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_sec = i_ss;
+      }
+
+		}
+    else   /* ordinary accept */
+    {
+			fn_userlog(c_ServiceName, "In accept");
+      EXEC SQL
+            SELECT TO_NUMBER( TO_CHAR(SYSDATE,'YYYY')) - 1900,
+                   TO_NUMBER( TO_CHAR(SYSDATE,'DD')) ,
+                   TO_NUMBER( TO_CHAR(SYSDATE,'MM')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'HH')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'MI')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'SS'))
+            INTO  :i_yyyy,
+                  :i_dd,
+                  :i_mm,
+                  :i_hh,
+                  :i_mi,
+                  :i_ss
+            FROM  DUAL;
+
+      if( st_req_data.li_msg_type == LIMIT_MARKET_ORD )
+      {
+       st_temp_rcv.st_ord_rqst_rply_data.l_msg_typ = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.l_msg_typ;
+       st_temp_rcv.st_ord_rqst_rply_data.l_msg_tag1= st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.l_msg_tag1;
+       st_temp_rcv.st_ord_rqst_rply_data.s_rply_cd = 0;
+       st_temp_rcv.st_ord_rqst_rply_data.l_amended_qty = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.l_qty;
+       if( st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ordr_actn_cd == 'A')
+       {
+         
+        st_temp_rcv.st_ord_rqst_rply_data.ll_ord_id = fn_swap_ulnglng(atoll(c_temp_ack));
+       }
+       else
+       {
+        st_temp_rcv.st_ord_rqst_rply_data.ll_ord_id = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.ll_ordr_id;
+       }
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_year = i_yyyy;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_month = i_mm;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_day = i_dd;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_hour = i_hh;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_min  = i_mi;
+       st_temp_rcv.st_ord_rqst_rply_data.st_tmstmp_dmyhms.c_sec  = i_ss;
+       st_temp_rcv.st_ord_rqst_rply_data.c_ordr_actn_cd = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ordr_actn_cd;
+       st_temp_rcv.st_ord_rqst_rply_data.c_buysell_flg=st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ordr_buysell_flg;
+       st_temp_rcv.st_ord_rqst_rply_data.c_ord_typ = st_req_data.st_bsnd_rqst_data.st_lmt_mrkt_ord_rqst.c_ord_typ;
+       strcpy(st_temp_rcv.st_ord_rqst_rply_data.c_rply_txt," Order Added Successfully");
+			}
+      else if(st_req_data.li_msg_type== ADD_STOPLOSS_BUY_ORD  ||
+             st_req_data.li_msg_type== UPD_STOPLOSS_BUY_ORD  ||
+             st_req_data.li_msg_type== ADD_STOPLOSS_SELL_ORD  ||
+             st_req_data.li_msg_type== UPD_STOPLOSS_SELL_ORD 
+           )
+      {
+       st_temp_rcv.st_stoploss_ord_rply_data.l_msg_typ = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.l_msg_typ;
+       st_temp_rcv.st_stoploss_ord_rply_data.l_msg_tag = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.l_msg_tag;
+       st_temp_rcv.st_stoploss_ord_rply_data.s_rply_cd = 0;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_day= i_dd;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_month=i_mm;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_year=i_yyyy;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_hour=i_hh;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_min=i_mi;
+       st_temp_rcv.st_stoploss_ord_rply_data.st_timestmp_dmyhms.c_sec=i_ss;
+       if( st_req_data.li_msg_type== UPD_STOPLOSS_BUY_ORD ||
+           st_req_data.li_msg_type== UPD_STOPLOSS_SELL_ORD
+         )
+       {
+        st_temp_rcv.st_stoploss_ord_rply_data.ll_transn_id = st_req_data.st_bsnd_rqst_data.st_sltp_ord_rqst.ll_ordr_id;
+        strcpy(st_temp_rcv.st_stoploss_ord_rply_data.c_reply_txt," Order Updated Successfully");
+       }
+       else 
+       { 
+         st_temp_rcv.st_stoploss_ord_rply_data.ll_transn_id = fn_swap_ulnglng(atoll(c_temp_ack));;
+         strcpy(st_temp_rcv.st_stoploss_ord_rply_data.c_reply_txt," Order Added Successfully");
+       }
+
+      }
+      else if(st_req_data.li_msg_type == DEL_STOPLOSS_SELL_ORD  ||
+           st_req_data.li_msg_type  == DEL_STOPLOSS_BUY_ORD   ||
+           st_req_data.li_msg_type == DEL_SLTP_BUY_AFTER_TRIGGER  ||
+           st_req_data.li_msg_type  == DEL_SLTP_SELL_AFTER_TRIGGER  ||
+           st_req_data.li_msg_type  == UPD_SLTP_BUY_AFTER_TRG  ||
+           st_req_data.li_msg_type  == UPD_SLTP_SELL_AFTER_TRG
+           )
+      {
+        st_temp_rcv.st_del_ord_rply_data.l_msg_typ = st_req_data.st_bsnd_rqst_data.st_del_ord_request.l_msg_typ;
+        st_temp_rcv.st_del_ord_rply_data.l_msg_tag = st_req_data.st_bsnd_rqst_data.st_del_ord_request.l_msg_tag;
+        st_temp_rcv.st_del_ord_rply_data.s_rply_cd = 0;
+        st_temp_rcv.st_del_ord_rply_data.s_ratediff=0;
+        st_temp_rcv.st_del_ord_rply_data.ll_transn_id= st_req_data.st_bsnd_rqst_data.st_del_ord_request.ll_transn_id;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_day = i_dd;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_month = i_mm;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_year = i_yyyy;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_hour = i_hh;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_min = i_mi;
+        st_temp_rcv.st_del_ord_rply_data.st_timestmp_dmyhms.c_sec = i_ss;
+      } 
+
+		}
+	
+	} /* Ordinary order ends */
+  i_temp_size = sizeof(struct st_send_rqst_data ); 
+	memcpy( st_target_rcv, &st_temp_rcv, i_temp_size);
+	*i_read_size = i_temp_size;
+
+	fn_userlog(c_ServiceName,"Returning fn_simu_ord ");
+	return 0;
+
+}
+
+int fn_bse_simu_trd( union st_rcv_reply_data *st_target_rcv,
+                int *i_read_size, 
+                char *c_ServiceName,
+                char *c_err_msg)
+{
+	struct vw_orderbook st_i_ordrbk;
+	union st_rcv_reply_data un_target;
+
+	int  i_ch_val;
+	int  i_temp_sz;
+  int  i_yyyy;
+  int  i_dd;
+  int  i_mm;
+  int  i_hh;
+  int  i_mi;
+  int  i_ss;
+
+
+	long int li_qty;
+	long int li_rate;
+	long  l_token_no;
+	long	l_strike_prc;
+  long  l_trd_id;
+
+	char	c_xchng_cd[4];
+	char	c_prd_typ;
+	char	c_undrlyng[7];
+	char	c_exrc_typ;
+	char	c_opt_typ;
+	char	c_expry_dt[23];
+	char	c_ordr_rfrnc[19];
+	char c_temp_trdtm[20+1];
+	char c_temp_trdno[10+1];
+	char c_make_trdno[2+1];
+	char c_make_jiffy[6+1];
+	char c_temp_jiffy[14+1];
+	long l_temp_trdtm;
+	long long ll_temp_jiffy;
+  long l_ord_seq;
+  time_t curtime;
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	curtime=tv.tv_sec;
+
+	i_temp_sz = sizeof(struct st_trd_cnfrmtn); 
+	MEMSET(un_target);
+
+	printf ( "\n\n" );
+	printf ( "Order reference number     : ");	
+	scanf  ( "\n%s", c_ordr_rfrnc);	
+
+	if( DEBUG_MSG_LVL_3 )  {
+	fn_userlog(c_ServiceName, "Before Call To SFO_REF_TO_ORD");	
+	}
+
+	strcpy ( st_i_ordrbk.c_ordr_rfrnc ,c_ordr_rfrnc);
+	fn_cpy_ddr(st_i_ordrbk.c_rout_crt);
+	st_i_ordrbk.c_oprn_typ = FOR_VIEW;
+
+	i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg,
+                           &st_i_ordrbk,
+                           &st_i_ordrbk,
+                           "vw_orderbook",
+                           "vw_orderbook",
+                           sizeof ( st_i_ordrbk ),
+                           sizeof ( st_i_ordrbk ),
+                           0,
+                           "SFO_REF_TO_ORD" );	
+
+	if ( (i_ch_val != SUCC_BFR) && ( i_ch_val != NO_DATA_FOUND ) )
+  {
+    fn_errlog(c_ServiceName,"L31015", LIBMSG, c_err_msg);
+    return -1;
+  }	
+	else if (i_ch_val == NO_DATA_FOUND)
+	{
+		printf ( "\n\n" );
+		printf ( "Record not found\n" );
+		return 0;
+	}
+
+	printf ("Executed quantity          : ");
+  scanf  ("\n%ld", &li_qty);
+
+	printf ("Executed rate ( in paise ) : ");
+  scanf  ("\n%ld", &li_rate);
+
+		
+  sprintf( c_temp_trdno, "%d%06d", 2,tv.tv_usec);
+  fn_userlog(c_ServiceName," c_temp_trdno  :%s:",c_temp_trdno);
+  l_trd_id = atol(c_temp_trdno);
+  fn_userlog(c_ServiceName," Trade No :%d:",l_trd_id);
+  
+  un_target.st_trd_cnfrmtn_data.l_msg_type = fn_swap_long(BSE_TRADE_CONFIRMATION);
+  un_target.st_trd_cnfrmtn_data.l_total_rec =fn_swap_long(1);
+ 
+	strcpy(c_xchng_cd,st_i_ordrbk.c_xchng_cd);
+	c_prd_typ = st_i_ordrbk.c_prd_typ;
+	strcpy(c_undrlyng,st_i_ordrbk.c_undrlyng);
+	c_exrc_typ = st_i_ordrbk.c_exrc_typ;
+	c_opt_typ = st_i_ordrbk.c_opt_typ;
+	strcpy(c_expry_dt,st_i_ordrbk.c_expry_dt);
+	l_strike_prc = st_i_ordrbk.l_strike_prc;
+		
+	/*** Commented In Ver 1.3  ***
+	
+	EXEC SQL
+		 SELECT fcm_token_no
+		 INTO :l_token_no
+		 FROM	fcm_fo_cntrct_mstr
+		 WHERE fcm_xchng_cd  = :c_xchng_cd 
+		 *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F', :c_prd_typ ) *** Commented in Ver 1.1 ***
+		 *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F', :c_prd_typ )		*** Ver 1.1 *** Commented in Ver 1.2 ***
+		 AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F','I','O', :c_prd_typ )		*** Ver 1.2 ***
+		 AND   fcm_undrlyng  = :c_undrlyng
+		 AND   fcm_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+		 AND   fcm_exer_typ  = :c_exrc_typ
+		 AND   fcm_opt_typ   = :c_opt_typ
+		 AND   fcm_strk_prc  = :l_strike_prc;
+	
+	*** Ver 1.3 Comment Ends ***/
+
+	/*** Ver 1.3 Starts ***/ 
+
+	EXEC SQL
+     SELECT ftq_token_no
+     INTO :l_token_no
+     FROM ftq_fo_trd_qt
+     WHERE ftq_xchng_cd  = :c_xchng_cd
+     AND   ftq_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F','I','O', :c_prd_typ ) 
+     AND   ftq_undrlyng  = :c_undrlyng
+     AND   ftq_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+     AND   ftq_exer_typ  = :c_exrc_typ
+     AND   ftq_opt_typ   = :c_opt_typ
+     AND   ftq_strk_prc  = :l_strike_prc;
+
+  /*** Ver 1.3 Starts ***/
+
+	if( DEBUG_MSG_LVL_0 )
+	{
+		fn_userlog(c_ServiceName, " l_token_no inside fn_bse_simu_trd function   :%ld:",l_token_no);
+	}
+
+	if ( SQLCODE != 0 )
+  {
+		fn_errlog(c_ServiceName,"L31020", SQLMSG, c_err_msg);
+   	return -1;
+  }
+  EXEC SQL
+            SELECT TO_NUMBER( TO_CHAR(SYSDATE,'YYYY')) - 1900,
+                   TO_NUMBER( TO_CHAR(SYSDATE,'DD')) ,
+                   TO_NUMBER( TO_CHAR(SYSDATE,'MM')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'HH')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'MI')),
+                   TO_NUMBER( TO_CHAR(SYSDATE,'SS'))
+            INTO  :i_yyyy,
+                  :i_dd,
+                  :i_mm,
+                  :i_hh,
+                  :i_mi,
+                  :i_ss
+            FROM  DUAL;
+		
+	un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].l_scrp_cd= fn_swap_long(l_token_no);
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].l_trd_id = fn_swap_long(l_trd_id); 
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].l_rt = fn_swap_long(li_rate); 
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].l_trd_qty= fn_swap_long(li_qty);
+ 
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].st_timestmp_dmyhms.c_year = i_yyyy;
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].st_timestmp_dmyhms.c_month=i_mm;
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].st_timestmp_dmyhms.c_day = i_dd;
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].st_timestmp_dmyhms.c_hour = i_hh;
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].st_timestmp_dmyhms.c_min  = i_mi;
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].st_timestmp_dmyhms.c_sec  = i_ss; 
+  strcpy(un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].c_client_id,st_i_ordrbk.c_cln_mtch_accnt);
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].ll_transaction_id = fn_swap_ulnglng(atoll(st_i_ordrbk.c_xchng_ack));
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].c_trd_flw = st_i_ordrbk.c_ordr_flw;
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].c_trnsctn_type = st_i_ordrbk.c_slm_flg;
+  EXEC SQL
+    SELECT max(FXB_ORDR_SQNC) 
+      INTO :l_ord_seq 
+      FROM FXB_FO_XCHNG_BOOK
+     WHERE FXB_ORDR_RFRNC = :st_i_ordrbk.c_ordr_rfrnc;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31025", SQLMSG, c_err_msg);
+    return -1;
+  }
+  un_target.st_trd_cnfrmtn_data.st_trd_dtls[0].l_msg_tag = fn_swap_long(l_ord_seq);  
+
+	memcpy( st_target_rcv, &un_target, i_temp_sz);
+	*i_read_size = i_temp_sz;
+
+	fn_userlog(c_ServiceName,"Returning fn_simu_trd ");
+	return 0;
+}
+
+
+int fn_bse_simu_trg( union st_rcv_reply_data *st_target_rcv,
+                int  *i_read_size, 
+                char *c_ServiceName,
+                char *c_err_msg)
+{
+
+  struct vw_orderbook st_i_ordrbk;
+  union st_rcv_reply_data un_target;
+	
+	int i_ch_val;
+	int i_temp_sz;
+  int  i_yyyy;
+  int  i_dd;
+  int  i_mm;
+  int  i_hh;
+  int  i_mi;
+  int  i_ss;
+
+
+  long int li_qty;
+  long int li_rate;
+  long  l_token_no;
+  long  l_strike_prc;
+  long  l_ord_seq;
+
+  char  c_xchng_cd[4];
+  char  c_prd_typ;
+  char  c_undrlyng[7];
+  char  c_exrc_typ;
+  char  c_opt_typ;
+  char  c_expry_dt[23]; 
+	char c_ordr_rfrnc[19];
+	char c_temp_trgtm[20+1];
+	char c_make_jiffy[6+1];
+	char c_temp_jiffy[14+1];
+	time_t curtime;
+	struct timeval tv;
+
+  gettimeofday(&tv, NULL);
+  curtime=tv.tv_sec;
+
+	MEMSET( un_target );
+	i_temp_sz = sizeof( struct st_sltp_ord_ums );
+
+  printf ( "\n\n" );
+  printf ( "Order reference number     : ");
+  scanf  ( "\n%s", c_ordr_rfrnc);
+
+	if( DEBUG_MSG_LVL_3 )  {
+  fn_userlog(c_ServiceName, "Before Call To SFO_REF_TO_ORD");
+	}
+
+  strcpy ( st_i_ordrbk.c_ordr_rfrnc ,c_ordr_rfrnc);
+	fn_cpy_ddr(st_i_ordrbk.c_rout_crt);
+  st_i_ordrbk.c_oprn_typ = FOR_VIEW;
+
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg,
+                           &st_i_ordrbk,
+                           &st_i_ordrbk,
+                           "vw_orderbook",
+                           "vw_orderbook",
+                           sizeof ( st_i_ordrbk ),
+                           sizeof ( st_i_ordrbk ),
+                           0,
+                           "SFO_REF_TO_ORD" );
+
+  if ( (i_ch_val != SUCC_BFR) && ( i_ch_val != NO_DATA_FOUND ) )
+  {
+    fn_errlog(c_ServiceName,"L31030", LIBMSG, c_err_msg);
+    return -1;
+  }
+  else if (i_ch_val == NO_DATA_FOUND)
+  {
+    printf ( "\n\n" );
+    printf ( "Record not found\n" );
+    return 0;
+  }
+
+  strcpy(c_xchng_cd,st_i_ordrbk.c_xchng_cd);
+  c_prd_typ = st_i_ordrbk.c_prd_typ;
+  strcpy(c_undrlyng,st_i_ordrbk.c_undrlyng);
+  c_exrc_typ = st_i_ordrbk.c_exrc_typ;
+  c_opt_typ = st_i_ordrbk.c_opt_typ;
+  strcpy(c_expry_dt,st_i_ordrbk.c_expry_dt);
+  l_strike_prc = st_i_ordrbk.l_strike_prc;
+
+	/*** Commented In Ver 1.3  ***
+
+  EXEC SQL
+     SELECT fcm_token_no
+     INTO :l_token_no
+     FROM fcm_fo_cntrct_mstr
+     WHERE fcm_xchng_cd  = :c_xchng_cd
+     *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F', :c_prd_typ ) *** Commented in Ver 1.1 ***
+		 *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F', 'U', 'F', :c_prd_typ )	*** Ver 1.1 *** Commented in ver 1.2 ***
+	   AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F', 'U', 'F','I','O', :c_prd_typ )	*** Ver 1.2 ***
+     AND   fcm_undrlyng  = :c_undrlyng
+     AND   fcm_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+     AND   fcm_exer_typ  = :c_exrc_typ
+     AND   fcm_opt_typ   = :c_opt_typ
+     AND   fcm_strk_prc  = :l_strike_prc;
+
+	*** Ver 1.3 Comment Ends ***/
+
+	/*** Ver 1.3 Starts ***/
+
+	EXEC SQL
+     SELECT ftq_token_no
+     INTO :l_token_no
+     FROM ftq_fo_trd_qt
+     WHERE ftq_xchng_cd  = :c_xchng_cd
+     AND   ftq_prdct_typ = decode( :c_prd_typ, 'P', 'F', 'U', 'F','I','O', :c_prd_typ ) 
+     AND   ftq_undrlyng  = :c_undrlyng
+     AND   ftq_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+     AND   ftq_exer_typ  = :c_exrc_typ
+     AND   ftq_opt_typ   = :c_opt_typ
+     AND   ftq_strk_prc  = :l_strike_prc;
+
+  /*** Ver 1.3 Starts ***/
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31035", SQLMSG, c_err_msg);
+    return -1;
+  }
+
+	if( DEBUG_MSG_LVL_0 )
+	{
+		fn_userlog(c_ServiceName, " l_token_no inside Function fn_bse_simu_trg  :%ld:",l_token_no);
+  }
+	
+  EXEC SQL
+       SELECT TO_NUMBER( TO_CHAR(SYSDATE,'YYYY')) - 1900,
+              TO_NUMBER( TO_CHAR(SYSDATE,'DD')) ,
+              TO_NUMBER( TO_CHAR(SYSDATE,'MM')),
+              TO_NUMBER( TO_CHAR(SYSDATE,'HH')),
+              TO_NUMBER( TO_CHAR(SYSDATE,'MI')),
+              TO_NUMBER( TO_CHAR(SYSDATE,'SS'))
+        INTO  :i_yyyy,
+              :i_dd,
+              :i_mm,
+              :i_hh,
+              :i_mi,
+              :i_ss
+        FROM  DUAL;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31040", SQLMSG, c_err_msg);
+    return -1;
+  }  
+
+  EXEC SQL
+    SELECT max(FXB_ORDR_SQNC)
+      INTO :l_ord_seq
+      FROM FXB_FO_XCHNG_BOOK
+     WHERE FXB_ORDR_RFRNC = :st_i_ordrbk.c_ordr_rfrnc;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31045", SQLMSG, c_err_msg);
+    return -1;
+  }
+  
+  un_target.st_sltp_ord_ums_data.l_msg_typ =  fn_swap_long(STOPLOSS_ORDR_UMS);
+  un_target.st_sltp_ord_ums_data.l_scrip_cd = fn_swap_long(l_token_no);
+  un_target.st_sltp_ord_ums_data.l_msg_tag  = fn_swap_long(l_ord_seq);
+  un_target.st_sltp_ord_ums_data.l_qty      = fn_swap_long(st_i_ordrbk.l_ord_tot_qty - st_i_ordrbk.l_exctd_qty);
+  un_target.st_sltp_ord_ums_data.l_avaqty   = fn_swap_long(st_i_ordrbk.l_ord_tot_qty - st_i_ordrbk.l_exctd_qty);
+  un_target.st_sltp_ord_ums_data.l_rate     = fn_swap_long(st_i_ordrbk.l_stp_lss_tgr);
+  un_target.st_sltp_ord_ums_data.ll_ordr_id = fn_swap_ulnglng(atoll(st_i_ordrbk.c_xchng_ack));
+  strcpy( un_target.st_sltp_ord_ums_data.c_client_id,st_i_ordrbk.c_cln_mtch_accnt);  
+  un_target.st_sltp_ord_ums_data.st_timestamp_dmyhms.c_year = i_yyyy; 
+  un_target.st_sltp_ord_ums_data.st_timestamp_dmyhms.c_month=i_mm;
+  un_target.st_sltp_ord_ums_data.st_timestamp_dmyhms.c_day = i_dd;
+  un_target.st_sltp_ord_ums_data.st_timestamp_dmyhms.c_hour = i_hh;
+  un_target.st_sltp_ord_ums_data.st_timestamp_dmyhms.c_min  = i_mi;
+  un_target.st_sltp_ord_ums_data.st_timestamp_dmyhms.c_sec  = i_ss;
+  un_target.st_sltp_ord_ums_data.c_ordr_typ ='P';  /*** SLTP Order ***/
+  un_target.st_sltp_ord_ums_data.c_ordr_flw = st_i_ordrbk.c_ordr_flw; 
+	memcpy( st_target_rcv, &un_target, i_temp_sz);
+	*i_read_size = i_temp_sz;
+
+	fn_userlog(c_ServiceName,"Returning fn_simu_trg ");
+	return 0;
+
+}
+
+int fn_bse_simu_conv_mktlmt( union st_rcv_reply_data *st_target_rcv,
+                int  *i_read_size,
+                char *c_ServiceName,
+                char *c_err_msg)
+{
+
+  struct vw_orderbook st_i_ordrbk;
+  union st_rcv_reply_data un_target;
+  
+  int i_ch_val;
+  int i_temp_sz;
+  long l_temp_trgtm;
+  long long ll_temp_jiffy;
+  long  l_token_no;
+  long  l_strike_prc;
+  long  li_rate;
+  long  l_ord_seq;
+
+  char c_temp_trgtm[20+1];
+  char c_make_jiffy[6+1];
+  char c_temp_jiffy[14+1];
+  char  c_xchng_cd[4];
+  char  c_prd_typ;
+  char  c_undrlyng[7];
+  char  c_exrc_typ;
+  char  c_opt_typ;
+  char  c_expry_dt[23];
+  char  c_ordr_rfrnc[19];
+
+  time_t curtime;
+  struct timeval tv;
+
+  gettimeofday(&tv, NULL);
+  curtime=tv.tv_sec;
+
+  MEMSET( un_target );
+  i_temp_sz = sizeof( struct st_mkrt_to_lmt_ord );
+
+  printf ( "\n\n" );
+  printf ( "Order reference number     : ");
+  scanf  ( "\n%s", c_ordr_rfrnc);
+
+  printf ("Converted  rate ( in paise ) : ");
+  scanf  ("\n%ld", &li_rate);
+
+  if( DEBUG_MSG_LVL_3 )  {
+  fn_userlog(c_ServiceName, "Before Call To SFO_REF_TO_ORD");
+  }
+
+  strcpy ( st_i_ordrbk.c_ordr_rfrnc ,c_ordr_rfrnc);
+  fn_cpy_ddr(st_i_ordrbk.c_rout_crt);
+  st_i_ordrbk.c_oprn_typ = FOR_VIEW;
+
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg,
+                           &st_i_ordrbk,
+                           &st_i_ordrbk,
+                           "vw_orderbook",
+                           "vw_orderbook",
+                           sizeof ( st_i_ordrbk ),
+                           sizeof ( st_i_ordrbk ),
+                           0,
+                           "SFO_REF_TO_ORD" );
+
+  if ( (i_ch_val != SUCC_BFR) && ( i_ch_val != NO_DATA_FOUND ) )
+  {
+    fn_errlog(c_ServiceName,"L31050", LIBMSG, c_err_msg);
+    return -1;
+  }
+  else if (i_ch_val == NO_DATA_FOUND)
+  {
+    printf ( "\n\n" );
+    printf ( "Record not found\n" );
+    return 0;
+  }
+   strcpy(c_xchng_cd,st_i_ordrbk.c_xchng_cd);
+  c_prd_typ = st_i_ordrbk.c_prd_typ;
+  strcpy(c_undrlyng,st_i_ordrbk.c_undrlyng);
+  c_exrc_typ = st_i_ordrbk.c_exrc_typ;
+  c_opt_typ = st_i_ordrbk.c_opt_typ;
+  strcpy(c_expry_dt,st_i_ordrbk.c_expry_dt);
+  l_strike_prc = st_i_ordrbk.l_strike_prc;
+
+	/*** Commented In Ver 1.3  ***
+
+  EXEC SQL
+     SELECT fcm_token_no
+     INTO :l_token_no
+     FROM fcm_fo_cntrct_mstr
+     WHERE fcm_xchng_cd  = :c_xchng_cd
+     *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F', :c_prd_typ )	*** Commented in Ver 1.1 ***
+		 *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F', :c_prd_typ )	*** Ver 1.1 *** Commented in ver 1.2 ***
+		 AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F','I','O', :c_prd_typ )	*** Ver 1.2 ***
+     AND   fcm_undrlyng  = :c_undrlyng
+     AND   fcm_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+     AND   fcm_exer_typ  = :c_exrc_typ
+     AND   fcm_opt_typ   = :c_opt_typ
+     AND   fcm_strk_prc  = :l_strike_prc;
+
+	*** Ver 1.3 Comment Ends ***/
+
+	/*** Ver 1.3 Starts ***/
+
+	EXEC SQL
+     SELECT ftq_token_no
+     INTO :l_token_no
+     FROM ftq_fo_trd_qt
+     WHERE ftq_xchng_cd  = :c_xchng_cd
+     AND   ftq_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F','I','O', :c_prd_typ )
+     AND   ftq_undrlyng  = :c_undrlyng
+     AND   ftq_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+     AND   ftq_exer_typ  = :c_exrc_typ
+     AND   ftq_opt_typ   = :c_opt_typ
+     AND   ftq_strk_prc  = :l_strike_prc;
+
+  /*** Ver 1.3 Starts ***/
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31055", SQLMSG, c_err_msg);
+    return -1;
+  }
+
+	if( DEBUG_MSG_LVL_0 )
+	{
+		fn_userlog(c_ServiceName, " l_token_no inside function fn_bse_simu_conv_mktlmt :%ld:",l_token_no);
+	}
+
+  EXEC SQL
+    SELECT max(FXB_ORDR_SQNC)
+      INTO :l_ord_seq
+      FROM FXB_FO_XCHNG_BOOK
+     WHERE FXB_ORDR_RFRNC = :st_i_ordrbk.c_ordr_rfrnc;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31060", SQLMSG, c_err_msg);
+    return -1;
+  }
+
+  un_target.st_mkrt_to_lmt_ord_data.l_msg_typ  = fn_swap_long(CONVRTED_MKT_TO_LMT);
+  un_target.st_mkrt_to_lmt_ord_data.l_scrip_cd = fn_swap_long(l_token_no);
+  un_target.st_mkrt_to_lmt_ord_data.ll_order_id = fn_swap_ulnglng(atoll(st_i_ordrbk.c_xchng_ack));
+  un_target.st_mkrt_to_lmt_ord_data.l_msg_tag   = fn_swap_long(l_ord_seq);
+  un_target.st_mkrt_to_lmt_ord_data.l_cnvtdrate = fn_swap_long(li_rate); 
+
+  memcpy( st_target_rcv, &un_target, i_temp_sz);
+  *i_read_size = i_temp_sz;
+
+  fn_userlog(c_ServiceName,"Returning fn_simu_trg ");
+  return 0;
+}
+
+
+
+int fn_simu_bse_ioc_cancel( union st_rcv_reply_data *st_target_rcv,
+                		int  *i_read_size, 
+                		char *c_ServiceName,
+                		char *c_err_msg)
+{
+	union st_rcv_reply_data st_temp_rcv;
+	struct vw_orderbook st_i_ordrbk; 
+  
+  int i_ch_val;
+  int i_temp_sz;
+  long l_temp_trgtm;
+  long long ll_temp_jiffy;
+  long  l_token_no;
+  long  l_strike_prc;
+  long  li_rate;
+  long  l_ord_seq;
+
+  char c_temp_trgtm[20+1];
+  char c_make_jiffy[6+1];
+  char c_temp_jiffy[14+1];
+  char  c_xchng_cd[4];
+  char  c_prd_typ;
+  char  c_undrlyng[7];
+  char  c_exrc_typ;
+  char  c_opt_typ;
+  char  c_expry_dt[23];
+  char  c_ordr_rfrnc[19];
+
+
+	i_temp_sz = sizeof ( struct st_kill_min_fill_ordr );
+  printf ( "\n\n" );
+  printf ( "Order reference number     : ");
+  scanf  ( "\n%s", c_ordr_rfrnc);
+
+  if( DEBUG_MSG_LVL_3 )  {
+  fn_userlog(c_ServiceName, "Before Call To SFO_REF_TO_ORD");
+  }
+
+  strcpy ( st_i_ordrbk.c_ordr_rfrnc ,c_ordr_rfrnc);
+  fn_cpy_ddr(st_i_ordrbk.c_rout_crt);
+  st_i_ordrbk.c_oprn_typ = FOR_VIEW;
+
+  i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg,
+                           &st_i_ordrbk,
+                           &st_i_ordrbk,
+                           "vw_orderbook",
+                           "vw_orderbook",
+                           sizeof ( st_i_ordrbk ),
+                           sizeof ( st_i_ordrbk ),
+                           0,
+                           "SFO_REF_TO_ORD" );
+
+  if ( (i_ch_val != SUCC_BFR) && ( i_ch_val != NO_DATA_FOUND ) )
+  {
+    fn_errlog(c_ServiceName,"L31065", LIBMSG, c_err_msg);
+    return -1;
+  }
+  else if (i_ch_val == NO_DATA_FOUND)
+  {
+    printf ( "\n\n" );
+    printf ( "Record not found\n" );
+    return 0;
+  }
+  strcpy(c_xchng_cd,st_i_ordrbk.c_xchng_cd);
+  c_prd_typ = st_i_ordrbk.c_prd_typ;
+  strcpy(c_undrlyng,st_i_ordrbk.c_undrlyng);
+  c_exrc_typ = st_i_ordrbk.c_exrc_typ;
+  c_opt_typ = st_i_ordrbk.c_opt_typ;
+  strcpy(c_expry_dt,st_i_ordrbk.c_expry_dt);
+  l_strike_prc = st_i_ordrbk.l_strike_prc;
+
+	/*** Commented In Ver 1.3  ***
+
+  EXEC SQL
+     SELECT fcm_token_no
+     INTO :l_token_no
+     FROM fcm_fo_cntrct_mstr
+     WHERE fcm_xchng_cd  = :c_xchng_cd
+     *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F', :c_prd_typ ) *** Commented in Ver 1.1 ***
+		 *** AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F', :c_prd_typ )	*** Ver 1.1 *** Commented in ver 1.2 ***
+		 AND   fcm_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F','I','O', :c_prd_typ )	*** Ver 1.2 ***
+     AND   fcm_undrlyng  = :c_undrlyng
+     AND   fcm_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+     AND   fcm_exer_typ  = :c_exrc_typ
+     AND   fcm_opt_typ   = :c_opt_typ
+     AND   fcm_strk_prc  = :l_strike_prc;
+	
+	*** Ver 1.3 Comment Ends ***/
+	
+    /*** Ver 1.3 Starts ***/
+
+	EXEC SQL
+     SELECT ftq_token_no
+     INTO :l_token_no
+     FROM ftq_fo_trd_qt
+     WHERE ftq_xchng_cd  = :c_xchng_cd
+     AND   ftq_prdct_typ = decode( :c_prd_typ, 'P', 'F','U','F','I','O', :c_prd_typ ) 
+     AND   ftq_undrlyng  = :c_undrlyng
+     AND   ftq_expry_dt  = to_date(:c_expry_dt,'dd-Mon-yyyy' )
+     AND   ftq_exer_typ  = :c_exrc_typ
+     AND   ftq_opt_typ   = :c_opt_typ
+     AND   ftq_strk_prc  = :l_strike_prc;
+
+    /*** Ver 1.3 Starts ***/
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31070", SQLMSG, c_err_msg);
+    return -1;
+  }
+
+	if( DEBUG_MSG_LVL_0 )
+	{
+		fn_userlog(c_ServiceName, " l_token_no before call to fn_simu_bse_ioc_cancel :%ld:",l_token_no);
+	}
+	
+  EXEC SQL
+    SELECT max(FXB_ORDR_SQNC)
+      INTO :l_ord_seq
+      FROM FXB_FO_XCHNG_BOOK
+     WHERE FXB_ORDR_RFRNC = :st_i_ordrbk.c_ordr_rfrnc;
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31075", SQLMSG, c_err_msg);
+    return -1;
+  }
+
+  st_temp_rcv.st_kill_min_fill_ordr_data.l_msg_typ = fn_swap_long(KILL_MIN_FILL_ORDR);
+  st_temp_rcv.st_kill_min_fill_ordr_data.l_scrip_cd = fn_swap_long(l_token_no);
+  st_temp_rcv.st_kill_min_fill_ordr_data.ll_ordr_id = fn_swap_ulnglng(atoll(st_i_ordrbk.c_xchng_ack));
+  st_temp_rcv.st_kill_min_fill_ordr_data.l_killed_qty = fn_swap_long(st_i_ordrbk.l_ord_tot_qty - st_i_ordrbk.l_exctd_qty);
+  st_temp_rcv.st_kill_min_fill_ordr_data.l_msg_tag    = fn_swap_long(l_ord_seq);
+
+	memcpy( st_target_rcv, &st_temp_rcv, i_temp_sz);
+	*i_read_size = i_temp_sz;
+
+	fn_userlog(c_ServiceName,"Returning fn_simu_spdioc ");
+	return 0;
+}
+
+void fn_simu_exit( char *c_pipe_id ,
+									 char *c_ServiceName,
+                   char *c_err_msg)
+{
+
+	int	i_tran_id;
+	int	i_ch_val;	
+
+  i_tran_id = fn_begintran ( c_ServiceName, c_err_msg );
+  if ( i_tran_id == -1 )
+  {
+    fn_errlog(c_ServiceName, "L31080", LIBMSG, c_err_msg );
+		return;
+  }
+ 
+	EXEC SQL
+			UPDATE opm_ord_pipe_mstr
+			SET opm_login_stts = 0
+			WHERE opm_pipe_id = :c_pipe_id;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31085", SQLMSG, c_err_msg);
+    printf( "System error. Contact system support\n" );
+  }	
+
+  i_ch_val = fn_committran ( c_ServiceName, i_tran_id, c_err_msg );
+  if ( i_ch_val == -1 )
+  {
+    fn_errlog(c_ServiceName, "L31090", LIBMSG, c_err_msg );
+  	return;
+  }	
+
+}

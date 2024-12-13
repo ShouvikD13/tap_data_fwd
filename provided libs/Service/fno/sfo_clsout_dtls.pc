@@ -1,0 +1,2048 @@
+/***********************************************************************************/
+/*        Program          : SFO_CLSOUT_DTLS                                      */
+/*                                                                                */
+/*        Input            : Required                                             */
+/*                           FFO_USR_ID                                           */
+/*                           FFO_SSSN_ID                                          */
+/*                           FFO_EBA_MTCH_ACT_NO                                  */
+/*                           FFO_XCHNG_CD                                         */
+/*                           FFO_PRDCT_TYP                                        */
+/*                           FFO_UNDRLYNG                                         */
+/*                           FFO_FROM_DT                                          */
+/*                           FFO_TO_DT                                            */
+/*                                                                                */
+/*        Output           : FFO_ORDR_RFRNC                                       */
+/*                           FFO_PRDCT_TYP                                        */
+/*                           FFO_UNDRLYNG                                         */
+/*                           FFO_EXPRY_DT                                         */
+/*                           FFO_EXER_TYP                                         */
+/*                           FFO_OPT_TYP                                          */
+/*                           FFO_STRK_PRC                                         */
+/*                           FFO_EXEC_QTY                                         */
+/*                           FFO_EXCTD_RT                                         */
+/*                           FFO_TRD_DT                                           */
+/*                           FFO_INSTRMNT_TYP                                     */
+/*                           FFO_TRD_FLW                                          */
+/*                           FFO_BRKRG_VL                                         */
+/*													 FFO_HGH_INDX_VAL                                     */
+/*													 FFO_LOW_PRC                                          */
+/*													 FFO_EBA_MTCH_ACT_NO                                  */
+/*                                                                                */
+/*         Description     : This reterive the value of the buy closeout and sell */
+/*                           closeout when product type is future.When product    */
+/*                           is option it will also retrive the value of assignment*/
+/*                           and exercise.                                        */
+/*                                                                                */
+/*         Log             : 1.0 09-Sep_2015  Bhupendra Malik                     */
+/*												 : 1.1 16-Aug-2016	Sandip Tambe												*/
+/*												 : VQC 13-Sep-2016	Swapnil More												*/
+/*                         : 1.2 24-Oct-2016  Kishor Borkar                       */
+/*                         : 1.3 30-Nov-2017  Afzal K.                            */
+/*                         : 1.4 14-Dec-2017  Anand Dhopte                        */
+/*                         : 1.5 14-Dec-2017  Anand Dhopte                        */ 
+/*												 : 1.6 24-May-2018  Bhushan Harekar											*/
+/*												 : 1.7 20-Nov-2018	Bhushan Harekar										  */
+/**********************************************************************************/
+/**********************************************************************************/
+/*                                                                                */
+/*      1.0 - New Release                                                         */
+/*      1.1 - Buffer size issue fix sandip [16-Aug-2016]                          */
+/*			VQC	-	Version Quality Control Changes (Swapnil) [13-Sep-2016]							*/
+/*      1.2 - Check Session IP -- PHASE_III [24-Oct-2016]                         */
+/*      1.3 - DB hits reduction  [30-Nov-2017]																		*/
+/*      1.4 - Logs introduced to debug spike in service response                  */
+/*      1.5 - Changes for avoiding database hit for fetching closout details for  */ 
+/*            same day call during market hours                                   */       
+/*			1.6	-	Optimization																												*/
+/*			1.7 - Memory allocation issue.																					  */
+/**********************************************************************************/
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>
+#include <fn_read_debug_lvl.h>
+#include <fo_view_def.h> /* Added in Ver 1.2 */
+#include <fml_rout.h>     /* Added in Ver 1.2 */
+
+void SFO_CLSOUT_DTLS(TPSVCINFO *rqst)
+{
+	FBFR32 *ptr_fml_Ibuf;
+	FBFR32 *ptr_fml_Obuf;
+
+	char c_ServiceName[33];
+	varchar c_errmsg[256];				/*** VQC Changed datatype from char to varchar ***/
+	char c_user_id[9]={'\0'};
+
+	long l_sssn_id = 0;
+
+	int  i_err[25];
+	int  i_ferr[25];
+	int i_error[4];
+	int i=0;
+	int i_cnt=0;
+	int i_counter=1;
+	int i_returncode=0;		/*** Ver 1.2 ***/
+	long li_sssn_id_chk=0;
+	long l_bufferlength; 
+	
+	EXEC SQL BEGIN DECLARE SECTION;
+	sql_cursor  sys_cursor;
+/*char c_opr_typ;							Commented in VQC as it is unused */
+	char c_ordr_rfrnc [ 19 ];
+	varchar c_trd_date [ 19 ];
+	varchar c_exp_date [ 19 ];
+	varchar c_frm_dt[ LEN_DATE ];
+	varchar c_to_dt[ LEN_DATE ];
+	char c_product_typ = '\0';
+	char c_mtch_accnt_no[11]={'\0'};
+	char c_exchange_cd[4];
+	char c_xchng_cd[4];
+	char c_indstk[2];
+	char c_exrc_typ='\0';
+	char c_opt_typ='\0';
+	char c_trd_flw='\0';
+/*char c_trade_flw='\0';			Commented in VQC as it is unused */	
+	char c_trade_flow='\0';
+	char c_underlying[7];
+	char c_spl_flg='\0'; 
+  char c_exg_crnt_stts = '\0'; 		/*** Ver 1.5 ***/
+  char c_nxt_trd_dt[9];        		/*** Ver 1.5 ***/
+  char c_frm_date[9];          		/*** Ver 1.5 ***/  
+  char c_nfo_xchng_cd[4] = "NFO";	/*** Ver 1.5 ***/
+
+	long l_strk_prc=0;  
+	long l_exctd_qty=0;
+	long l_exctd_rt=0;
+	long l_brkg_val=0;
+	long l_stt=0;
+	long l_srvc_tax=0;
+	long l_sebi_tt=0;
+	long l_tran_chrg=0;
+	long l_stamp_duty=0;
+	long l_taxes=0;
+
+	double d_value=0.0;
+	EXEC SQL END DECLARE SECTION;
+
+  /*** Ver 1.2 Starts Here ***/
+  struct vw_usr_prfl st_usr_prfl;
+  struct vw_err_msg st_err_msg;
+
+  MEMSET(st_usr_prfl);
+  MEMSET(st_err_msg);
+  /*** Ver 1.2 Ends Here ***/
+  
+	MEMSET(c_trd_date);
+	MEMSET(c_exp_date);
+	MEMSET(c_frm_dt);
+	MEMSET(c_to_dt);
+	MEMSET(c_exchange_cd);
+	MEMSET(c_underlying);
+	MEMSET(c_mtch_accnt_no);
+  MEMSET(c_frm_date);       /*** Ver 1.5 ***/ 
+  c_nfo_xchng_cd[3] = '\0'; /*** Ver 1.5 ***/
+
+	ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+	strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName); 
+
+	i_error[0] = Fget32(ptr_fml_Ibuf,FFO_USR_ID,0,(char *)c_user_id,0);
+	i_error[1] = Fget32(ptr_fml_Ibuf,FFO_SSSN_ID,0,(char *)&l_sssn_id,0);
+
+
+	if( DEBUG_MSG_LVL_3 )
+	{
+		fn_userlog(c_ServiceName,"User iD is:    [%s] ",c_user_id);
+		fn_userlog(c_ServiceName,"Session iD is: [%ld] ",l_sssn_id);
+	}
+	
+	for (i=0; i<2; i++)
+	{
+		if (i_error[i] == -1 )
+		{ 
+			fn_errlog(c_ServiceName,"S31005",FMLMSG,c_errmsg.arr);		/*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+			Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,(char *)c_errmsg.arr,0);	/*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+			tpreturn(TPFAIL,0L,(char *)ptr_fml_Ibuf,0L,0);
+		}
+	}
+	if( DEBUG_MSG_LVL_5 )
+	{
+		fn_userlog(c_ServiceName,"Before session validation");
+	}
+	
+
+	i_err[1] = Fget32( ptr_fml_Ibuf, FFO_XCHNG_CD, 0, (char *)c_exchange_cd, 0 );
+	i_ferr [1] = Ferror32;
+
+	i_err[2] = Fget32( ptr_fml_Ibuf, FFO_UNDRLYNG, 0, (char *)c_underlying, 0 );
+	i_ferr [2] = Ferror32;
+
+	i_err[3] = Fget32( ptr_fml_Ibuf, FFO_FROM_DT, 0, (char *)c_frm_dt.arr, 0 );
+	i_ferr[3] = Ferror32;
+
+	i_err[4] = Fget32( ptr_fml_Ibuf, FFO_TO_DT, 0, (char *)c_to_dt.arr, 0 );
+	i_ferr[4] = Ferror32;
+
+	i_err[5] = Fget32( ptr_fml_Ibuf, FFO_PRDCT_TYP, 0, (char *)&c_product_typ, 0 );
+	i_ferr[5] = Ferror32;
+
+	i_err[6] = Fget32( ptr_fml_Ibuf, FFO_TRD_FLW, 0, (char *)&c_trd_flw, 0 );
+	i_ferr[6] = Ferror32;
+
+	i_err[7] = Fget32( ptr_fml_Ibuf, FFO_EBA_MTCH_ACT_NO, 0, (char *)c_mtch_accnt_no, 0 );
+	i_ferr[7] = Ferror32;
+
+	i_err[8] = Fget32( ptr_fml_Ibuf, FFO_SPL_FLG, 0, (char *)&c_spl_flg, 0 );
+	i_ferr[8] = Ferror32;
+
+	for ( i_cnt = 0;  i_cnt <= 7; i_cnt++ )
+	{
+		if ( (i_err[i_cnt] == -1) && (i_ferr[i_cnt] != FNOTPRES ))
+		{
+			fn_userlog(c_ServiceName,"i_cnt[%ld]",i_cnt);
+			fn_errlog( c_ServiceName, "S31010", Fstrerror32( i_ferr[i_cnt] ), c_errmsg.arr  ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+   
+	}
+	if (strcmp( c_exchange_cd, "ALL") == 0 )
+	{ 
+		strcpy(c_exchange_cd , "%");   
+		rtrim(c_exchange_cd);
+	}
+
+	/*** Ver 1.7 Started ***/
+	l_bufferlength=sizeof(c_mtch_accnt_no)+sizeof(c_product_typ)+sizeof(c_xchng_cd)+sizeof(c_exp_date)+sizeof(c_exrc_typ)+sizeof(c_opt_typ)+sizeof(l_strk_prc)+sizeof(c_ordr_rfrnc)+sizeof(c_trd_date)+sizeof(l_exctd_qty)+sizeof(l_exctd_rt)+sizeof(l_brkg_val)+sizeof(l_taxes)+ sizeof(l_stt) + sizeof(l_srvc_tax) + sizeof(l_tran_chrg) + sizeof(l_sebi_tt) + sizeof(l_stamp_duty)+2048; 
+
+	if(DEBUG_MSG_LVL_1)
+	{
+		fn_userlog(c_ServiceName,"ISEC Before TPALLOC");
+	}
+
+	ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, l_bufferlength); 
+
+	if ( ptr_fml_Obuf == NULL )
+	{
+		fn_errlog( c_ServiceName, "S31015", TPMSG, c_errmsg.arr  );
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );   
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	if(DEBUG_MSG_LVL_1)
+	{
+		fn_userlog(c_ServiceName,"ISEC After TPALLOC");
+	}
+	/*** Ver 1.7 Ends ***/
+
+	if((strcmp(c_user_id,"system") == 0 || strcmp(c_user_id,"SYSTEM") == 0 ) && (l_sssn_id == 0) )
+	{
+		fn_userlog(c_ServiceName,"Inside system session check");
+		EXEC SQL
+				 SELECT 	uac_usr_id
+				 INTO 	 	:c_user_id
+				 FROM 		uac_usr_accnts 
+				 WHERE  	uac_clm_mtch_accnt= :c_mtch_accnt_no;
+			
+		if(SQLCODE !=0 )
+		{
+			fn_errlog( c_ServiceName, "S31020", SQLMSG, c_errmsg.arr ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+			tpfree ( ( char * ) ptr_fml_Obuf );    /*** Ver 1.7 ***/
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );				/*** VQC Changed from c_errmsg to c_errmsg.arr ***/	
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}	
+	}
+	rtrim(c_user_id);
+	if(DEBUG_MSG_LVL_5)
+	{
+		fn_userlog(c_ServiceName,"User id is is    [%s]",c_user_id);
+/*	fn_userlog(c_ServiceName,"operation type is    [%c]",c_opr_typ); 			Commented in VQC */
+		fn_userlog(c_ServiceName,"exchange code is     [%s]",c_exchange_cd);
+		fn_userlog(c_ServiceName,"underlying is        [%s]",c_underlying);
+		fn_userlog(c_ServiceName,"product type is      [%c]",c_product_typ);
+		fn_userlog(c_ServiceName,"trade flow is        [%c]",c_trd_flw);
+		fn_userlog(c_ServiceName,"match account no is  [%s]",c_mtch_accnt_no);
+		fn_userlog(c_ServiceName,"spl flag  is  [%c]", c_spl_flg);
+	}
+
+	SETLEN(c_frm_dt) ;	
+	SETLEN(c_to_dt) ;
+	
+	
+	if( DEBUG_MSG_LVL_0 ) 
+	{
+    fn_userlog(c_ServiceName,"spl flag  is  [%c]",c_spl_flg);
+		fn_userlog(c_ServiceName,"from date is  [%s]",c_frm_dt.arr);
+		fn_userlog(c_ServiceName,"to date is    [%s]",c_to_dt.arr);
+  	fn_userlog(c_ServiceName,"Exchange Code is :%s:",c_nfo_xchng_cd); 			/***	Ver 1.5	***/
+	}
+
+  /*** Ver 1.5 Starts ***/
+
+  EXEC SQL
+     SELECT EXG_CRRNT_STTS, 
+            TO_CHAR(TO_DATE(EXG_NXT_TRD_DT,'DD-Mon-YYYY'),'YYYYMMDD'),
+            TO_CHAR(TO_DATE(:c_frm_dt,'DD-MM-YYYY'),'YYYYMMDD') 
+       INTO :c_exg_crnt_stts,
+            :c_nxt_trd_dt,
+            :c_frm_date  
+       FROM EXG_XCHNG_MSTR
+      WHERE EXG_XCHNG_CD = :c_nfo_xchng_cd; 
+
+  if(SQLCODE != 0)
+  {
+   fn_errlog( c_ServiceName, "S31025", SQLMSG, c_errmsg.arr);
+	 tpfree ( ( char * ) ptr_fml_Obuf );    /*** Ver 1.7 ***/
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );
+   tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuf, 0L, 0); 
+  }	
+
+  if(c_exg_crnt_stts == 'O' && strcmp(c_frm_date,c_nxt_trd_dt) == 0 )
+  {
+  	fn_userlog(c_ServiceName,"Same Day Request So Not Displaying Closeout Records.");
+   	tpreturn(TPSUCCESS, 0,(char *)ptr_fml_Obuf, 0, 0 ); 
+  }
+
+  /*** Ver 1.5 Ends ***/
+
+	if ( l_sssn_id != 0 )
+	{
+		/*** Ver 1.2 Starts Here ***/
+  i_returncode = Fvftos32( ptr_fml_Ibuf,
+                           (char *) &st_usr_prfl,
+                           "vw_usr_prfl" );
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31030", FMLMSG, c_errmsg.arr);
+		tpfree ( ( char * ) ptr_fml_Obuf );    /*** Ver 1.7 ***/
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );
+		tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuf, 0L, 0);
+  }
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( st_usr_prfl.c_rout_crt );
+
+  /*** Below Log added in Ver 1.4 ***/
+  if(DEBUG_MSG_LVL_1)
+  {
+    fn_userlog(c_ServiceName,"ISEC Before call to fn_chk_sssn-Match Account :%s: Trade flow :%c:",c_mtch_accnt_no,c_trd_flw);
+  }
+
+  i_returncode = fn_chk_sssn( c_ServiceName, &st_usr_prfl,
+                                             &st_err_msg ) ;
+
+  if ( i_returncode == -1 )
+  {
+		fn_errlog(c_ServiceName,"S31035",LIBMSG, st_err_msg.c_err_msg);
+		tpfree ( ( char * ) ptr_fml_Obuf );    /*** Ver 1.7 ***/
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );
+		tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuf, 0L, 0);
+  }
+
+  /*** Below Log added in Ver 1.4 ***/
+  if(DEBUG_MSG_LVL_1)
+  {
+    fn_userlog(c_ServiceName,"ISEC After call to fn_chk_sssn");
+  }
+	
+		/*** Ver 1.2 Ends Here ***/
+
+		/*** Commented in ver 1.2 
+		li_sssn_id_chk = chk_sssn(c_ServiceName,c_user_id,l_sssn_id,c_errmsg.arr); *** VQC Changed from c_errmsg to c_errmsg.arr ***
+
+		if(li_sssn_id_chk ==  -1)
+		{
+			fn_errlog(c_ServiceName,"S31040"," ", c_errmsg.arr); *** VQC Changed from c_errmsg to c_errmsg.arr ***  
+			strcpy(c_errmsg.arr,"Session Timed Out");							 *** VQC Changed from c_errmsg to c_errmsg.arr ***
+			Fadd32( ptr_fml_Ibuf,FFO_ERR_MSG, c_errmsg.arr, 0 ); *** VQC Changed from c_errmsg to c_errmsg.arr ***
+			tpreturn(TPFAIL,0L, (char *)ptr_fml_Ibuf, 0L, 0);
+		}
+	Comment Ends for Ver 1.2	****/
+	}
+  
+	if(strcmp(c_underlying,"")==0)
+	{
+		strcpy(c_underlying,"%");
+	}
+		
+	EXEC SQL
+			 SELECT to_date(:c_frm_dt,'dd-mm-yyyy'),
+						  to_date(:c_to_dt,'dd-mm-yyyy')
+			 INTO	  :c_frm_dt,
+							:c_to_dt
+			 FROM   DUAL;
+
+	if (SQLCODE != 0 )
+	{
+		fn_errlog( c_ServiceName, "S31045", SQLMSG, c_errmsg.arr ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+		tpfree ( ( char * ) ptr_fml_Obuf );    /*** Ver 1.7 ***/
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 ) ;      /*** VQC Changed from c_errmsg to c_errmsg.arr ***/ 
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	SETNULL(c_frm_dt);
+	SETNULL(c_to_dt);
+	EXEC SQL ALLOCATE :sys_cursor ;	
+    
+	if(c_trd_flw == 'E' && c_product_typ=='O')
+	{
+			if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") != 0 )
+			{
+				EXEC SQL  EXECUTE
+        	        BEGIN
+          	      OPEN  :sys_cursor FOR
+		       SELECT	fec_clm_mtch_accnt,
+                 	fec_xchng_cd,
+                 	fec_prdct_typ,
+                 	fec_indstk,
+                 	fec_undrlyng,
+                 	fec_expry_dt,
+                 	fec_exer_typ,
+                 	fec_opt_typ,
+                 	fec_strk_prc,
+                 	nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 	fec_exrc_dt,
+                 	NVL( fec_exrc_qty, 0 ),
+                 	NVL( fec_curr_mkt_prc, 0 ),
+                 	NVL(fec_brkg_val,0) BROKERAGE,
+                 	NVL(fec_stt,0) ,
+								 	NVL(fec_src_tx,0) ,
+								 	NVL(fec_sebi_tt,0) ,
+								 	NVL(fec_tran_chrg,0) ,
+								 	NVL(fec_stamp_duty,0) , 
+                  'E' FLW
+            FROM	FEC_FO_EXRC_CONF,CLM_CLNT_MSTR
+            WHERE fec_clm_mtch_accnt = clm_mtch_accnt
+						AND   fec_clm_mtch_accnt = :c_mtch_accnt_no
+            AND   fec_xchng_cd   LIKE :c_exchange_cd
+           /***  AND   fec_prdct_typ  LIKE 'O'  Commented in Ver 1.5 ***/
+            AND   fec_prdct_typ         = 'O'   /*** Ver 1.5 ***/
+            AND   fec_exrc_init         = 'E'
+						AND   trim(fec_undrlyng) LIKE trim(:c_underlying)
+            AND   fec_exrc_dt          >= :c_frm_dt
+            AND   fec_exrc_dt          <= :c_to_dt
+            AND   CLM_BP_ID            = :c_user_id
+       	union
+            SELECT	fec_clm_mtch_accnt,
+                 		fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                		'E' FLW
+          		FROM	FEC_FO_EXRC_CONF_HSTRY,CLM_CLNT_MSTR
+              WHERE fec_clm_mtch_accnt = clm_mtch_accnt
+							AND   fec_clm_mtch_accnt = :c_mtch_accnt_no
+              AND 	fec_xchng_cd       LIKE :c_exchange_cd
+             /*** AND 	fec_prdct_typ      LIKE 'O'  Commented in Ver 1.5 ***/
+              AND   fec_prdct_typ      = 'O'         /*** Ver 1.5 ***/
+              AND 	fec_exrc_init      = 'E'
+              AND 	trim(fec_undrlyng) LIKE trim(:c_underlying)
+              /** AND 	fec_exrc_dt       >= :c_frm_dt
+              AND 	fec_exrc_dt       <= :c_to_dt  *** Commented in Ver 1.6 **/
+							AND		TRUNC(fec_exrc_dt) >= :c_frm_dt    /*** Ver 1.6 ***/
+							AND		TRUNC(fec_exrc_dt) <= :c_to_dt     /*** Ver 1.6 ***/
+              AND 	CLM_BP_ID          = :c_user_id ;
+              END;
+              END-EXEC;
+				}
+				else if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") == 0 )
+				{
+					EXEC SQL  EXECUTE
+        		        BEGIN
+          		      OPEN  :sys_cursor FOR
+		       SELECT	fec_clm_mtch_accnt,
+                 	fec_xchng_cd,
+                 	fec_prdct_typ,
+                 	fec_indstk,
+                 	fec_undrlyng,
+                 	fec_expry_dt,
+                 	fec_exer_typ,
+                 	fec_opt_typ,
+                 	fec_strk_prc,
+                 	nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 	fec_exrc_dt,
+                 	NVL( fec_exrc_qty, 0 ),
+                 	NVL( fec_curr_mkt_prc, 0 ),
+                 	NVL(fec_brkg_val,0) BROKERAGE,
+                 	NVL(fec_stt,0) ,
+								 	NVL(fec_src_tx,0) ,
+								 	NVL(fec_sebi_tt,0) ,
+								 	NVL(fec_tran_chrg,0) ,
+								 	NVL(fec_stamp_duty,0) , 
+                  'E' FLW
+            FROM	FEC_FO_EXRC_CONF,CLM_CLNT_MSTR
+            WHERE fec_clm_mtch_accnt = clm_mtch_accnt
+            AND   fec_xchng_cd   LIKE :c_exchange_cd
+            /*** AND   fec_prdct_typ  LIKE 'O'  Commented in Ver 1.5 ***/
+            AND   fec_prdct_typ         = 'O'   /*** Ver 1.5 ***/
+            AND   fec_exrc_init         = 'E'
+						AND   trim(fec_undrlyng) LIKE trim(:c_underlying)
+            AND   fec_exrc_dt          >= :c_frm_dt
+            AND   fec_exrc_dt          <= :c_to_dt
+            AND   CLM_BP_ID            = :c_user_id
+       	union
+            SELECT	fec_clm_mtch_accnt,
+                 		fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                		'E' FLW
+          		FROM	FEC_FO_EXRC_CONF_HSTRY,CLM_CLNT_MSTR
+              WHERE fec_clm_mtch_accnt = clm_mtch_accnt
+              AND 	fec_xchng_cd       LIKE :c_exchange_cd
+              /*** AND 	fec_prdct_typ      LIKE 'O' Commented in Ver 1.5 ***/
+              AND  fec_prdct_typ       = 'O'        /*** Ver 1.5 ***/
+              AND 	fec_exrc_init      = 'E'
+              AND 	trim(fec_undrlyng) LIKE trim(:c_underlying)
+              /** AND 	fec_exrc_dt       >= :c_frm_dt
+              AND 	fec_exrc_dt       <= :c_to_dt  *** Commented in Ver 1.6 ***/
+							AND   TRUNC(fec_exrc_dt)  >= :c_frm_dt    /*** Ver 1.6 ***/
+							AND		TRUNC(fec_exrc_dt)  <= :c_to_dt			/*** Ver 1.6 ***/
+              AND 	CLM_BP_ID          = :c_user_id ;
+              END;
+              END-EXEC;
+		  }
+      else
+		  {
+				EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+	 				 SELECT		fec_clm_mtch_accnt,
+                 		fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                  	'E' FLW
+         /**FROM		FEC_FO_EXRC_CONF,uac_usr_accnts
+            WHERE   fec_clm_mtch_accnt = uac_clm_mtch_accnt  ** commented in ver 1.3 ****/
+            FROM    FEC_FO_EXRC_CONF                         /*****Added in Ver 1.3*****/
+            WHERE   fec_clm_mtch_accnt = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            AND 		fec_xchng_cd       LIKE :c_exchange_cd
+            /*** AND 		fec_prdct_typ      LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     fec_prdct_typ         = 'O'      /*** Ver 1.5 ***/
+            AND 		fec_exrc_init         = 'E'
+            AND 		trim(fec_undrlyng) LIKE trim(:c_underlying)          
+            AND 		fec_exrc_dt          >= :c_frm_dt
+            AND 		fec_exrc_dt          <= :c_to_dt
+         /**AND 		uac_usr_id            = :c_user_id ** commented in ver 1.3 ****/
+        union
+           SELECT		fec_clm_mtch_accnt,
+                 		fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                  	'E' FLW
+       /***	FROM		FEC_FO_EXRC_CONF_HSTRY,uac_usr_accnts
+            WHERE   fec_clm_mtch_accnt = uac_clm_mtch_accnt  ** commented in ver 1.3 ****/
+            FROM    FEC_FO_EXRC_CONF_HSTRY                   /*****Added in Ver 1.3*****/
+            WHERE   fec_clm_mtch_accnt = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            AND 		fec_xchng_cd       LIKE :c_exchange_cd
+           /***  AND 		fec_prdct_typ      LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     fec_prdct_typ         = 'O'      /*** Ver 1.5 ***/           
+            AND 		fec_exrc_init         = 'E'
+            AND 		trim(fec_undrlyng) LIKE trim(:c_underlying)
+            /** AND 		fec_exrc_dt          >= :c_frm_dt
+            AND 		fec_exrc_dt          <= :c_to_dt; *** Commented in Ver 1.6 ***/
+						AND			TRUNC(fec_exrc_dt)	  >= :c_frm_dt    /*** Ver 1.6 ***/
+					  AND			TRUNC(fec_exrc_dt)		<= :c_to_dt;		/*** Ver 1.6 ***/
+        /** AND 		uac_usr_id            = :c_user_id; ** commented in ver 1.3 ****/
+         END;
+         END-EXEC;	
+		 }
+	}
+  else if(c_trd_flw == 'A' && c_product_typ=='O')
+  {
+  	if( c_user_id[0] == BPID  && strcmp(c_mtch_accnt_no,"*") != 0 )
+		{
+	  	EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+            FROM		FAB_FO_ASGNMNT_BOOK ,CLM_CLNT_MSTR
+         		WHERE   FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+						AND     FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+          	AND     CLM_BP_ID          = :c_user_id
+          	AND     FAB_XCHNG_CD        LIKE :c_exchange_cd
+          /***	AND     FAB_PRDCT_TYP       LIKE 'O'   Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP  = 'O'               /*** Ver 1.5 ***/ 
+          	AND     trim(FAB_UNDRLYNG)  LIKE trim(:c_underlying)
+          	AND     FAB_ASGND_DT      >=:c_frm_dt
+          	AND     FAB_ASGND_DT      <=:c_to_dt
+        union
+         	SELECT	  FAB_CLM_MTCH_ACCNT,
+                	  FAB_XCHNG_CD,
+                	  FAB_PRDCT_TYP,
+                    FAB_INDSTK,
+                    FAB_UNDRLYNG,
+                 	  FAB_EXPRY_DT,
+                 	  FAB_EXER_TYP,
+                 	  FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+           FROM		  FAB_FO_ASGNMNT_BOOK_HSTRY, CLM_CLNT_MSTR
+           WHERE  	FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+					 AND      FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+           AND    	CLM_BP_ID          = :c_user_id
+           AND    	FAB_XCHNG_CD       LIKE :c_exchange_cd
+           /*** AND    	FAB_PRDCT_TYP      LIKE 'O'  Commented in Ver 1.5 ***/
+           AND     FAB_PRDCT_TYP  = 'O'              /*** Ver 1.5 ***/
+           AND    	trim(FAB_UNDRLYNG) LIKE trim(:c_underlying)
+           AND    	FAB_ASGND_DT      >=:c_frm_dt
+           AND    	FAB_ASGND_DT      <=:c_to_dt;
+			 END;
+			 END-EXEC;
+		
+		}
+		else if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") == 0 )
+		{
+	  	EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+            FROM		FAB_FO_ASGNMNT_BOOK ,CLM_CLNT_MSTR
+         		WHERE   FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+          	AND     CLM_BP_ID          = :c_user_id
+          	AND     FAB_XCHNG_CD        LIKE :c_exchange_cd
+          /***	AND     FAB_PRDCT_TYP       LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP   = 'O'             /*** Ver 1.5 ***/
+          	AND     trim(FAB_UNDRLYNG)  LIKE trim(:c_underlying)
+          	AND     FAB_ASGND_DT      >=:c_frm_dt
+          	AND     FAB_ASGND_DT      <=:c_to_dt
+        union
+         	SELECT	  FAB_CLM_MTCH_ACCNT,
+                	  FAB_XCHNG_CD,
+                	  FAB_PRDCT_TYP,
+                    FAB_INDSTK,
+                    FAB_UNDRLYNG,
+                 	  FAB_EXPRY_DT,
+                 	  FAB_EXER_TYP,
+                 	  FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+           FROM		  FAB_FO_ASGNMNT_BOOK_HSTRY, CLM_CLNT_MSTR
+           WHERE  	FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+           AND    	CLM_BP_ID          = :c_user_id
+           AND    	FAB_XCHNG_CD       LIKE :c_exchange_cd
+          /*** AND    	FAB_PRDCT_TYP      LIKE 'O'   Commented in Ver 1.5 ***/
+           AND      FAB_PRDCT_TYP   =  'O'            /*** Ver 1.5 ***/
+           AND    	trim(FAB_UNDRLYNG) LIKE trim(:c_underlying)
+           AND    	FAB_ASGND_DT      >=:c_frm_dt
+           AND    	FAB_ASGND_DT      <=:c_to_dt;
+			 END;
+			 END-EXEC;
+		}
+		else
+		{
+			EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+					 SELECT		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+									  nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+        /**FROM		  FAB_FO_ASGNMNT_BOOK, uac_usr_accnts
+         	 WHERE 		FAB_CLM_MTCH_ACCNT = uac_clm_mtch_accnt
+         	 AND    	uac_usr_id         = :c_user_id  ** commented in ver 1.3 ****/
+           FROM    FAB_FO_ASGNMNT_BOOK                     /*****Added in Ver 1.3*****/
+           WHERE   FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+           AND    	FAB_XCHNG_CD         LIKE :c_exchange_cd
+           /*** AND    	FAB_PRDCT_TYP        LIKE 'O'  Commented in Ver 1.5 ***/
+           AND     FAB_PRDCT_TYP  =  'O'               /*** Ver 1.5 ***/
+           AND    	trim(FAB_UNDRLYNG)   LIKE trim(:c_underlying)
+           AND    	FAB_ASGND_DT      >=:c_frm_dt
+           AND    	FAB_ASGND_DT      <=:c_to_dt
+      union
+          SELECT 		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+      /** FROM   		FAB_FO_ASGNMNT_BOOK_HSTRY, uac_usr_accnts
+          WHERE  		FAB_CLM_MTCH_ACCNT = uac_clm_mtch_accnt
+          AND    		uac_usr_id         = :c_user_id  ** commented in ver 1.3 ****/
+          FROM      FAB_FO_ASGNMNT_BOOK_HSTRY                 /*****Added in Ver 1.3*****/
+          WHERE     FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+          AND    		FAB_XCHNG_CD        LIKE :c_exchange_cd
+         /***  AND    		FAB_PRDCT_TYP       LIKE 'O'   Commented in Ver 1.5 ***/
+          AND        FAB_PRDCT_TYP  = 'O'                /*** Ver 1.5 ***/
+          AND    		trim(FAB_UNDRLYNG)  LIKE trim(:c_underlying)
+          AND    		FAB_ASGND_DT      >=:c_frm_dt
+          AND    		FAB_ASGND_DT      <=:c_to_dt;
+				END;
+				END-EXEC;
+
+		}
+	}
+  else if( c_trd_flw=='B' || c_trd_flw=='S' )
+	{
+		if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") != 0 )
+		{
+			EXEC SQL  EXECUTE
+           			BEGIN
+            		OPEN  :sys_cursor FOR
+					 SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+		   				  	  FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+							     'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,	
+							 		  nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    FCO_ORDR_FLW
+	  		   FROM		  FCO_FO_FCLSOUT,CLM_CLNT_MSTR
+           WHERE    FCO_CLM_MTCH_ACCNT= CLM_MTCH_ACCNT
+					 AND      FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+           AND      FCO_XCHNG_CD LIKE :c_exchange_cd
+           AND      FCO_PRDCT_TYP =:c_product_typ 
+           AND      FCO_ORDR_FLW=:c_trd_flw
+           AND      trim(FCO_UNDRLYNG) LIKE trim(:c_underlying) 
+           AND      FCO_CLS_TM >= :c_frm_dt      
+           AND      FCO_CLS_TM <= :c_to_dt
+           AND      CLM_BP_ID = :c_user_id
+       UNION
+	         SELECT   FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    FCO_ORDR_FLW
+            FROM    FCO_FO_FCLSOUT_HSTRY,CLM_CLNT_MSTR
+            WHERE   FCO_CLM_MTCH_ACCNT  = CLM_MTCH_ACCNT
+					  AND     FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+            AND     FCO_XCHNG_CD         LIKE :c_exchange_cd
+            AND     FCO_PRDCT_TYP       =:c_product_typ
+            AND     trim(FCO_UNDRLYNG)   LIKE trim(:c_underlying) 
+            AND     FCO_ORDR_FLW        =:c_trd_flw
+            AND     FCO_CLS_TM         >= :c_frm_dt
+            AND     FCO_CLS_TM         <= :c_to_dt
+            AND     CLM_BP_ID           = :c_user_id;
+         END;
+         END-EXEC;
+		}
+		else if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") == 0 )
+		{
+			EXEC SQL  EXECUTE
+           			BEGIN
+            		OPEN  :sys_cursor FOR
+					 SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+		   				  	  FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+							     'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,	
+							 		  nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    FCO_ORDR_FLW
+	  		   FROM		  FCO_FO_FCLSOUT,CLM_CLNT_MSTR
+           WHERE    FCO_CLM_MTCH_ACCNT= CLM_MTCH_ACCNT
+           AND      FCO_XCHNG_CD LIKE :c_exchange_cd
+           AND      FCO_PRDCT_TYP =:c_product_typ 
+           AND      FCO_ORDR_FLW=:c_trd_flw
+           AND      trim(FCO_UNDRLYNG) LIKE trim(:c_underlying) 
+           AND      FCO_CLS_TM >= :c_frm_dt      
+           AND      FCO_CLS_TM <= :c_to_dt
+           AND      CLM_BP_ID = :c_user_id
+       UNION
+	         SELECT   FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    FCO_ORDR_FLW
+            FROM    FCO_FO_FCLSOUT_HSTRY,CLM_CLNT_MSTR
+            WHERE   FCO_CLM_MTCH_ACCNT  = CLM_MTCH_ACCNT
+            AND     FCO_XCHNG_CD         LIKE :c_exchange_cd
+            AND     FCO_PRDCT_TYP       =:c_product_typ
+            AND     trim(FCO_UNDRLYNG)   LIKE trim(:c_underlying) 
+            AND     FCO_ORDR_FLW        =:c_trd_flw
+            AND     FCO_CLS_TM         >= :c_frm_dt
+            AND     FCO_CLS_TM         <= :c_to_dt
+            AND     CLM_BP_ID           = :c_user_id;
+         END;
+         END-EXEC;
+		}
+    else 
+    {							
+	  	EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    FCO_ORDR_FLW
+     /**    FROM    FCO_FO_FCLSOUT,uac_usr_accnts
+            WHERE   FCO_CLM_MTCH_ACCNT= uac_clm_mtch_accnt    ** commented in ver 1.3 ****/
+            FROM     FCO_FO_FCLSOUT                           /*****Added in Ver 1.3*****/
+            WHERE   FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            AND     FCO_XCHNG_CD LIKE :c_exchange_cd 
+            AND     FCO_PRDCT_TYP =:c_product_typ
+            AND     FCO_ORDR_FLW=:c_trd_flw
+            AND     trim(FCO_UNDRLYNG)  LIKE trim(:c_underlying) 
+            AND     FCO_CLS_TM >= :c_frm_dt
+            AND     FCO_CLS_TM <= :c_to_dt				  			
+       /**  AND     UAC_USR_ID = :c_user_id  ** commented in ver 1.3 ****/
+        UNION
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    FCO_ORDR_FLW
+        /***    FROM		FCO_FO_FCLSOUT_HSTRY,uac_usr_accnts   
+            WHERE   FCO_CLM_MTCH_ACCNT= uac_clm_mtch_accnt  ** commented in ver 1.3 ****/
+            FROM     FCO_FO_FCLSOUT_HSTRY                           /*****Added in Ver 1.3*****/
+            WHERE    FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            AND     FCO_XCHNG_CD LIKE :c_exchange_cd 
+            AND     FCO_PRDCT_TYP =:c_product_typ
+            AND     FCO_ORDR_FLW=:c_trd_flw
+            AND     trim(FCO_UNDRLYNG)  LIKE trim(:c_underlying) 
+            AND     FCO_CLS_TM >= :c_frm_dt
+            AND     FCO_CLS_TM <= :c_to_dt;
+         /**   AND     UAC_USR_ID = :c_user_id;   ** commented in ver 1.3 ****/
+         END;
+         END-EXEC;
+		}
+	}
+  else if(c_product_typ=='F' && c_trd_flw=='X')  
+  {
+		if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") != 0 )
+		{
+  		EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,			
+          	        FCO_EXPRY_DT,
+										FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+									  'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM, 
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+										FCO_ORDR_FLW
+					 FROM			FCO_FO_FCLSOUT, CLM_CLNT_MSTR				/** Ver 1.1 FCO history changed to main table **/	
+           where 		FCO_CLM_MTCH_ACCNT= CLM_MTCH_ACCNT
+					 AND      FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+           and   		FCO_XCHNG_CD LIKE :c_exchange_cd 
+           and   		FCO_PRDCT_TYP= 'F'
+           AND   		trim(FCO_UNDRLYNG) LIKE trim(:c_underlying) 
+           AND   		FCO_CLS_TM >= :c_frm_dt
+           AND   		FCO_CLS_TM <= :c_to_dt
+           AND   		CLM_BP_ID = :c_user_id 
+       UNION
+           SELECT   FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+									  FCO_ORDR_FLW
+            FROM    FCO_FO_FCLSOUT_HSTRY,CLM_CLNT_MSTR
+            WHERE   FCO_CLM_MTCH_ACCNT= clm_mtch_accnt
+					  AND      FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+            AND     FCO_XCHNG_CD LIKE :c_exchange_cd 
+            AND     FCO_PRDCT_TYP = 'F'
+            AND     trim(FCO_UNDRLYNG) LIKE trim(:c_underlying)
+            AND     FCO_CLS_TM >= :c_frm_dt
+            AND     FCO_CLS_TM <= :c_to_dt
+            AND     CLM_BP_ID = :c_user_id;
+        END;
+        END-EXEC;
+		}
+		else if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") == 0 )
+		{
+  		EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,			
+          	        FCO_EXPRY_DT,
+										FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+									  'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM, 
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+										FCO_ORDR_FLW
+					 FROM			FCO_FO_FCLSOUT, CLM_CLNT_MSTR				/** Ver 1.1 FCO history changed to main table **/	
+           where 		FCO_CLM_MTCH_ACCNT= CLM_MTCH_ACCNT
+           and   		FCO_XCHNG_CD LIKE :c_exchange_cd 
+           and   		FCO_PRDCT_TYP= 'F'
+           AND   		trim(FCO_UNDRLYNG) LIKE trim(:c_underlying) 
+           AND   		FCO_CLS_TM >= :c_frm_dt
+           AND   		FCO_CLS_TM <= :c_to_dt
+           AND   		CLM_BP_ID = :c_user_id 
+       UNION
+           SELECT   FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+									  FCO_ORDR_FLW
+            FROM    FCO_FO_FCLSOUT_HSTRY,CLM_CLNT_MSTR
+            WHERE   FCO_CLM_MTCH_ACCNT= clm_mtch_accnt
+            AND     FCO_XCHNG_CD LIKE :c_exchange_cd 
+            AND     FCO_PRDCT_TYP = 'F'
+            AND     trim(FCO_UNDRLYNG) LIKE trim(:c_underlying)
+            AND     FCO_CLS_TM >= :c_frm_dt
+            AND     FCO_CLS_TM <= :c_to_dt
+            AND     CLM_BP_ID = :c_user_id;
+        END;
+        END-EXEC;
+		}
+		else
+		{
+			EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+									  FCO_ORDR_FLW
+        /***FROM		FCO_FO_FCLSOUT,uac_usr_accnts
+            where   FCO_CLM_MTCH_ACCNT= uac_clm_mtch_accnt ** commented in ver 1.3 ****/
+            FROM     FCO_FO_FCLSOUT                           /*****Added in Ver 1.3*****/
+            WHERE   FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            and     FCO_XCHNG_CD LIKE :c_exchange_cd 
+            and     FCO_PRDCT_TYP= 'F'
+            AND     trim(FCO_UNDRLYNG) LIKE trim(:c_underlying) 
+       	    AND     trunc(FCO_CLS_TM) between  to_date(:c_frm_dt,'dd-mon-yyyy') AND to_date(:c_to_dt,'dd-mon-yyyy')
+        /** AND     uac_usr_id = :c_user_id ** commented in ver 1.3 ****/ 
+        UNION
+           SELECT
+                     FCO_CLM_MTCH_ACCNT,
+                     FCO_XCHNG_CD,
+                     FCO_PRDCT_TYP,
+                     FCO_INDSTK,
+                     FCO_UNDRLYNG,
+                     FCO_EXPRY_DT,
+                     FCO_EXER_TYP,
+                     FCO_OPT_TYP,
+                     FCO_STRK_PRC,
+                     'Exchange Initiated' ORDER_Reference,
+                     FCO_CLS_TM ,
+                     abs(FCO_CLS_QTY),
+                     FCO_CLS_RT,
+                     nvl(FCO_BRKG,0) BROKERAGE,
+							  		 nvl(FCO_STT,0),
+									   nvl(FCO_SRC_TX,0), 
+									   nvl(FCO_SEBI_TT,0) , 	
+									   nvl(FCO_TRAN_CHRG,0) ,
+									   nvl(FCO_STAMP_DUTY,0) ,
+									   FCO_ORDR_FLW
+        /***FROM		 FCO_FO_FCLSOUT_HSTRY,uac_usr_accnts
+             WHERE   FCO_CLM_MTCH_ACCNT= uac_clm_mtch_accnt **** commented in ver 1.3 ****/
+             FROM     FCO_FO_FCLSOUT_HSTRY                           /*****Added in Ver 1.3*****/
+             WHERE    FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+             AND     FCO_XCHNG_CD LIKE :c_exchange_cd 
+             AND     FCO_PRDCT_TYP = 'F'
+             AND     trim(FCO_UNDRLYNG) LIKE trim(:c_underlying)
+             AND     trunc(FCO_CLS_TM) between  to_date(:c_frm_dt,'dd-mon-yyyy')  AND to_date(:c_to_dt,'dd-mon-yyyy'); 
+       /**** AND     uac_usr_id = :c_user_id;   commented in ver 1.3 ****/
+          END;
+          END-EXEC;									
+		}		
+	}
+	if((c_product_typ=='O' && c_trd_flw=='X') || c_spl_flg =='A' )
+	{
+				/******************************************************************************************************** 
+				*		NOTE :																																															*
+				*						In case of other front end  value of ordr_flow flag for closeout records are as below  :		*
+				*						Bue Closeout  : C																																						*
+				*						Sell Closeout : D																																						*
+				*********************************************************************************************************/
+
+
+		if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") != 0 )
+    { 
+	  	EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    decode(:c_spl_flg,'A',decode(FCO_ORDR_FLW,'B','C','S','D'),FCO_ORDR_FLW)
+            FROM		FCO_FO_FCLSOUT,CLM_CLNT_MSTR
+            WHERE   FCO_CLM_MTCH_ACCNT= clm_mtch_accnt
+            AND     FCO_CLM_MTCH_ACCNT= :c_mtch_accnt_no
+            AND     FCO_XCHNG_CD LIKE :c_exchange_cd 
+					  AND     FCO_PRDCT_TYP like decode(:c_spl_flg,'A','%',:c_product_typ)
+					  AND     trim(FCO_UNDRLYNG) LIKE trim(:c_underlying)
+            AND     FCO_CLS_TM >= :c_frm_dt
+            AND     FCO_CLS_TM <= :c_to_dt
+            AND     CLM_BP_ID = :c_user_id
+			  UNION
+           SELECT   FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								   	nvl(FCO_STT,0),
+										nvl(FCO_SRC_TX,0), 
+										nvl(FCO_SEBI_TT,0) , 	
+										nvl(FCO_TRAN_CHRG,0) ,
+										nvl(FCO_STAMP_DUTY,0) ,
+                    decode(:c_spl_flg,'A',decode(FCO_ORDR_FLW,'B','C','S','D'),FCO_ORDR_FLW)
+             FROM		FCO_FO_FCLSOUT_HSTRY,CLM_CLNT_MSTR
+             WHERE	FCO_CLM_MTCH_ACCNT= clm_mtch_accnt
+						 AND    FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+             AND    FCO_XCHNG_CD LIKE :c_exchange_cd 
+						 AND    FCO_PRDCT_TYP like decode(:c_spl_flg,'A','%',:c_product_typ)
+             AND    trim(FCO_UNDRLYNG) LIKE trim(:c_underlying)
+             AND    FCO_CLS_TM >= :c_frm_dt
+             AND    FCO_CLS_TM <= :c_to_dt
+             AND    CLM_BP_ID = :c_user_id	
+         union
+				  SELECT		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+								 		FAB_EXPRY_DT,
+							   		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT, 
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+ 				    FROM		FAB_FO_ASGNMNT_BOOK ,CLM_CLNT_MSTR
+            WHERE   FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+            AND     FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+            AND     CLM_BP_ID         = :c_user_id 
+            AND     FAB_XCHNG_CD     LIKE :c_exchange_cd 
+           /*** AND     FAB_PRDCT_TYP    LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP  = 'O'           /*** Ver 1.5 ***/ 
+            AND     trim(FAB_UNDRLYNG)     LIKE trim(:c_underlying)
+            AND     FAB_ASGND_DT          >=:c_frm_dt 
+            AND     FAB_ASGND_DT          <=:c_to_dt
+        union
+					SELECT		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+            FROM	  FAB_FO_ASGNMNT_BOOK_HSTRY, CLM_CLNT_MSTR
+            WHERE   FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+            AND     FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no
+            AND     CLM_BP_ID         = :c_user_id
+            AND     FAB_XCHNG_CD     LIKE :c_exchange_cd 
+           /*** AND     FAB_PRDCT_TYP    LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP  = 'O' /*** Ver 1.5 ***/
+            AND     trim(FAB_UNDRLYNG)     LIKE trim(:c_underlying)
+            AND     FAB_ASGND_DT          >=:c_frm_dt
+            AND     FAB_ASGND_DT          <=:c_to_dt
+       union
+				  SELECT   	fec_clm_mtch_accnt,
+                   	fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt, 
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt, 
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+               			NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                  	'E' FLW
+            FROM		FEC_FO_EXRC_CONF,CLM_CLNT_MSTR
+            WHERE   fec_clm_mtch_accnt = clm_mtch_accnt
+            AND     fec_clm_mtch_accnt = :c_mtch_accnt_no
+            AND     fec_xchng_cd       LIKE :c_exchange_cd 
+            /*** AND     fec_prdct_typ      LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     fec_prdct_typ       = 'O'         /*** Ver 1.5 ***/ 
+            AND     trim(fec_undrlyng)       LIKE trim(:c_underlying)
+            AND     fec_exrc_init         = 'E'
+            AND     fec_exrc_dt          >= :c_frm_dt
+            AND     fec_exrc_dt          <= :c_to_dt
+            AND     CLM_BP_ID            = :c_user_id
+        union
+					 SELECT   fec_clm_mtch_accnt,
+                    fec_xchng_cd,
+                    fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+										'E' FLW
+             FROM		FEC_FO_EXRC_CONF_HSTRY,CLM_CLNT_MSTR
+             WHERE  fec_clm_mtch_accnt = clm_mtch_accnt
+             AND    fec_clm_mtch_accnt = :c_mtch_accnt_no
+             AND    fec_xchng_cd          LIKE :c_exchange_cd 
+             /*** AND 		fec_prdct_typ         LIKE 'O'  Commented in Ver 1.5 ***/
+             AND     fec_prdct_typ     = 'O'              /*** Ver 1.5 ***/
+             AND 		trim(fec_undrlyng)          LIKE trim(:c_underlying)
+             AND 		fec_exrc_init         = 'E'
+             /*** AND 		fec_exrc_dt          >= :c_frm_dt
+             AND 		fec_exrc_dt          <= :c_to_dt	*** Commented in Ver 1.6 ***/
+						 AND		TRUNC(fec_exrc_dt)	  >= :c_frm_dt		/*** Ver 1.6 ***/
+						 AND		TRUNC(fec_exrc_dt)		<= :c_to_dt			/*** Ver 1.6 ***/
+             AND 		CLM_BP_ID            = :c_user_id ;
+          END;
+          END-EXEC;					   			
+		}
+		else if( c_user_id[0] == BPID && strcmp(c_mtch_accnt_no,"*") == 0 )
+		{
+	  	EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    decode(:c_spl_flg,'A',decode(FCO_ORDR_FLW,'B','C','S','D'),FCO_ORDR_FLW)
+            FROM		FCO_FO_FCLSOUT,CLM_CLNT_MSTR
+            WHERE   FCO_CLM_MTCH_ACCNT= clm_mtch_accnt
+            AND     FCO_XCHNG_CD LIKE :c_exchange_cd 
+					  AND     FCO_PRDCT_TYP like decode(:c_spl_flg,'A','%',:c_product_typ)
+					  AND     trim(FCO_UNDRLYNG) LIKE trim(:c_underlying)
+            AND     FCO_CLS_TM >= :c_frm_dt
+            AND     FCO_CLS_TM <= :c_to_dt
+            AND     CLM_BP_ID = :c_user_id
+			  UNION
+           SELECT   FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								   	nvl(FCO_STT,0),
+										nvl(FCO_SRC_TX,0), 
+										nvl(FCO_SEBI_TT,0) , 	
+										nvl(FCO_TRAN_CHRG,0) ,
+										nvl(FCO_STAMP_DUTY,0) ,
+                    decode(:c_spl_flg,'A',decode(FCO_ORDR_FLW,'B','C','S','D'),FCO_ORDR_FLW)
+             FROM		FCO_FO_FCLSOUT_HSTRY,CLM_CLNT_MSTR
+             WHERE	FCO_CLM_MTCH_ACCNT= clm_mtch_accnt
+             AND    FCO_XCHNG_CD LIKE :c_exchange_cd 
+						 AND    FCO_PRDCT_TYP like decode(:c_spl_flg,'A','%',:c_product_typ)
+             AND    trim(FCO_UNDRLYNG) LIKE trim(:c_underlying)
+             AND    FCO_CLS_TM >= :c_frm_dt
+             AND    FCO_CLS_TM <= :c_to_dt
+             AND    CLM_BP_ID = :c_user_id	
+         union
+				  SELECT		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+								 		FAB_EXPRY_DT,
+							   		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT, 
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+ 				    FROM		FAB_FO_ASGNMNT_BOOK ,CLM_CLNT_MSTR
+            WHERE   FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+            AND     CLM_BP_ID         = :c_user_id 
+            AND     FAB_XCHNG_CD     LIKE :c_exchange_cd 
+            /*** AND     FAB_PRDCT_TYP    LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP  = 'O'            /*** Ver 1.5 ***/
+            AND     trim(FAB_UNDRLYNG)     LIKE trim(:c_underlying)
+            AND     FAB_ASGND_DT          >=:c_frm_dt 
+            AND     FAB_ASGND_DT          <=:c_to_dt
+        union
+					SELECT		FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT,
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+            FROM	  FAB_FO_ASGNMNT_BOOK_HSTRY, CLM_CLNT_MSTR
+            WHERE   FAB_CLM_MTCH_ACCNT = clm_mtch_accnt
+            AND     CLM_BP_ID         = :c_user_id
+            AND     FAB_XCHNG_CD     LIKE :c_exchange_cd 
+            /*** AND     FAB_PRDCT_TYP    LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP         = 'O'     /*** Ver 1.5 ***/  
+            AND     trim(FAB_UNDRLYNG)     LIKE trim(:c_underlying)
+            AND     FAB_ASGND_DT          >=:c_frm_dt
+            AND     FAB_ASGND_DT          <=:c_to_dt
+       union
+				  SELECT   	fec_clm_mtch_accnt,
+                   	fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt, 
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt, 
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+               			NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                  	'E' FLW
+            FROM		FEC_FO_EXRC_CONF,CLM_CLNT_MSTR
+            WHERE   fec_clm_mtch_accnt = clm_mtch_accnt
+            AND     fec_xchng_cd       LIKE :c_exchange_cd 
+            /*** AND     fec_prdct_typ      LIKE 'O'   Commented in Ver 1.5 ***/
+            AND     fec_prdct_typ        = 'O'         /*** Ver 1.5 ***/
+            AND     trim(fec_undrlyng)       LIKE trim(:c_underlying)
+            AND     fec_exrc_init         = 'E'
+            AND     fec_exrc_dt          >= :c_frm_dt
+            AND     fec_exrc_dt          <= :c_to_dt
+            AND     CLM_BP_ID            = :c_user_id
+        union
+					 SELECT   fec_clm_mtch_accnt,
+                    fec_xchng_cd,
+                    fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+										'E' FLW
+             FROM		FEC_FO_EXRC_CONF_HSTRY,CLM_CLNT_MSTR
+             WHERE  fec_clm_mtch_accnt = clm_mtch_accnt
+             AND    fec_xchng_cd          LIKE :c_exchange_cd 
+            /***  AND 		fec_prdct_typ         LIKE 'O'   Commented in Ver 1.5 ***/
+             AND     fec_prdct_typ        =  'O'           /*** Ver 1.5 ***/
+             AND 		trim(fec_undrlyng)          LIKE trim(:c_underlying)
+             AND 		fec_exrc_init         = 'E'
+             /** AND 		fec_exrc_dt          >= :c_frm_dt
+             AND 		fec_exrc_dt          <= :c_to_dt  *** Commented in Ver 1.6 ***/
+						 AND		TRUNC(fec_exrc_dt)	  >= :c_frm_dt		/*** Ver 1.6 ***/
+						 AND		TRUNC(fec_exrc_dt)		<= :c_to_dt			/*** Ver 1.6 ***/
+             AND 		CLM_BP_ID            = :c_user_id ;
+          END;
+          END-EXEC;					   			
+		}
+		else
+		{
+			EXEC SQL  EXECUTE
+                BEGIN
+                OPEN  :sys_cursor FOR
+           SELECT		FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+								    nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    decode(:c_spl_flg,'A',decode(FCO_ORDR_FLW,'B','C','S','D'),FCO_ORDR_FLW)
+      /*** FROM		  FCO_FO_FCLSOUT,uac_usr_accnts
+           WHERE    FCO_CLM_MTCH_ACCNT= uac_clm_mtch_accnt  *** commented in ver 1.3 ****/
+           FROM     FCO_FO_FCLSOUT 													 /*****Added in Ver 1.3*****/
+      	   WHERE    FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+           AND      FCO_XCHNG_CD LIKE :c_exchange_cd 
+					 AND      FCO_PRDCT_TYP like decode(:c_spl_flg,'A','%',:c_product_typ)
+           AND      trim(FCO_UNDRLYNG)  LIKE trim(:c_underlying)
+           AND      FCO_CLS_TM >= :c_frm_dt
+           AND      FCO_CLS_TM <= :c_to_dt
+      /*** AND      uac_usr_id = :c_user_id **** commented in ver 1.3 ****/
+       UNION
+           SELECT   FCO_CLM_MTCH_ACCNT,
+                    FCO_XCHNG_CD,
+                    FCO_PRDCT_TYP,
+                    FCO_INDSTK,
+                    FCO_UNDRLYNG,
+                    FCO_EXPRY_DT,
+                    FCO_EXER_TYP,
+                    FCO_OPT_TYP,
+                    FCO_STRK_PRC,
+                    'Exchange Initiated' ORDER_Reference,
+                    FCO_CLS_TM ,
+                    abs(FCO_CLS_QTY),
+                    FCO_CLS_RT,
+                    nvl(FCO_BRKG,0) BROKERAGE,
+						   		  nvl(FCO_STT,0),
+									  nvl(FCO_SRC_TX,0), 
+									  nvl(FCO_SEBI_TT,0) , 	
+									  nvl(FCO_TRAN_CHRG,0) ,
+									  nvl(FCO_STAMP_DUTY,0) ,
+                    decode(:c_spl_flg,'A',decode(FCO_ORDR_FLW,'B','C','S','D'),FCO_ORDR_FLW)
+        /***     FROM    FCO_FO_FCLSOUT_HSTRY,uac_usr_accnts
+            WHERE   FCO_CLM_MTCH_ACCNT= uac_clm_mtch_accnt *** commented in ver 1.3 ****/
+            FROM     FCO_FO_FCLSOUT_HSTRY                    /*****Added in Ver 1.3*****/
+            WHERE   FCO_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            AND     FCO_XCHNG_CD  LIKE :c_exchange_cd 
+					  AND     FCO_PRDCT_TYP like decode(:c_spl_flg,'A','%',:c_product_typ)
+            AND     trim(FCO_UNDRLYNG)  LIKE trim(:c_underlying)
+            AND     FCO_CLS_TM >= :c_frm_dt
+            AND     FCO_CLS_TM <= :c_to_dt
+       /*** AND     uac_usr_id = :c_user_id **** commented in ver 1.3 ****/
+        union
+						SELECT  FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT, 
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+        /***FROM  	FAB_FO_ASGNMNT_BOOK, uac_usr_accnts
+          	WHERE   FAB_CLM_MTCH_ACCNT = uac_clm_mtch_accnt    *** commented in ver 1.3 ****/
+            FROM    FAB_FO_ASGNMNT_BOOK  										/*****Added in Ver 1.3*****/
+            WHERE   FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+       /***	AND     uac_usr_id         = :c_user_id         **** commented in ver 1.3 ****/
+          	AND     FAB_XCHNG_CD     LIKE :c_exchange_cd 
+          /***	AND     FAB_PRDCT_TYP    LIKE 'O'  Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP         = 'O'    /*** Ver 1.5 ***/
+          	AND     trim(FAB_UNDRLYNG)     LIKE trim(:c_underlying)
+          	AND     FAB_ASGND_DT          >=:c_frm_dt
+          	AND     FAB_ASGND_DT          <=:c_to_dt
+				union
+           SELECT 	FAB_CLM_MTCH_ACCNT,
+                 		FAB_XCHNG_CD,
+                 		FAB_PRDCT_TYP,
+                 		FAB_INDSTK,
+                 		FAB_UNDRLYNG,
+                 		FAB_EXPRY_DT,
+                 		FAB_EXER_TYP,
+                 		FAB_OPT_TYP,
+                 		FAB_STRK_PRC,
+                 		'Exchange Initiated' order_reference, --nvl(FAB_ASGN_RFRNC_NO,'Exchange Initiated') order_reference,
+                 		FAB_ASGND_DT, 
+                 		FAB_ASGND_QTY,
+                 		FAB_STTLMNT_PRC,
+                 		NVL(fab_brkrg_val,0) BROKERAGE,
+                 		nvl(fab_stt,0),
+								 		nvl(fab_src_tx,0),
+								 		nvl(fab_sebi_tt,0),
+								 		nvl(fab_tran_chrg,0),
+								 		nvl(fab_stamp_duty,0),
+                 		'A' FLW
+        /***FROM    FAB_FO_ASGNMNT_BOOK_HSTRY, uac_usr_accnts
+          	WHERE   FAB_CLM_MTCH_ACCNT = uac_clm_mtch_accnt   *** commented in ver 1.3 ****/
+            FROM    FAB_FO_ASGNMNT_BOOK_HSTRY							  	/*****Added in Ver 1.3*****/
+            WHERE   FAB_CLM_MTCH_ACCNT = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/ 
+      /***	AND     uac_usr_id         = :c_user_id **** commented in ver 1.3 ****/
+          	AND     FAB_XCHNG_CD     LIKE :c_exchange_cd 
+          /***	AND     FAB_PRDCT_TYP    LIKE 'O'     Commented in Ver 1.5 ***/
+            AND     FAB_PRDCT_TYP         = 'O'       /*** Ver 1.5 ***/
+          	AND     trim(FAB_UNDRLYNG)     LIKE trim(:c_underlying)
+          	AND     FAB_ASGND_DT          >=:c_frm_dt
+          	AND     FAB_ASGND_DT          <=:c_to_dt
+			 union
+           SELECT   fec_clm_mtch_accnt,
+                 		fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                 		'E' FLW
+        /***FROM 		FEC_FO_EXRC_CONF,uac_usr_accnts
+         	  WHERE   fec_clm_mtch_accnt = uac_clm_mtch_accnt     *** commented in ver 1.3 ****/
+            FROM    FEC_FO_EXRC_CONF                         /*****Added in Ver 1.3*****/
+            WHERE   fec_clm_mtch_accnt = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            AND 		fec_xchng_cd          LIKE :c_exchange_cd 
+           /*** AND 		fec_prdct_typ         LIKE 'O'   Commented in Ver 1.5 ***/
+            AND     fec_prdct_typ         = 'O'          /*** Ver 1.5 ***/
+            AND 		trim(fec_undrlyng)          LIKE trim(:c_underlying)
+            AND 		fec_exrc_init         = 'E'
+            AND 		fec_exrc_dt          >= :c_frm_dt
+            AND 		fec_exrc_dt          <= :c_to_dt
+       /*** AND 		uac_usr_id            = :c_user_id  **** commented in ver 1.3 ****/
+			 	union
+            SELECT  fec_clm_mtch_accnt,
+                 		fec_xchng_cd,
+                 		fec_prdct_typ,
+                 		fec_indstk,
+                 		fec_undrlyng,
+                 		fec_expry_dt,
+                 		fec_exer_typ,
+                 		fec_opt_typ,
+                 		fec_strk_prc,
+                 		nvl(fec_exrc_rfrnc_no,'Exchange Initiated') Order_reference,
+                 		fec_exrc_dt,
+                 		NVL( fec_exrc_qty, 0 ),
+                 		NVL( fec_curr_mkt_prc, 0 ),
+                 		NVL(fec_brkg_val,0) BROKERAGE,
+                 		NVL(fec_stt,0) ,
+								 		NVL(fec_src_tx,0) ,
+								 		NVL(fec_sebi_tt,0) ,
+								 		NVL(fec_tran_chrg,0) ,
+								 		NVL(fec_stamp_duty,0) , 
+                 		'E' FLW
+        /***FROM 	  FEC_FO_EXRC_CONF_HSTRY,uac_usr_accnts
+            WHERE  	fec_clm_mtch_accnt = uac_clm_mtch_accnt     *** commented in ver 1.3 ****/
+						FROM    FEC_FO_EXRC_CONF_HSTRY                   /*****Added in Ver 1.3*****/
+            WHERE   fec_clm_mtch_accnt = :c_mtch_accnt_no    /*****Added in Ver 1.3*****/
+            AND 		fec_xchng_cd          LIKE :c_exchange_cd 
+            /*** AND 		fec_prdct_typ         LIKE 'O'    Commented in Ver 1.5 ***/
+            AND    fec_prdct_typ              = 'O'       /*** Ver 1.5 ***/
+            AND 		trim(fec_undrlyng)          LIKE trim(:c_underlying)
+            AND 		fec_exrc_init         = 'E'
+       /*** AND 		fec_exrc_dt          >= :c_frm_dt
+            AND 		fec_exrc_dt          <= :c_to_dt; *** Commented in Ver 1.6 ***/
+						AND			TRUNC(fec_exrc_dt)   >= :c_frm_dt  /*** Ver 1.6 ***/
+						AND			TRUNC(fec_exrc_dt)   <= :c_to_dt;  /*** Ver 1.6 ***/	
+       /*** AND 		uac_usr_id            = :c_user_id;**** commented in ver 1.3 ****/
+         END;			
+			   END-EXEC;		
+		}		
+	}
+	if ( SQLCODE != 0 )
+  {
+  	fn_errlog( c_ServiceName, "S31050", SQLMSG, c_errmsg.arr  ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+ 		EXEC SQL CLOSE :sys_cursor;
+  	EXEC SQL FREE :sys_cursor;
+		tpfree ( ( char * ) ptr_fml_Obuf );    /*** Ver 1.7 ***/
+  	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );  /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+  	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/*** Below code is commented and moved above in ver 1.7 ***
+
+	l_bufferlength=sizeof(c_mtch_accnt_no)+sizeof(c_product_typ)+sizeof(c_xchng_cd)+sizeof(c_exp_date)+sizeof(c_exrc_typ)+sizeof(c_opt_typ)+sizeof(l_strk_prc)+sizeof(c_ordr_rfrnc)+sizeof(c_trd_date)+sizeof(l_exctd_qty)+sizeof(l_exctd_rt)+sizeof(l_brkg_val)+sizeof(l_taxes)+ sizeof(l_stt) + sizeof(l_srvc_tax) + sizeof(l_tran_chrg) + sizeof(l_sebi_tt) + sizeof(l_stamp_duty)+2048;  ** Ver 1.1 ** 
+
+   *** Below Log added in Ver 1.4 *** 
+  if(DEBUG_MSG_LVL_1)
+  {
+    fn_userlog(c_ServiceName,"ISEC Before TPALLOC");
+  }
+	
+	 **ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN);				Ver 1.1 comment ** 
+	ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, l_bufferlength);						 ** ver 1.1 *** 
+
+	if ( ptr_fml_Obuf == NULL )
+  {
+ 		fn_errlog( c_ServiceName, "S31055", TPMSG, c_errmsg.arr  );   *** VQC Changed from c_errmsg to c_errmsg.arr *** 
+ 		EXEC SQL CLOSE :sys_cursor;
+ 		EXEC SQL FREE :sys_cursor;
+ 		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 ); 			 *** VQC Changed from c_errmsg to c_errmsg.arr *** 
+ 		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 	}
+
+   *** Below Log added in Ver 1.4 *** 
+  if(DEBUG_MSG_LVL_1)
+  {
+    fn_userlog(c_ServiceName,"ISEC After TPALLOC");
+  }
+
+	****** Ver 1.7 Comment Ends ******/
+ 
+/*	l_bufferlength=sizeof(c_mtch_accnt_no)+sizeof(c_product_typ)+sizeof(c_xchng_cd)+sizeof(c_exp_date)+sizeof(c_exrc_typ)+sizeof(c_opt_typ)+sizeof(l_strk_prc)+sizeof(c_ordr_rfrnc)+sizeof(c_trd_date)+sizeof(l_exctd_qty)+sizeof(l_exctd_rt)+sizeof(l_brkg_val)+sizeof(l_taxes)+ sizeof(l_stt) + sizeof(l_srvc_tax) + sizeof(l_tran_chrg) + sizeof(l_sebi_tt) + sizeof(l_stamp_duty); **** ver 1.1 moved  before alloc */
+			
+		i_cnt=0;	/** ver 1.1 **/
+	for ( ; ; )
+  {
+			l_stt=0;
+			l_srvc_tax=0;
+			l_sebi_tt=0;
+			l_tran_chrg=0;
+			l_stamp_duty=0;
+			l_taxes=0;
+ 			d_value=0.0;
+
+			EXEC SQL FETCH :sys_cursor
+				into  :c_mtch_accnt_no,
+              :c_xchng_cd,
+							:c_product_typ,
+							:c_indstk,
+							:c_underlying,
+							:c_exp_date,
+							:c_exrc_typ,
+							:c_opt_typ,
+							:l_strk_prc,
+							:c_ordr_rfrnc,
+							:c_trd_date,
+							:l_exctd_qty,
+							:l_exctd_rt,
+							:l_brkg_val,
+              :l_stt,
+							:l_srvc_tax,
+							:l_sebi_tt,
+							:l_tran_chrg,
+							:l_stamp_duty,
+              :c_trade_flow;
+       
+		if ( SQLCODE != 0 )
+    {
+    	if ( SQLCODE == NO_DATA_FOUND )
+    	{
+				fn_userlog( c_ServiceName, "No data found in main FETCH. Or all records Fetched");
+				break;
+			}
+			else
+			{
+				fn_errlog( c_ServiceName, "S31060", SQLMSG, c_errmsg.arr  ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+   			EXEC SQL CLOSE :sys_cursor;
+   			EXEC SQL FREE :sys_cursor;
+   			tpfree ( ( char * ) ptr_fml_Obuf );
+   			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );		 /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+			}
+		}
+		i_cnt++;	/** ver 1.1 **/
+	 	SETNULL(c_exp_date);
+   	SETNULL(c_trd_date);
+
+		l_taxes =l_stt + l_srvc_tax  +l_sebi_tt + l_tran_chrg + l_stamp_duty;
+		d_value=(double) l_exctd_qty*l_exctd_rt;
+		if(DEBUG_MSG_LVL_5)
+		{ 
+			fn_userlog(c_ServiceName,"match account:%s:",c_mtch_accnt_no);
+    	fn_userlog(c_ServiceName,"product type :%c:",c_product_typ);
+		  fn_userlog(c_ServiceName,"Xchng code :%s:",c_xchng_cd);
+		  fn_userlog(c_ServiceName,"Order reference no :%s:",c_ordr_rfrnc);
+		  fn_userlog(c_ServiceName,"Expry date      :%s:",c_exp_date.arr);
+		  fn_userlog(c_ServiceName,"Exer type      :%c:",c_exrc_typ);
+		  fn_userlog(c_ServiceName,"Opt type       :%c:",c_opt_typ);
+			fn_userlog(c_ServiceName,"Trade date     :%s:",c_trd_date.arr);   
+			fn_userlog(c_ServiceName,"Trade Flow     :%c:",c_trade_flow);
+			fn_userlog(c_ServiceName,"Strike price   :%ld:",l_strk_prc);
+			fn_userlog(c_ServiceName,"Executed Qty   :%ld:",l_exctd_qty);
+			fn_userlog(c_ServiceName,"Brokrege Value :%ld:",l_brkg_val);
+			fn_userlog(c_ServiceName,"Total Charges + BRKG          :%ld:",l_taxes);
+			fn_userlog(c_ServiceName,"Underlying     :%s:",c_underlying);
+			fn_userlog(c_ServiceName,"l_stt          :%ld:",l_stt);
+			fn_userlog(c_ServiceName,"l_srvc_tax          :%ld:",l_srvc_tax);
+			fn_userlog(c_ServiceName,"l_sebi_tt          :%ld:",l_sebi_tt);
+			fn_userlog(c_ServiceName,"l_tran_chrg          :%ld:",l_tran_chrg);
+			fn_userlog(c_ServiceName,"l_stmp_duty          :%ld:",l_stamp_duty);
+      fn_userlog(c_ServiceName,"d_value             :%lf:",d_value);
+		}
+		 
+	 	if ( Funused32( ptr_fml_Obuf ) < Fneeded32( 1, l_bufferlength) )
+    {
+			if(DEBUG_MSG_LVL_3)
+			{ 
+				fn_userlog(c_ServiceName,"Inside Unused count :%d: and rows fetched:%d:",i_counter,i_cnt);		/** Ver 1.1 **/
+			}
+      i_counter++;
+
+      /*** Below Log added in Ver 1.4 ***/
+      if(DEBUG_MSG_LVL_1)
+      {
+        fn_userlog(c_ServiceName,"ISEC Before TPREALLOC");
+      }
+
+      /*ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf,i_counter * (MIN_FML_BUF_LEN +2048) ); ** ver 1.1 comment**/
+      /**ptr_fml_Obuf = (FBFR32 *)tprealloc((char *)ptr_fml_Obuf,i_counter * l_bufferlength);	** ver 1.1 ** Commented in Ver 1.6 ***/
+
+			ptr_fml_Obuf = (FBFR32 *)tprealloc((char *)ptr_fml_Obuf, Fsizeof32(ptr_fml_Obuf) + i_counter * l_bufferlength);	/*** Ver 1.6 ***/	
+
+		 	if ( ptr_fml_Obuf == NULL )
+      {
+        fn_errlog( c_ServiceName, "S31065", TPMSG, c_errmsg.arr  ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+        EXEC SQL CLOSE :sys_cursor;
+        EXEC SQL FREE :sys_cursor;
+   			tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );  /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+     
+      /*** Below Log added in Ver 1.4 ***/
+      if(DEBUG_MSG_LVL_1)
+      {
+        fn_userlog(c_ServiceName,"ISEC After TPREALLOC");
+      }
+  
+		}
+
+		i_err[0]  = Fadd32(ptr_fml_Obuf,FFO_EBA_MTCH_ACT_NO ,(char *)c_mtch_accnt_no,0);
+		i_err[1]  = Fadd32(ptr_fml_Obuf,FFO_PRDCT_TYP ,(char *)&c_product_typ,0);
+		i_err[2]  = Fadd32(ptr_fml_Obuf,FFO_XCHNG_CD ,(char *)c_xchng_cd,0);
+		i_err[3]  = Fadd32(ptr_fml_Obuf,FFO_ORDR_RFRNC ,(char *)c_ordr_rfrnc,0);
+		i_err[4]  = Fadd32(ptr_fml_Obuf,FFO_EXPRY_DT ,(char *)c_exp_date.arr,0);
+		i_err[5]  = Fadd32(ptr_fml_Obuf,FFO_EXER_TYP ,(char *)&c_exrc_typ,0);
+		i_err[6]  = Fadd32(ptr_fml_Obuf,FFO_OPT_TYP ,(char *)&c_opt_typ,0);
+		i_err[7]  = Fadd32(ptr_fml_Obuf,FFO_TRD_DT ,(char *)c_trd_date.arr,0);
+		i_err[8]  = Fadd32(ptr_fml_Obuf,FFO_TRD_FLW ,(char *)&c_trade_flow,0);
+		i_err[9]  = Fadd32(ptr_fml_Obuf,FFO_STRK_PRC ,(char *)&l_strk_prc,0);
+		i_err[10] = Fadd32(ptr_fml_Obuf,FFO_EXEC_QTY ,(char *)&l_exctd_qty,0);
+		i_err[11] = Fadd32(ptr_fml_Obuf,FFO_BRKRG_VL ,(char *)&l_brkg_val,0);
+    i_err[12] = Fadd32(ptr_fml_Obuf,FFO_UNDRLYNG ,(char *)c_underlying,0); 
+    i_err[13] = Fadd32(ptr_fml_Obuf,FFO_EXCTD_RT,(char *)&l_exctd_rt,0);
+    i_err[14] = Fadd32(ptr_fml_Obuf,FFO_INSTRMNT_TYP,(char *)&c_indstk,0) ;
+    i_err[15] = Fadd32(ptr_fml_Obuf,FFO_RTN_STTS,(char *)&l_stt,0);    
+   	i_err[16] = Fadd32(ptr_fml_Obuf,FFO_LOW_PRC,(char *)&l_srvc_tax,0) ;
+ 		i_err[17] = Fadd32(ptr_fml_Obuf,FFO_STLMNT_PRC,(char *)&l_stamp_duty,0) ;
+ 		i_err[18] = Fadd32(ptr_fml_Obuf,FFO_AVRG_TRD_PRC,(char *)&l_sebi_tt,0) ; 
+ 		i_err[19] = Fadd32(ptr_fml_Obuf,FFO_HGH_INDX_VAL,(char *)&l_tran_chrg,0) ; 
+ 	  i_err[20] = Fadd32(ptr_fml_Obuf,FFO_FRS_BRKG,(char *)&l_taxes,0) ;
+    i_err[21] = Fadd32(ptr_fml_Obuf,FFO_AMOUNT,(char *)&d_value,0) ;     
+
+	 	for(i=0;i<22;i++)
+		{
+			if(i_err[i] == -1)
+    	{
+    		fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i);
+     	  fn_errlog( c_ServiceName, "S31070", FMLMSG, c_errmsg.arr  ); /*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+ 				EXEC SQL CLOSE :sys_cursor;
+ 				EXEC SQL FREE :sys_cursor;
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg.arr, 0 );		/*** VQC Changed from c_errmsg to c_errmsg.arr ***/
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    }
+  }
+
+  /*** Below Log added in Ver 1.4 ***/
+  if(DEBUG_MSG_LVL_1)
+  {
+   fn_userlog(c_ServiceName,"ISEC SFO_CLSOUT_DTLS Service Ends");
+  }
+
+ 	EXEC SQL CLOSE :sys_cursor;
+ 	EXEC SQL FREE :sys_cursor;
+ 	tpfree ( ( char * ) ptr_fml_Ibuf );
+  tpreturn(TPSUCCESS, 0, (char *)ptr_fml_Obuf, 0, 0 );
+}

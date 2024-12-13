@@ -1,0 +1,345 @@
+/***********************************************************************************/
+/* Program           : SFO_PAYOFF                                                  */
+/*                                                                                 */
+/* Input             :                                                             */
+/*                                                                                 */
+/* Output            :  FFO_JIFFY                                                  */
+/*                      FFO_RATE                                                   */
+/*                                                                                 */
+/* Description       : This service calculates expected profit and loss values for */
+/*                     a strategy with multiple or single leg                      */
+/*                                                                                 */
+/* Log               : 1.0   Ravindra Panda | ISEC | 15-Mar-2022                   */
+/* 									 : 1.1   Ravindra Panda | ISEC | 04-Apr-2022									 */
+/***********************************************************************************/
+/* 1.0    -  New Release ( CR-ISEC14-150651 : One Click Derivatives )              */
+/* 1.1		-	 Minor Changes																												 */
+/***********************************************************************************/
+
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo_view_def.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_session.h>
+#include <fn_pos.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+
+void SFO_PAYOFF(TPSVCINFO * rqst)
+{
+	int     i_tot_leg = 0;    // Total number of legs
+
+  char    c_ServiceName[33];
+  char    c_err_msg[256];
+
+  int     i = 0;
+  int     i_err[7];
+  int     i_ferr[7];
+  int     i_lcnt = 0;       // Looping variable for leg count
+  int     i_fut_count = 0;  // Variable to store number of future legs in a strategy
+	int			i_fut = 0;        // Variable to indicate presence of future contract in a strategy
+	int     i_opt = 0;        // Variable to indicate presence of options contract in a strategy
+  int     i_opt_count = 0;  // Variable to store number of options legs in a strategy
+  int     i_cnt = 0;
+
+	double 	d_recmnd_prc = 0.0;
+	double  d_target_prc = 0.0;
+  double  d_sltp_prc = 0.0;
+  double  d_expctd_prft = 0.0;
+  double  d_expctd_loss = 0.0;
+  double  d_profit = 0.0;
+  double  d_loss = 0.0;
+  double  d_avg_all_legs = 0.0;
+  double  d_leg_be = 0.0;
+	double  d_lot_size = 0.0;
+
+	long  l_lot_size = 0;
+
+	/* tuxedo variables */
+  FBFR32 *ptr_fml_Ibuf; /* pointer to FML input */
+  FBFR32 *ptr_fml_Obuf; /* pointer to FML output */
+
+  ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+  fn_userlog(c_ServiceName, "---------- Service %s starts -----------", c_ServiceName);
+
+	INITBATDBGLVL(c_ServiceName);
+
+  /* Fetching total number of legs */
+  i_tot_leg = Foccur32((FBFR32 * ) ptr_fml_Ibuf, FFO_STRIKE_PRC);
+	if( DEBUG_MSG_LVL_0 )
+  	fn_userlog(c_ServiceName, "Total number of legs is :%d", i_tot_leg);
+
+	/************************ Declaring arrays used in code ******************************************/
+  char    c_leg_typ[i_tot_leg] ;    // Each leg type i.e; future, call, put
+
+  long    l_leg_qty[i_tot_leg] ;    // Quatity traded in each leg
+
+  double  d_leg_strk[i_tot_leg];    // Strike price of each leg
+  double  d_leg_prem[i_tot_leg] ;   // Premium paid for each leg
+  double  d_leg_cls_prc[i_tot_leg] ;  // Closing price of each leg
+  double  d_recmnd_to[i_tot_leg];      // Recommended to price for each leg
+  double  d_recmnd_from[i_tot_leg];    // Recommended From price for each leg
+  double  d_recmnd_avg[i_tot_leg];    // Recommended price average
+  /************************ Array declaration ends here *******************************************/
+
+	/* fetching Target and Stoploss Trigger Price for the Stratergy */
+  if( DEBUG_MSG_LVL_0 )
+		fn_userlog(c_ServiceName, "fetching Target and Stoploss Trigger Price for the Stratergy");
+
+  i_err[0] = Fget32(ptr_fml_Ibuf, FFO_BASE_ORD_VAL, 0, (char *)&d_target_prc, 0);
+  i_ferr[0] = Ferror32;
+  i_err[0] = Fget32(ptr_fml_Ibuf, FFO_ADD_MRGN_AMT, 0, (char *)&d_sltp_prc, 0);
+  i_ferr[0] = Ferror32;
+
+  for ( i_cnt = 0; i_cnt < 2; i_cnt++ )
+  {
+    if (i_err[i_cnt] == -1)
+    {
+      fn_errlog(c_ServiceName, "S31005", Fstrerror32(i_ferr[0]),c_err_msg);
+      fn_userlog(c_ServiceName, "Unable to fget Target and SLTP price.");
+      Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+      tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+    }
+  }
+	if( DEBUG_MSG_LVL_0 )
+	{
+  	fn_userlog(c_ServiceName, "Retreived Target price for the strategy is:%lf",d_target_prc);
+  	fn_userlog(c_ServiceName, "Retreived StopLoss Trigger price for the strategy is:%lf",d_sltp_prc);
+	}
+
+	/* Fetching leg details */
+  for ( i_lcnt=0; i_lcnt<i_tot_leg; i_lcnt++ )
+  {
+    i_err[1] = Fget32(ptr_fml_Ibuf, FFO_ORD_TYP , i_lcnt, (char * ) &c_leg_typ[i_lcnt], 0);
+    i_ferr[1] = Ferror32;
+    i_err[2] = Fget32(ptr_fml_Ibuf, FFO_STRIKE_PRC, i_lcnt, (char * ) &d_leg_strk[i_lcnt], 0);
+    i_ferr[2] = Ferror32;
+    i_err[3] = Fget32(ptr_fml_Ibuf, FFO_AMOUNT , i_lcnt, (char * ) &d_leg_prem[i_lcnt], 0);
+    i_ferr[3] = Ferror32;
+    i_err[4] = Fget32(ptr_fml_Ibuf, FFO_TOT_QTY_TRDD, i_lcnt, (char * ) &l_leg_qty[i_lcnt], 0);
+    i_ferr[4] = Ferror32;
+    i_err[5] = Fget32(ptr_fml_Ibuf, FFO_PSTN_AMT_BLKD, i_lcnt, (char * ) &d_recmnd_from[i_lcnt], 0);
+    i_ferr[5] = Ferror32;
+    i_err[6] = Fget32(ptr_fml_Ibuf, FFO_ADDL_AMT_BLKD, i_lcnt, (char * ) &d_recmnd_to[i_lcnt], 0);
+    i_ferr[6] = Ferror32;
+
+    for (i_cnt = 1; i_cnt < 7 ; i_cnt++)
+    {
+      if (i_err[i_cnt] == -1)
+      {
+        fn_errlog(c_ServiceName, "S31010", Fstrerror32(i_ferr[i_cnt]), c_err_msg);
+        fn_userlog(c_ServiceName, "Unable to fget :%d:", i_cnt);
+        Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+        tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+      }
+    }
+
+		if ( c_leg_typ[i_lcnt] == 'F' )
+		{
+      i_fut_count = i_fut_count + 1;
+			i_fut = 1;
+		}
+    else if ( c_leg_typ[i_lcnt] == 'P' || c_leg_typ[i_lcnt] == 'C' )
+		{	
+      i_opt_count = i_opt_count + 1;
+			i_opt = 1;
+		}
+
+    d_recmnd_avg[i_lcnt] = ( d_recmnd_from[i_lcnt] + d_recmnd_to[i_lcnt] )/2;
+
+		/*** Recommended price in case of multiple only future or multiple only option legs = avrg_recmd_leg1 (+/-) avrg_recmd_leg2 (+/-) avg_recmd_leg3 ....... (+/-) avr_recmd_last_leg [+ = for buy and - = for sell] ***/
+
+		if ( l_leg_qty[i_lcnt] > 0)
+		{
+    	d_avg_all_legs = d_avg_all_legs + d_recmnd_avg[i_lcnt];
+			l_lot_size = l_leg_qty[i_lcnt];
+		}
+		else if ( l_leg_qty[i_lcnt] < 0 )
+		{
+			d_avg_all_legs = d_avg_all_legs - d_recmnd_avg[i_lcnt];
+			l_lot_size = (-1)*l_leg_qty[i_lcnt];
+		}
+
+		if( DEBUG_MSG_LVL_0 )
+		{
+    	fn_userlog(c_ServiceName, "Retreived details for leg number :%d: is",i_lcnt+1);
+    	fn_userlog(c_ServiceName, "----------------------------------------------------------------------------------------");
+    	fn_userlog(c_ServiceName, "Fetched values of leg_typ is :%c:",c_leg_typ[i_lcnt]);
+    	fn_userlog(c_ServiceName, "Fetched value of strike pice is :%lf:",d_leg_strk[i_lcnt]);
+    	fn_userlog(c_ServiceName, "Fetched value of premium for this leg is :%lf:",d_leg_prem[i_lcnt]);
+    	fn_userlog(c_ServiceName, "Fetched value of quatity for the leg is :%ld:",l_leg_qty[i_lcnt]);
+    	fn_userlog(c_ServiceName, "Fetched value of Recommened from  price for the leg is :%lf:",d_recmnd_from[i_lcnt]);
+    	fn_userlog(c_ServiceName, "Fetched value of Recommened to price for the leg is :%lf: ",d_recmnd_to[i_lcnt]);
+    	fn_userlog(c_ServiceName, "Fetched value of Recommened average price for the leg is :%lf:",d_recmnd_avg[i_lcnt]);
+    	fn_userlog(c_ServiceName, "----------------------------------------------------------------------------------------");
+  	}
+	}
+
+	/*** Added in Ver 1.1 ***/
+
+	if ( d_avg_all_legs < 0 )
+		d_avg_all_legs = (-1)*d_avg_all_legs;
+	else
+		d_avg_all_legs = d_avg_all_legs;
+
+	/*** Ver 1.1 ends here ***/
+
+	fn_userlog(c_ServiceName, "Lot size is :%ld:",l_lot_size);
+	fn_userlog(c_ServiceName, "Average recommended price for strategy is :%lf:",d_avg_all_legs);
+
+	d_lot_size = (double)(l_lot_size);
+
+	/*********** Strategy with only OPTIONS leg or only FUTURES leg ************/
+	if ( (i_fut == 0 && i_opt == 1) || (i_fut == 1 && i_opt == 0) )
+  {
+		if ( i_opt_count == 1 || i_fut_count == 1 )
+    {
+
+			if ( d_recmnd_avg[0] < 0 )
+				d_recmnd_avg[0] = (-1)*d_recmnd_avg[0];
+			
+			/*** For streategies with only 1 Options/Future leg, expected profit = Target - Recommended Price ***
+			 *** and expected loss = Recommended Price - SLTP ***/
+			
+			//if( DEBUG_MSG_LVL_0 )
+    		fn_userlog(c_ServiceName, "****** Inside only Future/Option strategy ******");		
+
+			d_expctd_prft = (d_target_prc - d_recmnd_avg[0])*d_lot_size;
+			d_expctd_loss = (d_recmnd_avg[0] - d_sltp_prc)*d_lot_size;
+		}
+		else if ( i_opt_count > 1 || i_fut_count > 1)
+		{
+			/*** For strategies with more than 1 Options/Future legs, expected profit = (Target - Recommended Price)*lot size ***
+		 	 *** expected loss = (Recommended Price - SLTP)*lot size ***/
+
+			//if( DEBUG_MSG_LVL_0 )
+        fn_userlog(c_ServiceName, "****** Inside multiple only Future/Option legs strategy ******");
+	
+				d_expctd_prft = (d_target_prc - d_avg_all_legs)*d_lot_size; 
+				d_expctd_loss = (d_avg_all_legs - d_sltp_prc)*d_lot_size;
+		}
+	}
+
+	/*********** Strategy having both, i.e; FUTURE and OPTION leg **************/
+	if ( i_fut == 1 && i_opt == 1 )
+  {
+
+		//if( DEBUG_MSG_LVL_0 )
+        fn_userlog(c_ServiceName, "****** Inside Future + Option strategy ******");
+
+    for ( i_lcnt=0; i_lcnt<i_tot_leg; i_lcnt++ )
+    {
+      d_leg_be = 0.0;
+      d_profit = 0.0;
+      d_loss = 0.0;
+
+      switch(c_leg_typ[i_lcnt])
+      {
+        case 'F':
+          d_leg_be = d_recmnd_avg[i_lcnt];
+          d_profit = (d_target_prc - d_leg_be) * (l_leg_qty[i_lcnt]);
+          d_loss = (d_sltp_prc - d_leg_be) * l_leg_qty[i_lcnt];
+          break;
+				case 'P':
+          d_leg_be = d_leg_strk[i_lcnt] - d_recmnd_avg[i_lcnt];
+          if ( d_target_prc >= d_leg_strk[i_lcnt] )
+            d_profit = d_recmnd_avg[i_lcnt] * l_leg_qty[i_lcnt]*(-1);
+          else
+            d_profit = ( d_leg_be - d_target_prc) * l_leg_qty[i_lcnt];
+
+          if ( d_sltp_prc >= d_leg_strk[i_lcnt] )
+            d_loss = d_recmnd_avg[i_lcnt] * l_leg_qty[i_lcnt] * (-1);
+          else
+            d_loss = ( d_leg_be - d_sltp_prc) * l_leg_qty[i_lcnt];
+          break;
+
+        case 'C':
+          d_leg_be = d_leg_strk[i_lcnt] + d_recmnd_avg[i_lcnt];
+          if ( d_target_prc > d_leg_strk[i_lcnt] )
+            d_profit = ( d_target_prc - d_leg_be ) * l_leg_qty[i_lcnt];
+          else
+            d_profit = d_recmnd_avg[i_lcnt] * l_leg_qty[i_lcnt] * (-1);
+
+          if ( d_sltp_prc > d_leg_strk[i_lcnt] )
+            d_loss = ( d_sltp_prc - d_leg_be ) * l_leg_qty[i_lcnt];
+          else
+            d_loss = d_recmnd_avg[i_lcnt] * l_leg_qty[i_lcnt] * (-1);
+          break;
+      }
+		  d_expctd_prft = d_expctd_prft + d_profit;
+      d_expctd_loss = d_expctd_loss + d_loss;
+
+			if( DEBUG_MSG_LVL_0 )
+  		{
+				fn_userlog(c_ServiceName,"---- Profit and loss values for leg number ::%d: is ----",i_lcnt+1);
+				fn_userlog(c_ServiceName,"Leg be value is :%lf:",d_leg_be);
+				fn_userlog(c_ServiceName," Profit value is :%lf:",d_profit);
+				fn_userlog(c_ServiceName,"Loss value is :%lf:",d_loss);
+				fn_userlog(c_ServiceName,"---------------------------------------------------------------");
+			}		
+    }
+  }
+
+	/*** Added in Ver 1.1 ***/
+
+	if ( d_expctd_prft > 0)
+    d_expctd_prft = d_expctd_prft;
+  else
+    d_expctd_prft = d_expctd_prft * (-1);
+
+	if ( d_expctd_loss > 0)
+    d_expctd_loss = d_expctd_loss;
+  else
+    d_expctd_loss = d_expctd_loss * (-1);
+	
+	/*** ver 1.1 ends here ***/
+
+	if( DEBUG_MSG_LVL_0 )
+	{
+		fn_userlog(c_ServiceName,"---******Profit value passed is *******--- :%lf:",d_expctd_prft);
+  	fn_userlog(c_ServiceName,"---******loss value is*******--- :%lf:",d_expctd_loss);
+	}
+
+  /* Allocating memory to output-buffer */
+  ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN * 10 );
+  if ( ptr_fml_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31015", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+	if( DEBUG_MSG_LVL_0 )
+  	fn_userlog(c_ServiceName,"Memory allocated to output-buffer");
+
+  i_err[0] = Fadd32(ptr_fml_Obuf, FFO_JIFFY, (char *)&d_expctd_loss, 0);
+  i_err[1] = Fadd32(ptr_fml_Obuf, FFO_RATE, (char *)&d_expctd_prft, 0);
+  for(i_cnt=0;i_cnt<2;i_cnt++)
+  {
+    if(i_err[i_cnt] == -1)
+    {
+      fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i_cnt);
+      fn_errlog( c_ServiceName, "S31020", FMLMSG, c_err_msg  );
+      tpfree ( ( char * ) ptr_fml_Obuf );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }
+
+	if( DEBUG_MSG_LVL_0 )
+	{
+  	fn_userlog(c_ServiceName, "PayOff values moved to output buffer successfully");
+  	fn_userlog(c_ServiceName,"Service %s complete successfully...", c_ServiceName);
+  }
+
+	tpreturn(TPSUCCESS, 0L, (char *)ptr_fml_Obuf, 0L, 0);
+} //Main function definition ends here

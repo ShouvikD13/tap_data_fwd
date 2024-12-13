@@ -1,0 +1,449 @@
+/*  Program           : SFO_PLG_BAL                                           */
+/*                                                                            */
+/*  Input            :  FFO_STCK_CD                                           */
+/*                      FFO_EXPRY_DT                                          */
+/*											FFO_EBA_MTCH_ACT_NO																		*/
+/*                                                                            */
+/*  Output            : FFO_ERR_MSG																						*/ 
+/*                                                                            */
+/*  Description        : This service will be called by a batch program       */
+/*                       to get open positon of a client as of given date     */ 
+/*                       for a particular stock.                              */
+/*                                                                            */
+/*  Log               : 1.0   12-May-2006   Infotech|Vidyayini Krish          */
+/*                    : 1.1   22-Aug-2007   Infotech|Vidyayini Krish          */
+/*                    : 1.2   17-Dec-2007   Infotech|Vidyayini Krish          */
+/*                    : 1.3   21-Aug-2009   Infotech|Vidyayini Krish          */
+/*                    : 1.4   13-Dec-2010   Infotech|Swati.A.B                */
+/*                                                                            */
+/******************************************************************************/
+/*   1.0  -  New release                                                      */
+/*   1.1  -  Changes for picking up data from tifp qty than plg_vs_wd_qty     */
+/*   1.2  -  Changed for IBM                                                  */
+/*   1.3  -  Bug Fix CRCSN35185                                               */   
+/*   1.4  -  2010-0123-Policy-Operationalisation of New Depository System     */
+/*         - (DPM number size change from 10 to 14 )                          */
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <userlog.h>
+#include <fml32.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h> /* Ver 1.2 */ 
+#include <string.h> /* Ver 1.2 */
+#include <fn_read_debug_lvl.h> /* Ver 1.2 */
+
+EXEC SQL INCLUDE "table/ptd_tifp_dtls.h";
+EXEC SQL INCLUDE "table/dbd_dp_blck_dtls.h";
+/*EXEC SQL INCLUDE "table/mcc_mtch_corp_coll.h"; */
+
+void SFO_PLG_BAL(TPSVCINFO *rqst)
+{
+	int i_returncode;
+	int i_trnsctn=0;
+	int i_err[12];
+	int i_ferr[12];
+	int i_cnt;
+	int i_counter=1;
+	char c_ServiceName[33];
+	char c_err_msg[256 + 1];
+	char c_msg[256];
+	char c_stck_cd[7];
+	char c_match_nmbr[11];
+	char c_dp_id[9];
+	char c_dp_clnt_id[9];
+	char c_record_dt[LEN_DATE];
+	char c_plg_allwd_flg;
+	FBFR32 *ptr_fml_Ibuf;
+
+	int i_count;
+	int flag=0;
+	/**long l_temp_dpm;--commented for ver 1.4 **/
+
+	double d_temp_dpm=0.0; /** ver 1.4 **/
+	long l_sum;
+	long l_pvwq;
+	long l_ptq;
+	long l_req_val;
+	long l_dbd_tifp_qty=0;
+	char c_temp_date[LEN_DATE];
+
+	ptr_fml_Ibuf=(FBFR32 *)rqst->data;
+	strcpy(c_ServiceName,rqst->name);
+	INITDBGLVL(c_ServiceName);
+
+	/**  Get the input parameters from Input buffer **/
+
+	i_err[0]=Fget32(ptr_fml_Ibuf,FFO_STCK_CD,0,c_stck_cd,0);
+	i_ferr[0]=Ferror32;
+	i_err[1]=Fget32(ptr_fml_Ibuf,FFO_EXPRY_DT,0,c_record_dt,0);
+	i_ferr[1]=Ferror32;
+	i_err[2]=Fget32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO,0,c_match_nmbr,0);
+	i_ferr[2]=Ferror32;
+	i_err[3]=Fget32(ptr_fml_Ibuf,FFO_DPID,0,c_dp_id,0);
+  i_ferr[3]=Ferror32;
+	i_err[4]=Fget32(ptr_fml_Ibuf,FFO_CLNT_DPID,0,c_dp_clnt_id,0);
+	i_ferr[4]=Ferror32;
+
+	for(i_cnt=0;i_cnt<5;i_cnt++)
+	{
+ 			if(i_err[i_cnt]==-1)
+	  	{
+				fn_errlog(c_ServiceName,"S31005",Fstrerror32(i_ferr[i_cnt]),c_err_msg);
+    		fn_userlog(c_ServiceName,"Error at Field Number %d",i_cnt);
+				Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_err_msg,0);
+				tpreturn(TPFAIL,0L,(char*)ptr_fml_Ibuf,0,0);
+	  	}
+	}
+
+	EXEC SQL 
+       SELECT stk_plg_allwd
+	     INTO   :c_plg_allwd_flg
+	     FROM   stk_stk_mstr 
+	     WHERE  stk_stck_cd = :c_stck_cd;
+
+	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+		 fn_errlog( c_ServiceName, "S31010",SQLMSG,c_err_msg);
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if(SQLCODE == NO_DATA_FOUND)
+	{
+	  fn_errlog( c_ServiceName, "S31015",SQLMSG,c_err_msg);
+		fn_userlog( c_ServiceName, "Pledge allowed flag does not have any value in stock master");
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if(c_plg_allwd_flg != 'R')
+	{
+    fn_userlog( c_ServiceName, "Stock is not in revaluation mode in stock master");
+		strcpy(c_err_msg,"Stock not in revaluation mode");
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }	
+
+	fn_userlog(c_ServiceName,"c_stck_cd:%s:" ,c_stck_cd);
+	fn_userlog(c_ServiceName,"c_record_dt:%s:" ,c_record_dt);
+	fn_userlog(c_ServiceName,"c_match_nmbr:%s:",c_match_nmbr);
+	fn_userlog(c_ServiceName,"c_dp_id:%s:",c_dp_id);
+	fn_userlog(c_ServiceName,"c_dp_clnt_id:%s:",c_dp_clnt_id);
+
+	/** Begin Transaction **/
+
+ 	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+ 	if ( i_trnsctn == -1 )
+ 	{
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    fn_errlog( c_ServiceName, "S31020",LIBMSG,c_err_msg);
+	  fn_userlog(c_ServiceName,"Could not begin transaction properly");
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 	}
+
+	EXEC SQL 
+       DELETE 
+		   FROM   mcc_mtch_corp_coll 
+	     WHERE  trunc(mcc_sys_dt) = to_date(:c_record_dt,'DD-MON-YYYY') 
+	     AND    mcc_stck_cd = :c_stck_cd 
+	     AND    mcc_clm_mtch_accnt = :c_match_nmbr
+	     AND    mcc_dp_id = :c_dp_id
+	     AND    mcc_dp_clnt_id = :c_dp_clnt_id
+	     AND    mcc_prcsd_flg = 'N';
+
+ 	if((SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND)) 
+  {
+     fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg  );
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+	   fn_userlog(c_ServiceName,"Failed to delete from MCC_MTCH_CORP_COLL ");	
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if(SQLCODE == NO_DATA_FOUND)
+	{
+		fn_userlog(c_ServiceName,"No records found in MCC");
+	}
+
+	/** Select those pledges on which withdraw or invoke have happened before record date
+    	for the given Match Account number **/
+
+	/**  PBT_PLG_BAL_TEMP is a temporary table for storing data **/
+
+	EXEC SQL 
+       DELETE 
+			 FROM   pbt_plg_bal_temp;
+
+ 	if((SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND)) 
+  {
+     fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		 fn_userlog(c_ServiceName,"Failed to delete from Temporary table PBT_PLG_BAL_TEMP");
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+	
+	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_userlog(c_ServiceName,"Finding open pledges as of record date commit aborted");
+    fn_errlog( c_ServiceName, "S31035", TPMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  }
+
+ 	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+ 	if ( i_trnsctn == -1 )
+ 	{
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    fn_errlog( c_ServiceName, "S31040",LIBMSG,c_err_msg);
+	  fn_userlog(c_ServiceName,"Could not begin transaction properly");
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	SQLCODE = 0;
+
+	EXEC SQL 
+			 INSERT INTO pbt_plg_bal_temp
+       (
+          pbt_dpm_nmbr,
+					pbt_wisum
+       )
+       SELECT
+              ptd_dpm_nmbr,
+							ptd_tifp_qty
+       FROM   ptd_tifp_dtls
+       WHERE  ptd_plg_rev_typ = 'P'
+       AND    ptd_leg_no = 'L5'
+       AND    ptd_tifp_stts = 'P'
+       AND    ptd_stck_cd = :c_stck_cd
+       AND    trunc(PTD_EXCTN_DT) <= to_date(:c_record_dt,'dd-Mon-YYYY')
+       AND    ptd_clm_mtch_accnt = :c_match_nmbr
+       AND    ptd_dp_id = :c_dp_id
+       AND    ptd_dp_clnt_id = :c_dp_clnt_id;
+
+  if((SQLCODE !=0) && (SQLCODE != NO_DATA_FOUND))  
+  {
+     fn_errlog( c_ServiceName, "S31045", SQLMSG, c_err_msg  );
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		 fn_userlog(c_ServiceName,"Selection of distinct DPM_NMBR and SUM failed");
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if(SQLCODE == NO_DATA_FOUND)
+	{
+		fn_userlog(c_ServiceName,"No records inserted in PBT table");
+	}
+
+
+	i_count =0;
+	EXEC SQL
+       SELECT count(*)
+       INTO   :i_count
+       FROM   pbt_plg_bal_temp;
+
+	if(SQLCODE != 0)
+	{
+  		fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg  );
+     	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+     	fn_userlog(c_ServiceName,"Counting of number of records failed");
+     	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	fn_userlog(c_ServiceName,"COUNT= %d",i_count);		
+
+
+	/** For each of the above selected records do the following **/
+
+
+	for(i_counter=1;i_counter <= i_count ;i_counter++)
+	{
+
+		EXEC SQL
+		     SELECT  NVL(pbt_dpm_nmbr,0) 
+		     INTO    :d_temp_dpm    /** ver 1.4 --changed from l_temp_dpm to d_temp_dpm **/ 
+		     FROM    pbt_plg_bal_temp 
+		     WHERE   rownum<2;
+
+  	if(SQLCODE !=0 )
+  	{
+   	 	fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+   		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+ 			fn_userlog(c_ServiceName,"No more data available");
+   		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+
+
+		/**   Find the withdraw and invoke over that DPM number **/
+
+		EXEC SQL
+				 SELECT NVL(SUM( ptd_tifp_qty ),0) /*  Ver 1.1 Changed from ptd_plg_vs_wd_qty to ptd_tifp_qty */
+								INTO :l_sum
+                FROM ptd_tifp_dtls
+                WHERE  ptd_plg_rev_typ in ('W','I')
+                AND  ptd_stck_cd = :c_stck_cd
+                AND trunc(PTD_EXCTN_DT)  <=  to_date(:c_record_dt,'dd-Mon-YYYY')
+                AND ptd_clm_mtch_accnt = :c_match_nmbr
+                AND ptd_tifp_stts = 'P'
+                AND ptd_leg_no in ('W3','I3')
+                AND ptd_dp_id = :c_dp_id
+                AND ptd_dp_clnt_id = :c_dp_clnt_id
+                AND ptd_dpm_nmbr = :d_temp_dpm;    /** ver 1.4 --changed from l_temp_dpm to d_temp_dpm **/
+
+		if(SQLCODE !=0  && SQLCODE != NO_DATA_FOUND)
+ 		{
+ 			fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg  );
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+  		fn_userlog(c_ServiceName,"Could not select sum of withdraw and invokation from PTD_TIFP_DTLS table");
+    	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 		}
+
+		if(SQLCODE == NO_DATA_FOUND)
+		{
+			fn_userlog(c_ServiceName,"No Withdraw or Invoke have happened on it");
+			l_sum = 0;
+		}
+	
+		EXEC SQL
+		     SELECT pbt_wisum 
+		     INTO   :l_ptq 
+		     FROM   pbt_plg_bal_temp 
+		     WHERE  pbt_dpm_nmbr=:d_temp_dpm;       /** ver 1.4 --changed from l_temp_dpm to d_temp_dpm **/
+
+		if(SQLCODE !=0 )
+  	{
+   		fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg  );
+   		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			fn_userlog(c_ServiceName,"Could not get PTD_TIFP_QTY from PBT");
+   		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+
+	  if(DEBUG_MSG_LVL_3){	
+		fn_userlog(c_ServiceName,"SUM= :%d:",l_sum);
+		}
+
+    /* The following query checks to see if pledge  is
+       open as of record date  for the given Match Account */
+
+		EXEC SQL
+		     SELECT 1 
+		     INTO   :flag 
+		     FROM   dual 
+		     WHERE  (:l_ptq - :l_sum) > 0;
+
+		if(flag == 1)
+		{
+
+      /** Insert the values for the open records as of record date into MCC_MTCH_CORP_COLL table **/
+
+		  fn_userlog(c_ServiceName,"The dpm nmbr is [%lf] and open qty is [%ld]",d_temp_dpm,l_req_val);
+																									  /** ver 1.4 --changed from l_temp_dpm to d_temp_dpm **/															
+
+		  EXEC SQL
+		  INSERT INTO mcc_mtch_corp_coll 
+		  (
+							mcc_clm_mtch_accnt, 
+							mcc_xchng_cd, 
+							mcc_stck_cd, 
+							mcc_tifp_qty, 
+							mcc_plg_rev_typ, 
+							mcc_isin_nmbr, 
+							mcc_dp_id, 
+							mcc_dp_clnt_id, 
+							mcc_pod_ref_no, 
+							mcc_tifp_run_dt, 
+							mcc_exctn_dt, 
+							mcc_plg_vs_wd_qty, 
+							mcc_dpm_nmbr, 
+							mcc_agree_nmbr, 
+							mcc_tifp_stts, 
+							mcc_prcsd_flg,
+							mcc_dbd_tifp_qty, 
+							mcc_sys_dt
+	    )   	
+		  (
+			  SELECT 
+										ptd_clm_mtch_accnt ,
+										ptd_xchng_cd,
+										ptd_stck_cd,
+										(:l_ptq - :l_sum),
+										ptd_plg_rev_typ,
+										ptd_isin_nmbr,
+										ptd_dp_id,
+										ptd_dp_clnt_id,
+										ptd_pod_ref_no,
+										ptd_tifp_run_dt,
+										ptd_exctn_dt,
+										0,
+										ptd_dpm_nmbr,
+										ptd_agree_nmbr,
+										ptd_tifp_stts,
+										'N',
+										:l_dbd_tifp_qty,
+										:c_record_dt 
+				FROM  ptd_tifp_dtls 
+				WHERE ptd_plg_rev_typ = 'P' 
+			  AND   ptd_tifp_stts = 'P'
+			  AND   ptd_leg_no = 'L5'
+			  AND   ptd_dpm_nmbr = :d_temp_dpm            /** ver 1.4 --changed from l_temp_dpm to d_temp_dpm **/
+			  AND   ptd_clm_mtch_accnt = :c_match_nmbr   /* ver 1.3 */
+				AND   ptd_dp_id = :c_dp_id                 /* ver 1.3 */
+				AND   ptd_dp_clnt_id = :c_dp_clnt_id       /* ver 1.3 */
+		  );
+
+
+		  if(SQLCODE !=0 )
+  	  {
+				fn_errlog( c_ServiceName, "S31070", SQLMSG, c_err_msg  );
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				fn_userlog(c_ServiceName,"Could not enter data into MCC_MTCH_CORP_COLL");
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	  }
+
+  	} 
+	  flag=0;
+    /** Delete the record after entering into MCC_MTCH_CORP_COLL from PBT_PLG_BAL_TEMP **/
+
+		EXEC SQL 
+         DELETE 
+				 FROM   pbt_plg_bal_temp 
+         WHERE  rownum < 2 ;
+
+		if(SQLCODE !=0 )
+ 		{
+ 			fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg  );
+ 			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+ 			fn_userlog(c_ServiceName,"Could not delete from PBT_PLG_BAL_TEMP");
+ 			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+ 			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 		}
+
+  }
+
+	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+   fn_userlog(c_ServiceName,"Finding open pledges as of record date commit aborted");
+   fn_errlog( c_ServiceName, "S31080", TPMSG, c_err_msg  );
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+  }
+
+	fn_userlog(c_ServiceName,"Finding open pledges as of record date transaction Committed");
+  tpreturn( TPSUCCESS, 0, (char *)ptr_fml_Ibuf, 0, 0 );
+
+}

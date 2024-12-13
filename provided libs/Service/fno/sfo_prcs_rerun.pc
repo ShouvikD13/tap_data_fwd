@@ -1,0 +1,3408 @@
+/***********************************************************************************/
+/*  Program           : SFO_PRCS_RERUN                                             */
+/*                                                                                 */
+/*  Input             : FFO_XCHNG_CD                                               */
+/*                      FFO_EBA_MTCH_ACT_NO                                        */
+/*                      FFO_RUN_NUM                                                */
+/*                      FFO_TRD_DT                                                 */
+/*                      FFO_BNK_ACT_NO                                             */
+/*                      FFO_BNK_TRN_TYP                                            */
+/*                      FFO_BNK_BLK_CD                                             */
+/*                      FFO_DR_CR_FLG                                              */
+/*                      FFO_PI_PO_AMT                                              */
+/*                      FFO_EBA_STTS                                               */
+/*                      FFO_BNK_STTS                                               */
+/*                                                                                 */
+/*  Output            :                                                            */
+/*                                                                                 */
+/*  Desription        : This service does the necessary processing at the          */
+/*                      bank/EBA end based on the transaction type and the         */
+/*                      status showing whether the message has been updated        */
+/*                      at the Bank / EBA end.This will send the time and          */
+/*                      trace no as well to complete the bank process if it		     */ 
+/*											is not done.                                               */
+/*	case CREDIT				 																											     	 */
+/*	case BLOCK 																															     	 */
+/*	case UNBLOCK_DEBIT	 																										     	 */
+/*	case DEBIT 																															     	 */
+/*  Log               :                                                            */
+/*                                                                                 */
+/***********************************************************************************/
+/*      11-Dec-2003      Ver 1.0        Sangeet Sinha     Release 1.0              */
+/*      30-Nov-2007      Ver 1.1        Vidyayini Krish   IBM Changes              */
+/*      31-May-2011      Ver 1.2        Sachin Birje      ADM Changes              */
+/*      13-Sep-2011      Ver 1.3        Sachin Birje      Narration Changes        */
+/*      04-Dec-2013      Ver 1.4        Sachin Birje      PIPO Run No Handling     */
+/*      08-Dec-2014      Ver 1.5        Sachin Birje      View to FML Changes      */
+/*      16-Dec-2016      Ver 1.6        Bhupendra Malik   Bank Account changes     */
+/*      18-Oct-2016      Ver 1.7        Vishal Borhade    IBR product code changes */
+/*      18-Jul-2018      Ver 1.8        Samip M           Run No for Bank Service  */
+/*      09-Aug-2019      Ver 1.9        Akash B           Deposit Model Changes    */ 
+/*      09-Aug-2019      Ver 2.0        Sachin Birje      IDFC CR Changes          */ 
+/*      08-Oct-2022      Ver 2.1        Sachin Birje      SpiraRequest 257         */ 
+/*      09-Mar-2023      Ver 2.2        Sachin Birje      Client Lock Changes      */ 
+/*      04-May-2023      Ver 2.3        Sandip Tambe      HSBC Payin check changes */
+/*      08-Sep-2023      Ver TOL        Shraddha Karande  Tux on linux             */ 
+/***********************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+/*Add header files here */
+#include <fml_def.h>
+#include <fo_view_def.h>     
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+/* Ver 1.1 #include <eba_to_ors.h> not needed */
+#include <fn_tuxlib.h>
+#include <fo.h>
+#include <fo_bank.h>
+#include <fn_log.h> 
+#include <fn_session.h> 
+#include <fn_read_debug_lvl.h> 
+
+int i;
+#define INIT(x,y)	for(i=0;i<y;i++)x[i]=0	
+
+/** Ver 1.9 Starts ***/
+
+int fn_ins_seg_log(char *,long,char *,char *,double,char,char *,double,char,char *,char *,long,char *,char *);
+
+#define CLEAR_BAL_TO_SGMNT_ALLOCATE 'I'
+#define ALLOCATE_TO_SEGMENT 'A'
+#define WALLET_UNBLOCK_DEBIT 'J'   /** Ver 2.0 **/
+/*replace fn_call_inc_dec_svc to fn_call_inc_dec_svc_rerun in Ver TOL*/
+int fn_call_inc_dec_svc_rerun(double,char,char *);
+int fn_insrt_pbp_tbl(double);
+int i_rc;
+int i_trnsctn;
+
+char c_ServiceName [ 33 ];
+char c_err_msg [ 256 ];
+char c_trn_typ;
+char c_tm[21];
+char c_xchng_cd[4];
+char c_cln_mtch_accnt[11];
+char c_bnk_accnt[21];
+char c_msg [ 256 ];
+char c_refrnce[16];
+
+char c_narration[61];  
+char c_sgmnt_cd[4]; 
+char c_channel[4]; 
+char c_trace[13];  
+char c_run_dt[21]; 
+char c_bnk_narration[21]; 
+char c_seg_prdct_cd[6];  
+
+double d_rerun_amount= 0.0;
+long int  li_block_cd;
+/*replace d_tot_alc_amt to d_tot_alc_amt_rerun in ver TOL*/ 
+double d_tot_alc_amt_rerun=0.0;
+/*replace d_amount_rs to d_amount_rs_reun in ver TOL*/
+double d_amount_rs_rerun=0.0;
+struct vw_usr_prfl st_usr_prfl;
+
+long li_run_no;
+char c_tag [ 256 ];
+
+/**** Ver 1.9 Ends *****/
+
+void SFO_PRCS_RERUN ( TPSVCINFO *rqst )
+{
+
+  FBFR32 *ptr_fml_Ibuf;
+
+/*  char c_ServiceName [ 33 ];
+  char c_err_msg [ 256 ]; * made global in ver 1.9 */
+
+  struct vw_upd_limits st_upd_lmts;
+/*  struct vw_usr_prfl st_usr_prfl; made global in ver 1.9 */
+
+  int i_returncode;
+/*  int i_trnsctn;  made global in ver 1.9 */
+
+  char c_bnk_stts;
+  char c_eba_stts;
+  char c_dr_cr_flg;
+  char c_bnk_dr_cr_flg;
+/*  char c_trn_typ; made global in ver 1.9 */
+/*  char c_trace[13]; made global in ver 1.9 */						
+/*  char c_tm[21];		made global in ver 1.9 */				
+	char c_stts;						
+/*  char c_tag [ 256 ]; made global in ver 1.9 */
+/*  char c_msg [ 256 ]; made global in ver 1.9 */
+/*  char c_bnk_narration[21];  ** Ver 1.3 **  made global in ver 1.9 */
+
+/*  long  li_run_no; made global in ver 1.9 */
+
+  double d_val_bal= 0.0;
+
+  /*** Ver 1.9 starts here ***/
+
+  FBFR32 *ptr_fml_Rbuf;
+  FBFR32 *ptr_fml_Sbuf;
+
+  char c_prdct_cd[21];
+  char c_pipo_src[2+1];
+  char c_tran_date[23];
+  char c_instrument_nmbr[20+1];
+  char c_mdc_crdt_nmbr[20+1];
+  char c_accntng_typ[20+1];
+  char c_mtch_series[20+1];
+  char c_src_rowid[20+1];
+  char c_class_svc[20+1];
+  char c_run_nmbr[20+1];
+  char c_usr_typ = '\0';
+  char c_ip_add[15+1] = "\0";
+  char c_txn_typ = '\0';
+  char c_timestamp[14+1];
+  char c_payin_pool_acc_nse[21];
+  char c_payout_pool_acc_nse[21];
+  char c_payin_pool_acc_bse[21];
+  char c_payout_pool_acc_bse[21];
+  char c_ibr_prdct_cd[11];
+  char c_pipo_typ='\0';
+  char c_pool_acc[21];
+  char c_othr_pool_acc[21];
+  char c_blk_deposit_flg='\0'; 
+  char c_seg_narr[101];
+  char c_bank_nm[11];  /*** Ver 2.0 ***/
+  char c_idfc_payin_flg='N';  /*** Ver 2.0 ***/
+  char c_hsbc_payin_flg='N';  /*** Ver 2.3 ***/
+
+  MEMSET(c_prdct_cd);
+  MEMSET(c_ibr_prdct_cd);
+  MEMSET(c_pipo_src);
+  MEMSET(c_tran_date);
+  MEMSET(c_instrument_nmbr);
+  MEMSET(c_mdc_crdt_nmbr);
+  MEMSET(c_accntng_typ);
+  MEMSET(c_mtch_series);
+  MEMSET(c_src_rowid);
+  MEMSET(c_class_svc);
+  MEMSET(c_run_nmbr);
+  MEMSET(c_ip_add);
+  MEMSET(c_timestamp);
+  MEMSET(c_payin_pool_acc_nse);
+  MEMSET(c_payout_pool_acc_nse);
+  MEMSET(c_payin_pool_acc_bse);
+  MEMSET(c_payout_pool_acc_bse);
+  MEMSET(c_ibr_prdct_cd);
+  MEMSET(c_othr_pool_acc);
+  MEMSET(c_seg_narr);
+  MEMSET(c_seg_prdct_cd);
+  MEMSET(c_bank_nm);   /** Ver 2.0 **/
+
+ 
+  MEMSET(c_err_msg); 
+  MEMSET(c_trn_typ);
+  MEMSET(c_tm);
+  MEMSET(c_xchng_cd);
+  MEMSET(c_cln_mtch_accnt);
+  MEMSET(c_bnk_accnt);
+  MEMSET(c_msg); 
+  MEMSET(c_refrnce);
+
+  MEMSET(c_narration);
+  MEMSET(c_sgmnt_cd);
+  MEMSET(c_channel);
+  MEMSET(c_trace);
+  MEMSET(c_run_dt);
+  MEMSET(c_bnk_narration);
+  MEMSET(c_seg_prdct_cd);
+
+  d_rerun_amount= 0.0;
+  li_block_cd=0;
+
+  d_tot_alc_amt_rerun=0.0;
+  d_amount_rs_rerun=0.0;
+
+  int i;
+  int i_err[20];
+  int i_ret_val;
+
+  long li_len_tobuf = 0;
+
+  double d_wallet_amt = 0.0;
+  double d_alctd_amt = 0.0;
+  double d_amount=0.0;
+  double d_rmng_pipo_amt=0.0;
+
+  strcpy(c_channel,"SYS");
+
+  /*** Ver 1.9 ends here ***/
+
+
+
+
+  EXEC SQL BEGIN DECLARE SECTION;
+/*  	char c_xchng_cd[4]; made global in ver 1.9 */
+/*  	char c_cln_mtch_accnt[11]; made global in ver 1.9 */
+/*  	char c_bnk_accnt[21]; made global in ver 1.9 */
+  	char c_reference[16];
+/*  	char c_run_dt[21]; made global in ver 1.9 */
+  	double d_rerun_amount= 0.0;
+		long int	li_block_cd;
+  EXEC SQL END DECLARE SECTION;
+
+	INIT(c_tm,21);
+	INIT(c_trace,13);
+	INIT(c_cln_mtch_accnt,11);
+	INIT(c_bnk_accnt,21);
+	INIT(c_reference,16);
+	INIT(c_run_dt,21);
+
+  ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);
+
+  /** Fprint32(ptr_fml_Ibuf); ** ver 1.5 **/	
+
+  i_returncode = fn_unpack_fmltovar ( c_ServiceName,
+                                    c_err_msg,
+                                    ptr_fml_Ibuf,
+                                    21,     /*** Ver 1.3, changed from 14 to 15 ***/ /** changed from 15 to 20 in ver 1.9 **//*Ver 2.0 *** 21 **/
+                         FFO_XCHNG_CD, ( char * )c_xchng_cd, NULL,
+                         FFO_EBA_MTCH_ACT_NO, ( char * )c_cln_mtch_accnt, NULL,
+                         FFO_RUN_NUM, ( char * )&li_run_no, NULL,
+                         FFO_TRD_DT, ( char * )c_run_dt, NULL,
+                         FFO_BNK_ACT_NO, ( char * )c_bnk_accnt, NULL,
+                         FFO_BNK_TRN_TYP, ( char * )&c_trn_typ, NULL,
+                         FFO_BNK_BLK_CD, ( char * )&li_block_cd, NULL,
+                         FFO_DR_CR_FLG, ( char * )&c_dr_cr_flg, NULL,
+                         FFO_PI_PO_AMT, ( char * )&d_rerun_amount, NULL,
+                         FFO_EBA_STTS, ( char * )&c_eba_stts, NULL,
+                         FFO_BNK_STTS, ( char * )&c_bnk_stts, NULL,
+                         FML_SYSTEM_TRACE, ( char * )c_trace, NULL,			
+                         FML_TM, ( char * )c_tm, NULL,									
+                         FFO_BAT_TAG, ( char * )c_tag, NULL,
+                         FFO_NARRATION_ID, ( char * )c_bnk_narration , NULL, /*** Ver 1.3 , bnk_narration added **/
+                         FFO_UPLD_MTCH_FLG,(char *)&c_blk_deposit_flg,NULL,  /***  Ver 1.9 ****/
+                         FFO_IP_VIEW_NM,(char *)c_payin_pool_acc_nse,NULL,  /*** Ver 1.9 ***/
+                         FFO_OP_VIEW_NM,(char *)c_payout_pool_acc_nse,NULL, /*** Ver 1.9 ***/
+                         FFO_SETTLOR,(char *)c_payin_pool_acc_bse,NULL, /*** Ver 1.9 ***/
+                         FFO_SPRD_ORD_REF,(char *)c_payout_pool_acc_bse,NULL, /*** Ver 1.9 **/ 
+                         FFO_QUEUE_NAME,(char *)c_bank_nm,NULL); /*** Ver 2.0 **/ 
+
+  if( i_returncode != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31005", LIBMSG , c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+  }
+	/*sangeet:The status is not sent because they all will be of failed status only*/
+	
+
+if(DEBUG_MSG_LVL_0){
+ fn_userlog(c_ServiceName,"*** Started ***");
+ fn_userlog(c_ServiceName,"Exchange code    :[%s]",c_xchng_cd);
+ fn_userlog(c_ServiceName,"Match account    :[%s]",c_cln_mtch_accnt);
+ fn_userlog(c_ServiceName,"Run no. 			   :[%ld]",li_run_no);
+ fn_userlog(c_ServiceName,"Run date         :[%s]",c_run_dt);
+ fn_userlog(c_ServiceName,"Bank Account no. :[%s]",c_bnk_accnt);
+ fn_userlog(c_ServiceName,"Transaction Type :[%c]",c_trn_typ);
+ fn_userlog(c_ServiceName,"Block code		   :[%ld]",li_block_cd);
+ fn_userlog(c_ServiceName,"Debit/Credit Flag:[%c]",c_dr_cr_flg);
+ fn_userlog(c_ServiceName,"PIPO Rerun Amount:[%lf]",d_rerun_amount);
+ fn_userlog(c_ServiceName,"EBA status       :[%c]",c_eba_stts);
+ fn_userlog(c_ServiceName,"Bank status      :[%c]",c_bnk_stts);
+ fn_userlog(c_ServiceName,"System trace      :[%s]",c_trace);
+ fn_userlog(c_ServiceName,"Placed time      :[%s]",c_tm);
+ fn_userlog(c_ServiceName,"Bnk_narration    :[%s]",c_bnk_narration); /*** Ver 1.3 ***/
+ fn_userlog(c_ServiceName,"Bnk_Name    :[%s]",c_bank_nm); /*** Ver 2.0 ***/
+}
+
+ /*** Ver 1.9 Starts *****/
+
+ if( c_blk_deposit_flg !='D' && c_blk_deposit_flg!='B')
+ {
+  fn_userlog(c_ServiceName,"Invalid Model Flag");
+  fn_userlog(c_ServiceName,"Skipping for match account :%s:",c_cln_mtch_accnt);
+  fn_errlog( c_ServiceName, "S31010", LIBMSG , c_err_msg );
+  tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+ }
+
+ /**** Ver 1.9 Ends *******/
+ /*** Ver 2.0 Starts Here ***/
+ if( strcmp(c_bank_nm,"IDFC") == 0 && c_blk_deposit_flg=='B' && strcmp(c_bnk_accnt,DUMMY_BNK_ACCNT)!=0 )
+ {
+   c_idfc_payin_flg ='Y';
+   fn_userlog( c_ServiceName, "c_idfc_payin_flg :%c:",c_idfc_payin_flg); 
+ }
+ /*** Ver 2.0 Ends Here ***/
+ /*** Ver 2.3 Starts Here ***/
+ if( strcmp(c_bank_nm,"HSBC") == 0 )
+ {
+   c_hsbc_payin_flg ='Y';
+   fn_userlog( c_ServiceName, "c_hsbc_payin_flg :%c:",c_hsbc_payin_flg); 
+ }
+ /*** Ver 2.3 Ends Here ***/
+
+  strcpy(st_usr_prfl.c_user_id,"system");
+  strcpy(st_usr_prfl.c_cln_mtch_accnt,c_cln_mtch_accnt);
+  strcpy(st_usr_prfl.c_bnk_accnt_nmbr[0],c_bnk_accnt);
+  st_usr_prfl.l_session_id = 0;
+  c_reference[0] = '\0';
+
+	strcpy(st_usr_prfl.c_rout_crt,"000");
+
+	switch ( c_trn_typ )
+	{
+		case CREDIT :
+			if ( ( c_eba_stts == NOT_UPDATED ) &&
+					 ( c_bnk_stts == UPDATED     ) )
+			{
+				fn_userlog(c_ServiceName,"Stage--------------2");
+       	c_bnk_dr_cr_flg = CR ;
+
+       	/***********************************************************/
+       	/*  Sending Credit message to Bank with trace no and time  */
+       	/***********************************************************/
+
+       	i_returncode =  fn_send_bnk_msg (	&st_usr_prfl,
+                                        	c_bnk_dr_cr_flg,
+                                        	"  ",
+                                        	d_rerun_amount,
+                                        	BACKOFFICE,
+                                         	c_ServiceName,
+                                         	c_err_msg,
+                                         	&d_val_bal,
+                                         	c_trace,
+																					c_tm, 
+																					c_bnk_narration, /*** Ver 1.3 bnk_narration added ***/
+                                          c_xchng_cd,      /** Ver 1.7 **/																	
+																					li_run_no);			 /** Added for Ver 1.8 **/
+
+       	switch ( i_returncode )
+       	{
+         	case SUCCESS :								/*Considering that the transation was already successful*/
+				fn_userlog(c_ServiceName,"Stage--------------3");
+					c_bnk_stts	='Y' ;
+					c_stts	='N' ;
+          break;
+
+         	case INSUF_FUNDS :
+         	case BLOCK_NOT_EXISTING :
+
+				fn_userlog(c_ServiceName,"Stage--------------4");
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31015",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+					/*****************************************************************/
+					/* Only status is updated to processed because it is not failure */
+					/*****************************************************************/
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'                AND	
+          FBM_PRDCT_CD  is null;                     /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0 )
+        	{
+						if(SQLCODE == NO_DATA_FOUND )						/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE FBM_FO_BNK_FLR_MSG
+								SET	FBM_STTS = 'P'
+								WHERE
+								FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+								FBM_RUN_NO 				 = :li_run_no					AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt				AND
+								FBM_TRACE					 = :c_trace						AND
+								FBM_STTS					 = 'N'                AND	
+          			FBM_PRDCT_CD  is null;
+							if(SQLCODE !=0 )
+							{
+          			fn_errlog(c_ServiceName, "S31020",SQLMSG,c_err_msg);
+          			strcpy ( c_msg, "System error. Contact system support" );
+          			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}  
+						}
+						else
+						{
+          		fn_errlog(c_ServiceName, "S31025",SQLMSG,c_err_msg);
+          		strcpy ( c_msg, "System error. Contact system support" );
+          		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31030",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+				break ;
+
+
+         	case INDERMINATE_FAILURE :
+         	case RERUN_FAILURE :
+         	case GENERAL_FAILURE :
+         	default :
+				fn_userlog(c_ServiceName,"Stage--------------5");
+					c_bnk_stts	='N' ;
+					c_stts	='N' ;
+
+
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31035",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'                AND	
+          FBM_PRDCT_CD  is null;                      /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0)
+        	{
+						/**** Ver 1.6 Starts ****/
+						if(SQLCODE == NO_DATA_FOUND)
+						{
+							EXEC SQL
+								UPDATE 	FBM_FO_BNK_FLR_MSG
+								SET			FBM_STTS = 'P',
+												FBM_BNK_ACCNT_NMBR=:c_bnk_accnt
+								WHERE	
+								FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+								FBM_RUN_NO 				 = :li_run_no					AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt      AND
+								FBM_TRACE					 = :c_trace						AND
+								FBM_STTS					 = 'N'                AND	
+								FBM_PRDCT_CD  		 is null;
+							if(SQLCODE	!= 0)
+							{
+          			fn_errlog(c_ServiceName, "S31040",SQLMSG,c_err_msg);
+          			strcpy ( c_msg, "System error. Contact system support" );
+          			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+							fn_userlog(c_ServiceName,"Number of Rows updated in FBM=:%ld:",sqlca.sqlerrd[2]);
+						}
+						else/**** Ver 1.6 Ends ******/
+						{
+							 fn_errlog(c_ServiceName, "S31045",SQLMSG,c_err_msg);
+          		 strcpy ( c_msg, "System error. Contact system support" );
+          		 fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		 tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+						
+        	}
+	
+					EXEC SQL
+  				INSERT INTO FBM_FO_BNK_FLR_MSG
+					(
+						FBM_XCHNG_CD,
+						FBM_CLM_MTCH_ACCNT,
+						FBM_RUN_NO,
+						FBM_RUN_DT,
+						FBM_BNK_ACCNT_NMBR,
+						FBM_TRNSCTN_TYP,
+						FBM_BLK_CD,
+						FBM_DC_FLG,
+						FBM_AMT,
+						FBM_BNK_STTS,
+						FBM_EBA_STTS,
+						FBM_STTS,
+						FBM_TRACE,
+						FBM_TIMESTAMP,
+            FBM_NARRATION,         /*** Ver 1.3 ***/
+            FBM_FUND_MODEL_FLG
+					)
+					VALUES
+					(
+						:c_xchng_cd,
+						:c_cln_mtch_accnt,
+						:li_run_no,
+						trunc(sysdate),
+						:c_bnk_accnt,
+						:c_trn_typ,
+						:li_block_cd,
+						:c_dr_cr_flg,
+						:d_rerun_amount,
+						:c_bnk_stts,
+						:c_eba_stts,
+						'N',
+						:c_trace,
+						to_date(:c_tm,'yyyymmddhh24miss'),
+            :c_bnk_narration      /*** Ver 1.3 ***/,
+            :c_blk_deposit_flg
+					);					
+					if(SQLCODE	!= 0)
+        	{
+          	fn_errlog(c_ServiceName, "S31050",SQLMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31055",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+          sprintf ( c_msg,"Failure while sending rerun bank entry for :%s:",c_cln_mtch_accnt);
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  				tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+					break ;
+
+       	}
+
+        i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        if ( i_trnsctn == -1 )
+        {
+          fn_errlog(c_ServiceName, "S31060",LIBMSG,c_err_msg);
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31065",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        /*** Ver 2.2 Starts here ***/
+        i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31070",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        } 
+        /*** Ver 2.2 Ends Here ***/ 
+
+				fn_userlog(c_ServiceName,"Stage--------------6");
+        i_returncode =  fn_do_cr (  c_ServiceName,
+                                    c_err_msg,
+                                    c_cln_mtch_accnt,
+                                    c_xchng_cd,
+                                    c_run_dt,
+                                    c_tag,
+                                    d_rerun_amount,
+          												  li_run_no,   /** Ver 1.4 li_run_no Added **/
+                                    c_bnk_accnt, /** Ver 1.9 ***/ 
+                                    c_trace,     /** Ver 1.9 ***/
+                                    c_blk_deposit_flg); /*** Ver 1.9 ****/ 
+
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31075",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          tpreturn ( TPSUCCESS, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+				/*** update the record to PROCESSED status in failure table ***/
+				EXEC SQL
+					UPDATE	fbm_fo_bnk_flr_msg
+					SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+					WHERE		fbm_xchng_cd				= :c_xchng_cd
+					AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+					AND			fbm_run_no				  = :li_run_no
+					AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+					AND			fbm_bnk_accnt_nmbr	= :c_bnk_accnt
+					AND			fbm_trnsctn_typ			= :c_trn_typ
+					AND			fbm_blk_cd					= :li_block_cd
+					AND			fbm_dc_flg					= :c_dr_cr_flg
+					AND			fbm_amt							= :d_rerun_amount 
+          AND     fbm_prdct_cd is null;  /*** Ver 1.2 ***/	
+
+        if( SQLCODE != 0 )
+        {
+					if(SQLCODE == NO_DATA_FOUND )	/** Ver 1.6 NDF added **/
+					{
+						EXEC SQL
+							UPDATE	fbm_fo_bnk_flr_msg
+							SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate,
+											FBM_BNK_ACCNT_NMBR=:c_bnk_accnt
+							WHERE		fbm_xchng_cd				= :c_xchng_cd
+							AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+							AND			fbm_run_no				  = :li_run_no
+							AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+							AND			fbm_bnk_accnt_nmbr	<> :c_bnk_accnt
+							AND			fbm_trnsctn_typ			= :c_trn_typ
+							AND			fbm_blk_cd					= :li_block_cd
+							AND			fbm_dc_flg					= :c_dr_cr_flg
+							AND			fbm_amt							= :d_rerun_amount 
+          		AND     fbm_prdct_cd is null; 
+						if(SQLCODE != 0 )
+						{
+          		fn_errlog( c_ServiceName, "S31080",SQLMSG,c_err_msg);
+          		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         			strcpy ( c_msg, "System error. Contact system support" );
+         			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+					}
+					else
+					{
+          	fn_errlog( c_ServiceName, "S31085",SQLMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+					}
+        }
+
+        if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        {
+          fn_errlog( c_ServiceName, "S31090",LIBMSG,c_err_msg);
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         	strcpy ( c_msg, "System error. Contact system support" );
+         	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+			}
+			else if (( c_eba_stts == NOT_UPDATED ) &&
+					 			  ( c_bnk_stts == NOT_UPDATED  ) )
+			{
+				fn_userlog(c_ServiceName,"Stage--------------7");
+       	c_bnk_dr_cr_flg = CR ;
+
+       	/***********************************************************/
+       	/*  Sending Credit message to Bank with trace no and time  */
+       	/***********************************************************/
+
+       	i_returncode =  fn_send_bnk_msg (	&st_usr_prfl,
+                                        	c_bnk_dr_cr_flg,
+                                        	"  ",
+                                        	d_rerun_amount,
+                                        	BACKOFFICE,
+                                         	c_ServiceName,
+                                         	c_err_msg,
+                                         	&d_val_bal,
+                                         	c_trace,
+																					c_tm,
+																					c_bnk_narration,       /*** Ver 1.3 bnk_narration added ***/
+                                          c_xchng_cd,           /** Ver 1.7 **/	
+																					li_run_no);						/** Added for Ver 1.8 **/
+
+       	switch ( i_returncode )
+       	{
+         	case SUCCESS :
+				fn_userlog(c_ServiceName,"Stage--------------8");
+					c_bnk_stts	='Y' ;
+					c_stts	='N' ;
+          break;
+
+         	case INSUF_FUNDS :
+         	case BLOCK_NOT_EXISTING :
+
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31095",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'	              AND
+          FBM_PRDCT_CD IS NULL;                 /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0)
+        	{
+						if( SQLCODE == NO_DATA_FOUND )		/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE 	FBM_FO_BNK_FLR_MSG
+								SET			FBM_STTS = 'P'
+								WHERE 	FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+												FBM_RUN_NO 				 = :li_run_no					AND
+												FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt			AND
+												FBM_TRACE					 = :c_trace						AND
+												FBM_STTS					 = 'N'	              AND
+          							FBM_PRDCT_CD IS NULL;   
+							if(SQLCODE	!= 0)
+							{
+          			fn_errlog(c_ServiceName, "S31100",SQLMSG,c_err_msg);
+          			strcpy ( c_msg, "System error. Contact system support" );
+          			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+						}
+						else
+						{
+          		fn_errlog(c_ServiceName, "S31105",SQLMSG,c_err_msg);
+          		strcpy ( c_msg, "System error. Contact system support" );
+          		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31110",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+				break ;
+
+         	case INDERMINATE_FAILURE :
+         	case RERUN_FAILURE :
+         	case GENERAL_FAILURE :
+         	default :
+				fn_userlog(c_ServiceName,"Stage--------------9");
+					c_bnk_stts	='N' ;
+					c_stts	='N' ;
+
+
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31115",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'	              AND
+          FBM_PRDCT_CD IS NULL;               /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0)
+        	{
+						/***** Ver 1.6 Starts *****/
+						if(SQLCODE == NO_DATA_FOUND)
+						{
+							EXEC SQL
+								UPDATE 	FBM_FO_BNK_FLR_MSG
+								SET			FBM_STTS = 'P',
+												FBM_BNK_ACCNT_NMBR =:c_bnk_accnt
+								WHERE
+								FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+								FBM_RUN_NO 				 = :li_run_no					AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt      AND
+								FBM_TRACE					 = :c_trace						AND
+								FBM_STTS					 = 'N'	              AND
+								FBM_PRDCT_CD 			 IS NULL;
+
+							if(SQLCODE	!= 0)
+							{
+								fn_errlog(c_ServiceName, "S31120",SQLMSG,c_err_msg);
+          			strcpy ( c_msg, "System error. Contact system support" );
+          			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+							fn_userlog(c_ServiceName,"Number of Rows updated in FBM=:%ld:",sqlca.sqlerrd[2]);
+						}
+						else/****** Ver 1.6 Ends *******/
+						{
+							fn_errlog(c_ServiceName, "S31125",SQLMSG,c_err_msg);
+          		strcpy ( c_msg, "System error. Contact system support" );
+          		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+        	}
+	
+					EXEC SQL
+  				INSERT INTO FBM_FO_BNK_FLR_MSG
+					(
+						FBM_XCHNG_CD,
+						FBM_CLM_MTCH_ACCNT,
+						FBM_RUN_NO,
+						FBM_RUN_DT,
+						FBM_BNK_ACCNT_NMBR,
+						FBM_TRNSCTN_TYP,
+						FBM_BLK_CD,
+						FBM_DC_FLG,
+						FBM_AMT,
+						FBM_BNK_STTS,
+						FBM_EBA_STTS,
+						FBM_STTS,
+						FBM_TRACE,
+						FBM_TIMESTAMP,
+            FBM_NARRATION,          /*** Ver 1.3 ***/
+            FBM_FUND_MODEL_FLG      /*** Ver 1.9 ***/
+					)
+					VALUES
+					(
+						:c_xchng_cd,
+						:c_cln_mtch_accnt,
+						:li_run_no,
+						trunc(sysdate),
+						:c_bnk_accnt,
+						:c_trn_typ,
+						:li_block_cd,
+						:c_dr_cr_flg,
+						:d_rerun_amount,
+						:c_bnk_stts,
+						:c_eba_stts,
+						'N',
+						:c_trace,
+						to_date(:c_tm,'yyyymmddhh24miss'),
+            :c_bnk_narration,       /*** Ver 1.3 ***/
+            :c_blk_deposit_flg     /*** Ver 1.9 ***/
+					);					
+					if(SQLCODE	!= 0)
+        	{
+          	fn_errlog(c_ServiceName, "S31130",SQLMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31135",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+          sprintf ( c_msg,"Failure while sending rerun bank entry for :%s:",c_cln_mtch_accnt);
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  				tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+					break ;
+
+       	}/*End of Switch*/
+
+				fn_userlog(c_ServiceName,"Stage-------------10");
+        i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        if ( i_trnsctn == -1 )
+        {
+          fn_errlog(c_ServiceName, "S31140",LIBMSG,c_err_msg);
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31145",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        /** Ver 2.2 Starst here ***/
+        i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31150",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+        /** Ver 2.2 Ends Here ***/
+				fn_userlog(c_ServiceName,"Stage-------------11");
+
+        i_returncode =  fn_do_cr (  c_ServiceName,
+                                    c_err_msg,
+                                    c_cln_mtch_accnt,
+                                    c_xchng_cd,
+                                    c_run_dt,
+                                    c_tag,
+                                    d_rerun_amount,
+                                    li_run_no,   /** Ver 1.4 li_run_no Added **/
+                                    c_bnk_accnt, /** Ver 1.9 ***/
+                                    c_trace,     /** Ver 1.9 ***/
+                                    c_blk_deposit_flg); /*** Ver 1.9 ****/
+
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31155",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          tpreturn ( TPSUCCESS, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+				/*** update the record to PROCESSED status in failure table ***/
+				EXEC SQL
+					UPDATE	fbm_fo_bnk_flr_msg
+					SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+					WHERE		fbm_xchng_cd				= :c_xchng_cd
+					AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+					AND			fbm_run_no				  = :li_run_no
+					AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+					AND			fbm_bnk_accnt_nmbr	= :c_bnk_accnt
+					AND			fbm_trnsctn_typ			= :c_trn_typ
+					AND			fbm_blk_cd					= :li_block_cd
+					AND			fbm_dc_flg					= :c_dr_cr_flg
+					AND			fbm_amt							= :d_rerun_amount 
+          AND     fbm_prdct_cd is null;       /*** Ver 1.2 ***/	
+
+        if( SQLCODE != 0 )
+        {
+					if(SQLCODE == NO_DATA_FOUND )				/** Ver 1.6 NDF added **/
+					{
+						EXEC SQL
+							UPDATE	fbm_fo_bnk_flr_msg
+							SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+							WHERE		fbm_xchng_cd				= :c_xchng_cd
+							AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+							AND			fbm_run_no				  = :li_run_no
+							AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+							AND			fbm_bnk_accnt_nmbr	<> :c_bnk_accnt
+							AND			fbm_trnsctn_typ			= :c_trn_typ
+							AND			fbm_blk_cd					= :li_block_cd
+							AND			fbm_dc_flg					= :c_dr_cr_flg
+							AND			fbm_amt							= :d_rerun_amount 
+          		AND     fbm_prdct_cd is null;       /*** Ver 1.2 ***/	
+						if(SQLCODE != 0 )
+						{
+          		fn_errlog( c_ServiceName, "S31160",SQLMSG,c_err_msg);
+          		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         			strcpy ( c_msg, "System error. Contact system support" );
+         			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}		
+					}
+					else
+					{
+          	fn_errlog( c_ServiceName, "S31165",SQLMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+				}
+        if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        {
+          fn_errlog( c_ServiceName, "S31170",LIBMSG,c_err_msg);
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         	strcpy ( c_msg, "System error. Contact system support" );
+         	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+			}/* There is no case like EBA is updated but bank is failed, so this condition is ignored*/
+			break ; /*Break for the inner switch*/
+
+		case BLOCK :
+				fn_userlog(c_ServiceName,"Stage--------------12");
+
+			if ( (( c_eba_stts == NOT_UPDATED ) && ( c_bnk_stts == UPDATED     ))
+					|| (( c_eba_stts == NOT_UPDATED ) && ( c_bnk_stts == NOT_UPDATED )) )
+			{
+				fn_userlog(c_ServiceName,"Stage--------------13");
+       	c_bnk_dr_cr_flg = BK ;
+ 
+         fn_userlog(c_ServiceName,"Inside Block case -------------------");
+
+        /******************************************************/
+        /*  Sending BFT message to Bank                       */
+        /******************************************************/
+        if( c_idfc_payin_flg == 'Y' )  /*** Ver 2.0 Added ***/
+        { 
+          i_returncode =  fn_send_bnk_msg (&st_usr_prfl,
+                                         c_bnk_dr_cr_flg,
+                                         FO_BLK_CD,
+                                         d_rerun_amount,
+                                         BACKOFFICE,
+                                         c_ServiceName,
+                                         c_err_msg,
+                                         &d_val_bal,
+                                         c_trace,
+                                         c_tm,
+                                         c_bnk_narration,  
+                                         c_xchng_cd,      
+                                         li_run_no);     
+
+        }
+        else
+        {                   /** Ver 2.4 Ends Here ***/
+         i_returncode =  fn_send_bnk_msg (&st_usr_prfl,
+                                         c_bnk_dr_cr_flg,
+                                         FO_BFT_BLK_CD,
+                                         d_rerun_amount,
+                                         BACKOFFICE,
+                                         c_ServiceName,
+                                         c_err_msg,
+                                         &d_val_bal,
+                                         c_trace,
+																				 c_tm,
+																				 c_bnk_narration,  /*** Ver 1.3 bnk_narration added ***/
+                                         c_xchng_cd,            /** Ver 1.7 **/
+																				 li_run_no);						/** Added for Ver 1.8 **/
+       }
+
+       switch ( i_returncode )
+       {
+        case SUCCESS :
+				fn_userlog(c_ServiceName,"Stage--------------14");
+					c_bnk_stts  ='Y' ;
+					c_stts  ='N' ;
+          break;
+
+         	case INSUF_FUNDS :
+         	case BLOCK_NOT_EXISTING :
+				fn_userlog(c_ServiceName,"Stage--------------15");
+
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31175",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'	              AND
+          FBM_PRDCT_CD IS NULL;        /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0)
+        	{
+						if(SQLCODE == NO_DATA_FOUND )				/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE FBM_FO_BNK_FLR_MSG
+								SET	FBM_STTS = 'P'
+								WHERE
+								FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+								FBM_RUN_NO 				 = :li_run_no					AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt			AND
+								FBM_TRACE					 = :c_trace						AND
+								FBM_STTS					 = 'N'	              AND
+          			FBM_PRDCT_CD IS NULL;  
+							if(SQLCODE != 0 )
+							{
+          			fn_errlog(c_ServiceName, "S31180",SQLMSG,c_err_msg);
+          			strcpy ( c_msg, "System error. Contact system support" );
+          			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+						}
+						else
+						{
+          		fn_errlog(c_ServiceName, "S31185",SQLMSG,c_err_msg);
+          		strcpy ( c_msg, "System error. Contact system support" );
+          		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31190",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+				break ;
+
+         case GENERAL_FAILURE :
+         case INDERMINATE_FAILURE :
+         case RERUN_FAILURE :
+         default :
+				fn_userlog(c_ServiceName,"Stage--------------16");
+					c_bnk_stts  ='N' ;
+					c_stts  ='N' ;
+
+          i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+          if ( i_trnsctn == -1 )
+          {
+            fn_errlog(c_ServiceName, "S31195",LIBMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+	
+          EXEC SQL
+          UPDATE FBM_FO_BNK_FLR_MSG
+          SET FBM_STTS = 'P'
+          WHERE
+          FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+          FBM_RUN_NO         = :li_run_no         AND
+          FBM_BNK_ACCNT_NMBR = :c_bnk_accnt       AND
+          FBM_TRACE          = :c_trace           AND
+          FBM_STTS           = 'N'                AND
+          FBM_PRDCT_CD IS NULL;           /*** Ver 1.2 ***/
+          if(SQLCODE  != 0)
+          {
+						/**** Ver 1.6 Starts *****************/
+						
+						if(SQLCODE == NO_DATA_FOUND)
+						{
+							 EXEC SQL
+							 	UPDATE 	FBM_FO_BNK_FLR_MSG
+							 	SET 		FBM_STTS = 'P',
+							 					FBM_BNK_ACCNT_NMBR= :c_bnk_accnt
+							 	WHERE
+							 	FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+							 	FBM_RUN_NO         = :li_run_no         AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt      AND
+							 	FBM_TRACE          = :c_trace           AND
+							 	FBM_STTS           = 'N'                AND
+							 	FBM_PRDCT_CD 			 IS NULL;
+
+							 if(SQLCODE  != 0)
+							 {
+								fn_errlog(c_ServiceName, "S31200",SQLMSG,c_err_msg);
+								strcpy ( c_msg, "System error. Contact system support" );
+								fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+								tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							 }	
+							fn_userlog(c_ServiceName,"Number of Rows updated in FBM=:%ld:",sqlca.sqlerrd[2]);
+						}
+						else/*********** Ver 1.6 Ends ***************************/
+						{
+							fn_errlog(c_ServiceName, "S31205",SQLMSG,c_err_msg);
+							strcpy ( c_msg, "System error. Contact system support" );
+							fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+							tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+					}				
+
+          EXEC SQL
+          INSERT INTO FBM_FO_BNK_FLR_MSG
+          (
+            FBM_XCHNG_CD,
+            FBM_CLM_MTCH_ACCNT,
+            FBM_RUN_NO,
+            FBM_RUN_DT,
+            FBM_BNK_ACCNT_NMBR,
+            FBM_TRNSCTN_TYP,
+            FBM_BLK_CD,
+            FBM_DC_FLG,
+            FBM_AMT,
+            FBM_BNK_STTS,
+            FBM_EBA_STTS,
+            FBM_STTS,
+            FBM_TRACE,
+            FBM_TIMESTAMP,
+            FBM_NARRATION ,           /*** Ver 1.3 ***/
+            FBM_FUND_MODEL_FLG        /*** Ver 1.9 ***/
+          )
+          VALUES
+          (
+            :c_xchng_cd,
+            :c_cln_mtch_accnt,
+            :li_run_no,
+            trunc(sysdate),
+            :c_bnk_accnt,
+            :c_trn_typ,
+            :li_block_cd,
+            :c_dr_cr_flg,
+            :d_rerun_amount,
+            :c_bnk_stts,
+            :c_eba_stts,
+            'N',
+            :c_trace,
+            to_date(:c_tm,'yyyymmddhh24miss'),
+            :c_bnk_narration,        /*** Ver 1.3 ***/
+            :c_blk_deposit_flg       /*** Ver 1.9 ***/
+          );
+          if(SQLCODE  != 0)
+          {
+            fn_errlog(c_ServiceName, "S31210",SQLMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+          {
+            fn_errlog( c_ServiceName, "S31215",LIBMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          sprintf ( c_msg,"Failure while sending BFT rerun bank entry for :%s:",c_cln_mtch_accnt);
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+          break ;
+
+        }
+				fn_userlog(c_ServiceName,"Stage--------------17");
+        i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        if ( i_trnsctn == -1 )
+        {
+          fn_errlog(c_ServiceName, "S31220",LIBMSG,c_err_msg);
+         	strcpy ( c_msg, "System error. Contact system support" );
+         	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31225",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+         	strcpy ( c_msg, "System error. Contact system support" );
+         	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+        /** Ver 2.2 Starts here **/
+        i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31230",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+        /** Ver 2.2 Ends Here ***/
+
+				fn_userlog(c_ServiceName,"Stage--------------18");
+        if( c_idfc_payin_flg == 'Y' || c_hsbc_payin_flg == 'Y' )  /** Ver 2.0 **//** Ver 2.3 **/
+        {
+           i_returncode =  fn_do_alloc ( c_ServiceName,
+                                    c_err_msg,
+                                    c_cln_mtch_accnt,
+                                    c_bnk_accnt,
+                                    c_tag,
+                                    d_rerun_amount,
+                                    li_run_no);
+
+        }
+        else
+        {
+        i_returncode =  fn_do_bft ( c_ServiceName,
+                                    c_err_msg,
+                                    c_cln_mtch_accnt,
+                                    c_bnk_accnt,
+                                    c_tag,
+                                    d_rerun_amount,
+                                    li_run_no);   /** Ver 1.4 li_run_no Added **/
+        }                            
+
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31235",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+				/*** update the record to PROCESSED status in failure table ***/
+				EXEC SQL
+					UPDATE	fbm_fo_bnk_flr_msg
+					SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+					WHERE		fbm_xchng_cd				= :c_xchng_cd
+					AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+					AND			fbm_run_no				  = :li_run_no
+					AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+					AND			fbm_bnk_accnt_nmbr	= :c_bnk_accnt
+					AND			fbm_trnsctn_typ			= :c_trn_typ
+					AND			fbm_blk_cd					= :li_block_cd
+					AND			fbm_dc_flg					= :c_dr_cr_flg
+					AND			fbm_amt							= :d_rerun_amount 
+          AND     fbm_prdct_cd is null;          /*** Ver 1.2 ***/	
+
+        if( SQLCODE != 0 )
+        {	
+					if(SQLCODE == NO_DATA_FOUND )						/** Ver 1.6 NDF added **/
+					{
+						EXEC SQL
+							UPDATE	fbm_fo_bnk_flr_msg
+							SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+							WHERE		fbm_xchng_cd				= :c_xchng_cd
+							AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+							AND			fbm_run_no				  = :li_run_no
+							AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+							AND			fbm_bnk_accnt_nmbr	<> :c_bnk_accnt
+							AND			fbm_trnsctn_typ			= :c_trn_typ
+							AND			fbm_blk_cd					= :li_block_cd
+							AND			fbm_dc_flg					= :c_dr_cr_flg
+							AND			fbm_amt							= :d_rerun_amount 
+          		AND     fbm_prdct_cd is null;
+
+						if(SQLCODE != 0 )
+						{
+         			fn_errlog( c_ServiceName, "S31240",SQLMSG,c_err_msg);
+         			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         			strcpy ( c_msg, "System error. Contact system support" );
+         			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+					}
+					else
+					{
+         		fn_errlog( c_ServiceName, "S31245",SQLMSG,c_err_msg);
+         		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+					}
+        }
+
+        if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        {
+         	fn_errlog( c_ServiceName, "S31250",LIBMSG,c_err_msg);
+         	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         	strcpy ( c_msg, "System error. Contact system support" );
+         	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+  			sprintf ( c_msg, "Rerun process completed successfully for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+			}/*All other cases are Ignored because they are not yet reported */ 
+			break;
+
+	case UNBLOCK_DEBIT :
+				fn_userlog(c_ServiceName,"Stage--------------19");
+		if (  (( c_eba_stts == NOT_UPDATED ) && ( c_bnk_stts == UPDATED     ))	|| 
+				  (( c_eba_stts == NOT_UPDATED ) && ( c_bnk_stts == NOT_UPDATED  ))  )
+		{
+				fn_userlog(c_ServiceName,"Stage--------------20");
+			if ( li_block_cd == BFT_DEBIT_ON_PAYIN )	
+			{
+				fn_userlog(c_ServiceName,"Stage--------------21");
+       	c_bnk_dr_cr_flg = UD ;
+
+        /******************************************************/
+        /*  Sending Unblock Debit on BFT message to Bank             */
+        /******************************************************/
+        i_returncode =  fn_send_bnk_msg (&st_usr_prfl,
+                                         c_bnk_dr_cr_flg,
+                                         FO_BFT_BLK_CD,
+                                         d_rerun_amount,
+                                         BACKOFFICE,
+                                         c_ServiceName,
+                                         c_err_msg,
+                                         &d_val_bal,
+                                         c_trace,
+																				 c_tm,
+																				 c_bnk_narration,        /*** Ver 1.3 bnk_narration added ***/
+                                         c_xchng_cd,            /** Ver 1.7 **/		
+																				 li_run_no);						/** Added for Ver 1.8 **/
+       switch ( i_returncode )
+       {
+        case SUCCESS :
+				fn_userlog(c_ServiceName,"Stage--------------22");
+					c_bnk_stts  ='Y' ;
+					c_stts  ='N' ;
+          break;
+
+         	case INSUF_FUNDS :
+         	case BLOCK_NOT_EXISTING :
+				fn_userlog(c_ServiceName,"Stage-------------23");
+
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31255",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'	              AND
+          FBM_PRDCT_CD IS NULL;            /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0)
+        	{
+						if(SQLCODE == NO_DATA_FOUND )					/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE 	FBM_FO_BNK_FLR_MSG
+								SET			FBM_STTS = 'P'
+								WHERE 	FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+								FBM_RUN_NO 				 = :li_run_no					AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt				AND
+								FBM_TRACE					 = :c_trace						AND
+								FBM_STTS					 = 'N'	              AND
+          			FBM_PRDCT_CD IS NULL;
+ 
+							if(SQLCODE !=0 )
+							{
+          			fn_errlog(c_ServiceName, "S31260",SQLMSG,c_err_msg);
+          			strcpy ( c_msg, "System error. Contact system support" );
+          			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+						}
+						else
+						{
+          		fn_errlog(c_ServiceName, "S31265",SQLMSG,c_err_msg);
+          		strcpy ( c_msg, "System error. Contact system support" );
+          		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31270",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+				break ;
+
+         case GENERAL_FAILURE :
+         case INDERMINATE_FAILURE :
+         case RERUN_FAILURE :
+         default :
+				fn_userlog(c_ServiceName,"Stage--------------24");
+					c_bnk_stts  ='N' ;
+					c_stts  ='N' ;
+
+          i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+          if ( i_trnsctn == -1 )
+          {
+            fn_errlog(c_ServiceName, "S31275",LIBMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+	
+          EXEC SQL
+          UPDATE FBM_FO_BNK_FLR_MSG
+          SET FBM_STTS = 'P'
+          WHERE
+          FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+          FBM_RUN_NO         = :li_run_no         AND
+          FBM_BNK_ACCNT_NMBR = :c_bnk_accnt       AND
+          FBM_TRACE          = :c_trace           AND
+          FBM_STTS           = 'N'                AND
+          FBM_PRDCT_CD IS NULL;               /*** Ver 1.2 ***/
+          if(SQLCODE  != 0)
+          {
+						/***** Ver 1.6 Starts *****/
+						if(SQLCODE == NO_DATA_FOUND)
+						{
+							EXEC SQL
+								UPDATE 	FBM_FO_BNK_FLR_MSG
+								SET 		FBM_STTS = 'P',
+												FBM_BNK_ACCNT_NMBR = :c_bnk_accnt
+								WHERE
+								FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+								FBM_RUN_NO         = :li_run_no         AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt      AND
+		          	FBM_TRACE          = :c_trace           AND
+				      	FBM_STTS           = 'N'                AND
+						  	FBM_PRDCT_CD 			 IS NULL;
+
+							if(SQLCODE  != 0)
+							{
+		            fn_errlog(c_ServiceName, "S31280",SQLMSG,c_err_msg);
+				        strcpy ( c_msg, "System error. Contact system support" );
+						    fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+								tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+							fn_userlog(c_ServiceName,"Number of Rows updated in FBM=:%ld:",sqlca.sqlerrd[2]);
+						}
+						else/**** Ver 1.6 Ends ****/
+						{
+							 fn_errlog(c_ServiceName, "S31285",SQLMSG,c_err_msg);
+				       strcpy ( c_msg, "System error. Contact system support" );
+						   fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+							 tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+					}				
+
+          EXEC SQL
+          INSERT INTO FBM_FO_BNK_FLR_MSG
+          (
+            FBM_XCHNG_CD,
+            FBM_CLM_MTCH_ACCNT,
+            FBM_RUN_NO,
+            FBM_RUN_DT,
+            FBM_BNK_ACCNT_NMBR,
+            FBM_TRNSCTN_TYP,
+            FBM_BLK_CD,
+            FBM_DC_FLG,
+            FBM_AMT,
+            FBM_BNK_STTS,
+            FBM_EBA_STTS,
+            FBM_STTS,
+            FBM_TRACE,
+            FBM_TIMESTAMP,
+            FBM_NARRATION,           /*** Ver 1.3 ***/
+            FBM_FUND_MODEL_FLG       /*** Ver 1.9 ***/
+           )
+          VALUES
+          (
+            :c_xchng_cd,
+            :c_cln_mtch_accnt,
+            :li_run_no,
+            trunc(sysdate),
+            :c_bnk_accnt,
+            :c_trn_typ,
+            :li_block_cd,
+            :c_dr_cr_flg,
+            :d_rerun_amount,
+            :c_bnk_stts,
+            :c_eba_stts,
+            'N',
+            :c_trace,
+            to_date(:c_tm,'yyyymmddhh24miss'),
+            :c_bnk_narration,       /*** Ver 1.3 ***/ 
+            :c_blk_deposit_flg      /*** Ver 1.9 ***/ 
+          );
+          if(SQLCODE  != 0)
+          {
+            fn_errlog(c_ServiceName, "S31290",SQLMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+          {
+            fn_errlog( c_ServiceName, "S31295",LIBMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          sprintf ( c_msg,"Failure while sending BFT rerun bank entry for :%s:",c_cln_mtch_accnt);
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+          break ;
+
+        }/*End of switch of bank call*/
+				fn_userlog(c_ServiceName,"Stage--------------25");
+
+      	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        if ( i_trnsctn == -1 )
+        {
+           	fn_errlog(c_ServiceName, "S31300",LIBMSG,c_err_msg);
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+				}
+
+        i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+            fn_errlog(c_ServiceName, "S31305",LIBMSG,c_err_msg);
+            fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+         }
+
+         /** Ver 2.2 Starts here **/
+         i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+         if ( i_returncode != 0 )
+         {
+            fn_errlog(c_ServiceName, "S31310",LIBMSG,c_err_msg);
+            fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+         }
+         /** Ver 2.2 Ends HEre ***/ 
+
+				fn_userlog(c_ServiceName,"Stage--------------26");
+        i_returncode =  fn_do_db_on_bft ( c_ServiceName,
+                                           c_err_msg,
+                                           c_cln_mtch_accnt,
+                                           c_xchng_cd,
+                                           c_run_dt,
+                                           c_bnk_accnt,
+                                           c_tag,
+                                           d_rerun_amount ,
+                                           li_run_no,   /** Ver 1.4 li_run_no Added **/
+                                           c_trace,  /**** Ver 1.9 ***/                                        
+                                           c_blk_deposit_flg); /*** Ver 1.9 ****/
+      
+        if ( i_returncode != 0 )
+        {
+            fn_errlog(c_ServiceName, "S31315",LIBMSG,c_err_msg);
+            fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+				/*** update the record to PROCESSED status in failure table ***/
+				EXEC SQL
+					UPDATE	fbm_fo_bnk_flr_msg
+					SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+					WHERE		fbm_xchng_cd				= :c_xchng_cd
+					AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+					AND			fbm_run_no				  = :li_run_no
+					AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+					AND			fbm_bnk_accnt_nmbr	= :c_bnk_accnt
+					AND			fbm_trnsctn_typ			= :c_trn_typ
+					AND			fbm_blk_cd					= :li_block_cd
+					AND			fbm_dc_flg					= :c_dr_cr_flg
+					AND			fbm_amt							= :d_rerun_amount 
+          AND     fbm_prdct_cd is null;         /*** Ver 1.2 ***/	
+
+         	if( SQLCODE != 0 )
+         	{
+						if (SQLCODE ==  NO_DATA_FOUND )					/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE	fbm_fo_bnk_flr_msg
+								SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+								WHERE		fbm_xchng_cd				= :c_xchng_cd
+								AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+								AND			fbm_run_no				  = :li_run_no
+								AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+								AND			fbm_bnk_accnt_nmbr	<> :c_bnk_accnt
+								AND			fbm_trnsctn_typ			= :c_trn_typ
+								AND			fbm_blk_cd					= :li_block_cd
+								AND			fbm_dc_flg					= :c_dr_cr_flg
+								AND			fbm_amt							= :d_rerun_amount 
+          			AND     fbm_prdct_cd is null; 
+         			if( SQLCODE != 0 )
+         			{
+         				fn_errlog( c_ServiceName, "S31320",SQLMSG,c_err_msg);
+         				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         				strcpy ( c_msg, "System error. Contact system support" );
+         				fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         				tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+						}
+						else
+						{
+         			fn_errlog( c_ServiceName, "S31325",SQLMSG,c_err_msg);
+         			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         			strcpy ( c_msg, "System error. Contact system support" );
+         			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+         	}
+
+          if(fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+          {
+            fn_errlog( c_ServiceName, "S31330",LIBMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+  				sprintf ( c_msg, "Rerun process completed successfully for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  				fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  				tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+			}
+			else if ( li_block_cd == ALLOCATION_DEBIT_ON_PAYIN )	
+			{
+				fn_userlog(c_ServiceName,"Stage--------------27");
+       	c_bnk_dr_cr_flg = UD ;
+
+        /******************************************************/
+        /*Sending Unblock Debit on allocation  message to Bank*/
+        /******************************************************/
+        i_returncode =  fn_send_bnk_msg (&st_usr_prfl,
+                                         c_bnk_dr_cr_flg,
+                                         FO_BLK_CD,
+                                         d_rerun_amount,
+                                         BACKOFFICE,
+                                         c_ServiceName,
+                                         c_err_msg,
+                                         &d_val_bal,
+                                         c_trace,
+																				 c_tm,
+																				 c_bnk_narration, /*** Ver 1.3 bnk_narration added ***/
+                                         c_xchng_cd,            /** Ver 1.7 **/
+																				 li_run_no);						/** Added for Ver 1.8 **/
+
+       switch ( i_returncode )
+       {
+        case SUCCESS :
+				fn_userlog(c_ServiceName,"Stage--------------28");
+					c_bnk_stts  ='Y' ;
+					c_stts  ='N' ;
+          break;
+
+         	case INSUF_FUNDS :
+         	case BLOCK_NOT_EXISTING :
+				fn_userlog(c_ServiceName,"Stage--------------29");
+
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31335",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'	              AND
+          FBM_PRDCT_CD IS NULL;          /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0)
+        	{
+						if(SQLCODE == NO_DATA_FOUND )				/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE FBM_FO_BNK_FLR_MSG
+								SET	FBM_STTS = 'P'
+								WHERE
+								FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+								FBM_RUN_NO 				 = :li_run_no					AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt			AND
+								FBM_TRACE					 = :c_trace						AND
+								FBM_STTS					 = 'N'	              AND
+          			FBM_PRDCT_CD IS NULL;          
+							if(SQLCODE != 0 )
+							{
+          			fn_errlog(c_ServiceName, "S31340",SQLMSG,c_err_msg);
+          			strcpy ( c_msg, "System error. Contact system support" );
+          			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+						}
+						else
+						{
+          		fn_errlog(c_ServiceName, "S31345",SQLMSG,c_err_msg);
+          		strcpy ( c_msg, "System error. Contact system support" );
+          		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31350",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+				break ;
+
+         case GENERAL_FAILURE :
+         case INDERMINATE_FAILURE :
+         case RERUN_FAILURE :
+         default :
+				fn_userlog(c_ServiceName,"Stage--------------30");
+					c_bnk_stts  ='N' ;
+					c_stts  ='N' ;
+
+          i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+          if ( i_trnsctn == -1 )
+          {
+            fn_errlog(c_ServiceName, "S31355",LIBMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+	
+          EXEC SQL
+          UPDATE FBM_FO_BNK_FLR_MSG
+          SET FBM_STTS = 'P'
+          WHERE
+          FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+          FBM_RUN_NO         = :li_run_no         AND
+          FBM_BNK_ACCNT_NMBR = :c_bnk_accnt       AND
+          FBM_TRACE          = :c_trace           AND
+          FBM_STTS           = 'N'                AND
+          FBM_PRDCT_CD IS NULL;             /*** Ver 1.2 ***/
+          if(SQLCODE  != 0)
+          {
+						/********** Ver 1.6 Starts **************/
+						if(SQLCODE == NO_DATA_FOUND)
+						{
+							EXEC SQL
+								UPDATE 		FBM_FO_BNK_FLR_MSG
+								SET 			FBM_STTS = 'P',
+													FBM_BNK_ACCNT_NMBR = :c_bnk_accnt
+								WHERE
+								FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+								FBM_RUN_NO         = :li_run_no         AND
+								FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt      AND
+								FBM_TRACE          = :c_trace           AND
+								FBM_STTS           = 'N'                AND
+								FBM_PRDCT_CD 			IS NULL;             
+
+							if(SQLCODE  != 0)
+							{
+								fn_errlog(c_ServiceName, "S31360",SQLMSG,c_err_msg);
+								strcpy ( c_msg, "System error. Contact system support" );
+								fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+								tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+							fn_userlog(c_ServiceName,"Number of Rows updated in FBM=:%ld:",sqlca.sqlerrd[2]);
+						}
+						else/******* Ver 1.6 Ends ********/
+						{
+							fn_errlog(c_ServiceName, "S31365",SQLMSG,c_err_msg);
+							strcpy ( c_msg, "System error. Contact system support" );
+							fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+							tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+					}				
+					
+          EXEC SQL
+          INSERT INTO FBM_FO_BNK_FLR_MSG
+          (
+            FBM_XCHNG_CD,
+            FBM_CLM_MTCH_ACCNT,
+            FBM_RUN_NO,
+            FBM_RUN_DT,
+            FBM_BNK_ACCNT_NMBR,
+            FBM_TRNSCTN_TYP,
+            FBM_BLK_CD,
+            FBM_DC_FLG,
+            FBM_AMT,
+            FBM_BNK_STTS,
+            FBM_EBA_STTS,
+            FBM_STTS,
+            FBM_TRACE,
+            FBM_TIMESTAMP,
+            FBM_NARRATION,          /*** Ver 1.3 ***/
+            FBM_FUND_MODEL_FLG      /*** Ver 1.9 ***/
+          )
+          VALUES
+          (
+            :c_xchng_cd,
+            :c_cln_mtch_accnt,
+            :li_run_no,
+            trunc(sysdate),
+            :c_bnk_accnt,
+            :c_trn_typ,
+            :li_block_cd,
+            :c_dr_cr_flg,
+            :d_rerun_amount,
+            :c_bnk_stts,
+            :c_eba_stts,
+            'N',
+            :c_trace,
+            to_date(:c_tm,'yyyymmddhh24miss'),
+            :c_bnk_narration,       /*** Ver 1.3 ***/
+            :c_blk_deposit_flg      /*** Ver 1.9 ***/
+          );
+          if(SQLCODE  != 0)
+          {
+            fn_errlog(c_ServiceName, "S31370",SQLMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+          {
+            fn_errlog( c_ServiceName, "S31375",LIBMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          sprintf ( c_msg,"Failure while sending BFT rerun bank entry for :%s:",c_cln_mtch_accnt);
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+          break ;
+
+        }/*End of switch of bank call*/
+
+        i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        if ( i_trnsctn == -1 )
+        {
+            fn_errlog(c_ServiceName, "S31380",LIBMSG,c_err_msg);
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+            fn_errlog(c_ServiceName, "S31385",LIBMSG,c_err_msg);
+            fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        /*** Ver 2.2 Starts here **/   
+        i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+            fn_errlog(c_ServiceName, "S31390",LIBMSG,c_err_msg);
+            fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+        /*** Ver 2.2 Ends here **/
+
+				fn_userlog(c_ServiceName,"Stage--------------31");
+        i_returncode 		=  fn_do_db_on_alloc ( c_ServiceName,
+                                              c_err_msg,
+                                              c_cln_mtch_accnt,
+                                              c_xchng_cd,
+                                              c_run_dt,
+                                              c_bnk_accnt,
+                                              c_tag,
+                                              d_rerun_amount,
+                                              li_run_no,   /*** Ver 1.4 li_run_no Added **/
+                                              c_trace, /**** Ver 1.9 ****/
+                                              c_blk_deposit_flg); /*** Ver 1.9 ****/
+
+        if ( i_returncode != 0 )
+        {
+            fn_errlog(c_ServiceName, "S31395",LIBMSG,c_err_msg);
+            fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+				/*** update the record to PROCESSED status in failure table ***/
+				EXEC SQL
+					UPDATE	fbm_fo_bnk_flr_msg
+					SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+					WHERE		fbm_xchng_cd				= :c_xchng_cd
+					AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+					AND			fbm_run_no				  = :li_run_no
+					AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+					AND			fbm_bnk_accnt_nmbr	= :c_bnk_accnt
+					AND			fbm_trnsctn_typ			= :c_trn_typ
+					AND			fbm_blk_cd					= :li_block_cd
+					AND			fbm_dc_flg					= :c_dr_cr_flg
+					AND			fbm_amt							= :d_rerun_amount 
+          AND     fbm_prdct_cd is null;           /*** Ver 1.2 ***/	
+
+         	if( SQLCODE != 0 )
+         	{
+						if(SQLCODE == NO_DATA_FOUND )				/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE	fbm_fo_bnk_flr_msg
+								SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+								WHERE		fbm_xchng_cd				= :c_xchng_cd
+								AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+								AND			fbm_run_no				  = :li_run_no
+								AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+								AND			fbm_bnk_accnt_nmbr	<> :c_bnk_accnt
+								AND			fbm_trnsctn_typ			= :c_trn_typ
+								AND			fbm_blk_cd					= :li_block_cd
+								AND			fbm_dc_flg					= :c_dr_cr_flg
+								AND			fbm_amt							= :d_rerun_amount 
+          			AND     fbm_prdct_cd is null;           /*** Ver 1.2 ***/	
+
+         			if( SQLCODE != 0 )
+         			{
+         				fn_errlog( c_ServiceName, "S31400",SQLMSG,c_err_msg);
+           			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         				strcpy ( c_msg, "System error. Contact system support" );
+         				fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+           			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+							}
+						}
+						else
+						{
+         			fn_errlog( c_ServiceName, "S31405",SQLMSG,c_err_msg);
+           		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         			strcpy ( c_msg, "System error. Contact system support" );
+         			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+           		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+         	}
+
+         	if (fn_committran(c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+         	{
+            fn_errlog( c_ServiceName, "S31410",LIBMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+         	}
+  				sprintf ( c_msg, "Rerun process completed successfully for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  				fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  				tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+			}
+		}/* All other conditions ignored because they are hardly probable in live*/
+		break;
+  
+
+	case DEBIT :
+				fn_userlog(c_ServiceName,"Stage--------------32");
+		if (	(( c_eba_stts == NOT_UPDATED ) && ( c_bnk_stts == UPDATED     ))	||
+					(( c_eba_stts == NOT_UPDATED ) && ( c_bnk_stts == NOT_UPDATED  ))  )
+		{
+      if( c_blk_deposit_flg == 'B' && li_block_cd != UNBLOCK_DEBIT_FROM_WALLET)    /*** Ver 1.9 Starts ***/ /** Ver 2.0, UNBLOCK_DEBIT_FROM_WALLET added **/
+      {       
+        
+       	c_bnk_dr_cr_flg = DB ;
+
+        /******************************************************/
+        /*  Sending Clear balance Debit message to Bank             */
+        /******************************************************/
+        i_returncode =  fn_send_bnk_msg (&st_usr_prfl,
+                                         c_bnk_dr_cr_flg,
+                                         " ",
+                                         d_rerun_amount,
+                                         BACKOFFICE,
+                                         c_ServiceName,
+                                         c_err_msg,
+                                         &d_val_bal,
+                                         c_trace,
+																				 c_tm,
+																				 c_bnk_narration,           /*** Ver 1.3 bnk_narration added ***/
+                                         c_xchng_cd,                /** Ver 1.7 **/
+																				 li_run_no);								/** Added for Ver 1.8 **/
+       switch ( i_returncode )
+       {
+        case SUCCESS :
+					fn_userlog(c_ServiceName,"Stage--------------33");
+					c_bnk_stts  ='Y' ;
+					c_stts  ='N' ;
+          break;
+
+         	case INSUF_FUNDS :
+         	case BLOCK_NOT_EXISTING :
+				fn_userlog(c_ServiceName,"Stage--------------34");
+
+        	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+        	if ( i_trnsctn == -1 )
+        	{
+          	fn_errlog(c_ServiceName, "S31415",LIBMSG,c_err_msg);
+          	strcpy ( c_msg, "System error. Contact system support" );
+          	fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+
+					EXEC SQL
+					UPDATE FBM_FO_BNK_FLR_MSG
+					SET	FBM_STTS = 'P'
+					WHERE
+					FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+					FBM_RUN_NO 				 = :li_run_no					AND
+					FBM_BNK_ACCNT_NMBR = :c_bnk_accnt				AND
+					FBM_TRACE					 = :c_trace						AND
+					FBM_STTS					 = 'N'	              AND
+          FBM_PRDCT_CD IS NULL;       /*** Ver 1.2 ***/
+					if(SQLCODE	!= 0)
+        	{
+						if(SQLCODE == NO_DATA_FOUND )					/** Ver 1.6 NDF added **/
+						{
+							EXEC SQL
+								UPDATE 	FBM_FO_BNK_FLR_MSG
+								SET			FBM_STTS = 'P'
+								WHERE 	FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt	AND
+												FBM_RUN_NO 				 = :li_run_no					AND
+												FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt				AND
+												FBM_TRACE					 = :c_trace						AND
+												FBM_STTS					 = 'N'	              AND
+          							FBM_PRDCT_CD IS NULL; 
+								if(SQLCODE	!= 0)
+								{
+          				fn_errlog(c_ServiceName, "S31420",SQLMSG,c_err_msg);
+          				strcpy ( c_msg, "System error. Contact system support" );
+          				fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          				tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+								}
+						}
+						else
+						{
+          		fn_errlog(c_ServiceName, "S31425",SQLMSG,c_err_msg);
+          		strcpy ( c_msg, "System error. Contact system support" );
+          		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+        	}
+        	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        	{
+          	fn_errlog( c_ServiceName, "S31430",LIBMSG,c_err_msg);
+          	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         		strcpy ( c_msg, "System error. Contact system support" );
+         		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          	tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        	}
+  			sprintf(c_msg,"Rerun successful for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+				break ;
+
+         case GENERAL_FAILURE :
+         case INDERMINATE_FAILURE :
+         case RERUN_FAILURE :
+         default :
+				fn_userlog(c_ServiceName,"Stage--------------35");
+					c_bnk_stts  ='N' ;
+					c_stts  ='N' ;
+
+          i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+          if ( i_trnsctn == -1 )
+          {
+            fn_errlog(c_ServiceName, "S31435",LIBMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+	
+          EXEC SQL
+          UPDATE FBM_FO_BNK_FLR_MSG
+          SET FBM_STTS = 'P'
+          WHERE
+          FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+          FBM_RUN_NO         = :li_run_no         AND
+          FBM_BNK_ACCNT_NMBR = :c_bnk_accnt       AND
+          FBM_TRACE          = :c_trace           AND
+          FBM_STTS           = 'N'                AND
+          FBM_PRDCT_CD IS NULL;             /*** Ver 1.2 ***/
+          if(SQLCODE  != 0)
+          {
+						if(SQLCODE == NO_DATA_FOUND)			/** Ver 1.6 NDF added **/
+						{
+				      		EXEC SQL
+										UPDATE 	FBM_FO_BNK_FLR_MSG
+						  			SET 		FBM_STTS = 'P',
+														FBM_BNK_ACCNT_NMBR = :c_bnk_accnt
+										WHERE 	FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+														FBM_RUN_NO         = :li_run_no         AND
+														FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt      AND
+														FBM_TRACE          = :c_trace           AND
+														FBM_STTS           = 'N'                AND
+														FBM_PRDCT_CD IS NULL;             
+								 if(SQLCODE != 0)
+								 {
+									fn_errlog(c_ServiceName, "S31440",SQLMSG,c_err_msg);
+									strcpy ( c_msg, "System error. Contact system support" );
+									fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+									tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+								 }
+						}
+						else
+						{
+									fn_errlog(c_ServiceName, "S31445",SQLMSG,c_err_msg);
+									strcpy ( c_msg, "System error. Contact system support" );
+									fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+									tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+					}
+
+          EXEC SQL
+          INSERT INTO FBM_FO_BNK_FLR_MSG
+          (
+            FBM_XCHNG_CD,
+            FBM_CLM_MTCH_ACCNT,
+            FBM_RUN_NO,
+            FBM_RUN_DT,
+            FBM_BNK_ACCNT_NMBR,
+            FBM_TRNSCTN_TYP,
+            FBM_BLK_CD,
+            FBM_DC_FLG,
+            FBM_AMT,
+            FBM_BNK_STTS,
+            FBM_EBA_STTS,
+            FBM_STTS,
+            FBM_TRACE,
+            FBM_TIMESTAMP,
+            FBM_NARRATION,  /*** Ver 1.3 ***/
+            FBM_FUND_MODEL_FLG  /*** Ver 1.9 ***/
+          )
+          VALUES
+          (
+            :c_xchng_cd,
+            :c_cln_mtch_accnt,
+            :li_run_no,
+            trunc(sysdate),
+            :c_bnk_accnt,
+            :c_trn_typ,
+            :li_block_cd,
+            :c_dr_cr_flg,
+            :d_rerun_amount,
+            :c_bnk_stts,
+            :c_eba_stts,
+            'N',
+            :c_trace,
+            to_date(:c_tm,'yyyymmddhh24miss'),
+            :c_bnk_narration,       /*** Ver 1.3 ***/
+            :c_blk_deposit_flg      /*** Ver 1.9 ***/
+          );
+          if(SQLCODE  != 0)
+          {
+            fn_errlog(c_ServiceName, "S31450",SQLMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+          {
+            fn_errlog( c_ServiceName, "S31455",LIBMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+          }
+          sprintf ( c_msg,"Failure while sending BFT rerun bank entry for :%s:",c_cln_mtch_accnt);
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+          break ;
+
+        }/*End of switch of bank call*/
+ 			
+	      i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+ 				if ( i_trnsctn == -1 )
+ 				{
+     			fn_errlog(c_ServiceName, "S31460",LIBMSG,c_err_msg);
+          fn_errlog(c_ServiceName, "S31465",LIBMSG,c_err_msg);
+       		strcpy ( c_msg, "System error. Contact system support" );
+       		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31470",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+       		strcpy ( c_msg, "System error. Contact system support" );
+       		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+        /** Ver 2.2 Starts here **/
+        i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31475",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+        /** Ver 2.2 Ends Here **/ 
+
+				fn_userlog(c_ServiceName,"Stage--------------36");
+        i_returncode =  fn_do_db_on_clr_bal ( c_ServiceName,
+                                              c_err_msg,
+                                              c_cln_mtch_accnt,
+                                              c_xchng_cd,
+                                              c_run_dt,
+                                              c_bnk_accnt,
+                                              c_tag,
+                                              d_rerun_amount ,
+                                              li_run_no,   /** Ver 1.4 li_run_no Added **/
+                                              c_trace, /*** Ver 1.9 ***/
+                                              c_blk_deposit_flg); /*** Ver 1.9 ****/
+
+        if ( i_returncode != 0 )
+        {
+          fn_errlog(c_ServiceName, "S31480",LIBMSG,c_err_msg);
+          fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+
+				/*** update the record to PROCESSED status in failure table ***/
+				EXEC SQL
+					UPDATE	fbm_fo_bnk_flr_msg
+					SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+					WHERE		fbm_xchng_cd				= :c_xchng_cd
+					AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+					AND			fbm_run_no				  = :li_run_no
+					AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+					AND			fbm_bnk_accnt_nmbr	= :c_bnk_accnt
+					AND			fbm_trnsctn_typ			= :c_trn_typ
+					AND			fbm_blk_cd					= :li_block_cd
+					AND			fbm_dc_flg					= :c_dr_cr_flg
+					AND			fbm_amt							= :d_rerun_amount 
+          AND     fbm_prdct_cd is null;         /*** Ver 1.2 ***/	
+
+        if( SQLCODE != 0 )
+        {
+					if(SQLCODE == NO_DATA_FOUND)			/** Ver 1.6 NDF added **/
+					{
+						EXEC SQL
+							UPDATE	fbm_fo_bnk_flr_msg
+							SET			fbm_stts						= 'Y',FBM_RUN_DT = sysdate
+							WHERE		fbm_xchng_cd				= :c_xchng_cd
+							AND			fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+							AND			fbm_run_no				  = :li_run_no
+							AND			fbm_run_dt				  = to_date(:c_run_dt,'DD-Mon-YYYY')
+							AND			fbm_bnk_accnt_nmbr	<> :c_bnk_accnt
+							AND			fbm_trnsctn_typ			= :c_trn_typ
+							AND			fbm_blk_cd					= :li_block_cd
+							AND			fbm_dc_flg					= :c_dr_cr_flg
+							AND			fbm_amt							= :d_rerun_amount 
+          		AND     fbm_prdct_cd is null; 
+						if(SQLCODE != 0 )
+						{
+         			fn_errlog( c_ServiceName, "S31485",SQLMSG,c_err_msg);
+         			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       				strcpy ( c_msg, "System error. Contact system support" );
+       				fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         			tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+						}
+					}
+					else
+					{
+         		fn_errlog( c_ServiceName, "S31490",SQLMSG,c_err_msg);
+         		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       			strcpy ( c_msg, "System error. Contact system support" );
+       			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         		tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+					}
+        }
+
+        if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        {
+          fn_errlog( c_ServiceName, "S31495",LIBMSG,c_err_msg);
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       		strcpy ( c_msg, "System error. Contact system support" );
+       		fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+        }
+       } 
+
+       /***** Ver 1.9 End for Block model *******/
+       /**** Ver 2.0, IDFC CR changes starts here ***/ 
+
+       fn_userlog(c_ServiceName," c_blk_deposit_flg :%c: li_block_cd :%ld:",c_blk_deposit_flg,li_block_cd);
+
+       if( c_blk_deposit_flg == 'B' && li_block_cd == UNBLOCK_DEBIT_FROM_WALLET )
+       {
+
+         fn_userlog(c_ServiceName,"Inside UNBLOCK_DEBIT_FROM_WALLET Rerun :%lf:",d_rerun_amount);
+         if( d_rerun_amount > 0)
+         {
+           /********* Begin Transaction **********/
+         i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+         if ( i_trnsctn == -1 )
+         {
+          fn_errlog(c_ServiceName, "S31500",LIBMSG,c_err_msg);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+         }
+
+         /********** Lock User ***********/
+         i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+
+         if ( i_returncode == -1 )
+         {
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          fn_errlog(c_ServiceName, "S31505",LIBMSG,c_err_msg);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+         }
+
+         /* Ver 2.2 starts here **/
+         i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+
+         if ( i_returncode == -1 )
+         {
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          fn_errlog(c_ServiceName, "S31510",LIBMSG,c_err_msg);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+         }
+         /* Ver 2.2 Ends Here **/  
+
+          sprintf(c_seg_prdct_cd,"%s%s",c_xchng_cd,"ID");
+
+          rtrim(c_seg_prdct_cd);
+
+         if(DEBUG_MSG_LVL_3)
+         {
+          fn_userlog(c_ServiceName,"c_seg_prdct_cd :%s:",c_seg_prdct_cd);
+         }
+
+          d_amount=d_rerun_amount;
+
+          c_txn_typ = WALLET_UNBLOCK_DEBIT;
+
+          i_returncode = fn_call_inc_dec_svc_rerun( d_amount*0.01, c_txn_typ,c_run_dt);
+
+
+          if( i_returncode != 0 )
+          {
+           fn_errlog( c_ServiceName , "S31515", TPMSG, c_err_msg);
+           /* fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); * Ver 2.1 */
+           Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG,(char*)c_err_msg,0);
+           tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+          }
+
+          if(DEBUG_MSG_LVL_3)
+              {
+               fn_userlog(c_ServiceName,"Before calling fn to increase allocation amount ");
+              }
+
+              EXEC SQL
+             SELECT to_char(sysdate,'DDMONYYYY')||LPAD(piposeq.nextval,6,0)
+             INTO : c_refrnce
+             FROM   DUAL;
+
+            if ( SQLCODE != 0 )
+            {   
+              fn_errlog(c_ServiceName, "S31520",LIBMSG,c_err_msg);
+              fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+              Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+              strcpy ( c_msg, "System error. Contact system support" );
+              fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 ); 
+            }
+              
+             if(DEBUG_MSG_LVL_3)
+             {
+              fn_userlog(c_ServiceName,"Reference no for Pass class :%s:",c_refrnce);
+              fn_userlog(c_ServiceName,"before calling fn_pass class entry ");
+             }
+
+             i_returncode = fn_pass_cls_entry (  c_ServiceName,
+                                                  c_err_msg,
+                                                  c_cln_mtch_accnt,
+                                                  c_xchng_cd,
+                                                  c_run_dt,
+                                                  c_tag,
+                                                  DEBIT,
+                                                  d_amount,
+                                                  PAYIN_PAYOUT,
+                                                  c_refrnce ,
+                                                  li_run_no,
+                                                  'W',
+                                                   c_bnk_accnt,
+                                                  "",
+                                                   c_blk_deposit_flg);
+
+
+             if ( i_returncode != 0 )
+             {
+                fn_errlog( c_ServiceName , "S31525", TPMSG, c_err_msg);
+                fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+                Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG,(char*)c_err_msg,0);
+                tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+             }
+            
+             if(DEBUG_MSG_LVL_3)
+        {
+         fn_userlog(c_ServiceName,"Pass class entry successful");
+         fn_userlog(c_ServiceName,"fbm_xchng_cd :%s:",c_xchng_cd);
+         fn_userlog(c_ServiceName,"c_cln_mtch_accnt :%s:",c_cln_mtch_accnt);
+         fn_userlog(c_ServiceName,"li_run_no :%ld:",li_run_no);
+         fn_userlog(c_ServiceName,"c_run_dt :%s:",c_run_dt);
+         fn_userlog(c_ServiceName," c_bnk_accnt :%s:",c_bnk_accnt);
+         fn_userlog(c_ServiceName,"c_trn_typ :%c:",c_trn_typ);
+         fn_userlog(c_ServiceName," li_block_cd :%ld:",li_block_cd);
+         fn_userlog(c_ServiceName,"c_dr_cr_flg :%c:",c_dr_cr_flg);
+         fn_userlog(c_ServiceName,"d_rerun_amount :%lf;",d_rerun_amount);
+        }
+
+          rtrim(c_xchng_cd);
+          rtrim(c_cln_mtch_accnt);
+          rtrim(c_run_dt);
+          rtrim(c_bnk_accnt);
+
+
+          EXEC SQL
+          UPDATE  fbm_fo_bnk_flr_msg
+          SET     fbm_stts            = 'Y',FBM_RUN_DT = sysdate
+          WHERE   fbm_xchng_cd        = :c_xchng_cd
+          AND     fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+          AND     fbm_run_no          = :li_run_no
+          AND     trunc(fbm_run_dt)   =     to_date(:c_run_dt,'DD-Mon-YYYY')
+          AND     fbm_bnk_accnt_nmbr  = :c_bnk_accnt
+          AND     fbm_trnsctn_typ     = :c_trn_typ
+          AND     fbm_blk_cd          = :li_block_cd
+          AND     fbm_dc_flg          = :c_dr_cr_flg
+          AND     fbm_amt             = :d_rerun_amount
+          AND     fbm_prdct_cd is null;  /*** Ver 1.2 ***/
+
+          if( SQLCODE != 0 )
+          {
+           if(SQLCODE == NO_DATA_FOUND ) /** Ver 1.6 NDF added **/
+           {
+            EXEC SQL
+            UPDATE  fbm_fo_bnk_flr_msg
+            SET     fbm_stts            = 'Y',FBM_RUN_DT = sysdate,
+                    FBM_BNK_ACCNT_NMBR=:c_bnk_accnt
+            WHERE   fbm_xchng_cd        = :c_xchng_cd
+            AND     fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+            AND     fbm_run_no          = :li_run_no
+            AND     trunc(fbm_run_dt)   =      to_date(:c_run_dt,'DD-Mon-YYYY')
+            AND     fbm_bnk_accnt_nmbr  <> :c_bnk_accnt
+            AND     fbm_trnsctn_typ     = :c_trn_typ
+            AND     fbm_blk_cd          = :li_block_cd
+            AND     fbm_dc_flg          = :c_dr_cr_flg
+            AND     fbm_amt             = :d_rerun_amount
+            AND     fbm_prdct_cd is null;
+
+            if(SQLCODE != 0 )
+            {
+             fn_errlog( c_ServiceName, "S31530",SQLMSG,c_err_msg);
+             fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+             strcpy ( c_msg, "System error. Contact system support" );
+             fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+             tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+            }
+           }
+           else
+           {
+            fn_errlog( c_ServiceName, "S31535",SQLMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+           }
+         }   
+
+         if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+         {
+           fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+           fn_errlog( c_ServiceName , "S31540", TPMSG, c_err_msg);
+           Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG,(char*)c_err_msg,0);
+           tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+         }
+        }
+       } 
+       /**** Ver 2.0 Ends Here **********/
+
+       /***** Ver 1.9 Starts for Deposit model ******/
+
+       if( c_blk_deposit_flg=='D' && c_hsbc_payin_flg != 'Y' ) 		/** Ver 2.3  no bank hit for HSBC**/
+       {
+       
+        if( d_rerun_amount > 0)
+        {
+         /********* Begin Transaction **********/
+         i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+         if ( i_trnsctn == -1 )
+         {
+          fn_errlog(c_ServiceName, "S31545",LIBMSG,c_err_msg);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+         }
+
+         /********** Lock User ***********/
+         i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+
+         if ( i_returncode == -1 )
+         {
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          fn_errlog(c_ServiceName, "S31550",LIBMSG,c_err_msg);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+         }
+
+         /** Ver 2.2 ***/
+         i_returncode = fn_lock_fno( c_ServiceName, c_cln_mtch_accnt );
+
+         if ( i_returncode == -1 )
+         {
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          fn_errlog(c_ServiceName, "S31555",LIBMSG,c_err_msg);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+         }
+         /** Ver 2.2 Ends **/ 
+
+          sprintf(c_seg_prdct_cd,"%s%s",c_xchng_cd,"ID"); 
+
+          rtrim(c_seg_prdct_cd);
+   
+         if(DEBUG_MSG_LVL_3)
+         {
+          fn_userlog(c_ServiceName,"c_seg_prdct_cd :%s:",c_seg_prdct_cd);
+         }
+
+          d_amount=d_rerun_amount;
+
+          c_txn_typ = CLEAR_BAL_TO_SGMNT_ALLOCATE;
+
+          i_returncode = fn_call_inc_dec_svc_rerun( d_amount*0.01, c_txn_typ,c_run_dt);
+
+
+          if( i_returncode != 0 )
+          {
+           fn_errlog( c_ServiceName , "S31560", TPMSG, c_err_msg);
+           Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG,(char*)c_err_msg,0);
+           tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+          }
+         
+          if(DEBUG_MSG_LVL_3)
+          {
+           fn_userlog(c_ServiceName,"---SVC_INC_WALLET service successful-------");
+          }
+
+          /*** To increase allocation amount ****/
+          i_returncode = fn_updt_allctn_dtls ( c_ServiceName,
+                                               c_err_msg,
+                                               c_cln_mtch_accnt,
+                                               c_bnk_accnt,
+                                               c_ServiceName,
+                                               d_amount,
+                                               &d_tot_alc_amt_rerun);
+
+          if( i_returncode != 0 )
+          {
+           fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+           fn_errlog( c_ServiceName , "S31565", TPMSG, c_err_msg);
+           Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG,(char*)c_err_msg,0);
+           tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+          }
+
+          if(DEBUG_MSG_LVL_3)
+          { 
+           fn_userlog(c_ServiceName,"---FAB Amount updated successfully---");
+          }
+
+          strcpy(c_sgmnt_cd,c_xchng_cd);
+
+          i_returncode = fn_ins_seg_log( "system",
+                                          0,
+                                          c_ServiceName,
+                                          c_cln_mtch_accnt,
+                                          d_amount*0.01,
+                                          'A', /**** To increase allocation **/
+                                          c_sgmnt_cd,
+                                          d_tot_alc_amt_rerun*0.01,
+                                          'N',
+                                          "SYS",  /**** Channel **/
+                                          "Allocation towards ISEC obligation",
+                                          li_run_no,
+                                          "ALLOC",
+                                          "CLEAR_BAL");
+
+           if ( i_returncode != 0 )
+           {
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            fn_errlog(c_ServiceName, "S31570",LIBMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+           }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+           fn_userlog(c_ServiceName,"---Segment log added successfully");
+           fn_userlog(c_ServiceName,"FAB Allocated by Amount |%lf|", d_amount );
+           fn_userlog(c_ServiceName,"Total FAB Allocated Amount |%lf|", d_tot_alc_amt_rerun );
+          }
+          /*** To reduce allocation amount ****/
+
+          i_returncode = fn_updt_allctn_dtls ( c_ServiceName,
+                                               c_err_msg,
+                                               c_cln_mtch_accnt,
+                                               c_bnk_accnt,
+                                               c_ServiceName,
+                                               d_amount * -1.0,
+                                               &d_tot_alc_amt_rerun);
+          if( i_returncode != 0 )
+          {
+           fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+           fn_errlog( c_ServiceName , "S31575", TPMSG, c_err_msg);
+           Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG,(char*)c_err_msg,0);
+           tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+          }
+    
+          if(DEBUG_MSG_LVL_3)
+          {
+           fn_userlog(c_ServiceName,"---Amount debited from allocation ----");
+          }
+
+           MEMSET(c_seg_narr);
+           sprintf(c_seg_narr,"NFO PI %s",c_run_dt);
+           rtrim(c_seg_narr);
+
+          i_returncode = fn_ins_seg_log( "system",
+                                          0,
+                                          c_ServiceName,
+                                          c_cln_mtch_accnt,
+                                          d_amount*0.01,
+                                          'I', /**** To reduce  allocation **/
+                                          c_sgmnt_cd,
+                                          d_tot_alc_amt_rerun*0.01,
+                                          'N',
+                                          "SYS",  /**** Channel **/
+                                          c_seg_narr,
+                                          li_run_no,
+                                          "DEALLOC",
+                                          "CLEAR_BAL" );
+
+           if ( i_returncode != 0 )
+           {
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            fn_errlog(c_ServiceName, "S31580",LIBMSG,c_err_msg);
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+           }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+           fn_userlog(c_ServiceName,"---Segment log added successfully----");
+           fn_userlog(c_ServiceName,"FAB Allocated by Amount |%lf|", d_amount );
+           fn_userlog(c_ServiceName,"Total FAB Allocated Amount |%lf|", d_tot_alc_amt_rerun );
+          }
+
+          EXEC SQL
+          SELECT to_char(sysdate,'DDMONYYYY')||LPAD(piposeq.nextval,6,0)
+          INTO : c_refrnce
+          FROM   DUAL;
+
+          if ( SQLCODE != 0 )
+          {
+           fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+           fn_errlog(c_ServiceName, "L31230",SQLMSG,c_err_msg);
+           strcpy ( c_msg, "System error. Contact system support" );
+           fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+           tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+          }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+           fn_userlog(c_ServiceName,"Reference no for Pass class :%s:",c_refrnce);
+          }
+
+          i_returncode = fn_pass_cls_entry (  c_ServiceName,
+                                              c_err_msg,
+                                              c_cln_mtch_accnt,
+                                              c_xchng_cd,
+                                              c_run_dt,
+                                              c_tag,
+                                              DEBIT,
+                                              d_amount,
+                                              PAYIN_PAYOUT,
+                                              c_refrnce ,
+                                              li_run_no,
+                                              'C',                /*** Ver 1.9 ***/
+                                               c_bnk_accnt,       /*** Ver 1.9 ***/
+                                               "",                /*** Ver 1.9 ***/
+                                               c_blk_deposit_flg); /*** Ver 1.9 ****/
+
+           if ( i_returncode != 0)
+           {
+            fn_errlog( c_ServiceName, "L31250",LIBMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+           }
+
+        if(DEBUG_MSG_LVL_3)
+        { 
+         fn_userlog(c_ServiceName,"Pass class entry successful");
+         fn_userlog(c_ServiceName,"fbm_xchng_cd :%s:",c_xchng_cd);
+         fn_userlog(c_ServiceName,"c_cln_mtch_accnt :%s:",c_cln_mtch_accnt);
+         fn_userlog(c_ServiceName,"li_run_no :%ld:",li_run_no);
+         fn_userlog(c_ServiceName,"c_run_dt :%s:",c_run_dt);
+         fn_userlog(c_ServiceName," c_bnk_accnt :%s:",c_bnk_accnt);
+         fn_userlog(c_ServiceName,"c_trn_typ :%c:",c_trn_typ);
+         fn_userlog(c_ServiceName," li_block_cd :%ld:",li_block_cd);
+         fn_userlog(c_ServiceName,"c_dr_cr_flg :%c:",c_dr_cr_flg);
+         fn_userlog(c_ServiceName,"d_rerun_amount :%lf;",d_rerun_amount);
+        }
+
+          rtrim(c_xchng_cd);
+          rtrim(c_cln_mtch_accnt);
+          rtrim(c_run_dt);
+          rtrim(c_bnk_accnt);
+
+
+          EXEC SQL
+          UPDATE  fbm_fo_bnk_flr_msg
+          SET     fbm_stts            = 'Y',FBM_RUN_DT = sysdate
+          WHERE   fbm_xchng_cd        = :c_xchng_cd
+          AND     fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+          AND     fbm_run_no          = :li_run_no
+          AND     trunc(fbm_run_dt)   =     to_date(:c_run_dt,'DD-Mon-YYYY')
+          AND     fbm_bnk_accnt_nmbr  = :c_bnk_accnt
+          AND     fbm_trnsctn_typ     = :c_trn_typ
+          AND     fbm_blk_cd          = :li_block_cd
+          AND     fbm_dc_flg          = :c_dr_cr_flg
+          AND     fbm_amt             = :d_rerun_amount
+          AND     fbm_prdct_cd is null;  /*** Ver 1.2 ***/
+
+          if( SQLCODE != 0 )
+          {
+           if(SQLCODE == NO_DATA_FOUND ) /** Ver 1.6 NDF added **/
+           {
+            EXEC SQL
+            UPDATE  fbm_fo_bnk_flr_msg
+            SET     fbm_stts            = 'Y',FBM_RUN_DT = sysdate,
+                    FBM_BNK_ACCNT_NMBR=:c_bnk_accnt
+            WHERE   fbm_xchng_cd        = :c_xchng_cd
+            AND     fbm_clm_mtch_accnt  = :c_cln_mtch_accnt
+            AND     fbm_run_no          = :li_run_no
+            AND     trunc(fbm_run_dt)   =      to_date(:c_run_dt,'DD-Mon-YYYY')
+            AND     fbm_bnk_accnt_nmbr  <> :c_bnk_accnt
+            AND     fbm_trnsctn_typ     = :c_trn_typ
+            AND     fbm_blk_cd          = :li_block_cd
+            AND     fbm_dc_flg          = :c_dr_cr_flg
+            AND     fbm_amt             = :d_rerun_amount
+            AND     fbm_prdct_cd is null;
+
+            if(SQLCODE != 0 )
+            {
+             fn_errlog( c_ServiceName, "S31585",SQLMSG,c_err_msg);
+             fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+             strcpy ( c_msg, "System error. Contact system support" );
+             fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+             tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+            }
+           }
+           else
+           {
+            fn_errlog( c_ServiceName, "S31590",SQLMSG,c_err_msg);
+            fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+            strcpy ( c_msg, "System error. Contact system support" );
+            fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+            tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+           }
+         }
+    
+         /******** PBP TABLE INSERT - ONLY FOR BFO PAYIN CASE  *******/
+
+        if(strcmp(c_xchng_cd,"BFO")==0)
+        {
+          strcpy(c_prdct_cd,"BFO");
+          strcpy(c_ibr_prdct_cd,"BFOID");
+          rtrim(c_ibr_prdct_cd);
+
+          c_pipo_typ='I';
+          strcpy(c_pool_acc,c_payin_pool_acc_nse);
+          strcpy(c_othr_pool_acc,c_payin_pool_acc_bse);
+          strcpy(c_trace,"");
+
+          rtrim(c_prdct_cd);
+          rtrim(c_pool_acc);
+          rtrim(c_othr_pool_acc);
+          rtrim(c_ibr_prdct_cd);
+
+         if(DEBUG_MSG_LVL_3)
+         {
+          fn_userlog(c_ServiceName,"-------Before PBP  Insert --------");
+         }
+
+          d_amount_rs_rerun=d_amount*0.01;
+
+          EXEC SQL
+          INSERT INTO PBP_PRD_BNK_PIPO
+         (
+           PBP_CLM_MTCH_ACCNT,
+           PBP_PROD_CD,
+           PBP_RUN_NO,
+           PBP_RUN_DATE,
+           PBP_PIPO_TYP,
+           PBP_AMT,
+           PBP_POOL_ACC,
+           PBP_DBCR_FLG,
+           PBP_PRCSS_FLG,
+           PBP_TRACE,
+           PBP_TIMESTAMP,
+           PBP_DC_DATE,
+           PBP_IBR_PRDCT_CD,
+           PBP_INS_DATE,
+           PBP_OTH_POOL_ACC
+         )
+         VALUES
+         (
+          :c_cln_mtch_accnt,
+          :c_prdct_cd,
+          :li_run_no,
+          to_date(:c_run_dt,'DD-Mon-YYYY'),
+          :c_pipo_typ,
+          :d_amount_rs_rerun,
+          :c_pool_acc,
+          'N',
+          'N',
+          :c_trace,
+          sysdate,    /**** confirm for this ***/
+          to_date(sysdate,'DD-MON-YYYY'),
+          :c_ibr_prdct_cd,
+          to_date(sysdate,'DD-MON-YYYY'),
+          :c_othr_pool_acc
+         );
+
+
+         if(SQLCODE != 0 )
+         {
+          fn_errlog( c_ServiceName, "S31595",SQLMSG,c_err_msg);
+          fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          strcpy ( c_msg, "System error. Contact system support" );
+          fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+          tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+         }
+         
+         if(DEBUG_MSG_LVL_3)
+         {
+          fn_userlog(c_ServiceName,"-------After PBP  Insert --------");
+         }
+        }
+       
+        if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+        {
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         fn_errlog( c_ServiceName , "S31600", TPMSG, c_err_msg);
+         Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG,(char*)c_err_msg,0);
+         tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+        }
+       }
+      }   /**** Ver 1.9 End for Deposit Model ****/
+
+  			sprintf ( c_msg, "Rerun process completed successfully for %s for amount [%lf] ", c_cln_mtch_accnt,d_rerun_amount );
+  			fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+  			tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+			}
+			break;
+
+	} /* end of outer switch */
+  fn_userlog(c_ServiceName, "**Invalid data received to process ");
+  tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 );
+} /* end of main */
+
+/**** Ver 1.9 Starts *******/
+
+int fn_call_inc_dec_svc_rerun( double d_amt, char c_txn_typ, char *c_run_dt  )
+{
+  FBFR32 *ptr_fml_Rbuf;
+  FBFR32 *ptr_fml_Sbuf;
+
+  char c_ip_add[15+1];
+  char c_called_svc[33];
+  char c_narratn[101];
+
+  MEMSET(c_called_svc);
+  MEMSET(c_ip_add);
+  MEMSET(c_narratn);
+
+  int i;
+  int i_err[20];
+  int i_err_cd = 0;
+
+  long li_len_tobuf=0;
+  long l_tpurcode;
+
+  sprintf(c_narratn,"NFO PI %s",c_run_dt); 
+  rtrim(c_narratn);
+  fn_userlog(c_ServiceName,"Narration for bank hit rerun :%s:",c_narratn);
+
+
+  ptr_fml_Sbuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+  if(ptr_fml_Sbuf == NULL)
+  {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    fn_errlog( c_ServiceName , "S31605", TPMSG, c_err_msg);
+    fn_userlog( c_ServiceName, "tpalloc failed for ptr_fml_Sbuf");
+    return -1;
+  }
+
+  ptr_fml_Rbuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+  if(ptr_fml_Rbuf == NULL)
+  {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    fn_errlog( c_ServiceName , "S31610", TPMSG, c_err_msg);
+    fn_userlog( c_ServiceName, "tpalloc failed for ptr_fml_Rbuf");
+    tpfree((char *)ptr_fml_Sbuf);
+    return -1;
+  }
+
+  if(  c_txn_typ == WALLET_UNBLOCK_DEBIT) /** Ver 2.0, WALLET_UNBLOCK_DEBIT added **/
+  {
+    strcpy( c_called_svc, "SVC_DEC_WALLET" );
+  }
+  else
+  {
+   strcpy( c_called_svc, "SVC_INC_WALLET" );
+  }
+
+ if(DEBUG_MSG_LVL_3)
+ {
+  fn_userlog(c_ServiceName,"Service To be called |%s| ",c_called_svc );
+  fn_userlog(c_ServiceName,"Transaction Type |%c|",c_txn_typ);
+  fn_userlog(c_ServiceName,"User ID |%s| ",st_usr_prfl.c_user_id );
+  fn_userlog(c_ServiceName,"Session ID |%ld| ",st_usr_prfl.l_session_id );
+  fn_userlog(c_ServiceName,"Match Acc No :%s: ",st_usr_prfl.c_cln_mtch_accnt );
+  fn_userlog(c_ServiceName,"Allcated Amount |%lf|",d_amt );
+  fn_userlog(c_ServiceName,"Channel |%s| ",c_channel );
+  fn_userlog(c_ServiceName,"IP Address |%s| ",c_ip_add );
+  fn_userlog(c_ServiceName," Bank narration :%s:",c_narratn);
+  fn_userlog(c_ServiceName,"Segment code :%s:",c_sgmnt_cd);
+  fn_userlog(c_ServiceName,"Run number :%ld:",li_run_no);
+  fn_userlog(c_ServiceName,"Bank Account :%s:",c_bnk_accnt);
+  fn_userlog(c_ServiceName,"Trace number :%s:",c_trace);
+  fn_userlog(c_ServiceName,"Timestamp :%s:",c_tm);
+  fn_userlog(c_ServiceName," Segment Product code :%s:",c_seg_prdct_cd);
+ }
+  i_err[0] = Fadd32(ptr_fml_Sbuf,FML_USR_ID,(char *)st_usr_prfl.c_user_id, 0);
+  i_err[1] = Fadd32(ptr_fml_Sbuf,FML_SSSN_ID,(char *)&st_usr_prfl.l_session_id,0);
+  i_err[2] = Fadd32(ptr_fml_Sbuf,FML_EBA_MTCH_ACT_NO,(char *)st_usr_prfl.c_cln_mtch_accnt,0);
+  i_err[3] = Fadd32(ptr_fml_Sbuf,FML_MSG_TYP,(char *)&c_txn_typ,0);
+  i_err[4] = Fadd32(ptr_fml_Sbuf,FML_TRNSCTN_AMT,(char *)&d_amt,0);
+  i_err[5] = Fadd32(ptr_fml_Sbuf,FML_MDC_NARRATION,(char *)c_narratn,0);
+  i_err[6] = Fadd32(ptr_fml_Sbuf,FML_USR_PASSWORD_ID,(char *)c_channel,0);
+  i_err[7] = Fadd32(ptr_fml_Sbuf,FML_IP_ID,(char *)c_ip_add,0);
+  i_err[8] = Fadd32(ptr_fml_Sbuf,FML_XCHNG_SG,(char *)c_sgmnt_cd,0);
+  i_err[9] = Fadd32(ptr_fml_Sbuf,FML_VLME,(char *)&li_run_no,0);
+  i_err[10] = Fadd32(ptr_fml_Sbuf,FML_ARD_BNK_ACCNT_NMBR,(char *)c_bnk_accnt,0);
+  i_err[11] = Fadd32(ptr_fml_Sbuf,FML_SYSTEM_TRACE,(char *)c_trace,0);
+  i_err[12] = Fadd32(ptr_fml_Sbuf,FML_TM,(char *)c_tm,0);
+  i_err[13] = Fadd32(ptr_fml_Sbuf,FML_TRANS_TYP,(char *)c_seg_prdct_cd,0);
+
+  for( i = 0 ; i < 14 ; i++ )
+  {
+    if(i_err[i] == -1)
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_userlog(c_ServiceName,"Fadd failed for %d", i );
+      fn_errlog(c_ServiceName,"L31055",FMLMSG,c_err_msg);
+      tpfree((char *)ptr_fml_Sbuf);
+      tpfree((char *)ptr_fml_Rbuf);
+      return -1;
+    }
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog(c_ServiceName,"---------Trace Number ---------- :%s:",c_trace);
+   fn_userlog(c_ServiceName,"---------Timestamp    ---------- :%s:",c_tm); 
+  }
+
+  if(tpcall( c_called_svc,(char*)ptr_fml_Sbuf,0,(char **)&ptr_fml_Rbuf,&li_len_tobuf,0 ) == -1)
+  {
+  
+   fn_userlog(c_ServiceName,"BEFORE TPESVCFAIL");
+
+   if(tperrno == TPESVCFAIL)
+   {
+    fn_userlog(c_ServiceName,"Inside TPESVCFAIL");
+
+    fn_userlog( c_ServiceName, "TPESVCFAIL returned by SVC_INC_WALLET" );
+
+    i_err_cd = tpurcode;
+    l_tpurcode = tpurcode;
+   
+   if(DEBUG_MSG_LVL_3)  
+   { 
+    fn_userlog(c_ServiceName,"tpurcode after call is |%ld|",tpurcode);
+    fn_userlog(c_ServiceName,"l_tpurcode is |%ld|",l_tpurcode);
+    fn_userlog(c_ServiceName,"Reached here");
+   }
+
+    if(l_tpurcode == 911 ||
+       l_tpurcode == -99 ||
+       l_tpurcode == -98 ||
+       l_tpurcode == -2  ||
+       l_tpurcode == 115 ||
+       l_tpurcode == 907 ||
+       l_tpurcode == -1)
+    {
+
+     fn_userlog(c_ServiceName,"Before aborting ");
+
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     fn_userlog(c_ServiceName,"After aborting ");
+     i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+     if ( i_trnsctn == -1 )
+     {
+      fn_errlog(c_ServiceName, "S31615",LIBMSG,c_err_msg);
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+      tpfree((char *)ptr_fml_Sbuf);
+      tpfree((char *)ptr_fml_Rbuf);
+      /** tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 ); ** Ver 2.1 **/
+      return -1;  /** Ver 2.1 **/
+     }
+
+     fn_userlog(c_ServiceName,"Inside Unconfirmed Failure - Updating Processed Status in FBM");
+
+     rtrim(c_cln_mtch_accnt);
+     rtrim(c_bnk_accnt);
+     rtrim(c_trace);
+
+    if(DEBUG_MSG_LVL_3)
+    {
+     fn_userlog(c_ServiceName,"c_cln_mtch_accnt :%s:",c_cln_mtch_accnt);
+     fn_userlog(c_ServiceName,"c_bnk_accnt :%s:",c_bnk_accnt);
+     fn_userlog(c_ServiceName,"c_trace :%s:",c_trace);
+    }
+
+     EXEC SQL
+     UPDATE FBM_FO_BNK_FLR_MSG
+     SET FBM_STTS = 'P'
+     WHERE
+     FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+     FBM_RUN_NO         = :li_run_no         AND
+     FBM_BNK_ACCNT_NMBR = :c_bnk_accnt       AND
+     FBM_TRACE          = :c_trace           AND
+     FBM_STTS           = 'N'                AND
+     FBM_PRDCT_CD  is null;
+
+     if(SQLCODE  != 0)
+     {
+       if(SQLCODE == NO_DATA_FOUND)
+       {
+
+        EXEC SQL
+        UPDATE  FBM_FO_BNK_FLR_MSG
+        SET     FBM_STTS = 'P',
+        FBM_BNK_ACCNT_NMBR=:c_bnk_accnt
+        WHERE
+        FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+        FBM_RUN_NO         = :li_run_no         AND
+        FBM_BNK_ACCNT_NMBR <> :c_bnk_accnt      AND
+        FBM_TRACE          = :c_trace           AND
+        FBM_STTS           = 'N'                AND
+        FBM_PRDCT_CD       is null;
+      
+        if(SQLCODE  != 0)
+        {
+         fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+         fn_errlog(c_ServiceName, "S31620",SQLMSG,c_err_msg);
+         strcpy ( c_msg, "System error. Contact system support" );
+         fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+         tpfree((char *)ptr_fml_Sbuf);
+         tpfree((char *)ptr_fml_Rbuf);
+         /** tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 ); ***Ver 2.1 **/
+         return -1; /** Ver 2.1 **/
+        }
+
+         fn_userlog(c_ServiceName,"Number of Rows updated in FBM=:%ld:",sqlca.sqlerrd[2]);
+       }
+       else
+       {
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog(c_ServiceName, "S31625",SQLMSG,c_err_msg);
+        strcpy ( c_msg, "System error. Contact system support" );
+        fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+        tpfree((char *)ptr_fml_Sbuf);
+        tpfree((char *)ptr_fml_Rbuf);
+        /**tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 ); *** Ver 2.1 */
+        return -1; /** Ver 2.1 **/
+       }
+     }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+     fn_userlog(c_ServiceName,"Before Inserting Fresh entry in FBM");
+     fn_userlog(c_ServiceName,"d_amt :%lf:",d_amt);
+    }
+ 
+     EXEC SQL
+     INSERT INTO FBM_FO_BNK_FLR_MSG
+    (
+     FBM_XCHNG_CD,
+     FBM_CLM_MTCH_ACCNT,
+     FBM_RUN_NO,
+     FBM_RUN_DT,
+     FBM_BNK_ACCNT_NMBR,
+     FBM_TRNSCTN_TYP,
+     FBM_BLK_CD,
+     FBM_DC_FLG,
+     FBM_AMT,
+     FBM_BNK_STTS,
+     FBM_EBA_STTS,
+     FBM_STTS,
+     FBM_TRACE ,
+     FBM_TIMESTAMP,
+     FBM_NARRATION,
+     FBM_FUND_MODEL_FLG
+    )
+    VALUES
+    (
+     :c_xchng_cd,
+     :c_cln_mtch_accnt,
+     :li_run_no,
+     to_date(:c_run_dt,'DD-MON-YYYY'),
+     :c_bnk_accnt,
+     :c_trn_typ,
+     :li_block_cd,
+     'D',
+     :d_amt*100,
+     'N',     /** Not updated **/
+     'N',     /** Not updated **/
+     'N',
+     :c_trace,
+     to_date(:c_tm,'yyyymmddhh24miss'),
+     :c_bnk_narration,
+     'D'
+    );
+
+    if ( SQLCODE != 0 )
+    {
+     fn_errlog( c_ServiceName, "S31630",SQLMSG,c_err_msg);
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     strcpy ( c_msg, "System error. Contact system support" );
+     fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+     tpfree((char *)ptr_fml_Sbuf);
+     tpfree((char *)ptr_fml_Rbuf);
+     /**tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 ); * Ver 2.1 */
+     return -1; /** Ver 2.1 **/
+    }
+
+     fn_userlog(c_ServiceName,"After Inserting Fresh entry in FBM");
+
+    
+     if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+     {
+      fn_errlog( c_ServiceName, "S31635",LIBMSG,c_err_msg);
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     strcpy ( c_msg, "System error. Contact system support" );
+     fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+     tpfree((char *)ptr_fml_Sbuf);
+     tpfree((char *)ptr_fml_Rbuf);
+     /*tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 ); * Ver 2.1 */
+      return -1; /** Ver 2.1 **/
+    }
+   }
+   else if( l_tpurcode == 116 ) /** Ver 2.1 Starts here **/
+   {
+     fn_userlog(c_ServiceName,"Before aborting ");
+
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     fn_userlog(c_ServiceName,"After aborting ");
+     i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+     if ( i_trnsctn == -1 )
+     {
+      fn_errlog(c_ServiceName, "S31640",LIBMSG,c_err_msg);
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+      tpfree((char *)ptr_fml_Sbuf);
+      tpfree((char *)ptr_fml_Rbuf);
+      /** tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 ); ** Ver 2.1 **/
+      return -1;  /** Ver 2.1 **/
+     }
+
+     fn_userlog(c_ServiceName,"Inside Unconfirmed Failure - Updating Processed Status in FBM");
+
+     rtrim(c_cln_mtch_accnt);
+     rtrim(c_bnk_accnt);
+     rtrim(c_trace);
+
+    if(DEBUG_MSG_LVL_3)
+    {
+     fn_userlog(c_ServiceName,"c_cln_mtch_accnt :%s:",c_cln_mtch_accnt);
+     fn_userlog(c_ServiceName,"c_bnk_accnt :%s:",c_bnk_accnt);
+     fn_userlog(c_ServiceName,"c_trace :%s:",c_trace);
+    }
+
+     EXEC SQL
+     UPDATE FBM_FO_BNK_FLR_MSG
+     SET FBM_STTS = 'P'
+     WHERE
+     FBM_CLM_MTCH_ACCNT = :c_cln_mtch_accnt  AND
+     FBM_RUN_NO         = :li_run_no         AND
+     FBM_BNK_ACCNT_NMBR = :c_bnk_accnt       AND
+     FBM_TRACE          = :c_trace           AND
+     FBM_STTS           = 'N'                AND
+     FBM_PRDCT_CD  is null;
+
+     if(SQLCODE  != 0)
+     {
+      fn_errlog(c_ServiceName, "S31645",SQLMSG,c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+      tpfree((char *)ptr_fml_Sbuf);
+      tpfree((char *)ptr_fml_Rbuf);
+      return -1;  /** Ver 2.1 **/
+     }
+
+     if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+     {
+      fn_errlog( c_ServiceName, "S31650",LIBMSG,c_err_msg);
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+     strcpy ( c_msg, "System error. Contact system support" );
+     fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+     tpfree((char *)ptr_fml_Sbuf);
+     tpfree((char *)ptr_fml_Rbuf);
+     /*tpreturn ( TPFAIL, ERR_BFR, ( char * )NULL, 0, 0 ); * Ver 2.1 */
+      return -1; /** Ver 2.1 **/
+    }
+
+
+   } /** Ver 2.1 Ends here **/ 
+   else
+   { 
+      fn_userlog(c_ServiceName,"Aborting Transaction for other tpurcode"); 
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   }
+  }  
+  else
+  {
+    fn_userlog(c_ServiceName,"Aborting Transaction for else of TPESVCFAIL"); 
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); 
+  }
+  tpfree ( ( char * ) ptr_fml_Rbuf ); /* Ver 2.1 */
+  tpfree ( ( char * ) ptr_fml_Sbuf ); /* Ver 2.1 */ 
+  return -1;
+ }
+
+ tpfree ( ( char * ) ptr_fml_Rbuf );
+ tpfree ( ( char * ) ptr_fml_Sbuf );
+
+ return 0;
+}
+
+/**** Ver 1.9 Ends ***/  
+

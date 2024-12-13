@@ -1,0 +1,459 @@
+/***************************************************************************/
+/*  Program            : SFO_SQOFF_PAYIN                                   */
+/*                                                                         */
+/*  Input              :                                                   */
+/*                                                                         */
+/*  Output             :                                                   */
+/*                                                                         */
+/*  Descripation       :This Process Used for clear all pending failuer    */
+/*                      payin -payout case and Clear Normal payin amount   */
+/*                      for Recover Pending Outstanding Obligation.        */
+/*                                                                         */
+/***************************************************************************/
+/*  11-Jun-2018   Ver 1.0  New Release                      -Tanmay Patel  */ 
+/*  27-Jan-2020       1.1  Deposit Model Changes            - Akash B      */ 
+/*  11-Mar-2022       1.2  IDFC CR changes                  - Sachin Birje */ 
+/***************************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fn_ddr.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <string.h>   
+#include <userlog.h>  
+#include <fml_rout.h>
+#include <stdlib.h>   
+#include <fn_read_debug_lvl.h>
+
+void SFO_SQOFF_PAYIN ( TPSVCINFO *rqst )
+{
+  FBFR32 *ptr_fml_Ibuf;
+  FBFR32 *ptr_fml_Obuf;
+  FBFR32 *ptr_fml_Sbuf;
+  FBFR32 *ptr_fml_Rbuf;
+  int  i_err[14]; /** Ver 1.1 changed from 8 to 13 **/ /* ver 1.2 , 14 **/
+  int  i_ch_val = 0;
+  int  i_returncode = 0;
+  int  i = 0;
+  char c_err_msg [256];
+  char c_msg [256]; 
+  char c_tag [256];
+  char c_ServiceName [35];
+  char c_svc_name [35];
+  char c_xchng_cd [4];
+  char c_bnk_accnt [21];
+  char c_bnk_narration [21]; 
+  char c_cln_mtch_accnt [11];
+  char c_tm [LEN_DATE];
+  char c_trace [12 + 1];
+  char c_trd_dt [12];
+  char c_run_dt [12];
+  char c_narration_dt[12]; 
+  char c_rout_str[4];
+  char c_eba_stts  = '\0';
+  char c_bnk_stts  = '\0';
+  char c_dr_cr_flg = '\0';
+  char c_trn_typ   = '\0';
+  char c_exist_flg;
+  
+  char c_payin_pool_acc_nse[20]; /*** Ver 1.1 ***/
+  char c_payout_pool_acc_nse[20];  /*** Ver 1.1 ***/
+  char c_payin_pool_acc_bse[20];  /*** Ver 1.1 ***/
+  char c_payout_pool_acc_bse[20]; /*** Ver 1.1 ***/
+  char c_model_flag='\0';         /*** Ver 1.1 ***/
+  char c_bank_nm[11];  /** Ver 1.1 **/
+
+
+  long int li_run_no;
+	long int li_run_no_main;
+  long int li_tot_rcrds;
+  long int li_cnt;
+	long int li_block_cd=1;
+  long l_recvbuf;
+
+  double d_rerun_amount;
+  double d_min_payin_amt=0; 
+  double d_min_payout_amt=0;
+  double d_dc_amt=0;
+
+  ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+
+  MEMSET(c_tag);
+  i_err[0] = Fget32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO,0,( char * )c_cln_mtch_accnt,0);
+  i_err[1] = Fget32(ptr_fml_Ibuf,FFO_XCHNG_CD,0,( char * )c_xchng_cd,0); 
+  i_err[2] = Fget32(ptr_fml_Ibuf,FFO_TRD_DT,0,( char * )c_trd_dt,0);
+  i_err[3] = Fget32(ptr_fml_Ibuf,FFO_RUN_NUM,0,( char * )&li_run_no_main,0);
+
+   for(i =0; i<4; i++)
+   {
+      if(i_err[i] == -1)
+      {
+				 fn_userlog(c_ServiceName,"Error at field :%d:",i+1);
+         fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg );
+         tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+   }
+
+   if( DEBUG_MSG_LVL_0 )
+   {
+     fn_userlog(c_ServiceName,"Match_account_No:%s:",c_cln_mtch_accnt);
+	   fn_userlog(c_ServiceName,"c_xchng_cd:%s:",c_xchng_cd);
+	   fn_userlog(c_ServiceName,"c_trd_dt:%s:",c_trd_dt);
+	   fn_userlog(c_ServiceName,"li_run_no_main:%ld:",li_run_no_main);
+   }
+
+   /*** Ver 1.2 Starst here ***/
+   MEMSET(c_bank_nm);
+   EXEC SQL
+     SELECT NVL(CLB_BNK_NM,'ICICI')
+       INTO :c_bank_nm
+       FROM CLB_BNK_ACCTS
+      WHERE CLB_CLM_MTCH_ACCNT =:c_cln_mtch_accnt; 
+   if( SQLCODE != 0)
+   {
+     fn_errlog( c_ServiceName, "S31010", SQLMSG, c_err_msg );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+   rtrim(c_bank_nm);
+
+   fn_userlog(c_ServiceName,"c_bank_nm :%s:",c_bank_nm);
+
+   i_err [0]= Fadd32(ptr_fml_Ibuf,FFO_QUEUE_NAME,(char *)c_bank_nm,0);
+
+   if ( i_err[0] == -1 )
+   {
+     fn_errlog( c_ServiceName, "S31015", FMLMSG, c_err_msg );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+   /**** Ver 1.2 Ends here ***/
+
+   MEMSET(c_bnk_narration);
+   MEMSET(c_narration_dt);
+   strcpy(c_bnk_narration,"F&O/");
+
+   EXEC SQL
+   SELECT to_char(sysdate, 'dd-Mon-yyyy')
+   INTO   :c_narration_dt
+   FROM   dual;
+
+   if( SQLCODE != 0)
+   {
+     fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+
+   rtrim(c_narration_dt);
+   fn_userlog(c_ServiceName," c_narration_dt :%s:",c_narration_dt);
+   strcat(c_bnk_narration,c_narration_dt);
+   fn_userlog(c_ServiceName,"Bank Narration :%s:",c_bnk_narration);
+
+   ptr_fml_Obuf = ( FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+   i_returncode  = tpcall  ("SFO_GT_RERUN",(char * ) ptr_fml_Ibuf,0,( char ** ) &ptr_fml_Obuf,&l_recvbuf,0);
+
+   if(i_returncode == -1)
+   {
+     fn_errlog( c_ServiceName, "S31025", TPMSG, c_err_msg );
+     fn_bat_pst_msg_fno ( c_ServiceName, c_err_msg, c_tag );
+     tpfree( (char *) ptr_fml_Obuf);
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }  
+
+   li_tot_rcrds = fn_reccnt_rs ( ptr_fml_Obuf,
+                                 c_ServiceName,
+                                 c_err_msg,
+                                 FFO_EBA_MTCH_ACT_NO );
+
+   if ( li_tot_rcrds == -1 )
+   {
+      fn_errlog( c_ServiceName, "S31030",LIBMSG,c_err_msg);
+      fn_dstry_rs ( ptr_fml_Obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+
+   fn_userlog(c_ServiceName,"li_tot_rcrds :%ld",li_tot_rcrds);
+
+   for(li_cnt = 1; li_cnt <= li_tot_rcrds; li_cnt++)
+   {
+
+     sprintf ( c_msg, "Processing record %ld of %ld", li_cnt, li_tot_rcrds );
+     fn_bat_pst_msg_fno ( c_ServiceName, c_msg, c_tag );
+
+     MEMSET(c_xchng_cd);
+     MEMSET(c_cln_mtch_accnt);
+     MEMSET(c_run_dt);
+     MEMSET(c_bnk_accnt);
+     MEMSET(c_trace);
+     MEMSET(c_tm);
+     c_eba_stts  = '\0';
+     c_bnk_stts  = '\0';
+     c_dr_cr_flg = '\0';
+     c_trn_typ   = '\0';
+     li_run_no   = 0;
+     d_rerun_amount = 0;
+     li_block_cd = 1;
+
+     i_ch_val = fn_getnxt_rs ( ptr_fml_Obuf,
+                               c_ServiceName,
+                               c_err_msg,
+                               14,
+                               FFO_XCHNG_CD, ( char * )c_xchng_cd,NULL,
+                               FFO_EBA_MTCH_ACT_NO, ( char * )c_cln_mtch_accnt,NULL,
+                               FFO_RUN_NUM,( char * )&li_run_no,NULL,
+                               FFO_TRD_DT, ( char * )c_run_dt,NULL,
+                               FFO_BNK_ACT_NO, ( char * )c_bnk_accnt,NULL,
+                               FFO_BNK_TRN_TYP,( char * )&c_trn_typ,NULL,
+                               FFO_BNK_BLK_CD, ( char * )&li_block_cd,NULL,
+                               FFO_DR_CR_FLG,( char * )&c_dr_cr_flg,NULL,
+                               FFO_PI_PO_AMT,( char * )&d_rerun_amount,NULL,
+                               FFO_EBA_STTS, ( char * )&c_eba_stts,NULL,
+                               FFO_BNK_STTS, ( char * )&c_bnk_stts ,NULL,
+                               FML_SYSTEM_TRACE, ( char * )c_trace ,NULL,
+                               FML_TM, ( char * )c_tm ,NULL,
+                               FFO_UPLD_MTCH_FLG,( char *)&c_model_flag, NULL); /** Ver 1.1 **/
+
+
+     if ( i_ch_val != 0 )
+     {
+       fn_errlog( c_ServiceName, "S31035", LIBMSG, c_err_msg );
+       tpfree( (char *) ptr_fml_Obuf);
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+
+     if( DEBUG_MSG_LVL_3 )
+     {
+  		 fn_userlog(c_ServiceName,"Exchange code     :[%s]" ,c_xchng_cd);
+	  	 fn_userlog(c_ServiceName,"Match account     :[%s]" ,c_cln_mtch_accnt);
+	  	 fn_userlog(c_ServiceName,"Run no.           :[%ld]",li_run_no);
+	  	 fn_userlog(c_ServiceName,"Run date          :[%s]" ,c_run_dt);
+	  	 fn_userlog(c_ServiceName,"Bank Account no.  :[%s]" ,c_bnk_accnt);
+	  	 fn_userlog(c_ServiceName,"Transaction Type  :[%c]" ,c_trn_typ);
+	  	 fn_userlog(c_ServiceName,"Block code        :[%ld]",li_block_cd);
+	  	 fn_userlog(c_ServiceName,"Debit/Credit Flag :[%c]" ,c_dr_cr_flg);
+	  	 fn_userlog(c_ServiceName,"PIPO Rerun Amount :[%lf]",d_rerun_amount);
+	  	 fn_userlog(c_ServiceName,"EBA status        :[%c]" ,c_eba_stts);
+	  	 fn_userlog(c_ServiceName,"Bank status       :[%c]" ,c_bnk_stts);
+	  	 fn_userlog(c_ServiceName,"System trace      :[%s]" ,c_trace);
+	  	 fn_userlog(c_ServiceName,"Placed time       :[%s]" ,c_tm);
+	  	 fn_userlog(c_ServiceName,"Bnk_narration     :[%s]" ,c_bnk_narration);
+     }
+
+
+     MEMSET(c_payin_pool_acc_bse);   /*** Ver 1.1 **/
+     MEMSET(c_payout_pool_acc_bse);  /*** Ver 1.1 **/
+     MEMSET(c_payin_pool_acc_nse);   /*** Ver 1.1 **/
+     MEMSET(c_payout_pool_acc_nse);  /*** Ver 1.1 **/
+
+     EXEC SQL
+     SELECT FSP_MIN_PAYIN_AMT,
+            FSP_MIN_PAYOUT_AMT,
+            FSP_BSE_PAYIN_ACC,   /*** Ver 1.1 ***/
+            FSP_BSE_PAYOUT_ACC,  /*** Ver 1.1 ***/
+            FSP_PAYIN_ACC,       /*** Ver 1.1 ***/
+            FSP_PAYOUT_ACC       /*** Ver 1.1 ***/
+     INTO  :d_min_payin_amt,
+           :d_min_payout_amt,
+           :c_payin_pool_acc_bse,  /*** Ver 1.1 ***/
+           :c_payout_pool_acc_bse, /*** Ver 1.1 ***/
+           :c_payin_pool_acc_nse, /*** Ver 1.1 ***/
+           :c_payout_pool_acc_nse /*** Ver 1.1 ***/
+     FROM   FSP_FO_SYSTM_PRMTR;
+
+     if( SQLCODE != 0)
+     {
+       fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg );
+       tpfree( (char *) ptr_fml_Obuf);
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }  
+     
+     fn_userlog(c_ServiceName," Model fund flag :%c:",c_model_flag);  /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payin pool acc bse :%s:",c_payin_pool_acc_bse); /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payout pool acc bse :%s:",c_payout_pool_acc_bse); /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payin pool acc nse :%s:",c_payin_pool_acc_nse); /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payout pool acc nse :%s:",c_payout_pool_acc_nse);  /*** Ver 1.1 **/
+
+
+     i_ch_val = fn_call_svc_fml ( c_ServiceName,
+                                  c_err_msg,
+                                  "SFO_PRCS_RERUN",
+                                  0,
+                                  21,    /*** changed from 15 to 20 ***/ /** Ver 1.2 , 21 **/
+                                  0,
+                                  FFO_XCHNG_CD, ( char * )c_xchng_cd,
+                                  FFO_EBA_MTCH_ACT_NO, ( char * )c_cln_mtch_accnt,
+                                  FFO_RUN_NUM,( char * )&li_run_no,
+                                  FFO_TRD_DT, ( char * )c_run_dt,
+                                  FFO_BNK_ACT_NO, ( char * )c_bnk_accnt,
+                                  FFO_BNK_TRN_TYP,( char * )&c_trn_typ,
+                                  FFO_BNK_BLK_CD, ( char * )&li_block_cd,
+                                  FFO_DR_CR_FLG,( char * )&c_dr_cr_flg,
+                                  FFO_PI_PO_AMT,( char * )&d_rerun_amount,
+                                  FFO_EBA_STTS, ( char * )&c_eba_stts,
+                                  FFO_BNK_STTS, ( char * )&c_bnk_stts ,
+                                  FML_SYSTEM_TRACE, ( char * )c_trace ,
+                                  FML_TM, ( char * )c_tm ,
+		                           	  FFO_BAT_TAG,(char *)c_tag,
+		                           	  FFO_NARRATION_ID,(char *)c_bnk_narration,
+                                  FFO_UPLD_MTCH_FLG,(char *)&c_model_flag,  /***  Ver 1.1 **/
+                                  FFO_IP_VIEW_NM, (char *)c_payin_pool_acc_nse, /** Ver 1.1 **/
+                                  FFO_OP_VIEW_NM, (char *)c_payout_pool_acc_nse,  /** Ver 1.1 **/
+                                  FFO_SETTLOR, (char *)c_payin_pool_acc_bse,     /** Ver 1.1 **/
+                                  FFO_SPRD_ORD_REF, (char *)c_payout_pool_acc_bse,  /** Ver 1.1 **/
+                                  FFO_QUEUE_NAME, (char *)c_bank_nm);   /** Ver 1.2 **/
+
+    if ( i_ch_val == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31045", LIBMSG, c_err_msg );
+      tpfree( (char *) ptr_fml_Obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+   }
+   
+   EXEC SQL
+   SELECT  sum(FBD_DC_AMT -( FBD_PI_PO_AMT + FBD_INT_ADJ_AMT))
+   INTO    :d_dc_amt
+   FROM    FBD_FO_BNK_DRCR
+   WHERE   FBD_XCHNG_CD = :c_xchng_cd
+   AND     FBD_DC_AMT != 0
+   AND     FBD_DC_AMT != FBD_PI_PO_AMT + FBD_INT_ADJ_AMT
+   AND     FBD_DC_FLG = 'D'
+   AND     FBD_TRD_DT <= :c_trd_dt
+   AND     FBD_CLM_MTCH_ACCNT = :c_cln_mtch_accnt
+   AND     FBD_CLM_MTCH_ACCNT not in
+           (
+                       SELECT  DISTINCT FBM_CLM_MTCH_ACCNT
+                       FROM    FBM_FO_BNK_FLR_MSG
+                       WHERE   FBM_STTS = 'N'
+                       AND     FBM_PRDCT_CD is null
+                       AND     FBM_XCHNG_CD = :c_xchng_cd
+            )
+   GROUP BY FBD_CLM_MTCH_ACCNT;
+
+   if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+   {
+     fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+     tpfree( (char *) ptr_fml_Obuf);
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+   if( SQLCODE == NO_DATA_FOUND || d_dc_amt >= 0)
+   {
+     fn_userlog(c_ServiceName,"No Debit Amount exist ...");    
+   }
+   else if (d_dc_amt < 0)
+   {
+
+     MEMSET(c_payin_pool_acc_bse);   /*** Ver 1.1 **/
+     MEMSET(c_payout_pool_acc_bse);  /*** Ver 1.1 **/
+     MEMSET(c_payin_pool_acc_nse);   /*** Ver 1.1 **/
+     MEMSET(c_payout_pool_acc_nse);  /*** Ver 1.1 **/
+
+     EXEC SQL
+     SELECT FSP_MIN_PAYIN_AMT,
+            FSP_MIN_PAYOUT_AMT,
+            FSP_BSE_PAYIN_ACC,   /*** Ver 1.1 ***/
+            FSP_BSE_PAYOUT_ACC,  /*** Ver 1.1 ***/
+            FSP_PAYIN_ACC,       /*** Ver 1.1 ***/
+            FSP_PAYOUT_ACC       /*** Ver 1.1 ***/
+     INTO  :d_min_payin_amt,
+           :d_min_payout_amt,
+           :c_payin_pool_acc_bse,  /*** Ver 1.1 ***/
+           :c_payout_pool_acc_bse, /*** Ver 1.1 ***/
+           :c_payin_pool_acc_nse, /*** Ver 1.1 ***/
+           :c_payout_pool_acc_nse /*** Ver 1.1 ***/
+     FROM   FSP_FO_SYSTM_PRMTR;
+
+     if( SQLCODE != 0)
+     {
+       fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg );
+       tpfree( (char *) ptr_fml_Obuf);
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     } 
+
+
+     /***** Ver 1.1 Starts  ****/
+ 
+     EXEC SQL
+     SELECT NVL(USR_FUND_MODEL_FLG,'N')
+     INTO :c_model_flag 
+     FROM USR_USER_MASTER,UAC_USR_ACCNTS
+     WHERE USR_USR_ID=UAC_USR_ID
+     AND UAC_CLM_MTCH_ACCNT=:c_cln_mtch_accnt;
+     
+     if( SQLCODE != 0)
+     {
+       fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg );
+       tpfree( (char *) ptr_fml_Obuf);
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+
+
+    /****** Ver 1.1 Ends ********/
+
+     fn_cpy_ddr(c_rout_str);
+     fn_userlog(c_ServiceName,"Before calling SFO_PRCS_PIPO for :%s:",c_cln_mtch_accnt);
+     fn_userlog(c_ServiceName," Model fund flag :%c:",c_model_flag);  /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payin pool acc bse :%s:",c_payin_pool_acc_bse); /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payout pool acc bse :%s:",c_payout_pool_acc_bse); /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payin pool acc nse :%s:",c_payin_pool_acc_nse); /*** Ver 1.1 **/
+     fn_userlog(c_ServiceName,"Payout pool acc nse :%s:",c_payout_pool_acc_nse);  /*** Ver 1.1 **/
+
+
+
+     ptr_fml_Sbuf = ( FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+     i_err[0] =Fadd32(ptr_fml_Sbuf, FFO_XCHNG_CD, ( char *)c_xchng_cd,0);
+     i_err[1] =Fadd32(ptr_fml_Sbuf, FFO_TRD_DT, (char *)c_trd_dt,0);
+     i_err[2] =Fadd32(ptr_fml_Sbuf, FFO_EBA_MTCH_ACT_NO ,(char *)c_cln_mtch_accnt,0);
+     i_err[3] =Fadd32(ptr_fml_Sbuf, FFO_RUN_NUM , ( char *)&li_run_no_main,0);
+     i_err[4] =Fadd32(ptr_fml_Sbuf, FFO_U_ORDR_MRGN, ( char *)&d_min_payin_amt,0);
+     i_err[5] =Fadd32(ptr_fml_Sbuf, FFO_U_EXCTD_MRGN,( char *)&d_min_payout_amt,0);
+     i_err[6] =Fadd32(ptr_fml_Sbuf, FFO_BAT_TAG, ( char *)c_tag,0);
+     i_err[7] =Fadd32(ptr_fml_Sbuf, FFO_ROUT_CRT,( char *) c_rout_str,0);
+     i_err[8] =Fadd32(ptr_fml_Sbuf, FFO_UPLD_MTCH_FLG,(  char *)&c_model_flag,0);  /** Ver 1.1 **/
+     i_err[9] =Fadd32(ptr_fml_Sbuf, FFO_IP_VIEW_NM,(  char *)c_payin_pool_acc_nse,0); /** Ver 1.1 **/
+     i_err[10] =Fadd32(ptr_fml_Sbuf,FFO_OP_VIEW_NM,(  char *)c_payout_pool_acc_nse,0); /** Ver 1.1 **/
+     i_err[11] =Fadd32(ptr_fml_Sbuf,FFO_SETTLOR,(  char *)c_payin_pool_acc_bse,0); /** Ver 1.1 **/
+     i_err[12] =Fadd32(ptr_fml_Sbuf,FFO_SPRD_ORD_REF,(  char *)c_payout_pool_acc_bse,0); /** Ver 1.1 **/
+     i_err[13] =Fadd32(ptr_fml_Sbuf,FFO_QUEUE_NAME,(  char *)c_bank_nm,0); /** Ver 1.2 **/
+    
+     for(i =0; i< 14; i++)  /** Changed from 8 to 13 in 1.1 ***/ /** ver 1.2 ** 14 **/
+     {
+       if(i_err[i] == -1)
+       {
+         fn_errlog( c_ServiceName, "S31065", FMLMSG, c_err_msg );
+         tpfree( (char *) ptr_fml_Obuf);
+         tpfree( (char *) ptr_fml_Sbuf); 
+         tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+       }
+     }
+
+     ptr_fml_Rbuf = ( FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+ 
+     i_returncode  = tpcall  ("SFO_PRCS_PIPO",(char * ) ptr_fml_Sbuf,0,( char ** ) &ptr_fml_Rbuf,&l_recvbuf,0); 
+     if (i_returncode == -1 )
+     {
+       fn_errlog( c_ServiceName, "S31070", FMLMSG, c_err_msg );
+       tpfree( (char *) ptr_fml_Obuf);
+       tpfree( (char *) ptr_fml_Sbuf);
+       tpfree( (char *) ptr_fml_Rbuf );
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+
+     fn_userlog(c_ServiceName,"After calling SFO_PRCS_PIPO for :%s:",c_cln_mtch_accnt);
+     tpfree( (char *) ptr_fml_Sbuf);
+     tpfree( (char *) ptr_fml_Rbuf ); 
+   }
+
+   tpfree( (char *) ptr_fml_Obuf);
+   fn_userlog(c_ServiceName,"=======================SFO_SQOFF_PAYIN Completed Successfully====================");    
+   tpreturn( TPSUCCESS, SUCC_BFR, NULL, 0, 0 );
+}

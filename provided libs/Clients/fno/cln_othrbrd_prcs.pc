@@ -1,0 +1,1056 @@
+/******************************************************************************/
+/*  Program           : CLN_OTHRBRD_PRCS 		                                      */
+/*                                                                            */
+/*  Input             : C_PIPE_ID                                             */
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       : This process reads the broadcast packets from Queue   */ 
+/*                      and send it to service.                               */ 
+/*  Log               : 1.0  14-Oct-2013 Sachin Birje                         */ 
+/*  Log               : 1.1  27-feb-2014 Mahesh Shinde												*/
+/*  Log               : 1.2  09-Sep-2014 Samip M															*/
+/*  Log               : 1.3  11-Dec-2014 Navina D.														*/
+/*  Log               : 1.4  19-may-2015 Sachin Birje   											*/
+/*  Log               : 1.5  05-Feb-2015 Sachin Birje                         */
+/*  Log               : 1.6  20-May-2016 Tanmay Warkhade                      */
+/*	Log								:	1.7	 26-May-2017 Mrinal Kishore												*/
+/*  Log               : 1.8  11-Aug-2017 Sachin Birje.                        */
+/*	Log								: 1.9  25-Apr-2018 Parag Kanojia												*/
+/*	Log								: 2.0  20-Mar-2019 Parag Kanojia												*/
+/*	Log								: 2.1  10-Apr-2023 Sachin Birje 												*/
+/*  Log               : TOL  11-Aug-2023 Agam                                 */
+/******************************************************************************/
+/*Ver 1.0             : New Release																						*/
+/*Ver 1.1             : Handling of INDIA VIX (CR_ISEC14_48665)								*/
+/*Ver 1.2             : View to FML changes																		*/
+/*Ver 1.3             : NNF:Trade execution range brdcast data      					*/
+/*Ver 1.4             : Auto Order Forwarding to Exchange           					*/
+/*Ver 1.5             : Properly existing the program                         */
+/*Ver 1.6             : Forwarding changes 																	  */
+/*Ver 1.7							:	Core Fix																							*/
+/*Ver 1.8             : Log printing                                          */
+/*Ver 1.9							:	Stream No. Exchange Exception Handling Changes				*/
+/*Ver 2.0							:	Implemented BCAST_SPD_MBP_DELTA (7211) and						*/
+/*											BCAST_SPD_MSTR_CHG(7309)															*/
+/*Ver 2.1							:	Minor Change - New Pipe Id Changes        						*/
+/*Ver TOL             : Tux on Linux                                          */
+/******************************************************************************/
+
+/**** C header ****/
+#include <stdio.h>
+#include <sqlca.h>
+#include <sys/socket.h>
+#include <unistd.h>
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+
+/**	#include <fo_view_def.h>	**/	/** ver 1.2 **/
+#include <fo_fml_def.h>
+/*	#include <fml_def.h>		***Commented in Ver 1.7*****/	
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+/*	#include <fn_scklib_tap.h>		***Commented in Ver 1.7*****/
+#include <fo_exg_brd_lib.h>
+
+/* Process specific header  */
+#include <fn_env.h>
+#include <fn_log.h>
+/************** Commented in Ver 1.7************
+#include <brd_cln_srvr.h>
+#include <fn_fil_log.h>
+************  Ver 1.7 end ***********************/
+#include <fn_ddr.h>
+#include <fn_msgq.h>
+
+#include <string.h>
+#include <stdlib.h>
+/*	#include <fml_rout.h>		***Commented in Ver 1.7*****/
+#include <fn_signal.h>
+#include <fn_read_debug_lvl.h>
+#include <signal.h>     /* Added in Ver TOL */
+
+void fn_sgnl_usr2(int i_sig_no);
+
+char c_xchng_cd [ 3+1 ];
+char c_pipe_id [ 5+1 ];
+/*char c_brd_port[10];	***Commented in Ver 1.7*****/
+char c_tbt_mod;	
+char c_fwd_mod[50]; /* Ver 1.4 */
+char c_svc_name[16];  /** Ver 1.4 **/
+
+/************** Commented in Ver 1.7************
+   int  i_dmp_val;
+   int  i_sck_id;										
+*************** Ver 1.7 End ********************/
+int i_exit_stts;
+int i_send_qid;
+
+/*long int li_port;	***Commented in Ver 1.7*****/
+
+void fn_strt_frwdng(char *c_ServiceName,char* c_err_msg,char *c_fwd_mod);  /** Ver 1.4 **/
+
+void CLN_OTHRBRD_PRCS ( int argc, char *argv[] )
+{
+
+	char c_ServiceName [33];
+	char c_err_msg [256];
+/*char c_run_mod;	***Commented in Ver 1.7*****/
+	char *ptr_c_tmp;
+	int	 i_ret_val;
+
+/************** Commented in Ver 1.7************
+	char c_serv_addr[20];
+	char *ptr_c_data;
+	char c_decmp_data[512];
+**************** Ver 1.7 End *******************/
+  char c_fwd_mod1[50] = {'\0'}; /* Ver 1.6 */
+
+/************** Commented in Ver 1.7************
+	int i_family;
+  int i_port_no;
+**************** Ver 1.7 End *******************/
+	long int li_buf_len ;
+/************** Commented in Ver 1.7************
+	int i_ch_val;
+	int i_msg_count;
+	int i_ip_len;
+  int i_q_type;
+*************** Ver 1.7 End ********************/
+  long l_msg_typ;
+/************** Commented in Ver 1.7************
+	unsigned int i_op_len;
+	int i_trnsctn_cd;
+	unsigned short int si_err_cd;
+***********************************/
+
+  strcpy(c_ServiceName, argv[0]);
+
+  INITBATDBGLVL(argv[0]);
+
+	union st_exch_brd_msg st_exch_msg;
+  union st_exch_brd_msg *ptr_exch_msg;
+  struct st_bcast_pack_data st_bcastdata;
+  struct st_bcast_cmp_packet *st_bcastcmp_packet;
+  struct st_brdcst_msgs st_brdcst_rcvq_msg;
+
+  char c_bcast_data [sizeof(st_brdcst_rcvq_msg)];
+
+	i_exit_stts = DONT_EXIT;
+
+  ptr_c_tmp = (char*) fn_get_prcs_spc ( c_ServiceName, "TBT_MODE" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"L31010", LIBMSG, c_err_msg);
+    fn_destroy_pipe();
+    exit(0);
+  }
+  c_tbt_mod = *ptr_c_tmp;
+
+  /*** ver 1.4 Starts Here ***/
+  MEMSET(c_fwd_mod);
+  MEMSET(c_svc_name);
+
+  ptr_c_tmp = (char*) fn_get_prcs_spc ( c_ServiceName, "FWD_PIPE" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"L31010", LIBMSG, c_err_msg);
+    fn_destroy_pipe();
+    exit(0);
+  }
+  fn_userlog(c_ServiceName," before strcpy  ptr_c_tmp is :%s:",ptr_c_tmp);
+
+  strcpy(c_fwd_mod,ptr_c_tmp);
+
+  fn_userlog(c_ServiceName," After strcpy c_fwd_mod is :%s: ", c_fwd_mod);
+
+  ptr_c_tmp = ( char * ) fn_get_prcs_spc ( c_ServiceName, "ORD_ROUT_SVC" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog( c_ServiceName, "L31035", LIBMSG, c_err_msg );
+  }
+  MEMSET(c_svc_name);
+  strcpy (c_svc_name,ptr_c_tmp);
+
+  fn_userlog(c_ServiceName," After strcpy c_svc_name :%s:",c_svc_name);
+  /*** Ver 1.4 Ends Here ***/
+  
+
+	while ( i_exit_stts == DONT_EXIT )
+  {
+		li_buf_len = sizeof( c_bcast_data );
+    MEMSET(c_bcast_data); 
+    MEMSET(st_brdcst_rcvq_msg);
+
+      if ( fn_read_msg_q ( i_send_qid,
+                         (void *)c_bcast_data,
+                         &li_buf_len,
+                         c_ServiceName,
+                         c_err_msg       ) == -1 )
+      {
+       fn_userlog(c_ServiceName," Error in Reading MSG Queue ");
+      }
+
+      memcpy(&l_msg_typ,c_bcast_data,sizeof(long));
+
+			if(DEBUG_MSG_LVL_3)  /*** Ver 1.8 ***/	/*** Ver 1.9 Debug level changed from 0 to 3 ***/
+      {
+        fn_userlog(c_ServiceName,"Message Received :%ld:",l_msg_typ);
+      }
+
+			switch ( l_msg_typ )
+			{
+				case BCAST_JRNL_VCT_MSG:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_JRNL_VCT_MSG");
+					fn_userlog(c_ServiceName,"Inside BCAST_JRNL_VCT_MSG Exchange Code Is :%s:",c_xchng_cd);
+				}
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_bcast_msg),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_bcast_msg)); 
+				i_ret_val = fn_gnrltrd_msg( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_bcast_msg), 
+																	  c_xchng_cd,
+																		c_pipe_id,
+																	  c_ServiceName,
+																	  c_err_msg);		
+
+				if ( i_ret_val == -1 )
+        {
+        	i_exit_stts = EXIT;
+        }
+
+					break;
+
+				case BCAST_SYSTEM_INFORMATION_OUT:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_SYSTEM_INFORMATION_OUT");
+					fn_userlog(c_ServiceName,"Inside BCAST_SYSTEM_INFORMATION_OUT Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sys_info_dat),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sys_info_dat)); 
+				i_ret_val = fn_system_information_out ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sys_info_dat),
+																								c_xchng_cd,
+																								c_ServiceName,
+																								c_err_msg);
+
+				if ( i_ret_val == -1 )
+        {
+          i_exit_stts = EXIT;
+        }
+
+					break;
+
+				case BCAST_SECURITY_MSTR_CHG:
+				
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_SECURITY_MSTR_CHG");
+					fn_userlog(c_ServiceName,"Inside BCAST_SECURITY_MSTR_CHG Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sec_upd_info),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sec_upd_info));
+				i_ret_val = fn_security_mstr_chg ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sec_upd_info),
+																					 c_xchng_cd,
+                                           c_ServiceName,
+                                           c_err_msg);
+        if ( i_ret_val == -1 )
+        {
+          i_exit_stts = EXIT;
+        }
+				
+					break;
+
+				case BCAST_INSTR_MSTR_CHG:
+
+					/*** Not Handled ***/
+
+          break;
+		
+				case BCAST_PART_MSTR_CHG:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_PART_MSTR_CHG");
+			  	fn_userlog(c_ServiceName,"Inside BCAST_PART_MSTR_CHG Exchange Code Is :%s:",c_xchng_cd);
+				}
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_part_upd_info),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_part_upd_info));
+
+				i_ret_val = fn_part_mstr_chg ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_part_upd_info),
+																				c_xchng_cd,
+                                        c_ServiceName,
+                                        c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+          break;
+
+				case BCAST_STOCK_STATUS_CHG:
+				case BCAST_STOCK_STATUS_CHG_PREOPEN:
+	
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case Stock Status Change");
+					fn_userlog(c_ServiceName,"Inside BCAST_STOCK_STATUS_CHG Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sec_stts_upd_info),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sec_stts_upd_info));
+				i_ret_val = fn_stock_status_chg ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_sec_stts_upd_info),
+																				 		c_xchng_cd,
+                                         		c_ServiceName,
+                                         		c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_TURNOVER_EXCEEDED:
+				case BROADCAST_BROKER_REACTIVATED:
+
+					if(DEBUG_MSG_LVL_1)
+					{
+						fn_userlog(c_ServiceName,"Inside Case Broker Activation / DeActivation");
+						fn_userlog(c_ServiceName,"Inside BCAST_TURNOVER_EXCEEDED Exchange Code Is :%s:",c_xchng_cd);
+					}
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_tlmt_exceed),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_tlmt_exceed));
+				i_ret_val = fn_turnover_exceeded (&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_tlmt_exceed),
+                                      			st_brdcst_rcvq_msg.st_xchng_brdmsg.st_hdr.si_transaction_code,
+																						c_xchng_cd,
+																						c_pipe_id,
+                                      			c_ServiceName,
+                                      			c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BC_OPEN_MSG:
+				case BC_CLOSE_MSG:
+				case BC_PRE_OR_POST_DAY_MSG:
+				case BC_PRE_OPEN_ENDED:
+				case EQUAL_BC_POSTCLOSE_MSG:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case Market status Change");  
+					fn_userlog(c_ServiceName,"Inside BC_OPEN_MSG Exchange Code Is :%s:",c_xchng_cd);
+				}
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_vct_msg),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_vct_msg));
+				i_ret_val = fn_brdmkt_stts_chng ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_vct_msg),
+																					 c_xchng_cd,
+																					 c_pipe_id,
+                            	             c_ServiceName,
+                              	           c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+          /** Ver 1.4 Starts Here **/
+          if( l_msg_typ == BC_OPEN_MSG )
+          {
+						MEMSET(c_fwd_mod1);             /* Ver 1.6 */
+    				strcpy( c_fwd_mod1, c_fwd_mod); /* Ver 1.6 */
+		
+            fn_userlog(c_ServiceName,"Starting Auto Order Forwarding");
+            /** fn_strt_frwdng(c_ServiceName,c_err_msg,c_fwd_mod);   Commented in Ver 1.6 **/
+            fn_strt_frwdng(c_ServiceName,c_err_msg,c_fwd_mod1);			 /** Added in Ver 1.6 ***/
+          } 
+	        /** Ver 1.4 Ends Here **/
+	
+					break;
+
+
+				case BCAST_TICKER_AND_MKT_INDEX:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_TICKER_AND_MKT_INDEX");
+					fn_userlog(c_ServiceName,"st_ticker.si_number_of_records :%d:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_ticker.si_number_of_records);
+				}
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_ticker),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_ticker)); 
+				i_ret_val = fn_ticker_and_mkt_index ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_ticker),
+																								c_xchng_cd,
+                                                c_ServiceName,
+                                                c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_MBO_MBP_UPDATE:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_MBO_MBP_UPDATE");
+					fn_userlog(c_ServiceName,"Inside BCAST_MBO_MBP_UPDATE Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_mbo_mbp),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_mbo_mbp));
+
+				i_ret_val = fn_mbo_mbp_update ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_mbo_mbp),
+																				  c_xchng_cd,
+                                          c_ServiceName,
+                                          c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_ONLY_MBP:
+
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_ONLY_MBP");
+					fn_userlog(c_ServiceName,"Inside BCAST_ONLY_MBP Exchange Code Is :%s:",c_xchng_cd);
+				}
+       
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_only_mbp),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_only_mbp));
+ 
+				i_ret_val = fn_bcast_only_mbp( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_only_mbp),
+																				 c_xchng_cd,
+                                         c_ServiceName,
+																				 c_tbt_mod, 
+                                         c_err_msg);
+
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_MW_ROUND_ROBIN:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_MW_ROUND_ROBIN");
+					fn_userlog(c_ServiceName,"Inside BCAST_MW_ROUND_ROBIN Exchange Code Is :%s:",c_xchng_cd);
+				}
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_inq_res),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_inq_res));
+				i_ret_val = fn_mw_round_robin ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_inq_res),
+																					c_xchng_cd,
+                                          c_ServiceName,
+                                          c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case SECURITY_OPEN_PRICE:
+			
+					 /*** Not Handled ***/
+          break;
+
+				case BCAST_CIRCUIT_MSG:
+			
+					/*** Ignored ***/
+          break;
+
+				case BCAST_INDICES:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_INDICES");
+					fn_userlog(c_ServiceName,"Inside BCAST_INDICES Exchange Code Is :%s:",c_xchng_cd);
+				}
+
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_indices),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_indices));
+				i_ret_val = fn_bcast_indices ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_indices),
+																				 c_xchng_cd,
+                                         c_ServiceName,
+                                         c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_INDUSTRY_INDEX_UPDATE:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case BCAST_INDUSTRY_INDEX_UPDATE");
+					fn_userlog(c_ServiceName,"Inside BCAST_INDUSTRY_INDEX_UPDATE Exchange Code Is :%s:",c_xchng_cd);
+				}
+	      memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_indust_indices),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_indust_indices));
+	
+				i_ret_val = fn_bcast_industry_index_update (&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_indust_indices),
+																											c_xchng_cd,
+                                        							c_ServiceName,
+                                        							c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case BCAST_SPD_MBP_DELTA:
+				/*** Ver 2.0 Starts ***/
+        fn_userlog(c_ServiceName,"Inside Case BCAST_SPD_MBP_DELTA");
+
+	      memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info));
+
+				if(DEBUG_MSG_LVL_4)
+           {
+             int i = 0;
+
+             fn_userlog(c_ServiceName,"Inside Case BCAST_SPD_MBP_DELTA");
+             fn_userlog(c_ServiceName,"Inside BCAST_SPD_MBP_DELTA Exchange Code Is :%s:",c_xchng_cd);
+
+             fn_userlog(c_ServiceName,"Inside st_int_header");
+             fn_userlog(c_ServiceName,"li_log_time  :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_hdr.li_log_time);
+             fn_userlog(c_ServiceName,"Inside st_bcast_data");
+             fn_userlog(c_ServiceName,"l_itoken_1   :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.l_itoken_1);
+             fn_userlog(c_ServiceName,"l_itoken_2   :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.l_itoken_2);
+						 fn_userlog(c_ServiceName,"si_mbp_buy   :%d:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.si_mbp_buy);
+             fn_userlog(c_ServiceName,"si_mbp_sell   :%d:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.si_mbp_sell);
+             fn_userlog(c_ServiceName,"li_traded_volume   :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.li_traded_volume);
+             fn_userlog(c_ServiceName,"d_total_traded_value :%lf:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.d_total_traded_value);
+             fn_userlog(c_ServiceName,"Inside st_mbp_buys");
+
+             for( i=0 ; i < MAX_MBP_BUYS ; i++ )
+             {
+               fn_userlog(c_ServiceName,"si_no_orders[i]   :%d:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_mbpbuys[i].si_no_orders);
+               fn_userlog(c_ServiceName,"li_volume[i]   :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_mbpbuys[i].li_volume);
+               fn_userlog(c_ServiceName,"li_price[i]     :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_mbpbuys[i].li_price);
+             }
+             fn_userlog(c_ServiceName,"Exit from st_mbp_buys");
+
+             fn_userlog(c_ServiceName,"Inside st_mbp_sells");
+
+             for( i=0 ; i < MAX_MBP_SELLS ; i++ )
+             {
+               fn_userlog(c_ServiceName,"si_no_orders[i]   :%d:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_mbpsells[i].si_no_orders);
+               fn_userlog(c_ServiceName,"li_volume[i]    :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_mbpsells[i].li_volume);
+               fn_userlog(c_ServiceName,"li_price[i]    :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_mbpsells[i].li_price);
+             }
+             fn_userlog(c_ServiceName,"Exit from st_mbp_sells");
+
+						 fn_userlog(c_ServiceName,"Inside st_total_order_volume");
+             fn_userlog(c_ServiceName,"d_buy    :%lf:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_totalordrvol.d_buy);
+             fn_userlog(c_ServiceName,"d_sell   :%lf:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.st_totalordrvol.d_sell);
+             fn_userlog(c_ServiceName,"Exit from st_total_order_volume");
+
+             fn_userlog(c_ServiceName,"li_open_price_difference   :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.li_open_price_difference);
+             fn_userlog(c_ServiceName,"li_day_high_price_difference  :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.li_day_high_price_difference);
+             fn_userlog(c_ServiceName,"li_day_low_price_difference    :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.li_day_low_price_difference);
+             fn_userlog(c_ServiceName,"li_last_traded_price_difference   :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.li_last_traded_price_difference);
+             fn_userlog(c_ServiceName,"li_last_updated_time   :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info.st_bcast_dat.li_last_updated_time);
+             fn_userlog(c_ServiceName,"Exit from st_bcast_data");
+             fn_userlog(c_ServiceName,"Exit from st_spd_mkt_info");
+
+           }
+
+          i_ret_val = fn_bcast_spd_mbp_delta( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_spread_mkt_info),
+                                         c_xchng_cd,
+                                         c_ServiceName,
+                                         c_tbt_mod,
+                                         c_err_msg);
+
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+ 
+				/*** Ver 2.0 Ends ***/
+          break;
+
+				case BCAST_INDEX_MSTR_CHG:
+			
+					/*** Not Handled ***/
+          break;
+
+				case BCAST_BASE_PRICE:
+
+					 /*** Not Handled ***/
+          break;
+
+				case BCAST_INDEX_MAP_TABLE:
+
+					/*** Not Handled ***/
+          break;
+
+				case RPRT_MARKET_STATS_OUT_RPT:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case RPRT_MARKET_STATS_OUT_RPT");
+					fn_userlog(c_ServiceName,"Inside RPRT_MARKET_STATS_OUT_RPT Exchange Code Is :%s:",c_xchng_cd);
+				}
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_rp_mkt_stts),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_rp_mkt_stts));
+
+				i_ret_val = fn_rprt_market_stats_out_rpt ( & ( st_brdcst_rcvq_msg.st_xchng_brdmsg.st_rp_mkt_stts),
+																											c_xchng_cd,
+                                                      c_ServiceName,
+                                                      c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+				case MKT_MVMT_CM_OI_IN:
+
+				if(DEBUG_MSG_LVL_1)
+				{
+					fn_userlog(c_ServiceName,"Inside Case MKT_MVMT_CM_OI_IN");
+					fn_userlog(c_ServiceName,"Inside MKT_MVMT_CM_OI_IN Exchange Code Is :%s:",c_xchng_cd);
+				}
+        /* memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg)); **/
+        memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_eqoi_data),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_eqoi_data));
+				i_ret_val = fn_eq_oi_qt ( st_brdcst_rcvq_msg.st_xchng_brdmsg.st_eqoi_data.st_eq_oi.st_oi_dat,
+                                  st_brdcst_rcvq_msg.st_xchng_brdmsg.st_eqoi_data.st_hdr.c_alpha_char,
+                                  st_brdcst_rcvq_msg.st_xchng_brdmsg.st_eqoi_data.st_hdr.si_error_code,
+																  c_xchng_cd,
+                                  c_ServiceName,
+                                  c_err_msg);
+          if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+					break;
+
+         case BCAST_GI_INDICES_ASSETS :
+           if(DEBUG_MSG_LVL_1)
+           {
+            fn_userlog(c_ServiceName,"Inside Case BCAST_GI_INDICES_ASSETS");
+            fn_userlog(c_ServiceName,"Inside BCAST_GI_INDICES_ASSETS Exchange Code Is :%s:",c_xchng_cd);
+           }                
+
+           memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_index_details),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_index_details));              
+           i_ret_val = fn_upd_global_indices( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_index_details),
+ 							                                  c_xchng_cd,
+              							                    c_pipe_id,
+                            							      c_ServiceName,
+                                 						    c_err_msg);
+
+           if ( i_ret_val == -1 )
+           {
+             i_exit_stts = EXIT;
+           } 
+
+          break;
+		
+					/**** Added in ver 1.1 ****/
+						
+					case BCAST_INDICES_VIX :
+
+           if(DEBUG_MSG_LVL_1)
+           {
+            	fn_userlog(c_ServiceName,"Inside Case BCAST_INDICES_VIX");
+            	fn_userlog(c_ServiceName,"Inside BCAST_INDICES_VIX Exchange Code Is :%s:",c_xchng_cd);
+           }
+
+           memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_indvix_dtls),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_indvix_dtls));
+
+           i_ret_val = fn_upd_india_vix( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_indvix_dtls),
+                                         c_xchng_cd,
+                                         c_pipe_id,
+                                         c_ServiceName,
+                                         c_err_msg);
+
+           if ( i_ret_val == -1 )
+           {
+             i_exit_stts = EXIT;
+           }
+
+          break;
+	
+					/**** Added in ver 1.1 ****/
+
+					/*** Ver 1.3 starts here ***/
+					case BCAST_TRADE_EXECUTION_RANGE :
+
+					if(DEBUG_MSG_LVL_1)
+					{
+						fn_userlog(c_ServiceName,"Inside Case BCAST_TRADE_EXECUTION_RANGE");  
+						fn_userlog(c_ServiceName,"Inside BCAST_TRADE_EXECUTION_RANGE Exchange Code Is  :%s:",c_xchng_cd);
+					}
+					memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_trd_exec_rng),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_trd_exec_rng));
+					
+					i_ret_val = fn_trd_exec_rng_upd ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_trd_exec_rng),
+																						 c_xchng_cd,
+																						 c_ServiceName,
+																						 c_err_msg);
+						if ( i_ret_val == -1 )
+						{
+							i_exit_stts = EXIT;
+						}
+		
+					break;
+					/*** Ver 1.3 ends here ***/
+
+					/*** Ver 1.9 Starts ***/
+          case BCAST_CONT_MSG :
+
+          if(DEBUG_MSG_LVL_0)
+          {
+            fn_userlog(c_ServiceName,"Inside Case BCAST_CONT_MSG");
+            fn_userlog(c_ServiceName,"Inside BCAST_CONT_MSG Exchange Code Is  :%s:",c_xchng_cd);
+          }
+          memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_exch_exception_msg),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_exch_exception_msg));
+
+          /**** Ver 2.0 commented ****************
+					i_ret_val = fn_exch_exception ( &(ptr_exch_msg->st_brd_exch_exception_msg),
+                                          c_xchng_cd,
+                                          c_pipe_id,
+                                          c_ServiceName,
+                                          c_err_msg);
+           ********** Ver 2.0 Ends Here ***********/  
+
+          /***** Ver 2.0 Starts Here *************/
+           i_ret_val = fn_exch_exception ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_exch_exception_msg),
+                                          c_xchng_cd,
+                                          c_pipe_id,
+                                          c_ServiceName,
+                                          c_err_msg);
+
+          /***** Ver 2.0 Ends here ***************/
+
+        	if ( i_ret_val == -1 )
+        	{
+          	i_exit_stts = EXIT;
+        	}
+
+					break;
+
+					/*** Ver 1.9 Ends ***/
+
+					/*** Ver 2.0 Starts ***/
+					case BCAST_SPD_MSTR_CHG:
+
+
+	      memcpy(&(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info),c_bcast_data+sizeof(long),sizeof(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info));
+
+        if(DEBUG_MSG_LVL_4)
+        {
+          fn_userlog(c_ServiceName,"Inside Case BCAST_SPD_MSTR_CHG");
+          fn_userlog(c_ServiceName,"Inside BCAST_SPD_MSTR_CHG Exchange Code Is :%s:",c_xchng_cd);
+
+          fn_userlog(c_ServiceName,"Inside st_spd_update_info");
+          fn_userlog(c_ServiceName,"Inside st_message_header");
+          fn_userlog(c_ServiceName,"Exit from st_message_header");
+          fn_userlog(c_ServiceName,"li_token_1  :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.li_token_1);
+          fn_userlog(c_ServiceName,"li_token_2  :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.li_token_2);
+          fn_userlog(c_ServiceName,"Inside st_sec_info");
+					fn_userlog(c_ServiceName,"c_instrument_name_1  :%s:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[0].c_instrument_name);
+          fn_userlog(c_ServiceName,"c_symbol_1  :%s:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[0].c_symbol);
+          fn_userlog(c_ServiceName,"c_series_1  :%s:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[0].c_series);
+          fn_userlog(c_ServiceName,"li_expiry_date_1  :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[0].li_expiry_date);
+          fn_userlog(c_ServiceName,"li_strike_price_1 :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[0].li_strike_price);
+          fn_userlog(c_ServiceName,"c_option_type_1 :%s:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[0].c_option_type);
+          fn_userlog(c_ServiceName,"si_ca_level_1 :%d:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[0].si_ca_level);
+          fn_userlog(c_ServiceName,"c_instrument_name_2  :%s:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[1].c_instrument_name);
+          fn_userlog(c_ServiceName,"c_symbol_2  :%s:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[1].c_symbol);
+          fn_userlog(c_ServiceName,"c_series_2  :%s:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[1].c_series);
+          fn_userlog(c_ServiceName,"li_expiry_date_2  :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[1].li_expiry_date);
+          fn_userlog(c_ServiceName,"li_strike_price_2 :%ld:",st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info.st_secinfo[1].li_strike_price);
+        }
+
+        i_ret_val = fn_spd_update_info ( &(st_brdcst_rcvq_msg.st_xchng_brdmsg.st_brd_spd_update_info),
+                                         c_xchng_cd,
+                                         c_ServiceName,
+                                         c_tbt_mod,
+                                         c_err_msg);
+
+				if ( i_ret_val == -1 )
+          {
+            i_exit_stts = EXIT;
+          }
+
+        break;
+				/*** Ver 2.0 Ends ***/
+				default:
+
+					fn_userlog ( c_ServiceName, "Warning - Invalid message type - %d",l_msg_typ);
+					break;
+			}
+		}
+	
+}
+
+int fn_bat_init(int argc, char *argv[])
+{
+  int  i_ch_val ;
+/*int  i_loop; ***Commented in Ver 1.7*****/
+  int  i_msgq_typ;
+
+  char c_ServiceName [ 33 ];
+	char c_pipe_id [ 5+1 ];
+  char c_err_msg[256];
+	char *ptr_c_tmp;
+/*char c_fileName[256];	***Commented in Ver 1.7*****/
+
+  strcpy( c_ServiceName, "CLN_OTHRBRD_PRCS" );
+
+  if( argc != 4)
+  {
+    fn_userlog(c_ServiceName,
+    "Usage - CLN_OTHRBRD_PRCS <Exchange qualifier> <Exchange code> <pipe_id>");
+    return ( -1 );
+  }
+  strcpy( c_pipe_id, argv[3] );
+
+  /*** Initialize the Routing string ***/
+  fn_init_ddr_pop ( argv[3],
+                    TRADING_SECTION,
+                    COMMON);
+
+  EXEC SQL
+    SELECT opm_xchng_cd
+    INTO   :c_xchng_cd
+    FROM   opm_ord_pipe_mstr
+    WHERE  opm_pipe_id = :c_pipe_id;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31005", SQLMSG, c_err_msg );
+    return ( -1 );
+  }
+
+  ptr_c_tmp = (char*) fn_get_prcs_spc ( c_ServiceName, "NORMAL_QUEUE" );
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName,"L31010", LIBMSG, c_err_msg);
+    fn_destroy_pipe();
+    return -1;
+  }
+  i_msgq_typ = atoi(ptr_c_tmp);
+
+  fn_userlog(c_ServiceName,"i_msgq_typ :%ld:",i_msgq_typ);
+
+  if(fn_crt_msg_q(&i_send_qid, i_msgq_typ, CLIENT, c_ServiceName, c_err_msg) == -1)
+  {
+     fn_userlog(c_ServiceName,"EBA : Failed to take access of Transmit queque.");
+     return ( -1 );
+  }
+
+  i_ch_val = fn_flush_q(  i_send_qid,
+                          c_ServiceName,
+                          c_err_msg);
+  if( i_ch_val == -1 )
+  {
+     fn_userlog(c_ServiceName,"EBA : Failed to Flush Transmit queque.");
+     return ( -1 );
+  }
+
+
+	if ( fn_set_sgn_hnd ( SIGUSR2, fn_sgnl_usr2, c_ServiceName, c_err_msg ) == -1 )
+	{
+  	fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg );
+  	return -1;
+	}
+
+  fn_var = CLN_OTHRBRD_PRCS;
+
+  return ( 0 );
+}
+
+void fn_bat_term(int argc,
+                 char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg(char *c_ServiceName,
+                 int i_trg_typ)
+{
+  return ( 0 );
+}
+void fn_sgnl_usr2(int i_sig_no)
+{
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog("CLN_OTHRBRD_PRCS","CLN_OTHRBRD_PRCS SIGUSER2 exit");
+	}
+  i_exit_stts = EXIT;
+  fn_set_break_q();  /** Ver 1.5 **/
+  return;
+}
+
+/** Ver 1.4 Starts Here ***/
+void fn_strt_frwdng(char *c_ServiceName,char* c_err_msg,char *c_fwd_mod)
+{
+
+  FBFR32 *ptr_fml_ibuf=NULL;
+
+  char c_exg_crrnt_stts='\0';
+  char  c_command[150];
+  char  c_file_nm[100];
+/************** Commented in Ver 1.7************
+  char  c_user[20];
+  char  c_process[20];
+  char  c_exchange[13+1];
+  char  c_data[1024];
+*************** Ver 1.7 End ********************/
+  char  c_pipe_id[13];
+  /* char  c_pipe_id1[12][2+1]; ** Ver 2.1 **/
+  char  c_pipe_id1[20][2+1];  /** Ver 2.1 **/
+  char  c_svc_nm[16];
+  char  c_xchng_cd[4];
+  char  c_buffer_typ[11];
+  char  c_fwd_mod_tmp[50]; 
+
+  char* strptr;
+
+  int i = 0;
+  int j = 0;
+  FILE  *fptr;
+/*long   li_tmp_prc_id;	****Commented in Ver 1.7*****/
+
+  MEMSET(c_file_nm);
+  MEMSET(c_command);
+
+  strcpy(c_file_nm, getenv("TEMP"));
+  strcat(c_file_nm,"/NFO_pack_clnt.txt");
+
+  remove(c_file_nm);
+
+  fn_userlog(c_ServiceName,"c_fwd_mod string is :%s:",c_fwd_mod);
+  
+  strcpy(c_fwd_mod_tmp,c_fwd_mod);
+
+  strptr = strchr(c_fwd_mod, '$');
+  if(strptr != NULL)
+  {
+     *strptr = '\0';
+  }
+
+  strptr = strtok(c_fwd_mod, "|");
+
+  while(strptr != NULL)
+  {
+    strcpy(c_pipe_id1[i], strptr);
+    strptr = strtok(NULL, "|");
+    i++;
+  }
+
+  EXEC SQL
+    SELECT EXG_CRRNT_STTS
+      INTO :c_exg_crrnt_stts
+      FROM exg_xchng_mstr
+     WHERE EXG_XCHNG_CD='NFO';
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31015", SQLMSG, c_err_msg );
+    fn_userlog ( c_ServiceName,"Error While Selecting the Exchange status");
+    return;
+  }
+  MEMSET(c_buffer_typ);
+  MEMSET(c_svc_nm);
+  MEMSET(c_xchng_cd);
+
+  strcpy(c_buffer_typ,"FMLBUFFER");
+  strcpy(c_svc_nm,"SFO_FWD_ORD");
+  strcpy(c_xchng_cd,"NFO");
+
+  fn_userlog ( c_ServiceName," c_buffer_typ :%s:",c_buffer_typ);
+
+  if( c_exg_crrnt_stts == 'O' )
+  {
+     ptr_fml_ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN) ;
+
+     if( Fadd32(ptr_fml_ibuf,FFO_SVC_NAME, (char *)c_svc_nm, 0) == -1)
+     {
+       fn_userlog ( c_ServiceName,"Error in Fadd 1");
+			 tpfree ( ( char * )ptr_fml_ibuf);         /*** tpfree added in Ver 1.7 ***/
+     }
+
+     if( Fadd32(ptr_fml_ibuf,FFO_XCHNG_CD, (char *)c_xchng_cd, 0) == -1)
+     {
+       fn_errlog( c_ServiceName, "S31020", FMLMSG, c_err_msg );
+       fn_userlog ( c_ServiceName,"Error in Fadd 1");
+       tpfree ( ( char * )ptr_fml_ibuf);         /*** tpfree added in Ver 1.7 ***/
+       return;
+     }
+
+     fn_userlog ( c_ServiceName," c_buffer_typ :%s:",c_buffer_typ);
+     if( Fadd32(ptr_fml_ibuf,FFO_QUEUE_NAME, (char *)c_buffer_typ, 0) == -1)
+     {
+       fn_errlog( c_ServiceName, "S31025", FMLMSG, c_err_msg );
+       fn_userlog ( c_ServiceName,"Error in Fadd 1");
+       tpfree ( ( char * )ptr_fml_ibuf);         /*** tpfree added in Ver 1.7 ***/
+       return;
+     }
+   
+     if( Fadd32(ptr_fml_ibuf, FFO_SYS_MSG, (char *)c_fwd_mod_tmp, 0) == -1)
+      {
+       fn_errlog( c_ServiceName, "S31030", FMLMSG, c_err_msg );
+       fn_userlog ( c_ServiceName,"Error in Fadd 1");
+       tpfree ( ( char * )ptr_fml_ibuf);         /*** tpfree added in Ver 1.7 ***/
+       return;
+      }
+
+     if ( tpacall(c_svc_name, (char *)ptr_fml_ibuf,  0, TPNOTRAN) == -1)
+     {
+       fn_errlog( c_ServiceName, "S31035", FMLMSG, c_err_msg );
+       fn_userlog ( c_ServiceName,"Error in calling SFO_CALL_FRWDA ");
+       tpfree ( ( char * )ptr_fml_ibuf);         /*** tpfree added in Ver 1.7 ***/
+       return;
+     }
+
+     sprintf(c_command, "ps -eaf -o args | grep cln_pack_clnt | grep -v 'grep' | cut -d \" \" -f 2  > %s",c_file_nm);
+
+     system(c_command);
+
+     fptr = (FILE *)fopen(c_file_nm, "r");
+     if(fptr == NULL)
+     {
+      fn_errlog(c_ServiceName,"S31040", TPMSG, c_err_msg);
+      return ;
+     }
+
+    while( feof(fptr)  == 0)  /* NULL Replaced with 0 in Ver TOL */
+    {
+
+     MEMSET(c_pipe_id);
+
+        fscanf(fptr, "%s",c_pipe_id);
+        if(strcmp(c_pipe_id,NULL) != 0 )
+        {
+          for(j=0;j<i;j++)
+          {
+            if(strcmp(c_pipe_id,c_pipe_id1[j]) == 0 )
+            {
+              fn_userlog(c_ServiceName, "Process cln_pack_clnt for Pipe Id :%s:",c_pipe_id1[j]);
+              fn_pst_trg( "cln_pack_clnt",
+                          "TRG_STRT_PMP",
+                          "TRG_STRT_PMP",
+                          c_pipe_id);
+              break;
+
+            }
+          }
+        }
+     }
+		tpfree ( ( char * )ptr_fml_ibuf);         /*** tpfree added in Ver 1.7 ***/
+    fclose(fptr);
+  }
+  else
+  {
+    fn_userlog(c_ServiceName, "Exchange not open");
+  }
+
+  return;
+}
+/** Ver 1.4 Ends Here ***/

@@ -1,0 +1,1930 @@
+/***************************************************************************************************
+*
+*   File Name : fn_igain_process_lib.pc [library for I-Gain Brokerage Calculation]
+*
+*   Ver 1.0 :03-Oct-2014 Sandip Tambe
+*   Ver 1.1 :09-Jun-2015 Bhupendra Malik
+*   Ver 1.2 :11-Aug-2015 Samip M		Bullet Pricing Scheme change
+*   Ver 1.3 :22-Dec-2017 Tanmay P   Bullet Brokerage Pricing Scheme Phase 2
+*   Ver 1.4 :08-May-2019 Sandip T   I-Gain PRIME CR-ISEC14-122754 
+*   Ver 1.5 :23-Dec-2019 Sandip T   I-Gain Option20 CR_ISEC14_131137
+*   Ver 1.6 :07-Oct-2020 Akash B    FULL & Lite brokerage model changes
+*   Ver 1.7 :18-Dec-2020 Akash B    CR-ISEC18-146782 NEO Phase 2 changes
+*		Ver 1.8 :04-Oct-2021 Ravindra Panda  Changes to include profit order for FPSL 
+***************************************************************************************************/
+#include  <stdlib.h>
+#include  <stdio.h>
+#include  <string.h>
+#include  <sqlca.h>
+#include  <fn_log.h>
+#include  <fo.h>
+#include <atmi.h>
+#include <fn_ddr.h>
+/** #include <fo_view_def.h>   Commented in Ver 1.1 **/
+#include <fo_exch_msgs.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_fobse_bcast.h>
+#include <fn_fo_bse_convrtn.h>   
+#include <fn_tuxlib.h>         
+
+#define SMS_TRIAL_NOTIFY 110  /** Ver 1.3  **/ 
+EXEC SQL include "table/itd_igain_trd_dtls.h";
+EXEC SQL include "table/iod_igain_ordr_dtls.h";
+EXEC SQL include "table/osm_option_scheme_mstr.h";
+EXEC SQL include "table/usr_user_master.h";
+EXEC SQL INCLUDE "table/osr_opm_subs_rqst.h"; /** Ver 1.3 **/
+
+int fn_bullet_sms(char * c_ServiceName,char * c_clm_mtch_accnt, int i_msg_code, char * c_end_date );   /*** Ver 1.3  ***/
+
+int  i_sms_cnt  = 0;           /** Ver 1.3  **/
+int  i_msg_code = 0;          /** Ver 1.3  **/
+
+int fn_eos_dtls(  char *, char *, char *, char *);
+int fn_populate_itd_iod( char *c_ServiceName,
+                         char *c_xchng_cd,
+                         char *c_date,
+                         char *c_err_msg
+                       )
+{
+  int i_ttd_cnt   = 0;
+  int i_itd_count = 0;
+  int i_iod_count = 0;
+	int i_ch_val =0;
+
+	EXEC SQL
+		DELETE FROM TTD_TMP_TRD_DTLS WHERE TTD_XCHNG_CD = :c_xchng_cd;
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of TTD_TMP_TRD_DTLS.");
+    fn_errlog( c_ServiceName, "L31005", SQLMSG, c_err_msg );
+    return -1;
+  }
+  EXEC SQL
+    INSERT INTO TTD_TMP_TRD_DTLS
+								(	TTD_XCHNG_CD,
+									TTD_CLM_MTCH_ACCNT,
+									TTD_TRD_DT,
+									TTD_ORDR_RFRNC,
+									TTD_SLTP_ORDR_RFRNC,
+									TTD_FC_FLG,
+									TTD_UNDRLYNG,
+									TTD_PRDCT_TYP,
+									TTD_EXER_TYP,
+									TTD_OPT_TYP,
+									TTD_STRK_PRC,
+									TTD_EXPRY_DT,
+									TTD_TRD_FLW,
+									TTD_EXCTD_QTY,
+									TTD_TRADE_VAL,
+									TTD_MIN_LOT_SIZE,
+									TTD_IGAIN_SCHM_CD,
+									TTD_TRADE_COUNT
+								 )
+    SELECT     ftd_xchng_cd,
+               ftd_clm_mtch_accnt,
+               fod_trd_dt,
+               ftd_ordr_rfrnc ,
+               fod_sltp_ordr_rfrnc ,
+               FOD_FC_FLAG,
+               ftd_undrlyng,
+               ftd_prdct_typ,
+               ftd_exer_typ,
+               ftd_opt_typ,
+               ftd_strk_prc,
+               ftd_expry_dt,
+               ftd_trd_flw ,
+               sum(FTD_EXCTD_QTY) ,
+               sum(FTD_EXCTD_QTY * FTD_EXCTD_RT) ,
+               ftd_min_lot_size ,
+               decode(ftd_prdct_typ,'I',CLM_IGAIN_OP_SCHM_CD,'U',CLM_IGAIN_FP_SCHM_CD,'*'),
+               count(FTD_XCHNG_TRD_NO)
+        FROM   FTD_FO_TRD_DTLS,FOD_FO_ORDR_DTLS,CLM_CLNT_MSTR
+        WHERE  FTD_ORDR_RFRNC     = FOD_ORDR_RFRNC
+        AND    FTD_XCHNG_CD       = FOD_XCHNG_CD
+        AND    fod_clm_mtch_accnt = ftd_clm_mtch_accnt
+        AND    ftd_clm_mtch_accnt = clm_mtch_accnt
+        AND    FOD_PRDCT_TYP      = FTD_PRDCT_TYP
+        AND    ftd_fut_conv_flg   ='N'
+        AND    ftd_prdct_typ in     ('I','U')
+        AND    trunc(ftd_trd_dt)= :c_date
+        AND    fod_xchng_cd       = :c_xchng_cd
+        and   ( ( nvl(CLM_IGAIN_FP_FLG,'N') = 'Y' AND ftd_prdct_typ='U' ) OR
+                ( nvl(CLM_IGAIN_OP_FLG,'N') = 'Y' AND ftd_prdct_typ='I' )
+              )
+				and    ftd_undrlyng in ( select distinct fum_undrlyng 
+																 from  fum_fo_undrlyng_mstr
+																 where fum_xchng_cd = :c_xchng_cd
+																 and   fum_igain_allwd_flg ='Y'  
+															 )
+					AND NVL(FTD_BRKG_TYPE,'N') <> 'B'		/*** Ver 1.2 ***/
+        GROUP BY ftd_xchng_cd,
+                ftd_indstk,
+                fod_trd_dt,
+                ftd_min_lot_size,
+                ftd_clm_mtch_accnt,
+                ftd_undrlyng,
+                ftd_prdct_typ,
+                ftd_expry_dt,
+                ftd_exer_typ,
+                ftd_opt_typ,
+                ftd_trd_flw,
+                ftd_ordr_rfrnc,
+                fod_sltp_ordr_rfrnc,
+                fod_fc_flag,
+                ftd_strk_prc,
+                decode(ftd_prdct_typ,'I',CLM_IGAIN_OP_SCHM_CD,'U',CLM_IGAIN_FP_SCHM_CD,'*');
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of TTD_TMP_TRD_DTLS.");
+    fn_errlog( c_ServiceName, "L31010", SQLMSG, c_err_msg );
+    return -1;
+  }
+  i_ttd_cnt = sqlca.sqlerrd[2];
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,":%d: Records Inserted into TTD.",i_ttd_cnt);
+	}
+  if(i_ttd_cnt == 0)
+  {
+    fn_userlog(c_ServiceName,"No records to process for I-Gain.Continue to OPM Processing.");
+    return 0;
+  }
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Now inserting records in ITD.");
+	}
+
+  EXEC SQL
+  	INSERT INTO ITD_IGAIN_TRD_DTLS
+    select
+      A.ttd_xchng_cd,
+      A.ttd_clm_mtch_accnt,
+      A.ttd_prdct_typ,
+      A.ttd_undrlyng,
+      A.ttd_expry_dt,
+      A.ttd_exer_typ,
+      A.ttd_opt_typ,
+      A.ttd_strk_prc,
+      A.ttd_trd_dt,
+      A.TTD_ORDR_RFRNC,
+      A.TTD_SLTP_ORDR_RFRNC,
+      A.TTD_TRD_FLW,
+      B.TTD_TRD_FLW,
+      A.TTD_EXCTD_QTY,
+      B.TTD_EXCTD_QTY,
+      A.TTD_TRADE_VAL,
+      B.TTD_TRADE_VAL,
+      decode(A.TTD_TRD_FLW,'S',(A.TTD_TRADE_VAL - B.TTD_TRADE_VAL),(B.TTD_TRADE_VAL - A.TTD_TRADE_VAL)) PRFT_LOSS,
+      decode(sign(decode(A.TTD_TRD_FLW,'S',(A.TTD_TRADE_VAL - B.TTD_TRADE_VAL),(B.TTD_TRADE_VAL - A.TTD_TRADE_VAL))),-1,'L',0,'L','P') PRFT_LOSS_FLG,
+      A.TTD_IGAIN_SCHM_CD SCHM_CD,
+            A.TTD_MIN_LOT_SIZE,
+      'N',
+      null,
+      null,
+      null,
+      null
+  from ( select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG ='F' and TTD_IGAIN_SCHM_CD <> 'BULLET' ) A,
+       ( select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG ='C' and TTD_IGAIN_SCHM_CD <> 'BULLET' ) B
+  where A.ttd_clm_mtch_accnt  = B.ttd_clm_mtch_accnt
+  and   A.ttd_expry_dt        = B.ttd_expry_dt
+  and   A.ttd_opt_typ         = B.ttd_opt_typ
+  and   A.ttd_strk_prc        = B.ttd_strk_prc
+  and   A.TTD_ORDR_RFRNC      = B.TTD_SLTP_ORDR_RFRNC
+  and   A.TTD_TRD_DT          = B.TTD_TRD_DT
+  and   A.TTD_EXCTD_QTY       = B.TTD_EXCTD_QTY               /*** Added 12-Nov-2014 UAT ***/
+  and   A.TTD_SLTP_ORDR_RFRNC = B.TTD_ORDR_RFRNC;
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"Failed in creating ITD Details");
+    fn_errlog( c_ServiceName, "L31015", SQLMSG, c_err_msg );
+    return -1;
+  }
+  i_itd_count=sqlca.sqlerrd[2];
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Successfully Inserted :%d: Records in ITD",i_itd_count);
+	}
+
+  i_ch_val = fn_eos_dtls(c_ServiceName,c_xchng_cd,c_date,c_err_msg );
+  if( i_ch_val != 0 )
+  {
+    fn_userlog(c_ServiceName,"failed in creating EOS records ");
+  }
+  /*** to Exclude Other than OP+ and SLTPFP underlyings ***/
+  EXEC SQL
+    DELETE from ITD_IGAIN_TRD_DTLS
+    where  ITD_TRD_DT=:c_date
+    and   ( ITD_UNDRLYNG,decode(itd_prdct_typ,'I','O','U','F'),itd_xchng_cd )
+	    not in ( select fum_undrlyng,fum_prdct_typ,fum_xchng_cd
+                     from    fum_fo_undrlyng_mstr
+                     where  FUM_IGAIN_ALLWD_FLG ='Y'
+                    )
+	and  ITD_PRCS_FLG <>'B' ;			/** Ver 1.2 Bullet ***/
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Excluding Underlyngs");
+    fn_errlog( c_ServiceName, "L31020", SQLMSG, c_err_msg );
+    return -1;
+  }
+  fn_userlog(c_ServiceName,"Now Inserting Order Level Details");
+
+  EXEC SQL
+    INSERT INTO  IOD_IGAIN_ORDR_DTLS
+								(IOD_XCHNG_CD,
+								IOD_ORDR_DT,
+								IOD_CLM_MTCH_ACCNT,
+								IOD_ORDR_RFRNC,
+								IOD_FRSH_COVER_FLG,
+								IOD_BUY_SELL,
+								IOD_ORDR_QTY,
+								IOD_TOTAL_VAL,
+								IOD_TOTAL_LOTS,
+								IOD_TOTAL_TRADES,
+								IOD_ORDR_LVL_BRKG,
+								IOD_TRD_LVL_BRKRG,
+								IOD_PRFT_LOSS_FLG,
+								IOD_AVRG_TRD_PRC,
+								IOD_ORD_ACK_NMBR,
+								IOD_PROFIT_RATE)
+    (
+          select  fod_xchng_cd,
+                  fod_trd_dt,
+                  ftd_clm_mtch_accnt,
+                  fod_ordr_rfrnc,
+                  fod_fc_flag,
+                  ftd_trd_flw,
+                  sum(ftd_exctd_qty) TOT_EXEC_QTY,
+                  sum(ftd_exctd_qty * ftd_exctd_rt) TRADE_VAL,
+                  sum(ftd_exctd_qty/ftd_min_lot_size) TOT_LOTS_TRADED,
+                  count(fod_ordr_rfrnc) TOTAL_TRADES,
+                  0,
+                  0,
+                  '',
+                  sum(ftd_exctd_rt)/ count(fod_ordr_rfrnc) AVRG_TRD_PRC ,
+                  ftd_ord_ack_nmbr ,
+                  null
+          from    FTD_FO_TRD_DTLS,FOD_FO_ORDR_DTLS,CLM_CLNT_MSTR
+          where   ftd_xchng_cd        = fod_xchng_cd
+          and     FTD_ORDR_RFRNC      = FOD_ORDR_RFRNC
+          and     fod_clm_mtch_accnt  = ftd_clm_mtch_accnt
+          and     ftd_clm_mtch_accnt  = clm_mtch_accnt
+          and     FOD_PRDCT_TYP       = FTD_PRDCT_TYP
+          and     ftd_fut_conv_flg    = 'N'
+					AND 		NVL(FTD_BRKG_TYPE,'N') <> 'B'																	/*** Ver 1.2 ***/
+          and     ((nvl(CLM_IGAIN_FP_FLG,'N') = 'Y' and ftd_prdct_typ='U' ) OR
+                  (nvl(CLM_IGAIN_OP_FLG,'N') = 'Y' and ftd_prdct_typ='I') )
+          and     trunc(ftd_trd_dt)   = :c_date
+          and     fod_xchng_cd        = :c_xchng_cd
+          and     ftd_ordr_rfrnc in
+                          (   select distinct ITD_FRSH_ORDR_RFRNC
+                            from    ITD_IGAIN_TRD_DTLS
+                            where   ITD_XCHNG_CD=:c_xchng_cd
+                            and     ITD_TRD_DT=:c_date
+                            union
+                            select distinct ITD_COVER_ORDR_RFRNC
+                            from    ITD_IGAIN_TRD_DTLS
+                            where   ITD_XCHNG_CD=:c_xchng_cd
+                            and     ITD_TRD_DT=:c_date
+                            union
+                            select distinct  ITD_C2_ORDR_RFRNC
+                            from    ITD_IGAIN_TRD_DTLS
+                            where   ITD_XCHNG_CD=:c_xchng_cd
+                            and     ITD_TRD_DT=:c_date
+                          )
+          group by fod_xchng_cd,
+                  ftd_clm_mtch_accnt,
+                  fod_ordr_rfrnc,
+                  fod_fc_flag,
+                  fod_trd_dt,
+                  ftd_trd_flw,
+                  ftd_ord_ack_nmbr
+    );
+    if( SQLCODE != 0 )
+    {
+      fn_userlog(c_ServiceName,"Failed in creating order Level details for IGain");
+      fn_errlog( c_ServiceName, "L31025", SQLMSG, c_err_msg );
+      return -1;
+    }
+    i_iod_count=sqlca.sqlerrd[2];
+    fn_userlog(c_ServiceName,"Successfully Inserted :%d: Records in IOD",i_iod_count);
+  return 0;
+}
+int fn_cal_igain_brkg( char *c_ServiceName,
+                         char *c_xchng_cd,
+                         char *c_date,
+                         char *c_err_msg
+                       )
+{
+  int i_rec_cnt=0;
+  double d_ordr_lvl_brkg =0.0;
+  double d_trd_lvl_brkg =0.0;
+	long long ll_iod_total_val= 0;
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Inside IGain Brokerage Calculation Function.");
+  	fn_userlog(c_ServiceName,"c_date=%s",c_date);
+	}
+
+  EXEC SQL
+    Declare itd_prcs_dtls cursor for
+    select  ITD_CLM_MTCH_ACCNT,
+            IOD_ORDR_RFRNC,
+            ITD_PRDCT_TYP,
+            IOD_ORDR_QTY,
+            IOD_TOTAL_VAL,
+            IOD_TOTAL_LOTS,
+            IOD_TOTAL_TRADES,
+            ITD_SCHM_CODE,
+            ITD_MIN_LOT_SIZE
+    from    IOD_IGAIN_ORDR_DTLS,ITD_IGAIN_TRD_DTLS
+    where   IOD_XCHNG_CD=ITD_XCHNG_CD
+    and     ITD_TRD_DT = trunc(IOD_ORDR_DT)
+    and     ITD_PRFT_LOSS_FLG='P'
+    and     ITD_TRD_DT = :c_date
+    and     ( IOD_ORDR_RFRNC = ITD_FRSH_ORDR_RFRNC OR
+              IOD_ORDR_RFRNC = ITD_COVER_ORDR_RFRNC OR
+              IOD_ORDR_RFRNC = nvl(ITD_C2_ORDR_RFRNC,'NA')
+            );
+
+  EXEC SQL open itd_prcs_dtls;
+
+  if(SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"Error in openig the profit order cursor");
+    fn_errlog( c_ServiceName, "L31030", SQLMSG, c_err_msg );
+    EXEC SQL ClOSE itd_prcs_dtls;
+    return -1;
+  }
+  while (1)
+  {
+    MEMSET(sql_itd_clm_mtch_accnt);
+    MEMSET(sql_iod_ordr_rfrnc);
+    MEMSET(sql_itd_schm_code.arr);
+    MEMSET(sql_usr_usr_id.arr);
+    sql_itd_prdct_typ='N';
+    sql_iod_ordr_qty=0;
+    sql_iod_total_val=0;
+    ll_iod_total_val=0;
+    sql_iod_total_lots=0;
+    sql_iod_total_trades=0;
+    sql_itd_min_lot_size=0;
+    sql_osm_profit_rate=0;
+    sql_iod_ordr_lvl_brkg=0.0;
+    sql_iod_trd_lvl_brkrg=0.0;
+    sql_usr_prepaid_allwd='N';
+    sql_usr_prime_allwd='N';			/** Ver 1.4 **/
+    d_ordr_lvl_brkg=0;
+
+    EXEC SQL
+      FETCH itd_prcs_dtls
+      INTO
+            :sql_itd_clm_mtch_accnt,
+            :sql_iod_ordr_rfrnc,
+            :sql_itd_prdct_typ,
+            :sql_iod_ordr_qty,
+            :ll_iod_total_val,
+            :sql_iod_total_lots,
+            :sql_iod_total_trades,
+            :sql_itd_schm_code,
+            :sql_itd_min_lot_size;
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"Error in Selecting profit trades");
+      fn_errlog( c_ServiceName, "L31035", SQLMSG, c_err_msg );
+      EXEC SQL ClOSE itd_prcs_dtls;
+      return -1;
+    }
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"No Records to process Or All Records Processed");
+      fn_errlog( c_ServiceName, "L31040", SQLMSG, c_err_msg );
+      EXEC SQL ClOSE itd_prcs_dtls;
+      break;
+    }
+    i_rec_cnt= i_rec_cnt +1;
+
+    SETLEN(sql_itd_schm_code);
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Processing for :%s:",sql_itd_clm_mtch_accnt);
+      fn_userlog(c_ServiceName,"sql_itd_prdct_typ:%c:",sql_itd_prdct_typ);
+      fn_userlog(c_ServiceName,"sql_iod_ordr_rfrnc :%s:",sql_iod_ordr_rfrnc);
+      fn_userlog(c_ServiceName,"sql_iod_ordr_qty :%ld:",sql_iod_ordr_qty);
+      fn_userlog(c_ServiceName,"sql_iod_total_val :%ld:",sql_iod_total_val);
+      fn_userlog(c_ServiceName,"ll_iod_total_val :%lld:",ll_iod_total_val);
+      fn_userlog(c_ServiceName,"sql_iod_total_lots :%ld:",sql_iod_total_lots);
+      fn_userlog(c_ServiceName,"sql_iod_total_trades :%ld:",sql_iod_total_trades);
+      fn_userlog(c_ServiceName,"sql_itd_schm_code :%s:",sql_itd_schm_code.arr);
+      fn_userlog(c_ServiceName,"sql_itd_min_lot_size :%ld:",sql_itd_min_lot_size);
+    }
+    EXEC SQL
+      SELECT   NVL(USR_PREPAID_ALLWD,'N'),
+							 NVL(USR_PRIME_ALLWD,'N'),			/** Ver 1.4 **/
+               USR_USR_ID
+      INTO     :sql_usr_prepaid_allwd,
+               :sql_usr_prime_allwd,					/** Ver 1.4 **/
+               :sql_usr_usr_id
+      FROM    USR_USER_MASTER,UAC_USR_ACCNTS
+      WHERE   USR_USR_ID  =UAC_USR_ID
+      AND     uac_clm_mtch_accnt=:sql_itd_clm_mtch_accnt;
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"Error in getting prepaid status for :%s:",sql_itd_clm_mtch_accnt);
+      fn_errlog( c_ServiceName, "L31045", SQLMSG, c_err_msg );
+      EXEC SQL ClOSE itd_prcs_dtls;
+      continue;
+    }
+    SETLEN(sql_usr_usr_id);
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"User Id is :%s:",sql_usr_usr_id.arr);
+    }
+    if(sql_usr_prepaid_allwd == 'Y' || sql_usr_prime_allwd == 'Y' )		/*** ver 1.4 Prime added **/
+    {
+      EXEC SQL
+       /*SELECT decode(:sql_itd_prdct_typ,'U',nvl(PISM_FUTURES_PRCNTG,0),'I',nvl(PISM_OPTIONS_LOT,0)*100) */
+       SELECT case when :sql_itd_prdct_typ ='U' then
+								DECODE(INSD_PRIME_SCHEMECODE, NULL, (DECODE(INSD_PREPAID_SCHEMECODE,NULL,0,nvl(PISM_FUTURES_PRCNTG,0))),nvl(IPSM_FUTURES_PRCNTG,0))	
+							when :sql_itd_prdct_typ ='I' then
+						    DECODE(INSD_PRIME_SCHEMECODE, NULL, (DECODE(INSD_PREPAID_SCHEMECODE,NULL,0,nvl(PISM_OPTIONS_LOT,0)*100)),nvl(IPSM_OPTIONS_LOT_BROK,0)*100)
+							end			/** Ver 1.4 Case introduced for Prime handling **/
+       into  :sql_osm_profit_rate               /*** PISM Brokerage Per lot in Rs **/
+       FROM
+             INSD_INFO_NTST_SCHEME_DTLS,
+             IMSM_INFO_MATCH_SCHEME_MASTER,
+             PISM_PREPAID_INFO_SCH_MSTR,
+						 IPSM_INFO_PRIME_SCH_MSTR
+       WHERE INSD_MATCH_ACCOUNT_NO = :sql_itd_clm_mtch_accnt
+       AND   INSD_EQ_SCHEMECODE    = IMSM_SCHEMECODE
+			 AND   decode(INSD_PRIME_SCHEMECODE,null,
+						(DECODE(INSD_PREPAID_SCHEMECODE,NULL,'RI',PISM_SCH_TYP)),nvl(IPSM_SCH_TYP,'RI') 
+						)  			/** ver 1.4 decode used **/
+       /*AND   nvl(PISM_SCH_TYP,'') * Ver 1.4 comment*/
+ 						= (   select decode(nvl(ICD_CUST_TYPE,''),'NRI','NRI','RI')
+                                        from ICD_INFO_CLIENT_DTLS
+                                        where icd_clnt_cd=:sql_itd_clm_mtch_accnt
+                                        and  icd_user_id =:sql_usr_usr_id
+                                     )
+       AND   INSD_PREPAID_SCHEMECODE    = PISM_GLOBAL_SCH_CD(+)
+			 AND     INSD_PRIME_SCHEMECODE     = IPSM_GLOBAL_SCH_CD(+);			/** IPSM included **/
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_userlog(c_ServiceName,"Error in getting Prepaid Percent for:%s:",sql_itd_clm_mtch_accnt);
+        fn_errlog( c_ServiceName, "L31050", SQLMSG, c_err_msg );
+        continue;
+      }
+      if( SQLCODE == NO_DATA_FOUND || sql_osm_profit_rate == 0) /*** To Confirm ***/
+      {
+        fn_userlog(c_ServiceName,"No Prepaid Details found for :%s: Pls Chk",sql_itd_clm_mtch_accnt);
+        EXEC SQL
+          SELECT decode(:sql_itd_prdct_typ,'I',OSM_PROFIT_RATE * 100,OSM_PROFIT_RATE)
+          into   :sql_osm_profit_rate
+          from 	OSM_OPTION_SCHEME_MSTR
+          where OSM_SCHM_CODE =:sql_itd_schm_code
+	  			and   OSM_PRDCT_TYP = :sql_itd_prdct_typ;
+
+        if(SQLCODE != 0)
+        {
+          fn_userlog(c_ServiceName,"Error in Getting profit rate for:%s:",sql_itd_schm_code.arr);
+          fn_errlog( c_ServiceName, "L31055", SQLMSG, c_err_msg );
+          EXEC SQL ClOSE itd_prcs_dtls;
+          return -1;
+        }
+      }
+    }
+    else
+    {
+      EXEC SQL
+        SELECT decode(:sql_itd_prdct_typ,'I',OSM_PROFIT_RATE * 100,OSM_PROFIT_RATE)
+        into   :sql_osm_profit_rate
+        from OSM_OPTION_SCHEME_MSTR
+        where OSM_SCHM_CODE =:sql_itd_schm_code;
+
+      if(SQLCODE != 0)
+      {
+        fn_userlog(c_ServiceName,"Error in Getting profit rate for:%s:",sql_itd_schm_code.arr);
+        fn_errlog( c_ServiceName, "L31060", SQLMSG, c_err_msg );
+        EXEC SQL ClOSE itd_prcs_dtls;
+        return -1;
+      }
+    }
+		if(DEBUG_MSG_LVL_0)
+		{
+    	fn_userlog(c_ServiceName,"sql_osm_profit_rate=:%lf:",sql_osm_profit_rate);
+		}
+    EXEC SQL
+      SELECT
+        CASE when :sql_itd_prdct_typ='U'
+             then (:ll_iod_total_val * (:sql_osm_profit_rate /100))
+             when :sql_itd_prdct_typ='I'
+             then  (:sql_iod_total_lots * :sql_osm_profit_rate )
+        END ORDR_LVL_BRKG,
+        CASE when :sql_itd_prdct_typ='U'
+             then (:ll_iod_total_val * :sql_osm_profit_rate / :sql_itd_min_lot_size)/:sql_iod_total_trades
+             when :sql_itd_prdct_typ='I'
+             then  (:sql_iod_total_lots * :sql_osm_profit_rate )/:sql_iod_total_trades
+        END TRADE_LVL_BRKG
+        INTO   :sql_iod_ordr_lvl_brkg,
+               :sql_iod_trd_lvl_brkrg
+        from dual;
+      if(SQLCODE != 0 )
+      {
+        fn_userlog(c_ServiceName,"Error Calculating Brokerage value");
+        fn_errlog( c_ServiceName, "L31065", SQLMSG, c_err_msg );
+        EXEC SQL ClOSE itd_prcs_dtls;
+        return -1;
+      }
+			if(DEBUG_MSG_LVL_3)
+			{
+      	fn_userlog(c_ServiceName,
+                              "Order Level brokerage for:%s: is :%lf:",
+                              sql_iod_ordr_rfrnc,sql_iod_ordr_lvl_brkg
+                );
+      	fn_userlog(c_ServiceName,
+                              "Trade Level brokerage for:%s: is :%lf:",
+                              sql_iod_ordr_rfrnc,sql_iod_trd_lvl_brkrg
+                );
+			}
+
+    EXEC SQL
+      UPDATE IOD_IGAIN_ORDR_DTLS
+      SET IOD_ORDR_LVL_BRKG = :sql_iod_ordr_lvl_brkg,
+          IOD_PRFT_LOSS_FLG = 'P',
+          IOD_PROFIT_RATE   = decode(:sql_itd_prdct_typ,'I',:sql_osm_profit_rate/100,:sql_osm_profit_rate)
+      WHERE IOD_ORDR_RFRNC  = :sql_iod_ordr_rfrnc
+      AND   trunc(IOD_ORDR_DT)      = :c_date;
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    {
+      fn_userlog(c_ServiceName,"Error Updating Order and Trade Level Brokerage");
+      fn_errlog( c_ServiceName, "L31070", SQLMSG, c_err_msg );
+      EXEC SQL ClOSE itd_prcs_dtls;
+      return -1;
+    }
+    if(SQLCODE == NO_DATA_FOUND)
+    {
+      fn_userlog(c_ServiceName," ISSUE:Problem in Updating Brkrg PLs Look into ");
+      fn_errlog( c_ServiceName, "L31075", SQLMSG, c_err_msg );
+      EXEC SQL ClOSE itd_prcs_dtls;
+      return -1;
+    }
+		EXEC SQL
+			UPDATE IOD_IGAIN_ORDR_DTLS
+			SET 	IOD_PROFIT_RATE   = decode( :sql_itd_prdct_typ,'I',
+																			  :sql_osm_profit_rate/100,
+																			  :sql_osm_profit_rate
+																			)
+			 WHERE trunc(IOD_ORDR_DT) = :c_date
+			 AND   IOD_CLM_MTCH_ACCNT =	:sql_itd_clm_mtch_accnt
+			 AND	 IOD_PROFIT_RATE is null
+			 and    IOD_ORDR_RFRNC in ( 
+																	select distinct itd_frsh_ordr_rfrnc from 
+																	itd_igain_trd_dtls 
+																	where itd_prdct_typ =:sql_itd_prdct_typ
+																	and itd_clm_mtch_accnt =:sql_itd_clm_mtch_accnt
+																	and itd_trd_Dt=:c_date
+																	union
+																	select distinct ITD_COVER_ORDR_RFRNC from 
+																	itd_igain_trd_dtls 
+																	where itd_prdct_typ =:sql_itd_prdct_typ
+																	and itd_clm_mtch_accnt =:sql_itd_clm_mtch_accnt
+																	and itd_trd_Dt=:c_date
+																	union 
+																	select distinct ITD_C2_ORDR_RFRNC from 
+																	itd_igain_trd_dtls 
+																	where itd_prdct_typ =:sql_itd_prdct_typ
+																	and itd_clm_mtch_accnt =:sql_itd_clm_mtch_accnt
+																	and itd_trd_Dt=:c_date
+																);
+
+    if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"Failed in Updating the Profit Rate in IOD");
+      fn_errlog( c_ServiceName, "L31080", SQLMSG, c_err_msg );
+      return -1;
+    }
+
+  EXEC SQL
+    UPDATE FTD_FO_TRD_DTLS
+    SET    FTD_BRKG = (  CASE
+                          when ftd_prdct_typ ='U'
+                          then ( :sql_iod_ordr_lvl_brkg/:ll_iod_total_val) *
+                               ( ftd_exctd_qty * ftd_exctd_rt)
+                          when ftd_prdct_typ ='I'
+                          then ( :sql_iod_ordr_lvl_brkg/:sql_iod_total_lots) *
+                               ( ftd_exctd_qty/ftd_min_lot_size)
+                          END
+                        ),
+					 FTD_BRKG_TYPE ='I' 												/** Ver 1.2 **/
+    WHERE  TRUNC(FTD_TRD_DT) =:c_date
+    AND    ftd_ordr_rfrnc = :sql_iod_ordr_rfrnc
+    AND    ftd_clm_mtch_accnt = :sql_itd_clm_mtch_accnt
+    AND    FTD_BRKG is null;
+
+    if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"Failed in Updating the Trade Level Brokerage in FTD");
+      fn_errlog( c_ServiceName, "L31085", SQLMSG, c_err_msg );
+      return -1;
+    }
+    if(SQLCODE == NO_DATA_FOUND)
+    {
+      fn_userlog(c_ServiceName," ISSUE:Probm in Updating Brkrg in FTD for:%s:",sql_iod_ordr_rfrnc);
+    }
+
+  } /** End of While **/
+  EXEC SQL ClOSE itd_prcs_dtls;
+
+  if(SQLCODE != 0)
+  {
+    fn_userlog(c_ServiceName,"Error Closing itd_prcs_dtls cursor");
+    fn_errlog( c_ServiceName, "L31090", SQLMSG, c_err_msg );
+    return -1;
+  }
+  fn_userlog(c_ServiceName,"Now Updating Trade Level Brokerage");
+
+  EXEC SQL
+    UPDATE FTD_FO_TRD_DTLS
+    SET    FTD_BRKG = 0,
+					 FTD_BRKG_TYPE ='I' 						/*** Ver 1.2 ***/
+    WHERE  TRUNC(FTD_TRD_DT) =:c_date
+    AND    FTD_BRKG is null
+    AND    ftd_ordr_rfrnc in ( select distinct iod_ordr_rfrnc
+                               from   iod_igain_ordr_dtls
+                               where  trunc(iod_ordr_dt)=:c_date
+                               and    iod_prft_loss_flg is null
+                             );
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"Failed in Updating the Trade Level Brokerage in FTD");
+      fn_errlog( c_ServiceName, "L31095", SQLMSG, c_err_msg );
+      return -1;
+    }
+
+  return 0;
+}
+int fn_eos_dtls(  char *c_ServiceName,
+                  char *c_xchng_cd,
+                  char *c_date,
+                  char *c_err_msg
+                )
+{
+  fn_userlog(c_ServiceName," inside fn_eos_dtls for inserting eos records in ITD for SPLIT COVER.");
+  EXEC SQL
+  INSERT INTO ITD_IGAIN_TRD_DTLS
+  select AA.XCHNG_CD,
+       AA.MTCH_ACCNT,
+       AA.PRDCT_TYP,
+       AA.UNDRLYNG,
+       AA.EXPRY,
+       AA.EXERCISE_TYP,
+       AA.OPT_TYP,
+       AA.STRK_PRC,
+       AA.TRD_DT,
+       BB.F_ORDR_RFRNC ,
+       BB.B_C2_ORDR,
+       AA.A_TRD_FLW,
+       AA.B_C2_TRD_FLW,
+       AA.A_EXCTD_QTY,
+       AA.B_C2_EXCTD_QTY,
+       AA.A_TRD_VAL,
+       BB.C2_TRD_VAL,
+       decode(AA.A_TRD_FLW,'S',(AA.A_TRD_VAL - (BB.C2_TRD_VAL + AA.BC2_TRD_VAL)),((AA.BC2_TRD_VAL +BB.C2_TRD_VAL) - AA.A_TRD_VAL)) PRFT_LOSS,
+       decode(sign(decode(AA.A_TRD_FLW,'S',(AA.A_TRD_VAL - (BB.C2_TRD_VAL + AA.BC2_TRD_VAL)),((AA.BC2_TRD_VAL +BB.C2_TRD_VAL) - AA.A_TRD_VAL))),-1,'L',0,'L','P') PRFT_LOSS_FLG,
+       AA.SCHM_CD,
+       AA.TTD_MIN_LOT_SIZE,
+      'N',
+       BB.C2_ORDR,
+       BB.B_C2_TRD_FLW,
+       BB.C2_EXCTD_QTY,
+       AA.BC2_TRD_VAL
+  from
+  (
+    select A.ttd_xchng_cd XCHNG_CD,
+      A.ttd_clm_mtch_accnt MTCH_ACCNT,
+      A.ttd_prdct_typ PRDCT_TYP,
+      A.ttd_undrlyng UNDRLYNG,
+      A.ttd_expry_dt EXPRY,
+      A.ttd_exer_typ EXERCISE_TYP,
+      A.ttd_opt_typ OPT_TYP,
+      A.ttd_strk_prc STRK_PRC,
+      A.ttd_trd_dt TRD_DT,
+      A.TTD_ORDR_RFRNC F_ORDR_RFRNC,
+      B.TTD_ORDR_RFRNC B_C2_ORDR,
+      null C2_ORDR,
+      A.TTD_TRD_FLW A_TRD_FLW,
+      B.TTD_TRD_FLW B_C2_TRD_FLW ,
+      null C2_TRD_FLW ,
+      A.TTD_EXCTD_QTY A_EXCTD_QTY,
+      B.TTD_EXCTD_QTY B_C2_EXCTD_QTY,
+      null C2_EXCTD_QTY,
+      A.TTD_TRADE_VAL A_TRD_VAL,
+      B.TTD_TRADE_VAL BC2_TRD_VAL,
+      null C2_TRD_VAL,
+      null PROFIT_LOSS,
+      null PROFIT_LOSS_FLG,
+      A.TTD_IGAIN_SCHM_CD SCHM_CD,
+      A.TTD_MIN_LOT_SIZE,
+      'N'
+    from ( select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG in ('F','E') and TTD_IGAIN_SCHM_CD <> 'BULLET') A,
+         ( select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG ='C' and  TTD_IGAIN_SCHM_CD <> 'BULLET' ) B
+    where A.ttd_clm_mtch_accnt  = B.ttd_clm_mtch_accnt
+    and   A.ttd_prdct_typ       = B.ttd_prdct_typ
+    and   A.ttd_expry_dt        = B.ttd_expry_dt
+    and   A.ttd_opt_typ         = B.ttd_opt_typ
+    and   A.ttd_strk_prc        = B.ttd_strk_prc
+    and   A.TTD_ORDR_RFRNC      = B.TTD_SLTP_ORDR_RFRNC
+    and   A.TTD_TRD_DT          = B.TTD_TRD_DT
+    and   A.TTD_EXCTD_QTY       != B.TTD_EXCTD_QTY     
+    and   A.TTD_SLTP_ORDR_RFRNC = B.TTD_ORDR_RFRNC
+  ) AA,
+  (
+    select       A.ttd_xchng_cd XCHNG_CD,
+      A.ttd_clm_mtch_accnt MTCH_ACCNT,
+      A.ttd_prdct_typ PRDCT_TYP,
+      A.ttd_undrlyng UNDRLYNG,
+      A.ttd_expry_dt EXPRY,
+      A.ttd_exer_typ EXERCISE_TYP,
+      A.ttd_opt_typ OPT_TYP,
+      A.ttd_strk_prc STRK_PRC,
+      A.ttd_trd_dt TRD_DT,
+      A.TTD_ORDR_RFRNC F_ORDR_RFRNC,
+      B.TTD_ORDR_RFRNC B_C2_ORDR,
+      A.TTD_SLTP_ORDR_RFRNC C2_ORDR,
+      A.TTD_TRD_FLW A_TRD_FLW,
+      B.TTD_TRD_FLW B_C2_TRD_FLW ,
+      B.TTD_TRD_FLW C2_TRD_FLW ,
+      A.TTD_EXCTD_QTY A_EXCTD_QTY,
+      B.TTD_EXCTD_QTY B_C2_EXCTD_QTY,
+      B.TTD_EXCTD_QTY C2_EXCTD_QTY,
+      A.TTD_TRADE_VAL A_TRD_VAL,
+      B.TTD_TRADE_VAL BC2_TRD_VAL,
+      B.TTD_TRADE_VAL C2_TRD_VAL,
+      null PROFIT_LOSS,
+      null PROFIT_LOSS_FLG,
+      A.TTD_IGAIN_SCHM_CD SCHM_CD,
+      A.TTD_MIN_LOT_SIZE,
+      'N'
+    from ( select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG in ('F','E') and TTD_IGAIN_SCHM_CD<> 'BULLET' ) A,
+         ( select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG ='C' and  TTD_IGAIN_SCHM_CD<> 'BULLET' ) B
+    where A.ttd_clm_mtch_accnt  = B.ttd_clm_mtch_accnt
+    and   A.ttd_prdct_typ       = B.ttd_prdct_typ
+    and   A.ttd_expry_dt        = B.ttd_expry_dt
+    and   A.ttd_opt_typ         = B.ttd_opt_typ
+    and   A.ttd_strk_prc        = B.ttd_strk_prc
+    and   A.TTD_ORDR_RFRNC      = B.TTD_SLTP_ORDR_RFRNC
+    and   A.TTD_TRD_DT          = B.TTD_TRD_DT
+    and   A.TTD_EXCTD_QTY       != B.TTD_EXCTD_QTY    
+    and   A.TTD_SLTP_ORDR_RFRNC != B.TTD_ORDR_RFRNC
+    ) BB
+    where AA.XCHNG_CD = BB.XCHNG_CD
+    and   AA.PRDCT_TYP= BB.PRDCT_TYP
+    and   AA.MTCH_ACCNT = BB.MTCH_ACCNT
+    and   AA.UNDRLYNG = BB.UNDRLYNG
+    and   AA.EXERCISE_TYP = BB.EXERCISE_TYP
+    and   AA.OPT_TYP = BB.OPT_TYP
+    and   AA.TRD_DT = BB.TRD_DT
+    and   AA.STRK_PRC = BB.STRK_PRC
+    and   AA.A_TRD_FLW = BB.A_TRD_FLW
+    and   AA.B_C2_TRD_FLW = BB.B_C2_TRD_FLW
+    and   AA.F_ORDR_RFRNC = BB.F_ORDR_RFRNC
+    and   AA.B_C2_ORDR = BB.C2_ORDR;
+
+  if(SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"L31100",SQLMSG,c_err_msg);
+    return -1;
+  }
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Count of COVER SPLIT=:%d:",sqlca.sqlerrd[2]);
+  	fn_userlog(c_ServiceName," Now inserting eos records in ITD for SPLIT FRESH.");
+	}
+
+  EXEC SQL
+    INSERT INTO ITD_IGAIN_TRD_DTLS
+    SELECT XCHNG_CD,
+           MTCH_ACCNT,
+           PRDCT_TYP,
+           UNDRLYNG,
+           EXPRY,
+           EXERCISE_TYP,
+           OPT_TYP,
+           STRK_PRC,
+           TRD_DT,
+           F1_ORDR_RFRNC,
+           BB.TTD_ORDR_RFRNC,
+           F1_TRD_FLW,
+           BB.TTD_TRD_FLW,
+           F1_EXCTD_QTY,
+           BB.TTD_EXCTD_QTY,
+           decode(F1_TRD_FLW,'B',F1_TRD_VAL,BB.TTD_TRADE_VAL) BUY_VAL,
+           decode(F1_TRD_FLW,'S',F1_TRD_VAL,BB.TTD_TRADE_VAL) SELL_VAL,
+           decode(F1_TRD_FLW,'S',((F1_TRD_VAL +F2_TRD_VAL) - BB.TTD_TRADE_VAL),(BB.TTD_TRADE_VAL -(F1_TRD_VAL+F2_TRD_VAL))) PRFT_LOSS,
+           decode(sign(decode(F1_TRD_FLW,'S',((F1_TRD_VAL +F2_TRD_VAL) - BB.TTD_TRADE_VAL),(BB.TTD_TRADE_VAL -(F1_TRD_VAL+F2_TRD_VAL)))),-1,'L',0,'L','P') PRFT_LOSS_FLG,
+           AA.SCHM_CD,
+           AA.LOT_SIZE,
+           'N',
+           F2_ORDR_RFRNC,
+           F2_TRD_FLW,
+           F2_EXCTD_QTY,
+           F2_TRD_VAL
+        FROM
+          (select
+              A.ttd_xchng_cd XCHNG_CD,
+              A.ttd_clm_mtch_accnt MTCH_ACCNT,
+              A.ttd_prdct_typ PRDCT_TYP,
+              A.ttd_undrlyng UNDRLYNG,
+              A.ttd_expry_dt EXPRY,
+              A.ttd_exer_typ EXERCISE_TYP,
+              A.ttd_opt_typ OPT_TYP,
+              A.ttd_strk_prc STRK_PRC,
+              A.ttd_trd_dt TRD_DT,
+              A.TTD_ORDR_RFRNC F1_ORDR_RFRNC,
+              B.TTD_ORDR_RFRNC F2_ORDR_RFRNC,
+              null F3_ORDR_RFRNC,
+              A.TTD_TRD_FLW F1_TRD_FLW,
+              B.TTD_TRD_FLW F2_TRD_FLW,
+              null          F3_TRD_FLW ,
+              A.TTD_EXCTD_QTY F1_EXCTD_QTY,
+              B.TTD_EXCTD_QTY F2_EXCTD_QTY,
+              null            F3_EXCTD_QTY,
+              A.TTD_TRADE_VAL F1_TRD_VAL,
+              B.TTD_TRADE_VAL F2_TRD_VAL,
+              null            F3_TRD_VAL,
+              null            PROFIT_LOSS,
+              null            PROFIT_LOSS_FLG,
+              A.TTD_IGAIN_SCHM_CD SCHM_CD,
+              A.TTD_MIN_LOT_SIZE LOT_SIZE,
+              'N'
+            from
+              (select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG='F' and  TTD_IGAIN_SCHM_CD<> 'BULLET' )  A,
+              (select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG='E' and  TTD_IGAIN_SCHM_CD<> 'BULLET' ) B
+                where A.TTD_CLM_MTCH_ACCNT = B.TTD_CLM_MTCH_ACCNT
+                and  A.TTD_ORDR_RFRNC = B.TTD_SLTP_ORDR_RFRNC
+              ) AA,
+              (select * from TTD_TMP_TRD_DTLS where TTD_FC_FLG='C' and  TTD_IGAIN_SCHM_CD<> 'BULLET' ) BB
+        WHERE AA.F1_ORDR_RFRNC = BB.TTD_SLTP_ORDR_RFRNC;
+    if(SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"L31105",SQLMSG,c_err_msg);
+      return -1;
+    }
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"Count of FRESH SPLIT=:%d:",sqlca.sqlerrd[2]);
+    	fn_userlog(c_ServiceName," fn_eos_dtls completed successfully for EOS Cases.");
+		}
+  return 0;
+}
+/**** Ver 1.2 Bullet trade processing starts ****/
+int fn_process_bullet( char *c_ServiceName,
+                         char *c_xchng_cd,
+                         char *c_date,
+                         char *c_err_msg
+                       )
+{
+  int i_bttd_cnt   = 0;
+  int i_bitd_count = 0;
+  int i_biod_count = 0;
+	int i_ch_val = 0;
+	/** ver 1.5 starts **/
+	EXEC SQL
+		DELETE FROM TTD_TMP_TRD_DTLS WHERE TTD_XCHNG_CD = :c_xchng_cd;
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of TTD_TMP_TRD_DTLS.");
+    fn_errlog( c_ServiceName, "L31110", SQLMSG, c_err_msg );
+    return -1;
+  }
+	/** ver 1.5 End **/
+	
+	fn_userlog(c_ServiceName,"Inside Bullet trade Processing.");
+	EXEC SQL
+		INSERT INTO TTD_TMP_TRD_DTLS
+							(TTD_XCHNG_CD,
+							TTD_CLM_MTCH_ACCNT,
+							TTD_TRD_DT,
+							TTD_ORDR_RFRNC,
+							TTD_SLTP_ORDR_RFRNC,
+							TTD_FC_FLG,
+							TTD_UNDRLYNG,
+							TTD_PRDCT_TYP,
+							TTD_EXER_TYP,
+							TTD_OPT_TYP,
+							TTD_STRK_PRC,
+							TTD_EXPRY_DT,
+							TTD_TRD_FLW,
+							TTD_EXCTD_QTY,
+							TTD_TRADE_VAL,
+							TTD_IGAIN_SCHM_CD,
+							TTD_TRD_MAX_TIME,
+							TTR_TRD_MIN_TIME)
+		SELECT	FTD_XCHNG_CD,
+						FTD_CLM_MTCH_ACCNT,
+            FOD_TRD_DT,
+						FTD_ORDR_RFRNC ,
+            FOD_SLTP_ORDR_RFRNC ,
+            FOD_FC_FLAG,
+            FTD_UNDRLYNG,
+            FTD_PRDCT_TYP,
+            FTD_EXER_TYP,
+            FTD_OPT_TYP,
+            FTD_STRK_PRC,
+            FTD_EXPRY_DT,
+            FTD_TRD_FLW ,
+            SUM(FTD_EXCTD_QTY),
+						SUM(FTD_EXCTD_QTY * FTD_EXCTD_RT),
+						'BULLET',
+						MAX(A.FTD_TRD_DT),
+						LEAST(NVL(B.FXB_RQST_TM,A.FTD_TRD_DT),MIN(A.FTD_TRD_DT)) FROM
+    (SELECT FTD_XCHNG_CD,
+            FTD_CLM_MTCH_ACCNT,
+            FOD_TRD_DT,
+            FTD_ORDR_RFRNC ,
+            FOD_SLTP_ORDR_RFRNC ,
+            FOD_FC_FLAG,
+            FTD_UNDRLYNG,
+            FTD_PRDCT_TYP,
+            FTD_EXER_TYP,
+            FTD_OPT_TYP,
+            FTD_STRK_PRC,
+            FTD_EXPRY_DT,
+            FTD_TRD_FLW ,
+            FTD_EXCTD_QTY,
+            FTD_EXCTD_RT,
+						FTD_TRD_DT
+        FROM   FTD_FO_TRD_DTLS,FOD_FO_ORDR_DTLS,CLM_CLNT_MSTR
+        WHERE  FTD_ORDR_RFRNC     = FOD_ORDR_RFRNC
+        AND    FTD_XCHNG_CD       = FOD_XCHNG_CD
+        AND    FOD_CLM_MTCH_ACCNT = FTD_CLM_MTCH_ACCNT
+        AND    FTD_CLM_MTCH_ACCNT = CLM_MTCH_ACCNT
+        AND    FOD_PRDCT_TYP      = FTD_PRDCT_TYP
+				AND    CLM_BULLET_SCHM_FLG='Y'
+				AND    FTD_UPLD_MTCH_FLG ='N'
+        AND    FTD_PRDCT_TYP IN ('I','U')
+        AND    TRUNC(FTD_TRD_DT) = :c_date
+        AND    FOD_XCHNG_CD = :c_xchng_cd
+				AND    NVL(FTD_BRKG_TYPE,'N')='N'								/** Ver 1.5 **/
+				AND    FOD_CHANNEL not in('CN1','CN2','CNT')
+		) A,
+    (SELECT FXB_ORDR_RFRNC,FXB_RQST_TM FROM FXB_FO_XCHNG_BOOK, FOD_FO_ORDR_DTLS
+    WHERE FOD_ORDR_RFRNC = FXB_ORDR_RFRNC
+    AND FXB_LMT_MRKT_SL_FLG = 'M'
+    AND FOD_PRDCT_TYP IN ('I','U')
+    AND FOD_TRD_DT = :c_date
+    AND FOD_XCHNG_CD = :c_xchng_cd
+		AND FOD_FC_FLAG IN  ('C','T')												/** Ver 1.8 **/
+		AND FOD_CHANNEL not in('CN1','CN2','CNT')
+		AND FXB_MDFCTN_CNTR = (SELECT MIN(FXB_MDFCTN_CNTR) FROM FXB_FO_XCHNG_BOOK A
+                WHERE A.FXB_ORDR_RFRNC = FOD_ORDR_RFRNC
+                AND FXB_LMT_MRKT_SL_FLG = 'M'
+								AND FXB_PLCD_STTS = 'A'
+								AND FXB_MDFCTN_CNTR > 1)) B
+    WHERE A.FTD_ORDR_RFRNC = B.FXB_ORDR_RFRNC(+)
+    GROUP BY FTD_XCHNG_CD,
+             FTD_CLM_MTCH_ACCNT,
+             FOD_TRD_DT,
+             FTD_ORDR_RFRNC ,
+             FOD_SLTP_ORDR_RFRNC ,
+             FOD_FC_FLAG,
+             FTD_UNDRLYNG,
+             FTD_PRDCT_TYP,
+             FTD_EXER_TYP,
+             FTD_OPT_TYP,
+             FTD_STRK_PRC,
+             FTD_EXPRY_DT,
+             FTD_TRD_FLW ,
+						 NVL(B.FXB_RQST_TM,A.FTD_TRD_DT);
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of TTD_TMP_TRD_DTLS for Bullet.");
+    fn_errlog( c_ServiceName, "L31115", SQLMSG, c_err_msg );
+    return -1;
+  }
+  i_bttd_cnt = sqlca.sqlerrd[2];
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,":%d: Records Inserted into TTD for Bullet.",i_bttd_cnt);
+	}
+  if(i_bttd_cnt == 0)
+  {
+    fn_userlog(c_ServiceName,"No records to process for Bullet.Continue to IGain Processing.");
+    return 0;
+  }
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Now inserting records in ITD for Bullet.");
+	}
+
+	EXEC SQL
+		INSERT INTO ITD_IGAIN_TRD_DTLS
+						(ITD_XCHNG_CD,
+						ITD_CLM_MTCH_ACCNT,
+						ITD_PRDCT_TYP,
+						ITD_UNDRLYNG,
+						ITD_EXPRY_DT,
+						ITD_EXER_TYP,
+						ITD_OPT_TYP,
+						ITD_STRK_PRC,
+						ITD_TRD_DT,
+						ITD_FRSH_ORDR_RFRNC,
+						ITD_COVER_ORDR_RFRNC,
+						ITD_FRSH_ORDR_TYP,
+						ITD_COVER_ORDR_TYP,
+						ITD_FRSH_ORDR_QTY,
+						ITD_COVER_ORDR_QTY,
+						ITD_PRCS_FLG,
+						ITD_SCHM_CODE
+					 )
+			SELECT
+			A.TTD_XCHNG_CD,
+			A.TTD_CLM_MTCH_ACCNT,
+			A.TTD_PRDCT_TYP,
+			A.TTD_UNDRLYNG,
+			A.TTD_EXPRY_DT,
+			A.TTD_EXER_TYP,
+			A.TTD_OPT_TYP,
+			A.TTD_STRK_PRC,
+			TRUNC(A.TTD_TRD_DT),
+			A.TTD_ORDR_RFRNC,
+			A.TTD_SLTP_ORDR_RFRNC,
+			A.TTD_TRD_FLW,
+			'',
+			A.TTD_EXCTD_QTY,
+			'',
+			'B',
+			'BULLET'
+			FROM (select * from TTD_TMP_TRD_DTLS where TTD_IGAIN_SCHM_CD = 'BULLET' ) A,
+			(SELECT FRSH.TTD_ORDR_RFRNC FROM
+			(SELECT TTD_ORDR_RFRNC,MAX(TTD_TRD_MAX_TIME) EXEC_TIME FROM
+			(SELECT TTD_ORDR_RFRNC,TTD_TRD_MAX_TIME
+			FROM TTD_TMP_TRD_DTLS
+			WHERE TTD_FC_FLG = 'F'
+			AND   TTD_IGAIN_SCHM_CD = 'BULLET'
+			UNION
+			SELECT TTD_SLTP_ORDR_RFRNC,TTD_TRD_MAX_TIME
+			FROM TTD_TMP_TRD_DTLS
+			WHERE TTD_FC_FLG = 'E'
+			AND   TTD_IGAIN_SCHM_CD = 'BULLET')
+			GROUP BY TTD_ORDR_RFRNC) FRSH,
+			(SELECT TTD_SLTP_ORDR_RFRNC,MIN(TTR_TRD_MIN_TIME) EXEC_TIME  FROM
+			(SELECT TTD_SLTP_ORDR_RFRNC,TTR_TRD_MIN_TIME             /** Ver 1.8 **/
+			FROM TTD_TMP_TRD_DTLS
+			WHERE TTD_FC_FLG = 'C'
+			AND  TTD_IGAIN_SCHM_CD = 'BULLET'
+			/** Ver 1.8 starts **/
+			UNION
+			SELECT TTD_SLTP_ORDR_RFRNC,TTR_TRD_MIN_TIME
+			FROM TTD_TMP_TRD_DTLS
+      WHERE TTD_FC_FLG = 'T'
+      AND  TTD_IGAIN_SCHM_CD = 'BULLET')
+			/** Ver 1.8 ends **/
+			GROUP BY TTD_SLTP_ORDR_RFRNC ) CVR
+			WHERE FRSH.TTD_ORDR_RFRNC = CVR.TTD_SLTP_ORDR_RFRNC
+			/*AND ((CAST(CVR.EXEC_TIME AS DATE) - CAST(FRSH.EXEC_TIME AS DATE))*24*60*60) < (	select PAR_BULLET_TIME_INTRVL */
+			AND ABS((CVR.EXEC_TIME - FRSH.EXEC_TIME)*24*60*60) <= (	select PAR_BULLET_TIME_INTRVL 
+  																																										from 		PAR_SYSTM_PRMTR 
+																																									  )
+			) B
+			WHERE A.TTD_ORDR_RFRNC = B.TTD_ORDR_RFRNC 
+			OR 		A.TTD_SLTP_ORDR_RFRNC = B.TTD_ORDR_RFRNC;
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"Failed in creating ITD Details for Bullet");
+    fn_errlog( c_ServiceName, "L31120", SQLMSG, c_err_msg );
+    return -1;
+  }
+  i_bitd_count=sqlca.sqlerrd[2];
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Successfully Inserted :%d: Records in ITD for Bullet",i_bitd_count);
+	}
+
+	EXEC SQL
+		UPDATE FTD_FO_TRD_DTLS
+		SET 	 FTD_BRKG_TYPE = 'B', 
+					 FTD_BRKG = 0
+		WHERE EXISTS(SELECT 1 FROM ITD_IGAIN_TRD_DTLS
+									WHERE ITD_PRCS_FLG  = 'B' 
+									AND (FTD_ORDR_RFRNC = ITD_FRSH_ORDR_RFRNC 
+									OR FTD_ORDR_RFRNC = ITD_COVER_ORDR_RFRNC)); 
+
+  if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )  /**** Ver 1.7  *****/
+  {
+    fn_userlog(c_ServiceName,"Failed in creating ITD Details for Bullet");
+    fn_errlog( c_ServiceName, "L31125", SQLMSG, c_err_msg );
+    return -1;
+  }
+  
+  if ( SQLCODE == NO_DATA_FOUND )  /**** Ver 1.7 *****/
+  {
+    fn_userlog(c_ServiceName,"No bullet records to process");
+    return 0; 
+  }
+
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Successfully Updated FTD for Bullet Trades");
+	}
+
+	/*** EXEC SQL
+		INSERT INTO IOD_IGAIN_ORDR_DTLS
+						(IOD_XCHNG_CD,
+						IOD_ORDR_DT,
+						IOD_CLM_MTCH_ACCNT,
+						IOD_ORDR_RFRNC,
+						IOD_FRSH_COVER_FLG,
+						IOD_BUY_SELL,
+						IOD_ORDR_QTY,
+					  IOD_TOTAL_LOTS,	
+						IOD_PRFT_LOSS_FLG)
+			SELECT distinct FOD_XCHNG_CD,
+			FOD_TRD_DT,
+			FOD_CLM_MTCH_ACCNT,
+			FOD_ORDR_RFRNC,
+			FOD_FC_FLAG,
+			FOD_ORDR_FLW,
+			FOD_EXEC_QTY,
+			decode(fod_prdct_typ,'U',FOD_EXEC_QTY,'I',(FOD_EXEC_QTY/FTD_MIN_LOT_SIZE)),
+			'B'
+			from FOD_FO_ORDR_DTLS,FTD_FO_TRD_DTLS
+			WHERE FTD_ORDR_RFRNC = FOD_ORDR_RFRNC
+			AND   FOD_CHANNEL not in('CN1','CN2','CNT')
+			AND   fod_trd_dt=:c_date
+			AND   FTD_BRKG_TYPE = 'B' ; *****/
+
+		EXEC SQL
+    INSERT INTO IOD_IGAIN_ORDR_DTLS
+                (IOD_XCHNG_CD,
+                IOD_ORDR_DT,
+                IOD_CLM_MTCH_ACCNT,
+                IOD_ORDR_RFRNC,
+                IOD_FRSH_COVER_FLG,
+                IOD_BUY_SELL,
+                IOD_ORDR_QTY,
+                IOD_TOTAL_VAL,
+                IOD_TOTAL_LOTS,
+                IOD_TOTAL_TRADES,
+                IOD_ORDR_LVL_BRKG,
+                IOD_TRD_LVL_BRKRG,
+                IOD_PRFT_LOSS_FLG,
+                IOD_AVRG_TRD_PRC,
+                IOD_ORD_ACK_NMBR,
+                IOD_PROFIT_RATE)
+          SELECT  FOD_XCHNG_CD,
+                  FOD_TRD_DT,
+                  FTD_CLM_MTCH_ACCNT,
+                  FOD_ORDR_RFRNC,
+                  FOD_FC_FLAG,
+                  FTD_TRD_FLW,
+                  SUM(FTD_EXCTD_QTY) TOT_EXEC_QTY,
+                  SUM(FTD_EXCTD_QTY * FTD_EXCTD_RT) TRADE_VAL,
+                  SUM(FTD_EXCTD_QTY/FTD_MIN_LOT_SIZE) TOT_LOTS_TRADED,
+                  COUNT(FOD_ORDR_RFRNC) TOTAL_TRADES,
+                  0,
+                  0,
+                  'B',
+                  SUM(FTD_EXCTD_RT)/ COUNT(FOD_ORDR_RFRNC) AVRG_TRD_PRC ,
+                  FTD_ORD_ACK_NMBR ,
+                  NULL
+					FROM FOD_FO_ORDR_DTLS,FTD_FO_TRD_DTLS
+					WHERE FTD_ORDR_RFRNC = FOD_ORDR_RFRNC
+		      AND   FOD_CHANNEL NOT IN('CN1','CN2','CNT')
+					AND   trunc(FTD_TRD_DT)=:c_date
+					AND   FTD_BRKG_TYPE = 'B'
+          GROUP BY FOD_XCHNG_CD,
+                  FTD_CLM_MTCH_ACCNT,
+                  FOD_ORDR_RFRNC,
+                  FOD_FC_FLAG,
+                  FOD_TRD_DT,
+                  FTD_TRD_FLW,
+                  FTD_ORD_ACK_NMBR;
+
+	if( SQLCODE != 0 )  
+	{
+		fn_userlog(c_ServiceName,"Failed in creating order Level details for Bullet");
+		fn_errlog( c_ServiceName, "L31130", SQLMSG, c_err_msg );
+		return -1;
+	}
+	i_biod_count=sqlca.sqlerrd[2];
+	fn_userlog(c_ServiceName,"Successfully Inserted :%d: Records in IOD for Bullet",i_biod_count);
+  /**  return 0;  **/
+
+/*****   For sms Notification  ******/
+/*****   Ver 1.3 Start   ******/
+
+ fn_userlog(c_ServiceName,"Start Bullet Trial SMS  Notification.");
+ i_msg_code = SMS_TRIAL_NOTIFY;
+
+  EXEC SQL
+    Declare bullet_schm_chk_date CURSOR FOR
+      SELECT OSR_CLM_MTCH_ACCNT,
+             END_DATE FROM(
+           SELECT OSR_CLM_MTCH_ACCNT,
+                  MAX(TRUNC(OSR_SCHEME_END_DT)) END_DATE
+           FROM   OSR_OPM_SUBS_RQST,CLM_CLNT_MSTR
+           WHERE  OSR_CLM_MTCH_ACCNT=CLM_MTCH_ACCNT
+           AND    OSR_PRDCT_FLG='B'
+           AND    OSR_MAP_UNMAP_FLG='M'
+           AND    CLM_BULLET_SCHM_TRIAL_FLG ='T'
+           AND    OSR_SCHEME_END_DT is not null
+       GROUP BY OSR_CLM_MTCH_ACCNT
+       HAVING  MAX(TRUNC(OSR_SCHEME_END_DT)) > TRUNC(sysdate)
+       AND     MAX(TRUNC(OSR_SCHEME_END_DT)) <= (SELECT MIN(FBC_TRD_DT)
+                                                    FROM   FBC_FO_BRNCH_CAL
+                                                    WHERE  FBC_TRD_DT > trunc(sysdate)
+                                                    AND    FBC_XCHNG_CD     = 'NFO'
+                                                    AND    FBC_GRP_ID       = '1'));
+
+   if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+   {
+     fn_userlog (c_ServiceName,"Error in Declaration of Cursor ");
+     fn_errlog ( c_ServiceName, "L31135", SQLMSG, c_err_msg  );
+     return -1;
+    }
+
+   EXEC SQL
+    Open bullet_schm_chk_date;
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+     fn_userlog (c_ServiceName,"Error in Open of Cursor ");
+     fn_errlog ( c_ServiceName, "L31140", SQLMSG, c_err_msg  );
+     return -1;
+    }
+
+
+   while(1)
+  {
+    MEMSET(sql_osr_clm_mtch_accnt);
+    MEMSET(sql_osr_scheme_end_dt);
+
+    EXEC SQL
+      FETCH bullet_schm_chk_date
+      INTO :sql_osr_clm_mtch_accnt,
+           :sql_osr_scheme_end_dt;
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+       fn_errlog ( c_ServiceName, "L31145", SQLMSG, c_err_msg  );
+ /*      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );*/
+       EXEC SQL close bullet_schm_chk_date;
+       fn_errlog ( c_ServiceName, "L31150", SQLMSG, c_err_msg);
+       return -1;
+    }
+
+    if(SQLCODE == NO_DATA_FOUND )
+    {
+      if(i_sms_cnt > 0)
+      {
+        fn_userlog(c_ServiceName,"All records Processed / No more record to be processed");
+        break;
+      }
+      else
+      {
+      fn_userlog(c_ServiceName,"No Request to be processed today");
+      break;
+      }
+    }
+
+     if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"osr_clm_mtch_accnt =:%s:",sql_osr_clm_mtch_accnt.arr);
+        fn_userlog(c_ServiceName,"sql_osr_scheme_end_dt =:%s:",sql_osr_scheme_end_dt.arr);
+      }
+
+    if(fn_bullet_sms(c_ServiceName,sql_osr_clm_mtch_accnt.arr,i_msg_code,sql_osr_scheme_end_dt.arr)!=0)
+    {
+ /*     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); */
+      fn_userlog(c_ServiceName,"Error while calling fn_bullet_sms");
+      EXEC SQL close bullet_schm_chk_date;
+      fn_errlog ( c_ServiceName, "L31155", SQLMSG, c_err_msg);
+      return -1;
+    }
+   else
+   {
+    fn_userlog(c_ServiceName, "Library called for sms  Request of [%s]", sql_osr_clm_mtch_accnt.arr);
+    i_sms_cnt++;
+   }
+
+}
+
+   EXEC SQL close bullet_schm_chk_date;
+
+  if(SQLCODE != 0)
+  {
+  fn_errlog ( c_ServiceName, "L31160", SQLMSG, c_err_msg  );
+ /* fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );*/
+  return -1;
+  }
+
+
+/****     Ver 1.3 end     ****/
+return 0;
+}
+/**** Ver 1.2 Bullet trade processing Ends ****/
+/** Ver 1.5 strats **/
+int fn_cal_op20_brkg(char *c_ServiceName,
+                         char *c_xchng_cd,
+                         char *c_date,
+                         char *c_err_msg
+                       )
+{
+		int i_iod_cnt=0;
+		int i_iod_upd_cnt=0;
+	/** 
+			Step 1: Generate Option Plus Trade Fresh Cover Mapping with respect to Execution time diff and Premium
+			Step 2: Mark orders eligible for Only base brokerage (Rs.20) without variable brokerage.
+			Step 3: insert in IOD with order level brokerage as 20 Rs per order
+			Step 4: Insert all remaining op+ and Option Orders in IOD where customer mapped to Option 20
+		  Step 5: calculate Option 20 brokerage for Option order
+			Step 6: Update Trade book suing order level brokerage in IOD and mark trades with Flag as "X"
+			Step 7: Update brokerage in FTD with ftdbrkg_type as 'X'
+	***/
+	/** Step1 **/
+		EXEC SQL
+	INSERT INTO TTD_TMP_TRD_DTLS
+		      (TTD_XCHNG_CD,
+		      TTD_CLM_MTCH_ACCNT,
+		      TTD_TRD_DT,
+		      TTD_ORDR_RFRNC,
+		      TTD_SLTP_ORDR_RFRNC,
+		      TTD_FC_FLG,
+		      TTD_UNDRLYNG,
+		      TTD_PRDCT_TYP,
+		      TTD_EXER_TYP,
+		      TTD_OPT_TYP,
+		      TTD_STRK_PRC,
+		      TTD_EXPRY_DT,
+		      TTD_TRD_FLW,
+		      TTD_EXCTD_QTY,
+		      TTD_EXCTD_RT,
+		      TTD_TRADE_VAL,
+		      TTD_IGAIN_SCHM_CD,
+		      TTD_TRD_MAX_TIME,
+		      TTR_TRD_MIN_TIME,
+					TTD_MIN_LOT_SIZE)
+	    SELECT  FTD_XCHNG_CD,
+		    FTD_CLM_MTCH_ACCNT,
+		    FOD_TRD_DT,
+		    FTD_ORDR_RFRNC ,
+		    FOD_SLTP_ORDR_RFRNC ,
+		    FOD_FC_FLAG,
+		    FTD_UNDRLYNG,
+		    'X',
+		    FTD_EXER_TYP,
+		    FTD_OPT_TYP,
+		    FTD_STRK_PRC,
+		    FTD_EXPRY_DT,
+		    FTD_TRD_FLW ,
+		    SUM(FTD_EXCTD_QTY),
+				SUM(FTD_EXCTD_QTY * FTD_EXCTD_RT)/SUM(FTD_EXCTD_QTY),
+		    SUM(FTD_EXCTD_QTY * FTD_EXCTD_RT),
+		    CLM_OP20_SCHM_CD,
+		    MAX(A.FTD_TRD_DT),
+		    LEAST(NVL(B.FXB_RQST_TM,A.FTD_TRD_DT),MIN(A.FTD_TRD_DT)),
+				FTD_MIN_LOT_SIZE
+	    FROM
+		(SELECT FTD_XCHNG_CD,
+		    FTD_CLM_MTCH_ACCNT,
+		    FOD_TRD_DT,
+		    FTD_ORDR_RFRNC ,
+		    FOD_SLTP_ORDR_RFRNC ,
+		    FOD_FC_FLAG,
+		    FTD_UNDRLYNG,
+		    'X',
+		    FTD_EXER_TYP,
+		    FTD_OPT_TYP,
+		    FTD_STRK_PRC,
+		    FTD_EXPRY_DT,
+		    FTD_TRD_FLW ,
+		    FTD_EXCTD_QTY,
+		    FTD_EXCTD_RT,
+	      CLM_OP20_SCHM_CD,
+		    FTD_TRD_DT,FTD_MIN_LOT_SIZE
+		FROM   FTD_FO_TRD_DTLS,fod_fo_ordr_dtls,CLM_CLNT_MSTR
+		WHERE  FTD_ORDR_RFRNC     = FOD_ORDR_RFRNC
+		AND    FTD_XCHNG_CD       = FOD_XCHNG_CD
+		AND    FOD_CLM_MTCH_ACCNT = FTD_CLM_MTCH_ACCNT
+		AND    FTD_CLM_MTCH_ACCNT = CLM_MTCH_ACCNT
+		AND    FOD_PRDCT_TYP      = FTD_PRDCT_TYP
+		AND    nvl(CLM_OP20_FLG,'N')='Y'
+		AND    FTD_UPLD_MTCH_FLG 	='N'
+		AND    FTD_PRDCT_TYP 			='I'
+		AND    TRUNC(FTD_TRD_DT)  =:c_date
+		AND    NVL(FTD_BRKG_TYPE,'N')='N'
+		AND    FOD_XCHNG_CD 			= :c_xchng_cd
+		--AND    FOD_CHANNEL not in('CN1','CN2','CNT')  /*** to be confirmed post business discussion **/
+	    ) A,
+	    (SELECT FXB_ORDR_RFRNC,FXB_RQST_TM FROM fxb_fo_xchng_book, fod_fo_ordr_dtls
+	    WHERE FOD_ORDR_RFRNC = FXB_ORDR_RFRNC
+	    AND FXB_LMT_MRKT_SL_FLG = 'M'
+	    AND FOD_PRDCT_TYP='I'
+	    AND FOD_TRD_DT = :c_date
+	    AND FOD_XCHNG_CD = :c_xchng_cd
+	    AND FOD_FC_FLAG='C'
+	    --AND FOD_CHANNEL not in('CN1','CN2','CNT')
+	    AND FXB_MDFCTN_CNTR = (SELECT MIN(FXB_MDFCTN_CNTR) FROM fxb_fo_xchng_book A
+			WHERE A.FXB_ORDR_RFRNC = FOD_ORDR_RFRNC
+			AND FXB_LMT_MRKT_SL_FLG = 'M'
+			AND FXB_PLCD_STTS = 'A'
+			AND FXB_MDFCTN_CNTR > 1)) B
+	    WHERE A.FTD_ORDR_RFRNC = B.FXB_ORDR_RFRNC(+)
+	    GROUP BY FTD_XCHNG_CD,
+		     FTD_CLM_MTCH_ACCNT,
+		     FOD_TRD_DT,
+		     FTD_ORDR_RFRNC ,
+		     FOD_SLTP_ORDR_RFRNC ,
+		     FOD_FC_FLAG,
+		     FTD_UNDRLYNG,
+		     'X',
+		     FTD_EXER_TYP,
+		     FTD_OPT_TYP,
+		     FTD_STRK_PRC,
+		     FTD_EXPRY_DT,
+		     FTD_TRD_FLW ,
+		     CLM_OP20_SCHM_CD,
+		     NVL(B.FXB_RQST_TM,A.FTD_TRD_DT),
+				 FTD_MIN_LOT_SIZE;
+
+	if(SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for OP20.");
+    fn_errlog( c_ServiceName, "L31165", SQLMSG, c_err_msg );
+    return -1;
+  }
+	EXEC SQL
+	    INSERT INTO ITD_IGAIN_TRD_DTLS
+		    (ITD_XCHNG_CD,
+		    ITD_CLM_MTCH_ACCNT,
+		    ITD_PRDCT_TYP,
+		    ITD_UNDRLYNG,
+		    ITD_EXPRY_DT,
+		    ITD_EXER_TYP,
+		    ITD_OPT_TYP,
+		    ITD_STRK_PRC,
+		    ITD_TRD_DT,
+		    ITD_FRSH_ORDR_RFRNC,
+		    ITD_COVER_ORDR_RFRNC,
+		    ITD_FRSH_ORDR_TYP,
+		    ITD_COVER_ORDR_TYP,
+		    ITD_FRSH_ORDR_QTY,
+		    ITD_COVER_ORDR_QTY,
+		    ITD_PRCS_FLG,
+		    ITD_SCHM_CODE,
+				ITD_MIN_LOT_SIZE
+		   )
+	      SELECT
+	      A.TTD_XCHNG_CD,
+	      A.TTD_CLM_MTCH_ACCNT,
+	      A.TTD_PRDCT_TYP,
+	      A.TTD_UNDRLYNG,
+	      A.TTD_EXPRY_DT,
+	      A.TTD_EXER_TYP,
+	      A.TTD_OPT_TYP,
+	      A.TTD_STRK_PRC,
+	      TRUNC(A.TTD_TRD_DT),
+	      A.TTD_ORDR_RFRNC,
+	      A.TTD_SLTP_ORDR_RFRNC,
+	      A.TTD_TRD_FLW,
+	      '',
+	      sum(A.TTD_EXCTD_QTY),
+	      '',
+	      'X',
+	      A.TTD_IGAIN_SCHM_CD,
+				A.TTD_MIN_LOT_SIZE
+	      FROM (select * from TTD_TMP_TRD_DTLS where TTD_IGAIN_SCHM_CD<>'BULLET') A,
+	      (SELECT FRSH.TTD_ORDR_RFRNC,FRSH.OSM_THRSHLD_PRM_VAL,FRSH.OSM_SQROFF_TIME_PRD FROM
+	      (SELECT TTD_ORDR_RFRNC,MAX(TTD_TRD_MAX_TIME) EXEC_TIME,OSM_THRSHLD_PRM_VAL,OSM_SQROFF_TIME_PRD FROM
+	      (SELECT distinct TTD_ORDR_RFRNC,TTD_TRD_MAX_TIME,OSM_THRSHLD_PRM_VAL,OSM_SQROFF_TIME_PRD
+	      FROM TTD_TMP_TRD_DTLS,OSM_OPTION_SCHEME_MSTR
+	      WHERE TTD_FC_FLG = 'F'
+	      AND OSM_SCHM_CODE=TTD_IGAIN_SCHM_CD
+		  UNION
+	      SELECT TTD_SLTP_ORDR_RFRNC,TTD_TRD_MAX_TIME,OSM_THRSHLD_PRM_VAL,OSM_SQROFF_TIME_PRD
+	      FROM TTD_TMP_TRD_DTLS,OSM_OPTION_SCHEME_MSTR
+	      WHERE TTD_FC_FLG = 'E'
+	      AND  OSM_SCHM_CODE=TTD_IGAIN_SCHM_CD)
+	      GROUP BY TTD_ORDR_RFRNC,OSM_THRSHLD_PRM_VAL,OSM_SQROFF_TIME_PRD) FRSH,
+	      (SELECT TTD_SLTP_ORDR_RFRNC,MIN(TTR_TRD_MIN_TIME) EXEC_TIME ,OSM_THRSHLD_PRM_VAL,OSM_SQROFF_TIME_PRD
+	      FROM TTD_TMP_TRD_DTLS,OSM_OPTION_SCHEME_MSTR
+	      WHERE TTD_FC_FLG = 'C'
+	      AND  OSM_SCHM_CODE=TTD_IGAIN_SCHM_CD
+	      GROUP BY TTD_SLTP_ORDR_RFRNC,OSM_THRSHLD_PRM_VAL,OSM_SQROFF_TIME_PRD ) CVR
+	      WHERE FRSH.TTD_ORDR_RFRNC = CVR.TTD_SLTP_ORDR_RFRNC
+	      AND ABS((CVR.EXEC_TIME - FRSH.EXEC_TIME)*24*60*60) <= FRSH.OSM_SQROFF_TIME_PRD
+	      ) B
+	      WHERE (A.TTD_ORDR_RFRNC = B.TTD_ORDR_RFRNC
+	      OR    A.TTD_SLTP_ORDR_RFRNC = B.TTD_ORDR_RFRNC )
+	     -- AND A.TTD_EXCTD_RT <= B.OSM_THRSHLD_PRM_VAL * 100
+			group by         A.TTD_XCHNG_CD,
+        A.TTD_CLM_MTCH_ACCNT,
+        A.TTD_PRDCT_TYP,
+        A.TTD_UNDRLYNG,
+        A.TTD_EXPRY_DT,
+        A.TTD_EXER_TYP,
+        A.TTD_OPT_TYP,
+        A.TTD_STRK_PRC,
+        TRUNC(A.TTD_TRD_DT),
+        A.TTD_ORDR_RFRNC,
+        A.TTD_SLTP_ORDR_RFRNC,
+        A.TTD_TRD_FLW,
+        'X',
+        A.TTD_IGAIN_SCHM_CD,
+        A.TTD_MIN_LOT_SIZE,
+				B.OSM_THRSHLD_PRM_VAL
+			/*Having (sum(A.TTD_EXCTD_RT)/count(A.TTD_ORDR_RFRNC)) <= B.OSM_THRSHLD_PRM_VAL * 100; */
+			Having (sum(A.TTD_TRADE_VAL)/sum(A.TTD_EXCTD_QTY)) <= B.OSM_THRSHLD_PRM_VAL * 100;
+
+
+		if(SQLCODE != 0 )
+  	{
+    	fn_userlog(c_ServiceName,"Error in Population of IOD for OP20.");
+    	fn_errlog( c_ServiceName, "L31170", SQLMSG, c_err_msg );
+    	return -1;
+  	}
+		
+		/** IOD insert to be carried out **/
+		EXEC SQL
+			insert into IOD_IGAIN_ORDR_DTLS
+			(
+				IOD_XCHNG_CD,
+				IOD_ORDR_DT,
+				IOD_CLM_MTCH_ACCNT,
+				IOD_ORDR_RFRNC,
+		    IOD_FRSH_COVER_FLG,		
+				IOD_BUY_SELL,
+				IOD_ORDR_QTY,
+				IOD_TOTAL_LOTS,
+				IOD_ORDR_LVL_BRKG,
+				IOD_PRFT_LOSS_FLG,
+				IOD_PROFIT_RATE,
+				IOD_VAR_BRKRG,
+				IOD_SCHM_CD,
+				IOD_ORD_ACK_NMBR
+		 )
+		 select
+				ITD_XCHNG_CD,
+				ITD_TRD_DT,
+				ITD_CLM_MTCH_ACCNT,
+				ITD_FRSH_ORDR_RFRNC,
+				'N',
+				ITD_FRSH_ORDR_TYP,
+				SUM(FTD_EXCTD_QTY),
+				SUM(FTD_EXCTD_QTY/ITD_MIN_LOT_SIZE),
+				nvl(OSM_PROFIT_RATE,0) * 100,
+				'X',
+			  nvl(OSM_PROFIT_RATE,0) * 100,
+				0,
+				ITD_SCHM_CODE,
+				min(ftd_xchng_trd_no)
+		from ITD_IGAIN_TRD_DTLS,FTD_FO_TRD_DTLS,OSM_OPTION_SCHEME_MSTR
+		where ftd_ordr_rfrnc=ITD_FRSH_ORDR_RFRNC
+		and   ftd_clm_mtch_accnt=ITD_CLM_MTCH_ACCNT
+		and   ITD_TRD_DT=trunc(ftd_trd_dt)
+		and   ITD_SCHM_CODE=OSM_SCHM_CODE
+		and   ITD_TRD_DT=:c_date
+		and   ftd_xchng_cd=ITD_XCHNG_CD
+		and   ftd_xchng_cd =:c_xchng_cd
+		and  nvl(ITD_PRCS_FLG,'B')='X'
+		GROUP BY ITD_XCHNG_CD,
+        ITD_TRD_DT,
+        ITD_CLM_MTCH_ACCNT,
+        ITD_FRSH_ORDR_RFRNC,
+        ITD_FRSH_ORDR_TYP,
+				OSM_PROFIT_RATE,
+				ITD_SCHM_CODE;
+				
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for OP20.");
+    fn_errlog( c_ServiceName, "L31175", SQLMSG, c_err_msg );
+    return -1;
+  }
+				
+					
+	/** Step2 **/
+	EXEC SQL
+		insert into IOD_IGAIN_ORDR_DTLS
+		(
+			IOD_XCHNG_CD,
+			IOD_ORDR_DT,
+			IOD_CLM_MTCH_ACCNT,
+			IOD_ORDR_RFRNC,
+			IOD_FRSH_COVER_FLG,
+			IOD_BUY_SELL,
+			IOD_ORDR_QTY,
+			IOD_TOTAL_VAL,
+			IOD_TOTAL_LOTS,
+			IOD_TOTAL_TRADES,
+			IOD_ORDR_LVL_BRKG,
+			IOD_AVRG_TRD_PRC,
+			IOD_ORD_ACK_NMBR,
+			IOD_PROFIT_RATE,
+			IOD_VAR_BRKRG,
+			IOD_PRFT_LOSS_FLG,
+			IOD_SCHM_CD
+		)
+		select  fod_xchng_cd,
+        fod_trd_dt,
+        ftd_clm_mtch_accnt,
+        fod_ordr_rfrnc,
+				nvl(fod_fc_flag,'N'),
+				ftd_trd_flw,
+				sum(ftd_exctd_qty) TOT_EXEC_QTY,
+				sum(ftd_exctd_qty * ftd_exctd_rt) TRADE_VAL,
+				sum(ftd_exctd_qty/ftd_min_lot_size) TOT_LOTS_TRADED,
+				count(fod_ordr_rfrnc) TOTAL_TRADES,
+				(OSM_PROFIT_RATE + sum((ftd_exctd_qty/ftd_min_lot_size)*OSM_VAR_BRKRG_RT)) * 100 ORDR_LVL_BRKG,
+				/*sum(ftd_exctd_rt)/ count(fod_ordr_rfrnc) AVRG_TRD_PRC , */
+				sum(ftd_exctd_rt*ftd_exctd_qty)/ sum(ftd_exctd_qty) AVRG_TRD_PRC ,
+				min(ftd_xchng_trd_no),
+				/*ftd_ord_ack_nmbr, UAT comment**/
+				OSM_PROFIT_RATE * 100,
+				sum(ftd_exctd_qty/ftd_min_lot_size)*OSM_VAR_BRKRG_RT*100 VAR_BRKRG,
+				'X',
+				CLM_OP20_SCHM_CD
+				from    FTD_FO_TRD_DTLS,fod_fo_ordr_dtls,CLM_CLNT_MSTR,OSM_OPTION_SCHEME_MSTR
+		where   ftd_xchng_cd        = fod_xchng_cd
+		and     FTD_ORDR_RFRNC      = FOD_ORDR_RFRNC
+		and     fod_clm_mtch_accnt  = ftd_clm_mtch_accnt
+		and     ftd_clm_mtch_accnt  = clm_mtch_accnt
+		and     FOD_PRDCT_TYP       = FTD_PRDCT_TYP
+		and     OSM_SCHM_CODE       = CLM_OP20_SCHM_CD
+		and     ftd_fut_conv_flg    = 'N'
+		AND     NVL(FTD_BRKG_TYPE,'N') ='N'
+		and     nvl(clm_op20_flg,'N') = 'Y' 
+		and     ftd_prdct_typ in ('I','O')
+		and     trunc(ftd_trd_dt)   = :c_date
+		and     fod_xchng_cd        =:c_xchng_cd
+		--AND     FOD_CHANNEL not in('CN1','CN2','CNT')  /*** to be confirmed post business discussion **/
+		and     FTD_ORDR_RFRNC not in ( select IOD_ORDR_RFRNC from IOD_IGAIN_ORDR_DTLS )
+    group by fod_xchng_cd,
+             ftd_clm_mtch_accnt,
+             fod_ordr_rfrnc,
+             fod_fc_flag,
+             fod_trd_dt,
+             ftd_trd_flw,
+             ftd_ord_ack_nmbr,
+	     			 OSM_PROFIT_RATE,
+	     			 OSM_VAR_BRKRG_RT,
+	     			 CLM_OP20_SCHM_CD;	
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for OP20.");
+    fn_errlog( c_ServiceName, "L31180", SQLMSG, c_err_msg );
+    return -1;
+  }
+  i_iod_cnt = sqlca.sqlerrd[2];
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,":%d: Records Inserted into IOD.",i_iod_cnt);
+  }
+  if(i_iod_cnt == 0)
+  {
+    fn_userlog(c_ServiceName,"No records to process for OP20..");
+    return 0;
+  }
+	/** Step3 **/
+
+  EXEC SQL
+    UPDATE FTD_FO_TRD_DTLS
+    SET    FTD_BRKG = (select IOD_PROFIT_RATE
+                          	 from 	IOD_IGAIN_ORDR_DTLS
+                             where  IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+                             AND    FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+                             AND    nvl(IOD_PRFT_LOSS_FLG,'N') ='X'
+							  					   AND    FTD_XCHNG_TRD_NO = trim(IOD_ORD_ACK_NMBR)),
+           FTD_BRKG_TYPE ='X' 
+    WHERE  TRUNC(FTD_TRD_DT) =:c_date
+    AND    FTD_BRKG is null
+		AND   exists (select 1
+								  from 		IOD_IGAIN_ORDR_DTLS
+									where IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+									AND   FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+									AND   nvl(IOD_PRFT_LOSS_FLG,'N') ='X' AND    FTD_XCHNG_TRD_NO = trim(IOD_ORD_ACK_NMBR));
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for OP20.");
+    fn_errlog( c_ServiceName, "L31185", SQLMSG, c_err_msg );
+    return -1;
+  } 
+  
+  EXEC SQL
+    UPDATE FTD_FO_TRD_DTLS
+    SET    FTD_BRKG = (select ((IOD_VAR_BRKRG/IOD_TOTAL_LOTS ) * (ftd_exctd_qty/ftd_min_lot_size)) + nvl(FTD_BRKG,0)
+											 from 		IOD_IGAIN_ORDR_DTLS
+											 where 	IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+											 AND   FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+											 AND   nvl(IOD_PRFT_LOSS_FLG,'N') ='X') ,
+           FTD_BRKG_TYPE ='X' 
+    WHERE  TRUNC(FTD_TRD_DT) =:c_date
+		AND   exists (select 1
+								  from 		IOD_IGAIN_ORDR_DTLS
+									where IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+									AND   FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+									AND   nvl(IOD_PRFT_LOSS_FLG,'N') ='X');
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for OP20.");
+    fn_errlog( c_ServiceName, "L31190", SQLMSG, c_err_msg );
+    return -1;
+  }
+	return 0;
+}
+/** Ver 1.5 Ends **/
+
+/** Ver 1.6 Starts **/
+int fn_cal_lite_brkg(char *c_ServiceName,
+                         char *c_xchng_cd,
+                         char *c_date,
+                         char *c_err_msg
+                       )
+{
+	double d_cnt_chrg=0.0;
+	double d_sys_chrg=0.0;
+	fn_userlog(c_ServiceName,"Inside D20 brokerage calculation function fn_cal_lite_brkg");
+
+  EXEC SQL
+  SELECT NVL(ACM_CHARGE,0)
+  INTO :d_sys_chrg
+  FROM ACM_ADDL_CHRGS_MSTR
+  WHERE TRIM(ACM_CHARGE_TYPE)='SYSTEM';
+
+  if(SQLCODE != 0)
+  {
+    fn_userlog(c_ServiceName,"Error in fetching system charge"); 
+    fn_errlog( c_ServiceName, "L31195", SQLMSG, c_err_msg );
+    return -1;
+  }
+
+  EXEC SQL
+  SELECT NVL(ACM_CHARGE,0)
+  INTO :d_cnt_chrg
+  FROM ACM_ADDL_CHRGS_MSTR
+  WHERE TRIM(ACM_CHARGE_TYPE)='CNT';
+
+  
+  if(SQLCODE != 0)
+  {
+    fn_userlog(c_ServiceName,"Error in fetching CNT charge");
+    fn_errlog( c_ServiceName, "L31195", SQLMSG, c_err_msg );
+    return -1;
+  }
+ 
+   EXEC SQL
+   insert into IOD_IGAIN_ORDR_DTLS
+    (
+      IOD_XCHNG_CD,
+      IOD_ORDR_DT,
+      IOD_CLM_MTCH_ACCNT,
+      IOD_ORDR_RFRNC,
+      IOD_FRSH_COVER_FLG,
+      IOD_BUY_SELL,
+      IOD_ORDR_QTY,
+      IOD_TOTAL_VAL,
+      IOD_TOTAL_LOTS,
+      IOD_TOTAL_TRADES,
+      IOD_ORDR_LVL_BRKG,
+      IOD_AVRG_TRD_PRC,
+      IOD_ORD_ACK_NMBR,
+      IOD_PROFIT_RATE,
+      IOD_VAR_BRKRG,
+      IOD_PRFT_LOSS_FLG,
+      IOD_SCHM_CD,
+      IOD_CNT_CHRGS,              
+      IOD_SYS_CHRGS      
+    )
+    select  fod_xchng_cd,
+        fod_trd_dt,
+        ftd_clm_mtch_accnt,
+        fod_ordr_rfrnc,
+        nvl(fod_fc_flag,'N'),
+        ftd_trd_flw,
+        sum(ftd_exctd_qty) TOT_EXEC_QTY,
+        sum(ftd_exctd_qty * ftd_exctd_rt) TRADE_VAL,
+        sum(ftd_exctd_qty/ftd_min_lot_size) TOT_LOTS_TRADED,
+        count(fod_ordr_rfrnc) TOTAL_TRADES,
+        ((case when ftd_prdct_typ in ('I','O') then OSM_PROFIT_RATE else OSM_FUT_FIXED_BRKG end ) + 
+				 sum((ftd_exctd_qty/ftd_min_lot_size)*(case when ftd_prdct_typ in ('I','O') then OSM_VAR_BRKRG_RT 
+																									 else OSM_FUT_VAR_BRKG_RT 
+																							end )
+					  )
+				) * 100,
+        sum(ftd_exctd_rt*ftd_exctd_qty)/ sum(ftd_exctd_qty) AVRG_TRD_PRC ,
+        min(ftd_xchng_trd_no),
+        (case when ftd_prdct_typ in ('I','O') then OSM_PROFIT_RATE else OSM_FUT_FIXED_BRKG end) * 100,
+        sum(ftd_exctd_qty/ftd_min_lot_size)* (case when  ftd_prdct_typ in ('I','O') then OSM_VAR_BRKRG_RT 
+																									 else  OSM_FUT_VAR_BRKG_RT 
+																							 end 
+																							) 
+				*100 VAR_BRKRG,
+        'D',  
+        OSM_SCHM_CODE,
+        case when fod_channel like 'CN%' then (:d_cnt_chrg*100) else 0 end,
+        case when fod_channel like 'SYS%'and FOD_ORDR_TYPE!='V' then (:d_sys_chrg*100) else 0 end  /*** Ver 1.7 **/
+    from    FTD_FO_TRD_DTLS,
+            fod_fo_ordr_dtls,
+            OSM_OPTION_SCHEME_MSTR,
+            UAC_USR_ACCNTS,
+            USR_USER_MASTER
+    where   ftd_xchng_cd        = fod_xchng_cd
+    and     FTD_ORDR_RFRNC      = FOD_ORDR_RFRNC
+    and     fod_clm_mtch_accnt  = ftd_clm_mtch_accnt
+    and     ftd_clm_mtch_accnt  = UAC_CLM_MTCH_ACCNT
+    and     UAC_USR_ID          = USR_USR_ID
+    and     FOD_PRDCT_TYP       = FTD_PRDCT_TYP
+    and     OSM_PRDCT_TYP = 'D' 
+    and     ftd_fut_conv_flg    = 'N'
+    AND     NVL(FTD_BRKG_TYPE,'N') = 'N'
+    and     NVL(USR_BRKG_MDL_FLG,'F')= 'L'
+    and     trunc(ftd_trd_dt)   = :c_date
+    and     fod_xchng_cd        = :c_xchng_cd
+    and     OSM_SCHM_DISP_STTS= 'Y'
+   group by fod_xchng_cd,
+      fod_trd_dt,
+      ftd_clm_mtch_accnt,
+      OSM_PROFIT_RATE,
+      OSM_VAR_BRKRG_RT,
+      OSM_FUT_FIXED_BRKG,
+      OSM_FUT_VAR_BRKG_RT,
+      ftd_prdct_typ,
+      fod_ordr_rfrnc,
+      fod_fc_flag,
+      ftd_trd_flw ,
+			fod_channel,
+      FOD_ORDR_TYPE,
+      OSM_SCHM_CODE;
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for Lite model.");
+    fn_errlog( c_ServiceName, "L31195", SQLMSG, c_err_msg );
+    return -1;
+  }
+
+   EXEC SQL
+    UPDATE FTD_FO_TRD_DTLS
+    SET    FTD_BRKG = (select IOD_PROFIT_RATE
+                             from   IOD_IGAIN_ORDR_DTLS
+                             where  IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+                             AND    FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+                             AND    nvl(IOD_PRFT_LOSS_FLG,'N') ='D'
+                             AND    FTD_XCHNG_TRD_NO = trim(IOD_ORD_ACK_NMBR)),
+           FTD_BRKG_TYPE ='D'
+    WHERE  TRUNC(FTD_TRD_DT) =:c_date
+    AND    FTD_BRKG is null
+    AND   exists (select 1
+                  from    IOD_IGAIN_ORDR_DTLS
+                  where IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+                  AND   FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+                  AND   nvl(IOD_PRFT_LOSS_FLG,'N') ='D' 
+									AND   FTD_XCHNG_TRD_NO = trim(IOD_ORD_ACK_NMBR)
+								 );
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for Lite model fixed brokerage");
+    fn_errlog( c_ServiceName, "L31200", SQLMSG, c_err_msg );
+    return -1;
+  }
+
+   EXEC SQL
+    UPDATE FTD_FO_TRD_DTLS
+    SET    FTD_BRKG = (select ((IOD_VAR_BRKRG/IOD_TOTAL_LOTS ) * (ftd_exctd_qty/ftd_min_lot_size)) + nvl(FTD_BRKG,0)
+                       from     IOD_IGAIN_ORDR_DTLS
+                       where  IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+                       AND   FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+                       AND   nvl(IOD_PRFT_LOSS_FLG,'N') ='D') ,
+           FTD_BRKG_TYPE ='D'
+    WHERE  TRUNC(FTD_TRD_DT) =:c_date
+    AND   exists (select 1
+                  from    IOD_IGAIN_ORDR_DTLS
+                  where IOD_ORDR_RFRNC=FTD_ORDR_RFRNC
+                  AND   FTD_CLM_MTCH_ACCNT=IOD_CLM_MTCH_ACCNT
+                  AND   nvl(IOD_PRFT_LOSS_FLG,'N') ='D'
+								 );
+
+  if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND )
+  {
+    fn_userlog(c_ServiceName,"Error in Population of IOD for Lite model variable brokerage.");
+    fn_errlog( c_ServiceName, "L31205", SQLMSG, c_err_msg );
+    return -1;
+  }
+  return 0;
+}
+/** Ver 1.6 Ends **/

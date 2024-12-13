@@ -1,0 +1,2110 @@
+/*	Program	    			:	SFO_BLK_ALLOC                                         */
+/*                                                                            */
+/*  Input             : FFO_USR_ID                                            */
+/*                      FFO_SSSN_ID                                           */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                      FFO_DR_CR_FLG                                         */
+/*                      FFO_AMOUNT                                            */
+/*                      FFO_MKT_TYP                                           */
+/*                      FFO_RQST_TYP                                          */
+/*                      FFO_ROUT_CRT                                          */
+/*                                                                            */
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       : This  program does the block or unblock of the amount */
+/*                      at the bank for the given clients bank account number */
+/*                      and logs the details in the corresponding tables in   */
+/*                      the EBA system. Any failure while corresponding  with */
+/*                      the bank is also logged appropriately. This program   */
+/*                      shall be called from the Front end Modify allocation  */
+/*                      screen and also while payin/payout operations carried */
+/*                      out during the settlement activities.                 */
+/*                                                                            */
+/*  Log               :                                                       */
+/*                                                                            */
+/******************************************************************************/
+/*      12-Nov-2001       Ver 1.0       S.Balamurugan   Release 1.0        		*/
+/*      12-Dec-2003       Ver 1.1       Sangeet Sinha   Revamp of PIPO  		  */
+/*			17-Dec-2007				Ver 1.3				Sushil Sharma	  AIX Migration					*/ 
+/*						  																				& Debug level Handling*/
+/*			08-Apr-2011				Ver 1.4				Sandip Tambe		Inserting Failed Trans*/
+/*																											actions in BFT Table	*/
+/*      13-Sep-2011       Ver 1.5       Sachin Birje    Narration Changes     */
+/*      17-Apr-2012       Ver 1.6       Sachin Birje    FNO BSE Changes       */
+/*      06-Nov-2012       Ver 1.7       Anurag Dubey    Stoping online nodes  */
+/*                                                      from modify allocation*/ 
+/*			07-Jun-2013				Ver 1.8       Vishnu Nair			Restrict cm mapped 		*/
+/*																											under DBC user from		*/
+/*																											modify allocation if	*/ 
+/*																											trading not allowd and*/
+/*																											Action Id changes 		*/	 
+/*			06-Aug-2013				Ver	1.9				Sandeep Patil		Condition to restrict */
+/*																											offline customer 			*/
+/*																											commented							*/
+/*		  08-Oct-2014		    Ver 2.0       Sachin Birje	  View to FML Changes 	*/
+/*		  22-Mar-2016		    Ver 2.1       Samip M					Column commented from CLB */
+/*      07-Oct-2016       Ver 2.2       Vishal B        IBR product code changes */
+/*      18-Jul-2018       Ver 2.3       Samip M					Run no for Bank Service */
+/*      25-Mar-2019       Ver 2.4       Akash B         Deposit Model Changes */
+/*      22-Mar-2021       Ver 2.5       Akash B         Disallow allocation for*/
+/*                                                      deposit clients for  */
+/*                                                      particular time slot */
+/*      15-Sep-2021       Ver 2.6       Abhinav K       CR-ISEC03-157490 IDFC Bank */
+/*			10-Dec-2021       Ver 2.7       Ravindra P      Peak margin changes  */
+/*			19-Apr-2022				Ver 2.8				Ravindra P			Minor Chnages        */
+/*      31-Oct-2022       Ver 2.9       Remon Pereira   CR-ISEC03-176316_KRA  */
+/*      15-Nov-2022       Ver 3.0       Shweta M        CR-ISEC03-177919 Actionable based on DP UCC flags(Reverted)*/
+/*			17-Nov-2022  			Ver 3.1				Shweta M				[IN:544] DP UCC flag for Allocation and deallocation*/
+/*			09-Mar-2023  			Ver 3.2				Sachin Birje    [Minor Change] Client Lock Changes */
+/*      09-Aug-2023       Ver TOL       Agam            Tux on Linux          */
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+/*Add header files here */
+
+#include <fo.h>
+/** #include <fo_view_def.h> ** Ver 2.0 **/
+#include <fo_view_def.h>     /** Ver 2.0 **/
+#include <fml_rout.h>         /*** Ver 2.0 **/
+#include <fo_fml_def.h>
+#include <fml_def.h>          /*** Ver 2.4 **/
+#include <fn_session.h>
+#include <fo_bank.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>								/*** Ver 1.3 : Added	***/
+#include <fn_read_debug_lvl.h>		/*** Ver 1.3 : Added  ***/
+#include <fn_pos.h>		/*** Ver 2.0 : Added  ***/
+ 
+#define ALLOCATE_TO_SEGMENT 'A'   /*segment allocate*/
+#define DEALLOCATE_FROM_SEGMENT 'U' /*segment deallocate*/
+#define PAYOUT_FROM_SEGMENT 'O' /*segment deallocate & then wallet withdrw*/
+
+static void return_fail(FBFR32 * ptr_fml_Ibuffer , char * c_err_msg); /*** Ver 2.6 ***/
+ 
+/*********  Ver 1.4 Additional Variable declaration *******/
+
+int  fn_insrt_bft(char *,char*, char*,char*,double, char *);  
+int fn_get_trdng_dtls( char *usr_id, char *mtch_accnt, char *trd_flag, char *prod_code ); /* Ver 1.7 */
+
+int  i_err_cd=0;
+char c_mtch_accnt[21];
+char c_bank_accnt[21];
+char c_err_msg[256];
+/********* Ver 1.4 for var decl Ends************/
+
+/********** Ver 2.4 starts here for gobal declr  **************/
+
+int fn_allocate_to_segment(double);
+int fn_deallocate_from_segment(double,char);
+int fn_call_inc_dec_svc(double,char);
+int fn_ins_mbs(char *,char *,char *,char *,char *,char *,long ,char *,double,char *,char *,char,char *,char,char *,char *,char *,char *,char, char *,
+ char *,char *,char *,char ); /** Declr in eba.h **/
+int fn_ins_seg_log(char *,long,char *,char *,double,char,char *,double,char,char *,char *,long,char *,char *);  /** Declr in eba.h **/
+int fn_poa_kra_dpucc_dtls(char *c_servicename, char *c_user_id, long li_sssn_id, char *c_match_account, char *c_bnk_account,  char *c_out_err_msg); /*Ver 3.1*/
+
+
+char c_prdct_cd[21];
+char c_pipo_src[2+1];
+char c_accntng_typ[20+1];
+char c_sgmnt_cd[20+1];
+char c_instrument_nmbr[20+1];
+char c_mdc_crdt_nmbr[20+1];
+char c_mtch_series[20+1];
+char c_class_svc[20+1];
+char c_src_rowid[20+1];
+char c_run_nmbr[20+1];
+char c_tran_date[23];
+char c_txn_type='\0';
+char c_trace[13];
+char c_narration[101];
+char c_ServiceName[33];
+char c_bnk_accnt[21];
+char c_channel[4];
+char c_usr_typ='\0';
+char c_ip_add[15+1]="\0";
+char c_xchng_cd[4] = {'\0'};
+char c_seg_prdct_cd[8]="\0";   /* size 5 changed to 8 in Ver TOL  */
+char c_blk_deposit_flg='\0';        
+char c_fo_link_bnk_acc = '\0';   /*** Ver 2.6 ***/
+char c_bnk_stts='X';/*Ver 2.9*/
+char c_kra_status[20];/*Ver 2.9*/
+
+
+long l_std_seg_dbcr_run_no;
+long l_run_no;
+
+double d_required_amount;   /** To be check **/
+double d_tot_alc_amt;
+double d_alctd_amt_rs = 0.0;
+
+int i_err[30];
+int i_returncode;
+
+struct vw_usr_prfl st_usr_prfl;
+
+FBFR32 *ptr_fml_Ibuf; /** Ver 2.4 **/
+FBFR32 *ptr_fml_Obuf; /** Ver 2.4 **/
+
+/*************** ver 2.4 ends here for global declr **************/
+
+
+ 
+void SFO_BLK_ALLOC( TPSVCINFO *rqst )
+{
+	FBFR32 *ptr_fml_Ibuf;
+  FBFR32 *ptr_fml_Obuf;
+	
+	char c_trd_dtls = ' ';     /* Ver 1.7 */
+	char  prd[4] = "FNO";      /* Ver 1.7 */ 
+/*  char c_ServiceName[33];   made global in ver 2.4 */
+/*  char c_err_msg[256];						***Ver 1.4 made global **/
+  char c_tag[256];
+  char c_timestamp[14 + 1];					/*1.1*/
+  char c_bnk_narration[21];           /*** Ver 1.5 ***/
+/*  char c_xchng_cd[4] = {'\0'};                 ** Ver 2.2 **  made global in ver 2.4 **/
+
+
+  char c_start_tm[12]; /** Ver 2.5 **/
+  char c_end_tm[12];   /** Ver 2.5 **/
+
+
+/*	int i_returncode;  made global in ver 2.4 **/
+	int i_trnsctn;
+	int i;
+	int i_ip_len;
+	int i_is_dbc_cust = 0; 				/** Ver 1.8 **/
+	int i_actn_id = -1;     			/**  Ver 1.8 **/
+/*  int i_err[5]; made global in ver 2.4 **/
+
+  int i_ferr[6]; /**change to 6 from 5 */
+  int i_chk_par_stts=0; /** Ver 2.5 **/
+  
+
+	double d_val_bal;
+	double d_ub_from_bft;
+	double d_ub_from_alloc;
+	long long ll_limit_amt;
+	long long ll_old_alctd_amt;
+	long long ll_old_bft_amt;
+	long long ll_max_ublk_amt;
+	long long ll_amount;
+  long long ll_nse_limit_amt;   /*** Ver 1.6 ***/
+  long long ll_bse_limit_amt;   /*** Ver 1.6 ***/
+  EXEC SQL BEGIN DECLARE SECTION;
+  /*  struct vw_usr_prfl st_usr_prfl; made global in ver 2.4 */
+		struct vw_gt_lmt_dtls st_gt_lmt_dtls;
+		double d_amount;
+		double d_alctd_amt = 0.0;
+		double d_bft_amt = 0.0;
+		double d_old_alctd_amt;
+		double d_old_bft_amt;
+
+		/** Ver 2.7 starts **/
+    int i_grp_id = 1;
+    double d_day_peak_mrgn = 0.0;
+    double d_peak_mrgn_debit = 0.0;
+    double d_adm_blnc = 0.0;
+    double d_fd_amt = 0.0;
+    double d_sec_amt = 0.0;
+    double d_peak_to_dr =0.0;
+
+    long long ll_peak_mrgn_debit = 0.0;
+    long long ll_peak_to_dr = 0.0;
+
+  	char c_peak_enblflg='N';
+	 /** Ver 2.7 ends **/
+
+		varchar c_trd_dt [ 12 ];
+		varchar c_exg_trd_dt [ 12 ]; /** Ver 2.7 **/
+ /*		char c_bnk_accnt[21]; made global in ver 2.4 */
+		char c_bnk_trnsctn_typ[3];
+		char c_bkubk_rsn_cd[6];
+		char c_trn_ref[13];
+		char c_clb_bic[21];
+		long l_clb_clnt_nmbr;
+		char c_dr_cr_flg;
+		char c_mkt_typ;
+		char c_req_typ;
+		char c_clb_bnk_nm[12];    /*** Ver 2.6 ***/ 
+  EXEC SQL END DECLARE SECTION;
+
+  struct vw_err_msg st_err_msg;
+	
+	MEMSET( c_trn_ref );										/*	Ver 1.3 : Added	*/
+  MEMSET(c_bnk_narration);     /*** Ver 1.5 ***/
+	MEMSET(c_xchng_cd);          /** Ver 2.2 **/
+  c_usr_typ='\0';              /** Ver 2.4 **/ 
+	c_fo_link_bnk_acc = 'N';    /*** Ver 2.6 ***/ 
+  MEMSET(c_start_tm);  /** Ver 2.5 **/
+  MEMSET(c_end_tm);    /** Ver 2.5 **/
+  MEMSET(c_clb_bnk_nm); /* Ver 2.6 */ 
+  MEMSET(c_err_msg); /* Ver 2.6 */ 
+  MEMSET(c_kra_status);/*Ver 2.9*/
+
+  ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);							/*  Ver 1.3 : Added */
+  strcpy( c_timestamp, "01-Jan-1980" );		/***Added by 1.1 to avoid the rerun */
+
+		fn_userlog( c_ServiceName, "START OF SFO_BLK_ALLOC");
+	/* Store the input value in the view vw_usr_prfl */
+	i_returncode = Fvftos32( ptr_fml_Ibuf,
+                           (char *)&st_usr_prfl,
+                           "vw_usr_prfl" );
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( st_usr_prfl.c_rout_crt );
+
+	/* Check the session */
+  /********* Comment starts here for Ver 2.4 ***********
+	i_returncode = fn_chk_sssn( c_ServiceName, &st_usr_prfl,
+                                             &st_err_msg ) ;
+  ******* Ver 2.4 comment ends here ********/
+
+  i_returncode = chk_sssn_ip_fo(c_ServiceName,st_usr_prfl.c_user_id,st_usr_prfl.l_session_id,(char *)c_ip_add,'Y',c_err_msg); /** Ver 2.4 **/
+
+
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );
+		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+    /******* To get channel 2.4 starts here *******/
+		fn_userlog(c_ServiceName,"Service Started.........>>>>>>>>");
+    EXEC SQL
+    SELECT NVL(USM_SUP_USR_TYP,'*')
+    INTO :c_usr_typ
+    FROM USM_SSSN_MNGR
+    WHERE USM_USR_ID=:st_usr_prfl.c_user_id
+    AND USM_SSSN_ID=:st_usr_prfl.l_session_id;
+
+  if( (SQLCODE != NO_DATA_FOUND) && (SQLCODE != 0))
+  {
+   fn_errlog( c_ServiceName, "S31015",SQLMSG,c_err_msg);
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  fn_get_channel( c_usr_typ, (char *)c_channel );
+
+  if( DEBUG_MSG_LVL_0 )
+  {
+    fn_userlog( c_ServiceName, "IP Address |%s|", c_ip_add );
+    fn_userlog( c_ServiceName, "Channel Name |%s|", c_channel );
+    fn_userlog( c_ServiceName, "Error Msg |%s|", c_err_msg );
+  }
+
+
+  /************ 2.4 ends here ****************/
+
+
+
+/* Added Ver 1.7 */
+
+	/***	Commented In Ver 1.9
+
+	***  Ver 1.8 Starts  ***
+
+  if(st_usr_prfl.c_user_id[0] != BPID )
+  {
+    i_is_dbc_cust = 0;
+
+    EXEC SQL
+        SELECT 1
+        INTO :i_is_dbc_cust
+        FROM  CLM_CLNT_MSTR
+        WHERE CLM_MTCH_ACCNT = :st_usr_prfl.c_cln_mtch_accnt
+        AND   CLM_TRD_FLG = 'N'
+        AND   CLM_BP_ID IS NOT NULL;
+
+    if( (SQLCODE != NO_DATA_FOUND) && (SQLCODE != 0))
+    {
+      fn_errlog( c_ServiceName, "S31020",SQLMSG,c_err_msg);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );     
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    if ( i_is_dbc_cust == 1 )
+    {
+      fn_userlog(c_ServiceName,"You do not have trading permissions");
+      fn_errlog( c_ServiceName, "S31025", "You do not have trading permissions", c_err_msg  );
+			strcpy(c_err_msg,"You do not have trading permissions");
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );    
+	
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }
+
+	** Ver 1.8 Ends **
+
+	Ver 1.9 Ends *****************/
+
+
+	if ( st_usr_prfl.c_user_id[0] == BPID )
+	{
+		if(fn_get_trdng_dtls((char *)st_usr_prfl.c_user_id, (char *)st_usr_prfl.c_cln_mtch_accnt, &c_trd_dtls, prd) == -1)
+		{
+			fn_errlog( c_ServiceName, "S31030",LIBMSG,c_err_msg);
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+		
+		fn_userlog( c_ServiceName," Trade detail flag for :%s: is :%c:", (char *)st_usr_prfl.c_user_id,c_trd_dtls);
+
+		if ( c_trd_dtls == 'N' )
+		{
+			fn_errlog( c_ServiceName, "B29017", " ", c_err_msg);
+			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+		
+	}
+
+  /************* Ver 2.4 Starts *****************/
+
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog(c_ServiceName," Service calling for Match Account :%s:",st_usr_prfl.c_cln_mtch_accnt);
+  }
+  
+  EXEC SQL
+  SELECT NVL(USR_FUND_MODEL_FLG,'N')
+  INTO :c_blk_deposit_flg
+  FROM USR_USER_MASTER,UAC_USR_ACCNTS
+  WHERE USR_USR_ID=UAC_USR_ID
+  AND UAC_CLM_MTCH_ACCNT=:st_usr_prfl.c_cln_mtch_accnt;
+
+
+  if( (SQLCODE != NO_DATA_FOUND) && (SQLCODE != 0))
+  {
+   fn_errlog( c_ServiceName, "S31035",SQLMSG,c_err_msg);
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  if( c_blk_deposit_flg!='B' && c_blk_deposit_flg!='D' )
+  {
+   fn_errlog( c_ServiceName,"Invalid Model Flag" , " ", c_err_msg);  
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 ); 
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog( c_ServiceName, "Model Flag :%c:",c_blk_deposit_flg);
+  }
+
+  /********** Ver 2.4 Ends **************/
+
+	/*****Added in Ver 2.6 start ***shift from below*****/
+  EXEC SQL
+    SELECT CLB_BNK_ACCT_NMBR,
+           TO_CHAR(SYSDATE,'yyyymmddhh24miss'),
+           NVL(CLB_BNK_NM,'ICICI')
+    INTO   :st_usr_prfl.c_bnk_accnt_nmbr[0], 
+           :c_timestamp,
+           :c_clb_bnk_nm
+    FROM   CLB_BNK_ACCTS
+    WHERE  CLB_CLM_MTCH_ACCNT = :st_usr_prfl.c_cln_mtch_accnt; 
+
+    if( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg );
+      return_fail(ptr_fml_Ibuf,c_err_msg);
+    }
+
+    rtrim(c_clb_bnk_nm);  /** Ver 2.6 **/
+
+		rtrim( st_usr_prfl.c_bnk_accnt_nmbr[0] );
+    strcpy(c_bnk_accnt,st_usr_prfl.c_bnk_accnt_nmbr[0]);
+
+    /** SETNULL(c_clb_bnk_acct_nmbr);
+    SETNULL(c_clb_bnk_nm); **/
+    rtrim(c_timestamp);
+
+    if(c_blk_deposit_flg == 'B' && strcmp(c_clb_bnk_nm,"ICICI") != 0 && strcmp(c_bnk_accnt,"000000000000") != 0)
+    {
+			c_fo_link_bnk_acc='Y';
+      c_blk_deposit_flg='D';
+    }
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Client bank Account :%s:%s:%c:",c_bnk_accnt,c_clb_bnk_nm,c_blk_deposit_flg);
+    }
+    /*****Added in Ver 2.6 end ***shift from below*****/
+
+  /********** Ver 2.5 Starts ************/
+
+  if(strcmp(st_usr_prfl.c_user_id,DEF_USR)!= 0 && st_usr_prfl.l_session_id!= DEF_SSSN && c_blk_deposit_flg =='D')
+  {
+    EXEC SQL
+    SELECT  CASE WHEN TO_NUMBER(PAR_DEP_FUND_START_TM) < TO_NUMBER(PAR_DEP_FUND_STOP_TM) THEN (CASE WHEN TO_NUMBER(TO_CHAR(SYSDATE,'hh24mi')) NOT BETWEEN TO_NUMBER(PAR_DEP_FUND_START_TM) AND TO_NUMBER(PAR_DEP_FUND_STOP_TM) THEN 1 ELSE 0 END) WHEN TO_NUMBER(PAR_DEP_FUND_START_TM) > TO_NUMBER(PAR_DEP_FUND_STOP_TM) THEN (CASE WHEN TO_NUMBER(TO_CHAR(SYSDATE,'hh24mi')) BETWEEN TO_NUMBER(PAR_DEP_FUND_STOP_TM) AND TO_NUMBER(PAR_DEP_FUND_START_TM) THEN 1 ELSE 0 END) END,
+              To_char(To_date(to_char(sysdate,'DD-Mon-YYYY')||PAR_DEP_FUND_START_TM,'DD-Mon-YYYY HH24MI'),'HH:MI AM'),
+              To_char(To_date(to_char(sysdate,'DD-Mon-YYYY')||PAR_DEP_FUND_STOP_TM,'DD-Mon-YYYY HH24MI'),'HH:MI AM')
+      INTO    :i_chk_par_stts,
+              :c_start_tm,
+              :c_end_tm
+      FROM PAR_SYSTM_PRMTR;
+
+    if (SQLCODE != 0)
+    {
+      fn_errlog( c_ServiceName, "S31045",SQLMSG,c_err_msg); 
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );  
+   
+    }
+
+    rtrim(c_start_tm);
+    rtrim(c_end_tm);
+
+    if(i_chk_par_stts == 1)
+    {
+      fn_errlog( c_ServiceName, "S31050",DEFMSG,c_err_msg);
+      sprintf(c_err_msg, "Allocation/Deallocation is disabled between %s to %s",c_end_tm,c_start_tm);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }
+
+
+
+  /********** Ver 2.5 Ends   ************/
+
+/* Ver 1.7 ends */	
+
+	/* Storing FML input into a variable  */
+	i_err[0]  = Fget32( ptr_fml_Ibuf,FFO_DR_CR_FLG,0,(char *)&c_dr_cr_flg, 0 );
+  i_ferr[0] = Ferror32;
+
+  i_err[1]  = Fget32( ptr_fml_Ibuf,FFO_AMOUNT,0,(char *)&d_amount, 0 );
+  i_ferr[1] = Ferror32;
+
+  i_err[2]  = Fget32( ptr_fml_Ibuf,FFO_MKT_TYP,0,(char *)&c_mkt_typ, 0 );
+  i_ferr[2] = Ferror32;
+
+  i_err[3]  = Fget32( ptr_fml_Ibuf,FFO_RQST_TYP,0,(char *)&c_req_typ, 0 );
+  i_ferr[3] = Ferror32;
+
+	i_err[4]  = Fget32( ptr_fml_Ibuf,FFO_XCHNG_CD ,0,(char *)c_xchng_cd, 0 );   /** Ver 2.2 **/
+  i_ferr[4] = Ferror32;                                                       /** Ver 2.2 **/
+	
+
+   /*** Ver 2.4 Starts ***/ 
+  
+  if( Fget32(ptr_fml_Ibuf,FFO_RUN_NUM,0,(char *)&l_run_no,0)== -1)
+  {
+   if( Ferror32 == FNOTPRES )
+   {
+    fn_userlog(c_ServiceName,"Run number not present"); 
+   }
+   else
+   {
+    fn_errlog( c_ServiceName, "S31055",FMLMSG , c_err_msg );
+    tpfree((char *)ptr_fml_Ibuf);
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+  }
+ 
+
+  /**** Ver 2.4 Ends  ****/
+
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog(c_ServiceName,"Run number :%ld:",l_run_no);
+  }
+  /* Check if any error found while getting value from FML  */
+
+  for ( i=0; i < 5; i++ )    /** Change counter from 4 to 5 in Ver 2.2 **/
+  {
+     if ( i_err[ i ] == -1 )
+     {
+				/** Ver 2.2 Starts **/
+
+        if( i_err[4] == -1 )
+        {
+          if( Ferror32 == FNOTPRES )
+          {
+            strcpy(c_xchng_cd, "NFO");
+          }
+        }  /** Ver 2.2 Ends **/
+				else
+				{
+        	fn_userlog( c_ServiceName, "Error in :%d:",i );
+        	fn_errlog( c_ServiceName, "S31060", Fstrerror32( i_ferr [i] ),
+                                                           c_err_msg  );
+       	  Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+					Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+			 }
+            
+	
+     }
+  }
+
+	rtrim(c_xchng_cd);      /** Ver 2.2 **/
+	ll_amount = (long long)d_amount;  /** Ver 2.7 **/
+
+	if(DEBUG_MSG_LVL_3){									/* Ver 1.3 */
+		fn_userlog( c_ServiceName, "c_cln_mtch_accnt  :%s:",
+			                        st_usr_prfl.c_cln_mtch_accnt );
+		fn_userlog( c_ServiceName, "c_dr_cr_flg  :%c: ", c_dr_cr_flg );
+		fn_userlog( c_ServiceName, "d_amount   :%lf: ",d_amount );
+		fn_userlog( c_ServiceName, "c_mkt_typ   :%c: ",c_mkt_typ );
+		fn_userlog( c_ServiceName, "c_req_typ   :%c: ",c_req_typ );
+    fn_userlog( c_ServiceName, "Bnk Narration :%s:",c_bnk_narration);
+		fn_userlog( c_ServiceName, "Exchange Code :%s:",  c_xchng_cd);              /** Ver 2.2 **/
+    fn_userlog( c_ServiceName, "Model Flag :%c:",c_blk_deposit_flg);            /** Ver 2.4 **/
+	}
+
+	if( c_mkt_typ != 'D' )
+	{
+		fn_errlog( c_ServiceName, "S31065", DEFMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	if( d_amount <= 0 )
+	{
+		fn_errlog( c_ServiceName, "S31070", DEFMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	/*****Commented in Ver 2.6 start ***shift to UP*****
+	
+	EXEC SQL
+		SELECT clb_bnk_acct_nmbr
+					 *** clb_clnt_nmbr,
+					 clb_bic		*** Commented for Ver 2.1 **
+		INTO	 :st_usr_prfl.c_bnk_accnt_nmbr[0]
+					 ** :l_clb_clnt_nmbr,
+					 :c_clb_bic *** Commented for Ver 2.1 ***
+		FROM	 clb_bnk_accts
+		WHERE	 clb_clm_mtch_accnt = :st_usr_prfl.c_cln_mtch_accnt;
+
+	if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+	{
+		fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      ***  Ver 1.8 ***
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	rtrim( st_usr_prfl.c_bnk_accnt_nmbr[0] );
+	strcpy(c_bnk_accnt,st_usr_prfl.c_bnk_accnt_nmbr[0]);
+	*****Commented in Ver 2.6 end ***shift to UP*****/
+
+	MEMSET(c_bank_accnt);																				/*** Ver 1.4 ***/
+	MEMSET(c_mtch_accnt);																				/*** Ver 1.4 ***/
+  
+	strcpy( c_bank_accnt,c_bnk_accnt);												  /*** Ver 1.4 ***/
+	strcpy(c_mtch_accnt,st_usr_prfl.c_cln_mtch_accnt);					/*** Ver 1.4 ***/	
+
+	if(DEBUG_MSG_LVL_3){										/* Ver 1.3 */
+		fn_userlog(c_ServiceName,"c_bnk_accnt_nmbr[0]  :%s:",
+                             st_usr_prfl.c_bnk_accnt_nmbr[0]);
+		fn_userlog(c_ServiceName,"c_bnk_accnt:%s:",c_bnk_accnt);
+	}
+
+   /***************** Ver 2.4 Starts transaction  ******************/
+
+  if( c_blk_deposit_flg=='D')
+  {
+  
+    fn_userlog( c_ServiceName, " Inside Deposit Model case  ");
+
+    i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+    if ( i_trnsctn == -1 )
+   {
+    fn_errlog( c_ServiceName, "S31080", LIBMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID , (char *)&i_actn_id , 0 );
+    Fadd32( ptr_fml_Ibuf, FFO_BAL_AMT,(char *)&d_required_amount,0);    /** To be check **/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+
+   i_returncode = fn_lock_usr( c_ServiceName, st_usr_prfl.c_cln_mtch_accnt );
+
+   if ( i_returncode == -1 )
+   {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID , (char *)&i_actn_id , 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+
+   /*** Ver 3.2 Starts Here ***/
+   i_returncode = fn_lock_fno( c_ServiceName, st_usr_prfl.c_cln_mtch_accnt );
+
+   if ( i_returncode == -1 )
+   {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID , (char *)&i_actn_id , 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+   /*** Ver 3.2 Ends Here ***/
+   
+
+
+  }
+
+  /******** Ver 2.4 ends **********/
+
+
+
+	if( c_dr_cr_flg == BK )
+	{
+		strcpy(c_bnk_trnsctn_typ,"BK");
+		if( c_req_typ == 'A' )
+		{
+			strcpy(c_bkubk_rsn_cd,FO_BLK_CD);   /* Block for Allocation */
+			d_alctd_amt = d_amount;
+
+      
+     if( c_blk_deposit_flg =='D' )
+     {
+ 
+      if(DEBUG_MSG_LVL_3)
+      { 
+       fn_userlog( c_ServiceName, " Inside Deposit Model case  "); 
+       fn_userlog(c_ServiceName,"Before call to Allocate to Segment");
+      }
+
+		 /*****Added in Ver 3.1 start*****/
+    	i_returncode=fn_poa_kra_dpucc_dtls(c_ServiceName, st_usr_prfl.c_user_id,st_usr_prfl.l_session_id, st_usr_prfl.c_cln_mtch_accnt, "NA", c_err_msg);
+
+    	if(i_returncode==-1)
+    	{
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        fn_errlog( c_ServiceName, "S31085", SQLMSG, c_err_msg  );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+    	/*****Added in Ver 3.1 End*****/
+
+			/*****Commented in Ver 3.1 start*****
+			*Ver 2.9 Start*
+  		EXEC SQL
+    		SELECT  NVL(IAI_BNK_ACCOUNT_FLAG,'X')
+    		INTO    :c_bnk_stts
+    		FROM    IAI_INFO_ACCOUNT_INFO
+    		WHERE   IAI_MATCH_ACCOUNT_NO  = :st_usr_prfl.c_cln_mtch_accnt;
+		
+  		if(SQLCODE != 0 && SQLCODE !=NO_DATA_FOUND)
+  		{
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    		fn_errlog( c_ServiceName, "S31090", SQLMSG, c_err_msg  );
+    		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  		}
+		
+  		if(DEBUG_MSG_LVL_3)
+  		{
+    		fn_userlog(c_ServiceName,"Bank Status:%c:",c_bnk_stts);
+  		}
+		
+  		if(c_bnk_stts=='P')
+			{
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				EXEC SQL
+      		SELECT DECODE(IKSM_CATEGORY,'R','REJECTED','V','VERIFIED','UNDERPROCESS')
+      		INTO :c_kra_status
+      		FROM IKD_INFO_KRA_DTLS,
+           		IKSM_INFO_KRA_STATUS_MASTER,
+           		ICD_INFO_CLIENT_DTLS,
+           		IAI_INFO_ACCOUNT_INFO
+      		WHERE IKD_WEBSVC_STATUS_CODE = IKSM_WEBSVC_STATUS_CODE
+      		AND   IKSM_ACTIVE_FLG='Y'
+      		AND   IKD_PAN_NO =ICD_PAN_NO
+      		AND   IAI_MATCH_ACCOUNT_NO=:st_usr_prfl.c_cln_mtch_accnt
+      		AND   IAI_SERIAL_NO=ICD_SERIAL_NO
+      		AND   ROWNUM < 2;
+		
+    		if(SQLCODE != 0)
+    		{
+      		fn_userlog(c_ServiceName,"Error:Unable to fetch kra stts...");
+      		fn_errlog( c_ServiceName, "S31095", SQLMSG, c_err_msg  );
+
+      		if(SQLCODE == NO_DATA_FOUND)
+      		{
+        		strcpy(c_err_msg,"KRA not available");
+      		}
+      		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    		}
+		
+    		rtrim(c_kra_status);
+
+				if(strcmp(c_kra_status,"UNDERPROCESS")==0)
+    		{
+      		strcpy(c_err_msg,"KYC verification for your account is 'Under-Process'. It is expected to be completed within 48 hours.");
+    		}
+    		else
+    		{
+      		strcpy(c_err_msg,"KYC verification for your account is kept on 'Hold' due to missing information/ documents. Visit Customer service->Service@Fingertips section->Place Service Request->Update address/KYC in trading account and update KYC details");
+    		}
+		
+    		rtrim(c_err_msg);
+    		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    		fn_errlog( c_ServiceName, "S31100", DEFMSG, c_err_msg  );
+    		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+			}
+			**Ver 2.9 end**
+			*****Commented in Ver 3.1 end*****/
+
+
+       i_returncode = fn_allocate_to_segment(d_alctd_amt);
+
+      if( i_returncode == -1 )
+      {
+       fn_userlog( c_ServiceName, "Failed in calling function fn_allocate_to_segment" );
+       fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       fn_errlog(c_ServiceName,"S31105",LIBMSG,c_err_msg);
+       Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+       tpreturn(TPFAIL, i_returncode, (char *)ptr_fml_Ibuf, 0L, 0);
+      }
+ 
+      if(DEBUG_MSG_LVL_3)
+      {
+       fn_userlog(c_ServiceName,"After successful Call to function fn_allocate_to_segment");
+      }
+     }     
+
+		}
+    else if( c_req_typ == 'B' )
+		{	
+			strcpy(c_bkubk_rsn_cd,FO_BFT_BLK_CD); 
+			d_bft_amt = d_amount;
+		}
+		else
+		{
+			fn_errlog( c_ServiceName, "S31110", "Invalid Request Type", c_err_msg);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+ 
+   if( c_blk_deposit_flg=='B' )
+   {
+
+    fn_userlog( c_ServiceName, " Inside Block  Model   ");   
+
+  	strcpy( c_timestamp, "01-Jan-1980" );		/***Added by 1.1 to avoid the rerun */
+
+  
+		i_returncode = fn_send_bnk_msg (&st_usr_prfl,
+																		c_dr_cr_flg,
+																		c_bkubk_rsn_cd,
+																		d_amount,
+																		BACKOFFICE,
+																		c_ServiceName,
+																		c_err_msg,
+																		&d_val_bal,
+																		c_trn_ref,
+																		c_timestamp,
+																		c_bnk_narration, /*1.1*/ /*** Ver 1.5 bnk_narration added ***/
+                                    c_xchng_cd,       /** Added in Ver 2.2 **/
+																		0);									/** Added for Ver 2.3 for Run no **/
+
+    
+
+		if( i_returncode != 0 )
+		{
+			fn_errlog( c_ServiceName, "S31115", LIBMSG, c_err_msg);
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+							/*** Ver 1.4 add ***/ 
+		
+			i_err_cd = i_returncode;																
+			fn_insrt_bft(c_ServiceName,c_trn_ref, c_bnk_trnsctn_typ,c_bkubk_rsn_cd ,d_amount,c_timestamp); 													
+							/*** Ver 1.4 ends ***/ 
+			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		
+		} 
+		if(DEBUG_MSG_LVL_3){						/*	Ver 1.3		*/
+			fn_userlog( c_ServiceName, "d_val_bal :[%lf] ", d_val_bal );
+		}
+
+		strcpy(c_tag,c_ServiceName);
+
+		/** The name of the function is little misleading. We send a +ve value **/
+    /** for unblock amount so it will work OK                              **/
+		if( c_req_typ == 'A' )
+		{
+			i_returncode = fn_do_ublk (	c_ServiceName,
+               									  c_err_msg,
+               									  st_usr_prfl.c_cln_mtch_accnt,
+               									  c_bnk_accnt,
+             										  0,
+																  d_amount);
+		}
+		else
+		{
+			i_returncode = fn_do_ublk (	c_ServiceName,
+               									  c_err_msg,
+               									  st_usr_prfl.c_cln_mtch_accnt,
+               									  c_bnk_accnt,
+             										  d_amount,
+																  0);
+		}
+		if( i_returncode != 0 )
+		{
+			fn_errlog( c_ServiceName, "S31120", LIBMSG, c_err_msg);
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+							
+			/*** Ver 1.4 add new error code -6 into BFT for FNO***/
+ 
+ 			i_err_cd = -6;																	
+			fn_insrt_bft(c_ServiceName,"********",c_bnk_trnsctn_typ,c_bkubk_rsn_cd ,d_amount,c_timestamp); 
+                        
+			/*** Ver 1.4 ends***/ 
+
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+   } 
+	}
+	else if( c_dr_cr_flg == UB )
+	{
+		strcpy(c_bnk_trnsctn_typ,"UB");
+		
+		if(DEBUG_MSG_LVL_3)																			/** Ver 1.4 for fn_userlog**/
+		{
+		fn_userlog(c_ServiceName,"Inside c_dr_cr_flg = UB");			
+		}
+
+	EXEC SQL
+			SELECT NVL(fab_alctd_amt,0),
+						 NVL(fab_bft_amt,0),
+						 NVL(FAB_ISEC_MRGN_AMT+FAB_ISEC_MRGN_AMT_BSE,0),      /** Ver 2.7 **/
+             NVL(FAB_FDR_AMT,0),                                  /** Ver 2.7 **/
+             NVL(FAB_PLG_AMT,0)                                   /** Ver 2.7 **/
+			INTO	 :d_old_alctd_amt,
+						 :d_old_bft_amt,
+						 :d_adm_blnc ,                                        /** Ver 2.7 **/
+             :d_fd_amt ,                                          /** Ver 2.7 **/
+             :d_sec_amt                                           /** Ver 2.7 **/
+			FROM	 fab_fo_alc_bft_smry
+			WHERE	 fab_clm_mtch_accnt = :st_usr_prfl.c_cln_mtch_accnt
+			AND		 fab_bnk_accnt = :c_bnk_accnt;
+	
+		if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+		{
+			fn_errlog( c_ServiceName, "S31125", SQLMSG, c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+		if( SQLCODE == NO_DATA_FOUND )
+		{
+			fn_errlog( c_ServiceName, "B26201", SQLMSG, c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+		
+		if(DEBUG_MSG_LVL_3)																			/** Ver 1.4 for fn_userlog **/
+		{
+		fn_userlog(c_ServiceName,"d_old_alctd_amt from FAB = %lf",d_old_alctd_amt);
+		fn_userlog(c_ServiceName,"d_old_bft_amt from FAB = %lf",d_old_bft_amt);  
+		}
+		EXEC SQL
+			SELECT to_char(sysdate, 'DD-Mon-YYYY')
+			INTO	 :c_trd_dt
+			FROM	 DUAL;
+
+		if( SQLCODE != 0 )
+		{
+			fn_errlog( c_ServiceName, "S31130", SQLMSG, c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+    /*** Ver 1.6, ********************************************************************************************* 
+         Since the current limit of NFO may differ from current limit of BFO, the limit check is done with
+         respect to exchange code. SFO_GET_LIMITS service is called once for NFO to get the current limit of NFO 
+         and 2nd time it is called for BFO to get the current limit of BFO 
+    ***********************************************************************************************************/ 
+
+		SETNULL(c_trd_dt);
+		strcpy(st_gt_lmt_dtls.c_trd_dt,(char *) c_trd_dt.arr);
+		strcpy( st_gt_lmt_dtls.c_cln_mtch_accnt,st_usr_prfl.c_cln_mtch_accnt);
+		st_gt_lmt_dtls.c_rqst_typ = LIMIT_X;
+      
+    strcpy(st_gt_lmt_dtls.c_xchng_cd,"NFO");  /*** Ver 1.6 ***/
+
+		i_ip_len = sizeof ( struct vw_gt_lmt_dtls);
+
+  	fn_cpy_ddr(st_gt_lmt_dtls.c_rout_crt);
+
+    /*** Ver 2.0 Starts Here ***/ 
+    i_returncode = fo_get_trd_limit(c_ServiceName,
+                                    st_usr_prfl.c_cln_mtch_accnt,
+                                    c_trd_dt.arr,
+                                    st_gt_lmt_dtls.c_rqst_typ,
+                                    st_gt_lmt_dtls.c_xchng_cd,
+                                    st_gt_lmt_dtls.l_gid,
+                                    &st_gt_lmt_dtls.d_amt,
+                                    c_err_msg
+                                    );
+                        
+    if( i_returncode != 0)
+    {
+      fn_errlog( c_ServiceName, "S31135", SQLMSG, c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+ 
+    fn_userlog(c_ServiceName,"fo_get_trd_limit limit  NFO:%lf:",st_gt_lmt_dtls.d_amt);
+    /***** Ver 2.0 Ends here ***/
+  
+    /*** Ver 1.6 , Getting the current limit of NFO ***/
+
+    /**** Ver 2.0 , commented below part *************************
+		i_returncode = fn_call_svc( c_ServiceName,
+                                c_err_msg,
+                                &st_gt_lmt_dtls,
+                                &st_gt_lmt_dtls,
+                                "vw_gt_lmt_dtls",
+                                "vw_gt_lmt_dtls",
+                                i_ip_len,
+                                i_ip_len,
+                                0,
+                                "SFO_GET_LIMITS" );
+  	if ( i_returncode == -1 )
+  	{
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );   
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+    ***** Ver 2.0 ************************************************/
+
+    /**	ll_limit_amt = ( long long )st_gt_lmt_dtls.d_amt; *** Ver 1.6 ***/
+    ll_nse_limit_amt = ( long long )st_gt_lmt_dtls.d_amt; /*** Ver 1.6 ***/
+
+    /**** COmmented in Ver 1.6 ************************
+    if(DEBUG_MSG_LVL_3)                                     ** Ver 1.4 for fn_userlog **
+    {
+      fn_userlog(c_ServiceName,".. st_gt_lmt_dtls.d_amt =:%lf:",st_gt_lmt_dtls.d_amt);
+      fn_userlog(c_ServiceName,".. ll_limit_amt =:%lld:",ll_limit_amt); 
+    }
+    ******* Ver 1.6 ************************/
+
+    if(DEBUG_MSG_LVL_3) /*** Ver 1.6 ***/ 
+    {
+      fn_userlog(c_ServiceName,".. st_gt_lmt_dtls.d_amt for NFO  =:%lf:",st_gt_lmt_dtls.d_amt);
+      fn_userlog(c_ServiceName,".. ll_nse_limit_amt  =:%lld:",ll_nse_limit_amt);
+    }
+
+    /*** Ver 1.6 starts here ***/
+    st_gt_lmt_dtls.d_amt=0;
+    strcpy(st_gt_lmt_dtls.c_xchng_cd,"BFO");
+
+    /*** Getting the current limit of BFO ***/    
+    /***** Ver 2.0 Starts Here ***************************************
+    i_returncode = fn_call_svc( c_ServiceName,
+                                c_err_msg,
+                                &st_gt_lmt_dtls,
+                                &st_gt_lmt_dtls,
+                                "vw_gt_lmt_dtls",
+                                "vw_gt_lmt_dtls",
+                                i_ip_len,
+                                i_ip_len,
+                                0,
+                                "SFO_GET_LIMITS" );
+    ******** Ver 2.0 Ends Here ***************************************/
+
+    /*** Ver 2.0 Starts Here ***/
+    i_returncode = fo_get_trd_limit(c_ServiceName,
+                                    st_usr_prfl.c_cln_mtch_accnt,
+                                    c_trd_dt.arr,
+                                    st_gt_lmt_dtls.c_rqst_typ,
+                                    st_gt_lmt_dtls.c_xchng_cd,
+                                    st_gt_lmt_dtls.l_gid,
+                                    &st_gt_lmt_dtls.d_amt,
+                                    c_err_msg
+                                    );
+
+    if( i_returncode != 0)
+    {
+      fn_errlog( c_ServiceName, "S31140", SQLMSG, c_err_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    fn_userlog(c_ServiceName,"fo_get_trd_limit limit  BFO:%lf:",st_gt_lmt_dtls.d_amt);
+    /***** Ver 2.0 Ends here ***/
+
+    if ( i_returncode != 0 )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    ll_bse_limit_amt = ( long long )st_gt_lmt_dtls.d_amt; 
+    
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,".. st_gt_lmt_dtls.d_amt for BFO  =:%lf:",st_gt_lmt_dtls.d_amt);
+      fn_userlog(c_ServiceName,".. ll_bse_limit_amt  =:%lld:",ll_bse_limit_amt);
+    } 
+    if(DEBUG_MSG_LVL_3)
+    {
+     fn_userlog(c_ServiceName,".. Current Limit in NFO =:%lld:",ll_nse_limit_amt);
+     fn_userlog(c_ServiceName,".. Current Limit in BFO =:%lld:",ll_bse_limit_amt); 
+    }
+    /*** Calculating the Minimum of NFO and BFO current limit ***/
+   
+    if( ll_nse_limit_amt < ll_bse_limit_amt )
+    {
+      ll_limit_amt = ll_nse_limit_amt;
+    }
+    else 
+    {
+       ll_limit_amt = ll_bse_limit_amt; 
+    }
+
+		if(DEBUG_MSG_LVL_3)											
+		{
+			fn_userlog(c_ServiceName,".. The Minimum amount ll_limit_amt  =:%lld:",ll_limit_amt);
+		}
+    /*** Ver 1.6 ends here ***/
+
+		ll_old_alctd_amt = ( long long )d_old_alctd_amt;
+
+		ll_old_bft_amt = ( long long )d_old_bft_amt;
+
+	
+		if(DEBUG_MSG_LVL_3)																			/** Ver 1.4 for fn_userlog **/
+		{
+			fn_userlog(c_ServiceName,".. ll_old_alctd_amt = :%lld:",ll_old_alctd_amt);
+			fn_userlog(c_ServiceName,".. ll_old_bft_amt= :%lld:",ll_old_bft_amt);
+		}
+
+		if( ll_limit_amt <= 0 )
+		{
+			fn_errlog( c_ServiceName, "B22003", FMLMSG, c_err_msg  );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+
+   if(  c_blk_deposit_flg =='B' )   /*** Ver 2.4 for block model ****/
+   {
+		if( ll_limit_amt < (ll_old_alctd_amt + ll_old_bft_amt) )
+		{
+			
+			ll_max_ublk_amt = ll_limit_amt;
+		}
+		else
+		{
+			ll_max_ublk_amt = (ll_old_alctd_amt + ll_old_bft_amt);
+		}
+   }
+
+   if( c_blk_deposit_flg =='D')    /***** Ver 2.4 for Deposit model ****/
+   {
+    if( ll_limit_amt < ll_old_alctd_amt  )
+    {
+
+      ll_max_ublk_amt = ll_limit_amt;
+    }
+    else
+    {
+      ll_max_ublk_amt = ll_old_alctd_amt ;
+    }   
+
+   }
+
+	 /** Ver 2.7 starts **/
+
+   MEMSET(c_exg_trd_dt);
+   EXEC SQL
+   SELECT NVL(FSP_PEAKMRGN_ENBLFLG,'N'),
+          EXG_NXT_TRD_DT
+     INTO :c_peak_enblflg,
+          :c_exg_trd_dt
+     FROM EXG_XCHNG_MSTR,FSP_FO_SYSTM_PRMTR
+    WHERE EXG_XCHNG_CD=:c_xchng_cd;
+
+  if ( SQLCODE != 0 )
+  {
+     fn_errlog( c_ServiceName, "S31145",SQLMSG,c_err_msg);
+      fn_userlog(c_ServiceName,"Error in fetching data");
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+  else if ( c_peak_enblflg == 'Y' )
+  {
+    SETNULL(c_exg_trd_dt);
+
+		if(DEBUG_MSG_LVL_4) 
+    	fn_userlog(c_ServiceName, "c_exg_trd_dt :%s:",c_exg_trd_dt.arr);
+
+		if( c_blk_deposit_flg =='B')
+		{
+      EXEC SQL
+      SELECT NVL(FCB_DAY_PEAK_MARGIN,0),
+             NVL(FCB_PEAK_MARGIN_DEBIT,0)
+      INTO   :d_day_peak_mrgn,
+             :d_peak_mrgn_debit
+      FROM   FCB_FO_CLNT_BLNCS
+      WHERE  FCB_CLM_MTCH_ACCNT = :st_usr_prfl.c_cln_mtch_accnt
+      AND FCB_XCHNG_CD=:c_xchng_cd
+      AND FCB_TRD_DT=:c_exg_trd_dt
+      AND FCB_GRP_ID=:i_grp_id;
+
+    	if( SQLCODE != 0 || SQLCODE == NO_DATA_FOUND )
+    	{
+				if(SQLCODE == NO_DATA_FOUND)
+				{
+					d_day_peak_mrgn = 0.00;
+					d_peak_mrgn_debit = 0.00;
+				}
+				else
+				{	
+      		fn_errlog( c_ServiceName, "S31150", SQLMSG, c_err_msg);
+      		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+      		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	  	}
+			}
+
+    	d_peak_to_dr = d_day_peak_mrgn - ( d_adm_blnc + d_fd_amt + d_sec_amt );
+
+			if(DEBUG_MSG_LVL_3)
+    		fn_userlog(c_ServiceName,"Peak margin to be debited : %lf",d_peak_to_dr);
+
+			ll_peak_mrgn_debit = (long long)d_peak_mrgn_debit;
+    	ll_peak_to_dr = (long long)d_peak_to_dr;
+
+    	/*** COMMENTED IN VER 2.8 *** if ( d_peak_mrgn_debit == 0  ) ** in case where no peak margin debited ***/
+			if ( ll_peak_mrgn_debit < ll_peak_to_dr )
+    	{
+        /** revised formula **/
+        ll_max_ublk_amt = fn_mind( ll_limit_amt ,( ll_old_bft_amt + ll_old_alctd_amt )  - ll_peak_to_dr);
+				if ( ll_amount > ll_max_ublk_amt && ll_amount < ll_limit_amt )
+      	{
+        	i_actn_id = 1;
+        	sprintf( c_err_msg,"Please note you can reduce only upto Rs. %lld as your peak margin is yet to be debited as per the regulatory re quirement.You may please choose to debit now from I-Sec & Peak  Margin Details page under F&O section post which you can reduce till Rs. %lld.",(ll_max_ublk_amt/100),(ll_limit_amt/100) ); 
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+        /*	fn_errlog( c_ServiceName, "S31155", SQLMSG, c_err_msg) ; */
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      	}
+      	else if ( ll_amount > ll_limit_amt )
+      	{
+        	sprintf( c_err_msg,"You cannot reduce more than the available current limit");
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+       	/*  fn_errlog( c_ServiceName, "S31160", SQLMSG, c_err_msg);  */
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      	}
+				if(DEBUG_MSG_LVL_3)
+        	fn_userlog(c_ServiceName,"Maximum unblock amount : %lld",ll_max_ublk_amt);
+    	}
+			/*** COMMENTED IN VER 2.8 *** else                          ** in case where debit credit process is run **
+    	{
+        fn_userlog(c_ServiceName,"Peak margin debited : %lf",d_peak_mrgn_debit);
+        if ( ll_peak_mrgn_debit < ll_peak_to_dr)
+        {
+            if( ll_peak_mrgn_debit != (ll_old_bft_amt + ll_old_alctd_amt ) )
+            {
+                fn_userlog(c_ServiceName,"You cannot reduce the F&O amount by more than %lld:",(ll_old_bft_amt + ll_old_alctd_amt ));
+            		sprintf( c_err_msg,"You cannot reduce the F&O amount by more than %lld. Please note, as per exchange mandate, peak margin amount is to be debited hence you will be able to deallocate surplus funds once the peak margin amount is debited.",(ll_old_bft_amt + ll_old_alctd_amt)); 
+                fn_userlog(c_ServiceName,"You cannot reduce the F&O amount by more than %lld:",(ll_old_bft_amt + ll_old_alctd_amt ));
+              ***  fn_errlog( c_ServiceName, "L31125", LIBMSG, c_err_msg);***
+                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+                Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+                tpreturn(TPFAIL, ERR_BFR,(char *)ptr_fml_Ibuf, 0, 0 );
+            }
+        }
+    	} **** COMMENTED IN VER 2.8 ****/
+		}
+  }  /** Ver 2.7 ends **/		
+
+
+
+    if(DEBUG_MSG_LVL_3)  /*** Ver 1.6 ***/
+    {
+     fn_userlog(c_ServiceName,".. The Maximum amount that can be unblocked :%lld:",ll_max_ublk_amt);
+    }
+
+		ll_amount = (long long)d_amount;
+
+		if( ll_amount > ll_max_ublk_amt )
+		{
+			fn_userlog(c_ServiceName,"---- INSIDE ERROR CONDITION FOR B26201 ----");
+			fn_errlog( c_ServiceName, "B26201", FMLMSG, c_err_msg  );
+    	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+
+   if( c_blk_deposit_flg =='B' )  /*** Ver 2.4 Starts ***/
+   {
+	
+   	d_ub_from_bft = fn_mind(d_old_bft_amt,d_amount);
+
+		d_ub_from_alloc = d_amount - d_ub_from_bft;
+
+		if(DEBUG_MSG_LVL_3)																			/** Ver 1.4 for fn_userlog **/
+		{
+			fn_userlog(c_ServiceName,".. d_ub_from_bft = %lf ",d_ub_from_bft);	 
+			fn_userlog(c_ServiceName,".. d_ub_from_alloc = %lf ",d_ub_from_alloc);
+		}
+		if ( d_ub_from_bft > 0 )
+		{
+
+			fn_userlog(c_ServiceName,"Deallocating from BFT d_ub_from_bft :%lf:",d_ub_from_bft);
+
+  		strcpy( c_timestamp, "01-Jan-1980" );		/***Added by 1.1 to avoid the rerun */
+
+			fn_userlog(c_ServiceName,"Inside RSN CD = 10004 in UB ");  /** Ver 1.4 **/
+
+			i_returncode = fn_send_bnk_msg (&st_usr_prfl,
+																			c_dr_cr_flg,
+																			FO_BFT_BLK_CD,
+																			d_ub_from_bft,
+																			BACKOFFICE,
+																			c_ServiceName,
+																			c_err_msg,
+																			&d_val_bal,
+																			c_trn_ref,
+																			c_timestamp,
+																			c_bnk_narration,  /*1.1*/ /*** Ver 1.5 bnk_narration added ***/
+                                      c_xchng_cd,       /** Added in Ver 2.2 **/
+																			0);								/** Added for Ver 2.3 for Run no **/
+    	if( i_returncode != 0 )
+    	{
+				fn_errlog( c_ServiceName, "S31165", LIBMSG, c_err_msg);
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+			  						/*** Ver 1.4 ****/	
+			  i_err_cd = i_returncode;                     					
+				fn_insrt_bft(c_ServiceName,c_trn_ref,c_bnk_trnsctn_typ,FO_BFT_BLK_CD,d_ub_from_bft,
+                        c_timestamp); 												
+										/*** Ver 1.4 ***/ 
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+			i_returncode = fn_do_ublk (	c_ServiceName,
+                									c_err_msg,
+                									st_usr_prfl.c_cln_mtch_accnt,
+                									c_bnk_accnt,
+               										d_ub_from_bft * -1.0,
+																	0);
+			if( i_returncode != 0 )
+			{
+				fn_errlog( c_ServiceName, "S31170", LIBMSG, c_err_msg);
+				fn_userlog(c_ServiceName,"CAUTION: BANK PASSED BUT EBA FAILED IN fn_do_ublk for :%s:, and Amt :%lf",st_usr_prfl.c_cln_mtch_accnt,d_ub_from_bft * -1.0);
+    		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+										/*** Ver 1.4 add***/ 
+ 			  i_err_cd = -6;																
+			  fn_insrt_bft(c_ServiceName,"********", c_bnk_trnsctn_typ,FO_BFT_BLK_CD,d_amount,
+                        c_timestamp);
+									 /*** Ver 1.4 ***/
+    		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+			} 
+		}
+
+  }
+  /******** Ver 2.4 ends for block model  *************/ 
+
+  if( c_blk_deposit_flg =='D' )
+  {
+    /******** Ver 2.4 starts here **********/
+
+    d_ub_from_alloc = d_amount;
+
+    if(DEBUG_MSG_LVL_0)
+    {
+      fn_userlog(c_ServiceName,".. d_ub_from_alloc = %lf ",d_ub_from_alloc);
+    }
+
+    /******** Ver 2.4 ends here **********/
+  }
+
+		if ( d_ub_from_alloc > 0)
+		{
+
+			fn_userlog(c_ServiceName," deallocating from Alloc,d_ub_from_alloc :%lf:",d_ub_from_alloc); 																					/*** Ver 1.4 ***/
+
+     if( c_blk_deposit_flg =='D' )  /*** Ver 2.4 **/
+     {
+      /*************** Ver 2.4 starts here for deallocation *****************/
+
+      if(DEBUG_MSG_LVL_4)
+      {
+       fn_userlog(c_ServiceName,"Before call to Deallocate from Segment");
+      }
+
+      i_returncode = fn_deallocate_from_segment(d_ub_from_alloc,c_req_typ);
+
+      if( i_returncode == -1 )
+      {
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog(c_ServiceName,"S31175",LIBMSG,c_err_msg);
+        Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+        tpreturn(TPFAIL, i_returncode, (char *)ptr_fml_Ibuf, 0L, 0);
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+       fn_userlog(c_ServiceName,"After Call to Deallocate from Segment");
+      }
+
+      /************** Ver 2.4 ends for deallocation **************/
+     }
+
+     if( c_blk_deposit_flg =='B')  /** Ver 2.4 **/
+     {
+  		strcpy( c_timestamp, "01-Jan-1980" );		/***Added by 1.1 to avoid the rerun */
+			
+			fn_userlog(c_ServiceName,"Inside RSN CD = 10003 in UB ");
+
+
+				i_returncode = fn_send_bnk_msg (&st_usr_prfl,
+																			c_dr_cr_flg,
+																			FO_BLK_CD,
+																			d_ub_from_alloc,
+																			BACKOFFICE,
+																			c_ServiceName,
+																			c_err_msg,
+
+																			&d_val_bal,
+																			c_trn_ref,
+																			c_timestamp,
+																			c_bnk_narration,  /*1.1*/ /*** Ver 1.5 bnk_narration added ***/
+                                      c_xchng_cd,        /** Added in Ver 2.2 **/
+																			0);								/** Added for Ver 2.3 for Run no **/
+
+    
+
+    	if( i_returncode != 0 )
+    	{
+				fn_errlog( c_ServiceName, "S31180", LIBMSG, c_err_msg);
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+									/*** Ver 1.4  add***/ 
+			  i_err_cd = i_returncode;                     
+				fn_insrt_bft(c_ServiceName,c_trn_ref, c_bnk_trnsctn_typ,FO_BLK_CD,d_ub_from_alloc,
+                        c_timestamp); 
+								/*** Ver 1.4 ends***/ 
+				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+			i_returncode = fn_do_ublk (	c_ServiceName,
+                									c_err_msg,
+                									st_usr_prfl.c_cln_mtch_accnt,
+                									c_bnk_accnt,
+																	0,
+               										d_ub_from_alloc * -1.0);
+			if( i_returncode != 0 )
+			{
+				fn_errlog( c_ServiceName, "S31185", LIBMSG, c_err_msg);
+    		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+							/**** Ver 1.4 add***/
+ 			  i_err_cd = -6;																
+			  fn_insrt_bft(c_ServiceName,"********", c_bnk_trnsctn_typ,FO_BLK_CD ,d_amount,
+                        c_timestamp); 								
+							/**** Ver 1.4 ends****/
+    		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+			} 
+		}
+   }
+		fn_userlog(c_ServiceName,"End of c_dr_cr_flg =UB ");		/*** Ver 1.4 ***/
+
+	} /* else if( c_dr_cr_flg == UB )  */
+	else
+	{
+		fn_errlog( c_ServiceName, "S31190", "Invalide Flag", c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/  
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	i_actn_id = 0;      /***  Ver 1.8 ***/
+	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );      /***  Ver 1.8 ***/
+
+
+   /************ Ver 2.4 Starts ************/
+  if( c_blk_deposit_flg == 'D'  )
+  {
+    if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    {
+     fn_errlog( c_ServiceName, "S31195", LIBMSG, c_err_msg  );
+     fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );            /*** Ver 2.4 ***/
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+     Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID , (char *)&i_actn_id , 0 );
+     Fadd32( ptr_fml_Ibuf, FFO_BAL_AMT,(char *)&d_required_amount,0);  /** To be check **/
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }
+
+   /*********** Ver 2.4 ends *********/
+
+
+
+
+	/*** tpreturn( TPSUCCESS, 0, (char *)NULL, 0 , 0 );         ***  Ver 1.8 ***/
+	tpreturn( TPSUCCESS, 0, (char *)ptr_fml_Ibuf, 0 , 0 );         /***  Ver 1.8 ***/
+}
+
+		/* Ver 1.4 addition of fn_insrt_bft() starts 	*/
+
+int fn_insrt_bft(char * c_ServiceName,char *c_sent_system_trace, char* c_msg_typ,
+                   char *c_blk_unblk_rsn_cd,  double d_trnsctn_amt, char *c_timestamp )
+{
+
+  /* Insert into BFT table in case of a bank failed transaction */
+
+  char c_remarks[100+1];
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Inside fn_insrt_bft() ");
+	}
+  memset( c_remarks, 0, sizeof(c_remarks) );
+
+  strcpy( c_remarks,"FNO Blocking/Unblocking successful in bank, but unsuccessful in EBA System! Take Corrective Action !");
+
+	d_trnsctn_amt	=	(d_trnsctn_amt / 100);				/** in BFT amount is stored in rupees **/
+
+  if(tpbegin(TRAN_TIMEOUT,0)== -1)
+  {
+     /* Return with a failure */
+     fn_errlog(c_ServiceName,"S31200",TPMSG,c_err_msg); 
+     return -1;
+  }
+
+   EXEC SQL INSERT
+             INTO        bft_bnk_fld_trnsctn
+                         (
+                         bft_fld_dt,
+                         bft_clm_mtch_accnt,
+                         bft_systm_trc_nmbr,
+                         bft_bnk_accnt_nmbr,
+                         bft_trnsctn_typ,
+                         bft_rsn_cd,
+                         bft_fld_amnt,
+                         bft_rmrks,
+                         bft_tbl_flag, 
+                         bft_err_cd,    
+                         bft_prcss_stts 
+                         )
+             VALUES      (
+                         decode(:c_timestamp, 'NULL', sysdate,
+                         to_date(:c_timestamp, 'yyyymmddhh24miss')), 
+ 												 :c_mtch_accnt,
+                         :c_sent_system_trace,
+                         :c_bank_accnt,
+                         :c_msg_typ,
+                         :c_blk_unblk_rsn_cd,
+                         :d_trnsctn_amt,
+                         :c_remarks,
+												 'FNO', 
+                         :i_err_cd,                         
+                         'N' 
+                         );
+
+	if( SQLCODE != 0 )
+	{
+			fn_userlog(c_ServiceName,"Error While Inserting into BFT and SQLCODE = %ld",	SQLCODE);
+			fn_errlog( c_ServiceName, "S31205", SQLMSG, c_err_msg);
+      return -1;
+	}
+
+  if(tpcommit(0)== -1)
+  {
+    /* Return with a failure */
+    	tpabort(0);
+ 			fn_errlog(c_ServiceName,"S31210",SQLMSG, c_err_msg);
+     	return -1;
+  }
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"Insertion into BFT completed Successfully");
+	}
+  return 1;
+}
+		/****  Ver 1.4 Ends *****/
+/************* Ver 2.4 Starts ****************************/
+
+int fn_allocate_to_segment(double d_alctd_amt)
+{
+  double d_alctd_amt_rs=0.0;
+  d_tot_alc_amt=0.0;
+  
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog( c_ServiceName, "===Inside function fn_allocate_to_segment===" );
+  }  
+
+  char c_txn_type = ALLOCATE_TO_SEGMENT;
+
+  double d_wallet_amt = 0;
+
+  EXEC SQL
+    SELECT NVL(CLM_WALLET_AMT*100,0)
+    INTO  :d_wallet_amt
+    FROM  CLM_CLNT_MSTR
+    WHERE CLM_MTCH_ACCNT = :st_usr_prfl.c_cln_mtch_accnt;
+
+  if( SQLCODE != 0 )
+  {
+    errlog(c_ServiceName,"S31215", SQLMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    fn_userlog(c_ServiceName, "Error in selecting wallet amount");
+    return -1;
+  }
+
+  if( DEBUG_MSG_LVL_0 )
+  {
+    fn_userlog( c_ServiceName, "Wallet Amt |%lf|", d_wallet_amt );
+    fn_userlog( c_ServiceName, "Allocated Amt |%lf|", d_alctd_amt );
+    fn_userlog( c_ServiceName, "Transaction Type |%c|", c_txn_type );
+  }
+
+  if( d_wallet_amt >= d_alctd_amt )
+  {
+    /***** To reduce wallet amount *****/
+
+    if(DEBUG_MSG_LVL_3)
+    {
+     fn_userlog( c_ServiceName, "Before fn_call_inc_dec_svc call in Alloc" );
+    }
+
+    i_returncode = fn_call_inc_dec_svc( d_alctd_amt, c_txn_type);
+
+    if( i_returncode != 0 )
+    {
+      fn_userlog(c_ServiceName,"Error in calling function fn_call_inc_dec_svc()");
+      fn_errlog(c_ServiceName,"S31220","Failed in fn_call_inc_dec_svc",c_err_msg);
+      return -1;
+    }
+
+    fn_userlog( c_ServiceName, "After fn_call_inc_dec_svc call in Alloc" );
+  }
+  else
+  {
+    fn_userlog(c_ServiceName,"Wallet amount is not sufficient to allocate" );
+    fn_errlog(c_ServiceName,"S31225","Wallet  amount is not sufficient to allocate",c_err_msg);
+    strcpy(c_err_msg,"Wallet Amount is not sufficient to allocate ");
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    return -1;
+  }
+
+  /*** To increase allocation amount ****/
+
+  i_returncode = fn_updt_allctn_dtls ( c_ServiceName,
+                                       c_err_msg,
+                                       st_usr_prfl.c_cln_mtch_accnt,
+                                       c_bnk_accnt,
+                                       c_ServiceName,
+                                       d_alctd_amt,
+                                       &d_tot_alc_amt);
+  if( i_returncode != 0 )
+  {
+    fn_userlog(c_ServiceName,"Error in updating Allocation Amount");
+    fn_errlog(c_ServiceName,"S31230",LIBMSG,c_err_msg);
+    return -1;
+  }
+
+  if( DEBUG_MSG_LVL_0 )
+  {
+    fn_userlog(c_ServiceName,"Total FAB Allocated Amount |%lf|", d_tot_alc_amt );
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog( c_ServiceName, "Before fn_ins_mbs call" );
+  }
+
+  /***** Entry in MBS Table *****/
+
+   MEMSET(c_prdct_cd);
+   MEMSET(c_pipo_src);
+   MEMSET(c_sgmnt_cd);
+   MEMSET(c_run_nmbr);
+   MEMSET(c_tran_date);
+   MEMSET(c_instrument_nmbr);
+   MEMSET(c_mdc_crdt_nmbr);
+   MEMSET(c_narration);
+   MEMSET(c_mtch_series);
+   MEMSET(c_class_svc);
+   MEMSET(c_src_rowid);
+   MEMSET(c_accntng_typ);
+
+   strcpy(c_prdct_cd,"ALLOC");
+   strcpy(c_accntng_typ,"GENERAL");
+   strcpy(c_pipo_src,"NA");
+   strcpy(c_sgmnt_cd,"NFO");
+   strcpy(c_tran_date,"");
+   sprintf (c_run_nmbr, "%lu" ,l_run_no); 
+   strcpy(c_instrument_nmbr,"");
+/**   strcpy(c_bnk_accnt,""); **/
+   fn_userlog(c_ServiceName,"--BANK ACCOUNT -- :%s:",c_bnk_accnt);
+   strcpy(c_mdc_crdt_nmbr,"");
+   strcpy(c_narration,"");
+   strcpy(c_mtch_series,"");
+   strcpy(c_class_svc,"SVC_ACC_ENT_MDC");
+   strcpy(c_src_rowid,"");
+
+   rtrim(c_run_nmbr);
+   fn_userlog(c_ServiceName,"Run number before MBS Insert :%s:",c_run_nmbr);
+  /***Converting into rupees **/
+  d_alctd_amt_rs=d_alctd_amt/100;
+
+	if(c_fo_link_bnk_acc == 'N') /*Ver 2.6*/
+  {
+  	i_returncode = fn_ins_mbs ( c_ServiceName,
+                             st_usr_prfl.c_cln_mtch_accnt,
+                             c_xchng_cd,
+                             c_prdct_cd,
+                             c_pipo_src,
+                             c_sgmnt_cd,
+                             0,
+                             c_tran_date,
+                             d_alctd_amt_rs,
+                             c_run_nmbr,
+                             c_instrument_nmbr,
+                             '\0',     /* \0 Added in Ver TOL */
+                             c_mdc_crdt_nmbr,
+                             ALLOCATE_TO_SEGMENT,
+                             c_accntng_typ,
+                             c_trace,
+                             c_bnk_accnt,
+                             c_narration,
+                             'C',
+                             c_mtch_series,
+                             c_class_svc,
+                             c_src_rowid,
+                             c_err_msg,
+                             c_blk_deposit_flg);
+
+  	if( i_returncode != 0 )
+  	{
+    	fn_userlog(c_ServiceName,"Error in Calling fn_ins_mbs");
+    	fn_errlog(c_ServiceName,"S31235",LIBMSG,c_err_msg);
+    	return -1;
+  	}
+	}
+
+ if(DEBUG_MSG_LVL_4)
+ {
+  fn_userlog( c_ServiceName, "After fn_ins_mbs call" );
+ } 
+
+  /**** To extract the updated FAB Amount *****/
+  /**** Entry in Segment Transaction Details *****/
+
+ if(DEBUG_MSG_LVL_3)
+ {
+  fn_userlog( c_ServiceName, "Before fn_ins_seg_log call" );
+ }
+
+  strcpy(c_narration,"Allocation to FNO  Segment ");
+
+	if(c_fo_link_bnk_acc == 'N') /*Ver 2.6*/
+  {
+  	i_returncode = fn_ins_seg_log(st_usr_prfl.c_user_id,
+                               st_usr_prfl.l_session_id,
+                               c_ServiceName,
+                               st_usr_prfl.c_cln_mtch_accnt,
+                               d_alctd_amt_rs,
+                               c_txn_type,
+                               c_sgmnt_cd,
+                               d_tot_alc_amt*0.01,
+                               'N',
+                               c_channel,
+                               c_narration,
+                               l_std_seg_dbcr_run_no,
+                               "ALLOC",
+                               "WALLET");
+
+  	if(i_returncode!=0)
+  	{
+    	fn_userlog(c_ServiceName,"Error in updating segment details");
+    	fn_errlog(c_ServiceName,"S31240",LIBMSG,c_err_msg);
+    	return -1;
+  	}
+  	fn_userlog( c_ServiceName, "After fn_ins_seg_log call" );
+	}
+  return 0;
+}
+
+
+int fn_deallocate_from_segment( double d_ub_from_alloc, char c_req_typ   )
+{
+  char c_txn_type='\0';
+  double d_ub_from_alloc_rs=0.0;
+  d_tot_alc_amt=0.0;
+
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog( c_ServiceName, "===Inside function fn_deallocate_from_segment===" );
+  }
+
+  c_txn_type = DEALLOCATE_FROM_SEGMENT;
+
+  if( DEBUG_MSG_LVL_0 )
+  {
+    fn_userlog( c_ServiceName, "Deallloc Amount |%lf|", d_ub_from_alloc );
+    fn_userlog( c_ServiceName, "Transaction Type |%c|", c_txn_type );
+  }
+
+  fn_userlog( c_ServiceName, "Before fn_call_inc_dec_svc call in Dealloc" );
+
+  i_returncode = fn_call_inc_dec_svc(d_ub_from_alloc,c_txn_type);
+
+  if(i_returncode!=0)
+  {
+    fn_userlog(c_ServiceName,"Error in calling svc_dec_wallet");
+    fn_errlog(c_ServiceName,"S31245",LIBMSG,c_err_msg);
+    return -1;
+  }
+
+  fn_userlog( c_ServiceName, "After fn_call_inc_dec_svc call in Dealloc" );
+
+  /**** To reduce allocation amount *******/
+
+  i_returncode = fn_updt_allctn_dtls ( c_ServiceName,
+                                      c_err_msg,
+                                      st_usr_prfl.c_cln_mtch_accnt,
+                                      c_bnk_accnt,
+                                      c_ServiceName,
+                                      d_ub_from_alloc * -1.0,
+                                      &d_tot_alc_amt);
+  if(i_returncode!=0)
+  {
+    fn_userlog(c_ServiceName,"Error in updating Allocation Amount");
+    fn_errlog(c_ServiceName,"S31250",LIBMSG,c_err_msg);
+    return -1;
+  }
+
+  fn_userlog(c_ServiceName,"Before fn_ins_mbs call" );
+
+
+  /******* Entry in MBS Table ********/
+
+  MEMSET(c_narration);
+  MEMSET(c_prdct_cd);
+  MEMSET(c_pipo_src);
+  MEMSET(c_sgmnt_cd);
+  MEMSET(c_run_nmbr);
+  MEMSET(c_tran_date);
+  MEMSET(c_instrument_nmbr);
+  MEMSET(c_mdc_crdt_nmbr);
+  MEMSET(c_mtch_series);
+  MEMSET(c_class_svc);
+  MEMSET(c_src_rowid);
+  MEMSET(c_accntng_typ);
+
+  strcpy(c_prdct_cd,"DEALLOC");
+  strcpy(c_accntng_typ,"GENERAL");
+  strcpy(c_pipo_src,"NA");
+  strcpy(c_sgmnt_cd,"NFO");
+  strcpy(c_tran_date,"");
+  sprintf (c_run_nmbr, "%lu" ,l_run_no);
+  strcpy(c_instrument_nmbr,"");
+  strcpy(c_mdc_crdt_nmbr,"");
+/**  strcpy(c_bnk_accnt,""); **/
+  fn_userlog(c_ServiceName,"--BANK ACCOUNT -- :%s:",c_bnk_accnt);
+  strcpy(c_narration,"");
+  strcpy(c_mtch_series,"");
+  strcpy(c_class_svc,"SVC_ACC_ENT_MDC");
+  strcpy(c_src_rowid,"");
+  
+  rtrim(c_run_nmbr);
+  fn_userlog(c_ServiceName,"Run number before MBS Insert :%s:",c_run_nmbr);
+
+ /*** Converting into rupees ***/
+
+  d_ub_from_alloc_rs=d_ub_from_alloc/100;
+
+	if(c_fo_link_bnk_acc == 'N') /* Ver 2.6 */
+  {
+  	i_returncode = fn_ins_mbs ( c_ServiceName,
+                             st_usr_prfl.c_cln_mtch_accnt,
+                             c_xchng_cd,
+                             c_prdct_cd,
+                             c_pipo_src,
+                             c_sgmnt_cd,
+                             0,
+                             c_tran_date,
+                             d_ub_from_alloc_rs,   /**positive amt send in case of dealloc **/
+                             c_run_nmbr,
+                             c_instrument_nmbr,
+                             '\0',                 /* \0 Added in Ver TOL */
+                             c_mdc_crdt_nmbr,
+                             DEALLOCATE_FROM_SEGMENT,
+                             c_accntng_typ,
+                             c_trace,
+                             c_bnk_accnt,
+                             c_narration,
+                             'D',
+                             c_mtch_series,
+                             c_class_svc,
+                             c_src_rowid,
+                             c_err_msg,
+                             c_blk_deposit_flg);
+
+  	if(i_returncode!=0)
+  	{
+    	fn_userlog(c_ServiceName,"Error in Calling fn_ins_mbs");
+    	fn_errlog(c_ServiceName,"S31255",LIBMSG,c_err_msg);
+    	return -1;
+ 		}
+	
+	}
+
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog(c_ServiceName,"Before fn_ins_seg_log call" );
+  }
+
+  /**** Entry in Segment Transaction Details *****/
+	if(c_fo_link_bnk_acc == 'N') /*Ver 2.6*/
+  {
+  	strcpy(c_narration,"De Allocation from FNO Segment ");
+
+  	i_returncode = fn_ins_seg_log(st_usr_prfl.c_user_id,
+                               st_usr_prfl.l_session_id,
+                               c_ServiceName,
+                               st_usr_prfl.c_cln_mtch_accnt,
+                               d_ub_from_alloc_rs,
+                               c_txn_type,
+                               c_sgmnt_cd,
+                               d_tot_alc_amt*0.01,
+                               'N',
+                               c_channel,
+                               c_narration,
+                               l_std_seg_dbcr_run_no,
+                               "DEALLOC",
+                               "LIMIT");
+
+  	if(i_returncode!=0)
+  	{
+   	 	fn_userlog(c_ServiceName,"Error in updating segment details");
+    	fn_errlog(c_ServiceName,"S31260",LIBMSG,c_err_msg);
+    	return -1;
+  	}
+	}
+  return 0;
+}
+
+
+int fn_call_inc_dec_svc( double d_alctd_amt, char c_txn_type )
+{
+
+ FBFR32 *ptr_fml_Rbuf;
+ FBFR32 *ptr_fml_Sbuf;
+
+ long li_len_tobuf=0;
+ long li_run_num = 0;
+
+ ptr_fml_Sbuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+ if(ptr_fml_Sbuf == NULL)
+ {
+   fn_errlog( c_ServiceName , "S31265", TPMSG, c_err_msg);
+   fn_userlog( c_ServiceName, "tpalloc failed for ptr_fml_Sbuf");
+   return -1;
+ }
+
+ ptr_fml_Rbuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+ if(ptr_fml_Rbuf == NULL)
+ {
+   fn_errlog( c_ServiceName , "S31270", TPMSG, c_err_msg);
+   fn_userlog( c_ServiceName, "tpalloc failed for ptr_fml_Rbuf");
+   return -1;
+ }
+
+ char c_called_svc[33];
+ char c_segment_code[4];
+ char c_mdc_narration[50];
+
+ MEMSET(c_called_svc);
+ MEMSET(c_segment_code);
+ MEMSET(c_mdc_narration);
+ MEMSET(c_seg_prdct_cd);
+
+ int i;
+
+ if( c_txn_type == ALLOCATE_TO_SEGMENT )
+ {
+  strcpy( c_called_svc,"SVC_DEC_WALLET" );
+  strcpy(c_mdc_narration,"Allocation To FNO Segment");
+ }
+ if( c_txn_type == DEALLOCATE_FROM_SEGMENT )
+ {
+  strcpy( c_called_svc, "SVC_INC_WALLET" );
+  strcpy(c_mdc_narration,"Deallocation From FNO Segment");
+ }
+
+  fn_userlog(c_ServiceName,"Calling service :%s:",c_called_svc);
+
+    rtrim(c_called_svc);
+    rtrim(c_mdc_narration);
+
+ if( DEBUG_MSG_LVL_0 )
+ {
+  fn_userlog(c_ServiceName,"Service To be called |%s| ",c_called_svc );
+  fn_userlog(c_ServiceName,"Transaction Type |%c|",c_txn_type);
+  fn_userlog(c_ServiceName,"User ID |%s| ",st_usr_prfl.c_user_id );
+  fn_userlog(c_ServiceName,"Session ID |%ld| ",st_usr_prfl.l_session_id );
+  fn_userlog(c_ServiceName,"Match Acc No |%s|",st_usr_prfl.c_cln_mtch_accnt );
+  fn_userlog(c_ServiceName,"Allcated/Deallocated Amount |%lf|",d_alctd_amt );
+  fn_userlog(c_ServiceName,"Channel |%s| ",c_channel );
+  fn_userlog(c_ServiceName,"IP Address |%s| ",c_ip_add );
+ }
+
+ d_alctd_amt_rs = d_alctd_amt/100.00;
+ i_err[0] = Fadd32(ptr_fml_Sbuf,FML_USR_ID,(char *)st_usr_prfl.c_user_id, 0);
+ i_err[1] = Fadd32(ptr_fml_Sbuf,FML_SSSN_ID,(char *)&st_usr_prfl.l_session_id,0);
+ i_err[2] = Fadd32(ptr_fml_Sbuf,FML_EBA_MTCH_ACT_NO,(char *)st_usr_prfl.c_cln_mtch_accnt,0);
+ i_err[3] = Fadd32(ptr_fml_Sbuf,FML_MSG_TYP,(char *)&c_txn_type,0);
+ i_err[4] = Fadd32(ptr_fml_Sbuf,FML_TRNSCTN_AMT,(char *)&d_alctd_amt_rs,0);
+ i_err[5] = Fadd32(ptr_fml_Sbuf,FML_MDC_NARRATION,(char *)c_mdc_narration,0);
+ i_err[6] = Fadd32(ptr_fml_Sbuf,FML_USR_PASSWORD_ID,(char *)c_channel,0);
+ i_err[7] = Fadd32(ptr_fml_Sbuf,FML_IP_ID,(char *)c_ip_add,0);
+
+ if(c_txn_type == ALLOCATE_TO_SEGMENT || c_txn_type == DEALLOCATE_FROM_SEGMENT)
+ {
+  i_err[8] = 0;
+  strcpy(c_segment_code,"NFO");
+  i_err[9] = Fadd32(ptr_fml_Sbuf,FML_XCHNG_SG,(char *)c_segment_code,0);
+ }
+
+ if(c_txn_type == PAYOUT_FROM_SEGMENT)
+ {
+  strcpy(c_bnk_accnt,st_usr_prfl.c_bnk_accnt_nmbr[0]);
+  i_err[8] = Fadd32(ptr_fml_Sbuf,FML_ARD_BNK_ACCNT_NMBR,(char *)c_bnk_accnt,0);
+  strcpy(c_segment_code,"NFO");
+  i_err[9] = Fadd32(ptr_fml_Sbuf,FML_XCHNG_SG,(char *)c_segment_code,0);
+ }
+
+ i_err[10] = Fadd32(ptr_fml_Sbuf,FML_VLME,(char *)&li_run_num,0);
+
+ if(c_txn_type == ALLOCATE_TO_SEGMENT)
+ {
+  strcpy(c_seg_prdct_cd,"ALLOC");
+  i_err[11] = Fadd32(ptr_fml_Sbuf,FML_TRANS_TYP,(char *)c_seg_prdct_cd,0);
+ }
+
+ if(c_txn_type == DEALLOCATE_FROM_SEGMENT  )
+ {
+  strcpy(c_seg_prdct_cd,"DEALLOC");
+  i_err[11] = Fadd32(ptr_fml_Sbuf,FML_TRANS_TYP,(char *)c_seg_prdct_cd,0);
+ }
+
+ 
+ for( i = 0 ; i < 12 ; i++ )
+ {
+  if(i_err[i] == -1)
+  {
+   fn_userlog(c_ServiceName,"Fadd failed for %d", i );
+   fn_errlog(c_ServiceName,"S31275",FMLMSG,c_err_msg);
+   tpfree((char *)ptr_fml_Sbuf);
+   tpfree((char *)ptr_fml_Rbuf);
+   return -1;
+  }
+ }
+
+ fn_userlog(c_ServiceName,"Calling service :%s:",c_called_svc);
+
+ if(tpcall( c_called_svc,(char*)ptr_fml_Sbuf,0,(char **)&ptr_fml_Rbuf,&li_len_tobuf,0 ) == -1)
+ {
+  if(tperrno == TPESVCFAIL)
+  {
+   fn_userlog("TPESVCFAIL returned by |%s|",c_called_svc);
+
+   if(Foccur32(ptr_fml_Rbuf, FML_ERR_MSG) > 0)
+   {
+    if(Fget32(ptr_fml_Rbuf,FML_ERR_MSG, 0, (char*)c_err_msg, 0 ) == -1)
+    {
+     tpabort(0);
+     fn_userlog(c_ServiceName,"error in fget of FML_ERR_MSG");
+     fn_errlog(c_ServiceName,"S31280",FMLMSG,c_err_msg);
+     tpfree((char *)ptr_fml_Sbuf);
+     tpfree((char *)ptr_fml_Rbuf);
+     return -1;
+    }
+   }
+  }
+  else
+  {
+      fn_userlog(c_ServiceName,"inside else of TPESVCFAIL");
+      tpabort(0);
+      fn_errlog(c_ServiceName,"S31285",TPMSG,c_err_msg);
+      tpfree((char *)ptr_fml_Sbuf);
+      tpfree((char *)ptr_fml_Rbuf);
+      return -1;
+  }
+ }
+
+ tpfree((char *)ptr_fml_Sbuf);
+ tpfree((char *)ptr_fml_Rbuf);
+
+ return 0;
+}
+
+/************** Ver 2.4 Ends ******************/
+
+/************** Ver 2.6 Ends ******************/
+static void return_fail(FBFR32 * ptr_fml_Ibuf , char * c_err_msg)
+{
+    long l_acnt_id = -1;
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   /** Fprint32(ptr_fml_Ibuf);**/
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+}
+/************** Ver 2.6 Ends ******************/
+

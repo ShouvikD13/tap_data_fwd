@@ -1,0 +1,487 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_REF_TO_ORD                                        */
+/*                                                                            */
+/*  Input             : vw_orderbook                                          */
+/*                                                                            */
+/*  Output            : vw_orderbook                                          */
+/*                      vw_err_msg                                            */
+/*                                                                            */
+/*  Description       : To get the details of the Order for the given         */
+/*                      input of Order Reference                              */
+/*                                                                            */
+/*  Log               : 1.0   03-Oct-2001   S. Swaminathan                    */
+/*  Log               : 1.1   04-Oct-2005   3i-infotech-P. Jagapathi          */
+/*	Log								:	1.2		27-Sep-2006		Abhishek | Infotech								*/
+/*	Log								:	1.3		20-Mar-2007		Anurag	 | Infotech								*/
+/*	Log								:	1.4		20-Dec-2007		Sushil	 | Infotech								*/
+/*  Log               : 1.5   10-Mar-2008   Shailesh | Infotech               */
+/*  Log               : 1.6   31-Oct-2008   Shailesh | Infotech               */
+/*  Log               : 1.7   14-Nov-2008   Shailesh | Infotech               */
+/*  Log               : 1.8   01-Jul-2009   Indrajit | Infotech               */
+/*  Log               : 2.0   01-Jul-2016   Tanmay W | Infotech               */
+/*                                                                            */
+/******************************************************************************/
+/*  1.0  -  New release                                                       */
+/*	1.2	 -	Changes done for UCC Code and CP Code in Match										*/
+/*					account and Settlor1 Field respectively														*/
+/*	1.3  -  Changes done to add channel to output															*/
+/*	1.4	 -	AIX Migration																											*/
+/*  1.5  -  Changes done for Futureplus                                       */
+/*  1.6  -  Changes for CRARE22929-to handle Distri xactn lock error       		*/ 
+/*  1.7  -  Changes for CRCSN23370-to increase the cp code length							*/ 
+/*  1.8  -  Added NOWAIT to handle distributed lock error for ors2 and 				*/
+/* 					seperated the else if	conditions for FOR UPDATE and FOR SNDCLNT		*/ 
+/*  2.0	-	  Log maintainance																									*/	
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>             /*  Ver 1.4 : Added   */
+#include <fn_read_debug_lvl.h>  /*  Ver 1.4 : Added   */
+
+void SFO_REF_TO_ORD( TPSVCINFO *rqst )
+{
+	char c_ServiceName[ 33];
+	char c_errmsg[256];
+	char c_msg[256];
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		short i_sprd_ord_rfrnc;
+		varchar c_ucc_cd [11];        /**  Ver 1.2    **/
+
+/**The cp code field length is changed from 10 to 12 in Ver 1.7**/
+
+/**	varchar c_cp_code [11];        **  Ver 1.2    **/
+		varchar c_cp_code [11 + 2];   /**  Ver 1.7    **/
+
+		short i_settlor;
+		short i_ack_tm;
+		short i_prev_ack_tm;
+		short i_xchng_ack;
+		short i_valid_dt;
+		struct vw_orderbook *ptr_st_orderbook;
+	EXEC SQL END DECLARE SECTION;
+
+	struct vw_err_msg *ptr_st_err_msg;
+
+	ptr_st_orderbook = ( struct vw_orderbook *)rqst->data;
+	strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);            /*  Ver 1.4 : Added   */
+
+	ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32",
+                                                     "vw_err_msg",
+                                                sizeof ( struct vw_err_msg ) );
+	if ( ptr_st_err_msg ==  NULL )
+	{
+		fn_errlog ( c_ServiceName, "S31005", TPMSG, c_errmsg );
+		tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+	}
+
+	memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) );
+ 
+/** if( DEBUG_MSG_LVL_3 ) ** Ver 2.0 **/ 
+if(DEBUG_MSG_LVL_0)   /** Ver 2.0 **/
+{          /*  Ver 1.4 : Debug level Change  */
+  fn_userlog( c_ServiceName,"c_ordr_rfrnc:%s:, Requested Operation :%c: ",ptr_st_orderbook->c_ordr_rfrnc, ptr_st_orderbook->c_oprn_typ);
+}
+
+  /*** Added for Order Routing ***/
+  fn_init_ddr_val ( ptr_st_orderbook->c_rout_crt );
+ 
+ MEMSET( ptr_st_orderbook->c_ctcl_id);
+	if ( ptr_st_orderbook->c_oprn_typ == FOR_VIEW )
+	{
+		EXEC SQL
+			SELECT 	fod_clm_mtch_accnt,
+							fod_ctcl_id , /* 1.1 */
+							fod_clnt_ctgry,
+							fod_pipe_id,
+							fod_xchng_cd,
+							fod_prdct_typ,
+							fod_undrlyng,
+							to_char ( fod_expry_dt, 'dd-Mon-yyyy' ),
+							fod_exer_typ,
+							fod_opt_typ,
+							fod_strk_prc,
+							fod_ordr_flw,
+							fod_lmt_mrkt_sl_flg,
+							fod_dsclsd_qty,
+							fod_ordr_tot_qty,
+							fod_lmt_rt,
+							fod_stp_lss_tgr,
+							fod_ordr_type,
+							to_char ( fod_ordr_valid_dt, 'dd-Mon-yyyy' ),
+							to_char ( fod_trd_dt, 'dd-Mon-yyyy' ),
+							fod_ordr_stts,
+							fod_exec_qty,
+							NVL(fod_exec_qty_day,0),
+							fod_cncl_qty,
+							fod_exprd_qty,
+							fod_sprd_ordr_ref,
+							fod_mdfctn_cntr,
+							fod_settlor,
+							fod_ack_nmbr,
+							fod_spl_flag,
+							fod_indstk,
+							to_char ( fod_ord_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							to_char ( fod_lst_rqst_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							fod_pro_cli_ind	,
+							fod_channel									/* 1.3 */
+				INTO  :ptr_st_orderbook->c_cln_mtch_accnt,
+							:ptr_st_orderbook->c_ctcl_id,  /* 1.1 */
+	            :ptr_st_orderbook->l_clnt_ctgry,
+	            :ptr_st_orderbook->c_pipe_id,
+							:ptr_st_orderbook->c_xchng_cd,
+	            :ptr_st_orderbook->c_prd_typ,
+	            :ptr_st_orderbook->c_undrlyng,
+	            :ptr_st_orderbook->c_expry_dt,
+	            :ptr_st_orderbook->c_exrc_typ,
+	            :ptr_st_orderbook->c_opt_typ,
+	            :ptr_st_orderbook->l_strike_prc,
+	            :ptr_st_orderbook->c_ordr_flw,
+	            :ptr_st_orderbook->c_slm_flg,
+	            :ptr_st_orderbook->l_dsclsd_qty,
+	            :ptr_st_orderbook->l_ord_tot_qty,
+	            :ptr_st_orderbook->l_ord_lmt_rt,
+	            :ptr_st_orderbook->l_stp_lss_tgr,
+	            :ptr_st_orderbook->c_ord_typ,
+	            :ptr_st_orderbook->c_valid_dt:i_valid_dt,
+	            :ptr_st_orderbook->c_trd_dt,
+	            :ptr_st_orderbook->c_ordr_stts,
+	            :ptr_st_orderbook->l_exctd_qty,
+	            :ptr_st_orderbook->l_exctd_qty_day,
+	            :ptr_st_orderbook->l_can_qty,
+	            :ptr_st_orderbook->l_exprd_qty,
+	            :ptr_st_orderbook->c_sprd_ord_rfrnc:i_sprd_ord_rfrnc,
+	            :ptr_st_orderbook->l_mdfctn_cntr,
+	            :ptr_st_orderbook->c_settlor:i_settlor,
+	            :ptr_st_orderbook->c_xchng_ack:i_xchng_ack,
+	            :ptr_st_orderbook->c_spl_flg,
+							:ptr_st_orderbook->c_ctgry_indstk,
+							:ptr_st_orderbook->c_ack_tm:i_ack_tm,
+							:ptr_st_orderbook->c_prev_ack_tm:i_prev_ack_tm,
+							:ptr_st_orderbook->c_pro_cli_ind,
+							:ptr_st_orderbook->c_channel 			/* 1.3 */
+				FROM	fod_fo_ordr_dtls
+				WHERE fod_ordr_rfrnc = :ptr_st_orderbook->c_ordr_rfrnc;
+	}
+	else if ( ptr_st_orderbook->c_oprn_typ == FOR_UPDATE ) /* Ver 1.8 Start */
+	{
+		EXEC SQL
+			SELECT 	fod_clm_mtch_accnt,
+							fod_clnt_ctgry,
+							fod_pipe_id,
+							fod_xchng_cd,
+							decode(:ptr_st_orderbook->c_oprn_typ,'S',(decode(fod_prdct_typ,'P','F',fod_prdct_typ)),fod_prdct_typ),  /*
+Ver 1.5 */
+							fod_undrlyng,
+							to_char ( fod_expry_dt, 'dd-Mon-yyyy' ),
+							fod_exer_typ,
+							fod_opt_typ,
+							fod_strk_prc,
+							fod_ordr_flw,
+							fod_lmt_mrkt_sl_flg,
+							fod_dsclsd_qty,
+							fod_ordr_tot_qty,
+							fod_lmt_rt,
+							fod_stp_lss_tgr,
+							fod_ordr_type,
+							to_char ( fod_ordr_valid_dt, 'dd-Mon-yyyy' ),
+							to_char ( fod_trd_dt, 'dd-Mon-yyyy' ),
+							fod_ordr_stts,
+							fod_exec_qty,
+							NVL(fod_exec_qty_day,0),
+							fod_cncl_qty,
+							fod_exprd_qty,
+							fod_sprd_ordr_ref,
+							fod_mdfctn_cntr,
+							fod_settlor,
+							fod_ack_nmbr,
+							fod_spl_flag,
+							fod_indstk,
+							to_char ( fod_ord_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							to_char ( fod_lst_rqst_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							fod_pro_cli_ind,
+							nvl(fod_ctcl_id,' '),  /* 1.1 */
+							fod_channel            /* 1.3 */
+				INTO  :ptr_st_orderbook->c_cln_mtch_accnt,
+	            :ptr_st_orderbook->l_clnt_ctgry,
+	            :ptr_st_orderbook->c_pipe_id,
+							:ptr_st_orderbook->c_xchng_cd,
+	            :ptr_st_orderbook->c_prd_typ,
+	            :ptr_st_orderbook->c_undrlyng,
+	            :ptr_st_orderbook->c_expry_dt,
+	            :ptr_st_orderbook->c_exrc_typ,
+	            :ptr_st_orderbook->c_opt_typ,
+	            :ptr_st_orderbook->l_strike_prc,
+	            :ptr_st_orderbook->c_ordr_flw,
+	            :ptr_st_orderbook->c_slm_flg,
+	            :ptr_st_orderbook->l_dsclsd_qty,
+	            :ptr_st_orderbook->l_ord_tot_qty,
+	            :ptr_st_orderbook->l_ord_lmt_rt,
+	            :ptr_st_orderbook->l_stp_lss_tgr,
+	            :ptr_st_orderbook->c_ord_typ,
+	            :ptr_st_orderbook->c_valid_dt:i_valid_dt,
+	            :ptr_st_orderbook->c_trd_dt,
+	            :ptr_st_orderbook->c_ordr_stts,
+	            :ptr_st_orderbook->l_exctd_qty,
+	            :ptr_st_orderbook->l_exctd_qty_day,
+	            :ptr_st_orderbook->l_can_qty,
+	            :ptr_st_orderbook->l_exprd_qty,
+	            :ptr_st_orderbook->c_sprd_ord_rfrnc:i_sprd_ord_rfrnc,
+	            :ptr_st_orderbook->l_mdfctn_cntr,
+	            :ptr_st_orderbook->c_settlor:i_settlor,
+	            :ptr_st_orderbook->c_xchng_ack:i_xchng_ack,
+	            :ptr_st_orderbook->c_spl_flg,
+							:ptr_st_orderbook->c_ctgry_indstk,
+							:ptr_st_orderbook->c_ack_tm:i_ack_tm,
+							:ptr_st_orderbook->c_prev_ack_tm:i_prev_ack_tm,
+							:ptr_st_orderbook->c_pro_cli_ind,
+							:ptr_st_orderbook->c_ctcl_id,  /* 1.1 */
+							:ptr_st_orderbook->c_channel   /* 1.3 */
+				FROM	fod_fo_ordr_dtls
+				WHERE fod_ordr_rfrnc = :ptr_st_orderbook->c_ordr_rfrnc
+				FOR 	UPDATE OF fod_ordr_rfrnc ; 
+	}
+	else if ( ptr_st_orderbook->c_oprn_typ == FOR_SNDCLNT)
+	{
+		EXEC SQL
+			SELECT 	fod_clm_mtch_accnt,
+							fod_clnt_ctgry,
+							fod_pipe_id,
+							fod_xchng_cd,
+							decode(:ptr_st_orderbook->c_oprn_typ,'S',(decode(fod_prdct_typ,'P','F',fod_prdct_typ)),fod_prdct_typ),  /*
+Ver 1.5 */
+							fod_undrlyng,
+							to_char ( fod_expry_dt, 'dd-Mon-yyyy' ),
+							fod_exer_typ,
+							fod_opt_typ,
+							fod_strk_prc,
+							fod_ordr_flw,
+							fod_lmt_mrkt_sl_flg,
+							fod_dsclsd_qty,
+							fod_ordr_tot_qty,
+							fod_lmt_rt,
+							fod_stp_lss_tgr,
+							fod_ordr_type,
+							to_char ( fod_ordr_valid_dt, 'dd-Mon-yyyy' ),
+							to_char ( fod_trd_dt, 'dd-Mon-yyyy' ),
+							fod_ordr_stts,
+							fod_exec_qty,
+							NVL(fod_exec_qty_day,0),
+							fod_cncl_qty,
+							fod_exprd_qty,
+							fod_sprd_ordr_ref,
+							fod_mdfctn_cntr,
+							fod_settlor,
+							fod_ack_nmbr,
+							fod_spl_flag,
+							fod_indstk,
+							to_char ( fod_ord_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							to_char ( fod_lst_rqst_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							fod_pro_cli_ind,
+							nvl(fod_ctcl_id,' '),  /* 1.1 */
+							fod_channel            /* 1.3 */
+				INTO  :ptr_st_orderbook->c_cln_mtch_accnt,
+	            :ptr_st_orderbook->l_clnt_ctgry,
+	            :ptr_st_orderbook->c_pipe_id,
+							:ptr_st_orderbook->c_xchng_cd,
+	            :ptr_st_orderbook->c_prd_typ,
+	            :ptr_st_orderbook->c_undrlyng,
+	            :ptr_st_orderbook->c_expry_dt,
+	            :ptr_st_orderbook->c_exrc_typ,
+	            :ptr_st_orderbook->c_opt_typ,
+	            :ptr_st_orderbook->l_strike_prc,
+	            :ptr_st_orderbook->c_ordr_flw,
+	            :ptr_st_orderbook->c_slm_flg,
+	            :ptr_st_orderbook->l_dsclsd_qty,
+	            :ptr_st_orderbook->l_ord_tot_qty,
+	            :ptr_st_orderbook->l_ord_lmt_rt,
+	            :ptr_st_orderbook->l_stp_lss_tgr,
+	            :ptr_st_orderbook->c_ord_typ,
+	            :ptr_st_orderbook->c_valid_dt:i_valid_dt,
+	            :ptr_st_orderbook->c_trd_dt,
+	            :ptr_st_orderbook->c_ordr_stts,
+	            :ptr_st_orderbook->l_exctd_qty,
+	            :ptr_st_orderbook->l_exctd_qty_day,
+	            :ptr_st_orderbook->l_can_qty,
+	            :ptr_st_orderbook->l_exprd_qty,
+	            :ptr_st_orderbook->c_sprd_ord_rfrnc:i_sprd_ord_rfrnc,
+	            :ptr_st_orderbook->l_mdfctn_cntr,
+	            :ptr_st_orderbook->c_settlor:i_settlor,
+	            :ptr_st_orderbook->c_xchng_ack:i_xchng_ack,
+	            :ptr_st_orderbook->c_spl_flg,
+							:ptr_st_orderbook->c_ctgry_indstk,
+							:ptr_st_orderbook->c_ack_tm:i_ack_tm,
+							:ptr_st_orderbook->c_prev_ack_tm:i_prev_ack_tm,
+							:ptr_st_orderbook->c_pro_cli_ind,
+							:ptr_st_orderbook->c_ctcl_id,  /* 1.1 */
+							:ptr_st_orderbook->c_channel   /* 1.3 */
+				FROM	fod_fo_ordr_dtls
+				WHERE fod_ordr_rfrnc = :ptr_st_orderbook->c_ordr_rfrnc
+				FOR 	UPDATE OF fod_ordr_rfrnc NOWAIT; 
+	}   /* Ver 1.8 Ends */
+	else 
+	{
+		sprintf( ptr_st_err_msg->c_err_msg, "Invalid Operation Type:%c:",
+                                       ptr_st_orderbook->c_oprn_typ );
+    fn_errlog ( c_ServiceName, "S31010", DEFMSG, ptr_st_err_msg->c_err_msg );
+    tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+	}
+
+	if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+		if( (ptr_st_orderbook->c_oprn_typ == FOR_SNDCLNT) && (SQLCODE == -54)) 		/**Ver 1.6 **/ /* Ver 1.8 Added new error code*/
+		{	
+			fn_userlog(c_ServiceName,"In DISTRIBUTION_LOCK_ERR ");
+			strcpy( ptr_st_err_msg->c_err_msg,"DISTRIBUTION_LOCK_ERR");
+		}
+		else
+		{
+			fn_errlog ( c_ServiceName, "S31015", SQLMSG, ptr_st_err_msg->c_err_msg );
+		}
+
+		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+  }
+
+	if ( ( SQLCODE == NO_DATA_FOUND ) &&
+			 ( ptr_st_orderbook->c_oprn_typ == FOR_VIEW ) )
+	{
+		EXEC SQL
+			SELECT 	fod_clm_mtch_accnt,
+							fod_clnt_ctgry,
+							fod_pipe_id,
+							fod_xchng_cd,
+							fod_prdct_typ,
+							fod_undrlyng,
+							to_char ( fod_expry_dt, 'dd-Mon-yyyy' ),
+							fod_exer_typ,
+							fod_opt_typ,
+							fod_strk_prc,
+							fod_ordr_flw,
+							fod_lmt_mrkt_sl_flg,
+							fod_dsclsd_qty,
+							fod_ordr_tot_qty,
+							fod_lmt_rt,
+							fod_stp_lss_tgr,
+							fod_ordr_type,
+							to_char ( fod_ordr_valid_dt, 'dd-Mon-yyyy' ),
+							to_char ( fod_trd_dt, 'dd-Mon-yyyy' ),
+							fod_ordr_stts,
+							fod_exec_qty,
+							NVL(fod_exec_qty_day,0),
+							fod_cncl_qty,
+							fod_exprd_qty,
+							NVL( fod_sprd_ordr_ref, '*' ),
+							fod_mdfctn_cntr,
+							NVL( fod_settlor, '*' ),
+							fod_ack_nmbr,
+							NVL( fod_spl_flag, ' ' ),
+							fod_indstk,
+							to_char ( fod_ord_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							to_char ( fod_lst_rqst_ack_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+							fod_pro_cli_ind,
+							fod_ctcl_id,  /* 1.1 */
+							fod_channel   /* 1.3 */
+			INTO    :ptr_st_orderbook->c_cln_mtch_accnt,
+              :ptr_st_orderbook->l_clnt_ctgry,
+              :ptr_st_orderbook->c_pipe_id,
+							:ptr_st_orderbook->c_xchng_cd,
+              :ptr_st_orderbook->c_prd_typ,
+              :ptr_st_orderbook->c_undrlyng,
+              :ptr_st_orderbook->c_expry_dt,
+              :ptr_st_orderbook->c_exrc_typ,
+              :ptr_st_orderbook->c_opt_typ,
+              :ptr_st_orderbook->l_strike_prc,
+              :ptr_st_orderbook->c_ordr_flw,
+              :ptr_st_orderbook->c_slm_flg,
+              :ptr_st_orderbook->l_dsclsd_qty,
+              :ptr_st_orderbook->l_ord_tot_qty,
+              :ptr_st_orderbook->l_ord_lmt_rt,
+              :ptr_st_orderbook->l_stp_lss_tgr,
+              :ptr_st_orderbook->c_ord_typ,
+              :ptr_st_orderbook->c_valid_dt,
+              :ptr_st_orderbook->c_trd_dt,
+              :ptr_st_orderbook->c_ordr_stts,
+              :ptr_st_orderbook->l_exctd_qty,
+              :ptr_st_orderbook->l_exctd_qty_day,
+              :ptr_st_orderbook->l_can_qty,
+              :ptr_st_orderbook->l_exprd_qty,
+              :ptr_st_orderbook->c_sprd_ord_rfrnc :i_sprd_ord_rfrnc,
+              :ptr_st_orderbook->l_mdfctn_cntr,
+              :ptr_st_orderbook->c_settlor,
+              :ptr_st_orderbook->c_xchng_ack,
+              :ptr_st_orderbook->c_req_typ,
+							:ptr_st_orderbook->c_ctgry_indstk,
+							:ptr_st_orderbook->c_ack_tm:i_ack_tm,
+							:ptr_st_orderbook->c_prev_ack_tm:i_prev_ack_tm,
+							:ptr_st_orderbook->c_pro_cli_ind,
+							:ptr_st_orderbook->c_ctcl_id,  /* 1.1 */
+							:ptr_st_orderbook->c_channel /* 1.3 */
+			FROM	 	fod_fo_ordr_dtls_hstry
+			WHERE 	fod_ordr_rfrnc = :ptr_st_orderbook->c_ordr_rfrnc;
+
+			if ( SQLCODE != 0 )
+			{
+    		fn_errlog ( c_ServiceName,"S31020", SQLMSG, ptr_st_err_msg->c_err_msg );
+    		tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+			}
+	}
+	else if ( SQLCODE == NO_DATA_FOUND )
+	{
+  	fn_errlog ( c_ServiceName,"S31025", SQLMSG, ptr_st_err_msg->c_err_msg );
+   	tpreturn ( TPFAIL, ERR_BFR, ( char * )ptr_st_err_msg, 0, 0 );
+	}
+
+	/* Ver 1.2 starts  */
+	
+	if ( ptr_st_orderbook->c_oprn_typ == FOR_SNDCLNT )
+	{
+	  EXEC SQL
+  	SELECT  NVL(RTRIM( CLM_CP_CD ), ' '),
+     	     	NVL(RTRIM( CLM_CLNT_CD ),CLM_MTCH_ACCNT )
+  	INTO		:c_cp_code,
+          	:c_ucc_cd
+  	FROM    CLM_CLNT_MSTR
+  	WHERE   CLM_MTCH_ACCNT = :ptr_st_orderbook->c_cln_mtch_accnt;
+
+	  if( SQLCODE != 0 )
+  	{
+    	fn_userlog( c_ServiceName, "match account is :%s:",ptr_st_orderbook->c_cln_mtch_accnt);
+    	fn_errlog( c_ServiceName, "S31030", SQLMSG, ptr_st_err_msg->c_err_msg);
+    	tpreturn( TPFAIL, ERR_BFR, (char *)ptr_st_err_msg, 0, 0);
+  	}
+
+  	SETNULL(c_ucc_cd);
+  	SETNULL(c_cp_code);
+if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.4 : Debug level Change  */
+  	fn_userlog( c_ServiceName, "match account before is :%s:",ptr_st_orderbook->c_cln_mtch_accnt);
+}	
+
+  	strcpy(ptr_st_orderbook->c_cln_mtch_accnt, (char *)c_ucc_cd.arr);
+  	strcpy(ptr_st_orderbook->c_settlor, (char *)c_cp_code.arr);
+	}
+
+  /* Ver 1.2 Ends */
+
+	rtrim ( ptr_st_orderbook->c_expry_dt );
+	rtrim ( ptr_st_orderbook->c_ctcl_id );
+
+if( DEBUG_MSG_LVL_3 ) {          /*  Ver 1.4 : Debug level Change  */
+  fn_userlog( c_ServiceName, "cp before is :%s:",c_cp_code.arr);
+  fn_userlog( c_ServiceName,"jagan ctcl_id is :%s:",ptr_st_orderbook->c_ctcl_id);
+  fn_userlog( c_ServiceName, "match account after is :%s:",ptr_st_orderbook->c_cln_mtch_accnt);
+  fn_userlog( c_ServiceName, "cp after is :%s:",ptr_st_orderbook->c_settlor);
+}	
+	tpfree ( ( char * ) ptr_st_err_msg );
+  tpreturn ( TPSUCCESS, SUCC_BFR, ( char * )ptr_st_orderbook, 
+                                  sizeof( struct vw_orderbook ), 0 );
+}

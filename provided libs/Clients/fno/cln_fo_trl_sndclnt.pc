@@ -1,0 +1,836 @@
+/************************************************************************************************
+*                                                                                               *
+*    Program           :    cln_fo_trl_sndclnt.pc                                               *
+*                                                                                               *
+*    Purpose           :    This program picks up price improvement order records from table    *
+*                           FTO_FO_TRAIL_ORD and sends it over to CEP system via socket.        * 
+*                                                                                               *
+*    Input Parameters  :    Param. Name         Values                                          *
+*                           Exchange code       NFO / BFO / ALL                                 *
+*                                                                                               *
+*    Output Parameters :    Order reference                                                     *
+*                           Stock code                                                          *
+*                           Order flow (Buy / Sell flag)                                        *
+*                           Modification counter                                                *
+*                           Incremental price                                                   *
+*                           Exchange code                                                       *
+*                           Product type                                                        *
+*                           CEP remove flag                                                     *
+*                           Row id                                                              *
+*                           Pipe id                                                             *
+*                           Order qty                                                           *
+*                           Executed qty                                                        *
+*                           Cancel qty                                                          *
+*                           LTP                                                                 *
+*                                                                                               *
+*       Ver. Log      :			1.0   02-Sep-2016 New Release ( Vishal Borhade)                     *
+*       Ver. Log      :			1.1   10-Jul-2017  Array size change ( Sachin Birje)                  *
+*                                                                                               *
+************************************************************************************************/
+/**** C header ****/
+#include <stdio.h>
+#include <sys/socket.h>
+
+/**** Tuxedo header ****/
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <unistd.h>
+#include <userlog.h>
+#include <errno.h>
+#include <fo_view_def.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_scklib_tap.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_signal.h>
+/* Process specific header  */
+#include <fn_env.h>
+#include <fn_log.h>
+#include <fn_ddr.h>
+#include <signal.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+
+#define DELIMITER '^'
+#define DONT_EXIT 1
+#define SET_KEEPALIVE 1
+#define EXIT 0
+
+int fn_read_inifile(void);
+int fn_send ( int  i_fd, char *ptr_c_stm, int  *ptr_i_sz);
+void  fn_sigusr2_hnd ( int );
+void  fn_snd_stp_mail ( char *, char* );
+int fn_upd_prc_impr ( char, char *, char * );
+
+
+/* Function for check the Trigger occurance. **/
+int fn_resend_ordrs( void );
+
+
+/** Global Variables **/
+char  c_ServiceName[33];
+char  c_errmsg[256];
+char  c_xchng_cd[4];
+char  c_inpt_xchng_cd[4];
+char  c_pipe_id[3];
+char  c_cep_ip[20] = {'\0'};
+char  c_trg_name[30];
+char  c_trg_message[30];
+char  c_trg_got ='N';
+char  c_filter[20];
+char  c_trg_tm = 'N';  /*** Added for fetching trigger time from CEP ***/
+
+int   i_cep_port = 0;
+int   i_sleep_time = 0;
+int   i_exit_stts = 0;
+
+long int li_trg_stp_bat_hnd = 0;
+
+
+void CLN_FO_TRL_SNDCLNT( int  argc, char *argv[] )
+{
+
+  int   i_prc_imp_sck_id = 0;
+  int   i_record_len = 0;
+  int   i_ret_val = 0;
+
+	char c_clm_mtch_accnt[11] = {'\0'} ;
+  char c_ordr_rfrnc[19]    = {'\0'} ;
+  char c_pipe_id[3]        = {'\0'} ;
+  char c_xchng_cd[4]       = {'\0'} ;
+  char c_prdct_typ         = '\0'   ;
+  char c_indstk            = '\0'   ;
+  char c_undrlyng[7]       = {'\0'} ;
+  char c_expry_dt[12]      = {'\0'} ;
+  char c_exer_typ          = '\0'   ;
+  char c_opt_typ           = '\0'   ;
+  char c_ordr_flw          = '\0'   ;
+  char c_status_flg        = '\0'   ;
+  char c_snd_date[12]      = {'\0'} ;
+  char c_cep_rmv_flg       = '\0'   ;
+  char c_ord_rowid[26]     = {'\0'} ;
+  char c_cntrct_desc[51]   = {'\0'} ;
+  char c_trg_got           = 'N'    ;
+  char c_record_str[200]   = {'\0'} ;
+	char c_sem_map_vl[21]    = {'\0'} ;  /** Ver 1.1 **/
+	char c_contract_desc[51] = {'\0'} ;
+
+	int i_ordr_tot_qty  = 0 ;
+  int i_exec_qty      = 0 ;
+  int i_cncl_qty      = 0 ;
+  int i_mdfctn_cntr   = 0 ;
+  double  d_incr_prc      = 0.0 ;
+  double d_ltp_rt        = 0.0 ;
+  long l_sequence_no   = 0 ;
+  long l_strk_prc      = 0 ;
+  long l_fmd_sequence  = 0 ;
+
+  INITBATDBGLVL("cln_fo_trl_sndclnt");
+
+  MEMSET(c_ServiceName);
+  MEMSET(c_errmsg);
+  MEMSET(c_xchng_cd);
+  MEMSET(c_trg_name);
+  MEMSET(c_filter);
+  MEMSET(c_inpt_xchng_cd);
+
+  strcpy(c_ServiceName, argv[0]);
+  strcpy(c_inpt_xchng_cd, argv[2]);
+  strcpy(c_pipe_id,"NA"); 
+
+  if(fn_set_sgn_hnd(SIGUSR2, fn_sigusr2_hnd, c_ServiceName, c_errmsg) == -1)
+  {
+    fn_errlog(c_ServiceName, "S31005", LIBMSG, c_errmsg);
+    fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+    return;
+  }
+	
+  if( fn_read_inifile() == -1)
+  {
+    fn_userlog(c_ServiceName,"Pipe Id :%s: - Error while reading ini file.",c_pipe_id);
+    fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+    fn_errlog(c_ServiceName, "S31010", LIBMSG, c_errmsg);
+    return;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,":%s: Starts successfully.",c_ServiceName);
+    fn_userlog(c_ServiceName,"Input parametrs:");
+    fn_userlog(c_ServiceName,"Exchange code :%s:",c_inpt_xchng_cd);    
+    fn_userlog(c_ServiceName,"Parameters from ini file:");
+    fn_userlog(c_ServiceName,"CEP IP address :%s:",c_cep_ip);
+    fn_userlog(c_ServiceName,"CEP Port :%d:",i_cep_port);
+    fn_userlog(c_ServiceName,"Sleep time :%d",i_sleep_time);
+  } 
+
+/**  Create Socket connection with CEP. **/
+
+  i_ret_val = fn_crt_clnt_sck(	c_cep_ip,
+																i_cep_port,
+																&i_prc_imp_sck_id,
+																c_ServiceName,
+															  c_errmsg	
+														 );
+
+	if ( i_ret_val == -1 )
+  {
+   fn_errlog(c_ServiceName,"S31015", LIBMSG, c_errmsg);
+   fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+   return ;
+  }
+
+	if(DEBUG_MSG_LVL_3)
+  {
+		fn_userlog(c_ServiceName,"Socket creation sucess ");
+	}
+
+  i_exit_stts = DONT_EXIT;
+  c_trg_got = 'N';
+
+  while(i_exit_stts == DONT_EXIT)
+  {
+	  MEMSET(c_clm_mtch_accnt);
+	  MEMSET(c_ordr_rfrnc);
+	  MEMSET(c_pipe_id);
+	  MEMSET(c_xchng_cd);
+	  MEMSET(c_undrlyng);
+	  MEMSET(c_expry_dt);
+	  MEMSET(c_snd_date);
+	  MEMSET(c_ord_rowid);
+	  MEMSET(c_cntrct_desc);
+		MEMSET(c_contract_desc);	
+	
+	   i_ordr_tot_qty  = 0 ;
+     i_exec_qty      = 0 ;
+     i_cncl_qty      = 0 ;
+     i_mdfctn_cntr   = 0 ;
+     d_incr_prc      = 0.0 ;
+     d_ltp_rt        = 0.0 ;
+     l_sequence_no   = 0 ;
+     l_strk_prc      = 0 ;
+
+	 EXEC SQL
+      SELECT  nvl(FTO_CLM_MTCH_ACCNT,'0'),
+              nvl(FTO_ORDR_RFRNC,'0'),
+              nvl(FTO_PIPE_ID,'0'),
+              nvl(FTO_XCHNG_CD,'0'),
+              nvl(FTO_PRDCT_TYP,'0'),
+              nvl(FTO_INDSTK,'0'),
+              nvl(FTO_UNDRLYNG,'0'),
+              nvl(FTO_EXPRY_DT,'11-Jan-1111'),
+              nvl(FTO_EXER_TYP,'0'),
+              nvl(FTO_OPT_TYP,'0'),
+              nvl(FTO_STRK_PRC,0),
+              nvl(FTO_ORDR_FLW,'0'),
+              nvl(FTO_ORDR_TOT_QTY,0),
+              nvl(FTO_EXEC_QTY,0),
+              nvl(FTO_CNCL_QTY,0),
+              nvl(FTO_MDFCTN_CNTR,0),
+              nvl(FTO_INCR_PRC,0) / 100,
+              nvl(FTO_LTP_RT,0),
+              nvl(FTO_STATUS_FLG,'N'),
+              nvl(FTO_SEQUENCE_NO,0),
+              nvl(FTO_SND_DATE,'11-Jan-1111'),
+              nvl(FTO_CEP_RMV_FLG,'N'),
+              nvl(FTO_CNTRCT_DESC,'0')
+      INTO    :c_clm_mtch_accnt,
+              :c_ordr_rfrnc,
+              :c_pipe_id,
+              :c_xchng_cd,
+              :c_prdct_typ,
+              :c_indstk,
+              :c_undrlyng,
+              :c_expry_dt,
+              :c_exer_typ,
+              :c_opt_typ,
+              :l_strk_prc,
+              :c_ordr_flw,
+              :i_ordr_tot_qty,
+              :i_exec_qty,
+              :i_cncl_qty,
+              :i_mdfctn_cntr,
+              :d_incr_prc,
+              :d_ltp_rt,
+              :c_status_flg,
+              :l_sequence_no,
+              :c_snd_date,
+              :c_cep_rmv_flg,
+							:c_cntrct_desc
+      FROM    FTO_FO_TRAIL_ORD
+      WHERE   FTO_STATUS_FLG = 'N' 
+			AND			FTO_XCHNG_CD like decode(:c_inpt_xchng_cd,'ALL','%',:c_inpt_xchng_cd)				 
+      AND   	FTO_SEQUENCE_NO = ( SELECT MIN(FTO_SEQUENCE_NO)
+                                  FROM   FTO_FO_TRAIL_ORD
+                                  WHERE  FTO_STATUS_FLG = 'N'
+                                  AND    FTO_XCHNG_CD like decode(:c_inpt_xchng_cd,'ALL','%',:c_inpt_xchng_cd)
+                               );
+
+    if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND ) 
+    {
+      fn_errlog( c_ServiceName, "S31020", SQLMSG, c_errmsg );
+      fn_close_sck(i_prc_imp_sck_id,c_ServiceName,c_errmsg);  /** ver 1.2 **/
+      fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+      return;
+    }
+
+    if(SQLCODE == NO_DATA_FOUND)
+    {
+			i_ret_val = fn_chk_stts (c_ServiceName);
+
+      if( i_ret_val == -1 )
+      {
+				fn_errlog( c_ServiceName, "S31025", DEFMSG, c_errmsg );
+				fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg);
+        fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);    
+        exit( -1);
+      }
+     
+      usleep(i_sleep_time);
+
+      continue;
+    }
+
+		rtrim(c_ordr_rfrnc);
+
+		EXEC SQL
+		 SELECT FTO_FO_TRAIL_ORD.ROWID
+		 INTO   :c_ord_rowid
+		 FROM   FTO_FO_TRAIL_ORD
+		 WHERE  FTO_ORDR_RFRNC = :c_ordr_rfrnc;
+
+
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog( c_ServiceName, "S31030", SQLMSG, c_errmsg );
+      fn_close_sck(i_prc_imp_sck_id,c_ServiceName,c_errmsg);  /** ver 1.2 **/
+      fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+      return;
+    }
+
+    if(SQLCODE == NO_DATA_FOUND)
+    {
+      i_ret_val = fn_chk_stts (c_ServiceName);
+
+      if( i_ret_val == -1 )
+      {
+        fn_errlog( c_ServiceName, "S31035", DEFMSG, c_errmsg );
+        fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg);
+        fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+        exit( -1);
+      }
+
+      usleep(i_sleep_time);
+
+      continue;
+    }		
+
+		rtrim(c_clm_mtch_accnt);
+		rtrim(c_ordr_rfrnc);
+		rtrim(c_pipe_id);
+		rtrim(c_xchng_cd);
+		rtrim(c_undrlyng);
+		rtrim(c_expry_dt);
+		rtrim(c_snd_date);
+		rtrim(c_ord_rowid);
+		rtrim(c_cntrct_desc);
+
+    if(DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName,"Order reference :%s:", c_ordr_rfrnc);
+      fn_userlog(c_ServiceName,"Match account :%s:", c_clm_mtch_accnt);
+      fn_userlog(c_ServiceName,"Stock code :%s:", c_undrlyng);
+      fn_userlog(c_ServiceName,"Exchange code :%s:", c_xchng_cd);
+      fn_userlog(c_ServiceName,"Product type :%c:", c_prdct_typ);
+      fn_userlog(c_ServiceName,"Order flow :%c:", c_ordr_flw);
+      fn_userlog(c_ServiceName,"Order qty :%d:", i_ordr_tot_qty);
+      fn_userlog(c_ServiceName,"Executed qty :%d:",i_exec_qty);
+      fn_userlog(c_ServiceName,"Cancelled qty :%d:",i_cncl_qty);
+      fn_userlog(c_ServiceName,"Modification counter :%d:", i_mdfctn_cntr);
+      fn_userlog(c_ServiceName,"Incremental price :%lf:", d_incr_prc);
+      fn_userlog(c_ServiceName,"LTP price :%lf:", d_ltp_rt);
+      fn_userlog(c_ServiceName,"CEP remove flag :%c:", c_cep_rmv_flg);
+      fn_userlog(c_ServiceName,"Pipe id  :%s:", c_pipe_id);
+      fn_userlog(c_ServiceName,"Sequence no.  :%ld:", l_sequence_no);
+      fn_userlog(c_ServiceName,"Row Id :%s:", c_ord_rowid);
+    	fn_userlog(c_ServiceName,"Trigger time :%c:",c_trg_tm);
+		} 
+
+    MEMSET(c_sem_map_vl);
+
+    if (strcmp(c_xchng_cd,"NFO") == 0 ) 
+    {
+      EXEC SQL
+				SELECT  SEM_MAP_VL
+        INTO  	:c_sem_map_vl
+        FROM  	SEM_STCK_MAP
+        WHERE 	SEM_STCK_CD = :c_undrlyng
+				AND   	SEM_ENTTY = decode(:c_indstk,'I','12',1); 
+    }
+    else if (strcmp(c_xchng_cd,"BFO") == 0 )    
+    {
+      EXEC SQL
+        SELECT  SEM_MAP_VL
+        INTO  	:c_sem_map_vl
+        FROM  	SEM_STCK_MAP
+        WHERE 	SEM_STCK_CD = :c_undrlyng
+        AND   	SEM_ENTTY = decode(:c_indstk,'I','12',6); 
+    }
+    else
+    {
+      fn_userlog(c_ServiceName,"Pipe ID :%s: - Invalid request",c_pipe_id);
+ 			fn_errlog(c_ServiceName, "S31040", DEFMSG, c_errmsg); 
+      fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+    	fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg);	 
+      exit( -1);
+    }
+
+    if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    {
+   		fn_errlog( c_ServiceName, "S31045", SQLMSG, c_errmsg ); 
+    	fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg); 
+      fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);    
+      exit( -1);
+    }
+
+    if(SQLCODE == NO_DATA_FOUND)
+    {
+       i_ret_val = 0;
+
+		 i_ret_val = fn_upd_prc_impr('F',c_ord_rowid,c_ordr_rfrnc);     /* 'F' - Invalid Stock code */ 
+     if(i_ret_val == -1)
+     {
+       fn_userlog(c_ServiceName,"Error in updating function");
+       fn_errlog(c_ServiceName, "S31050", DEFMSG, c_errmsg);
+       fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg);
+       fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+       exit( -1);
+     } 			  
+
+     continue;
+    }
+
+
+    rtrim(c_sem_map_vl);
+
+    if(DEBUG_MSG_LVL_3) 
+		{
+      fn_userlog(c_ServiceName,"stock map :%s:", c_sem_map_vl);
+    }
+
+		if( c_indstk == 'S' )
+    {
+     sprintf(c_contract_desc,"%sEQ~F:%s",c_sem_map_vl,c_expry_dt);
+    }
+    else
+    {
+     sprintf(c_contract_desc,"%s~F:%s",c_sem_map_vl,c_expry_dt);
+    }
+
+		rtrim(c_contract_desc);
+    MEMSET(c_record_str);
+
+    /**** Create a record string ***/
+    sprintf(c_record_str,"%s%c%s%s%c%c%c%d%c%lf%c%s%c%c%c%c%c%s%c%s%c%d%c%d%c%d%c%lf%c%ld%c%s%c%s%c%c",
+																												  c_ordr_rfrnc,DELIMITER, \
+																													c_contract_desc,c_xchng_cd,DELIMITER, \
+																													c_ordr_flw,DELIMITER, \
+																													i_mdfctn_cntr,DELIMITER, \
+																													d_incr_prc,DELIMITER, \
+																													c_xchng_cd,DELIMITER, \
+																													c_prdct_typ,DELIMITER, \
+																													c_cep_rmv_flg,DELIMITER, \
+																													c_ord_rowid,DELIMITER, \
+																													c_pipe_id,DELIMITER, \
+																													i_ordr_tot_qty,DELIMITER, \
+																													i_exec_qty,DELIMITER, \
+																													i_cncl_qty,DELIMITER, \
+																													d_ltp_rt,DELIMITER, \
+																													l_sequence_no,DELIMITER, \
+																													c_clm_mtch_accnt,DELIMITER, \
+																													c_undrlyng,DELIMITER, \
+																													c_trg_tm);
+
+    strcat(c_record_str,"\n");
+    i_record_len = strlen(c_record_str);
+
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"Record %s Length %d",c_record_str,i_record_len);
+		}
+
+    i_ret_val = fn_send(i_prc_imp_sck_id, (char *)c_record_str, &i_record_len);
+    if( i_ret_val == -1)
+    {
+      fn_userlog(c_ServiceName,"Pipe Id :%s: - Error while sending data packet to CEP.",c_pipe_id);
+      fn_errlog(c_ServiceName,"S31055",UNXMSG, c_errmsg);
+			fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg);
+      fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);     
+      exit( -1);
+    }
+
+    i_ret_val = fn_upd_prc_impr('Y',c_ord_rowid,c_ordr_rfrnc);     /* 'Y' - record sent to CEP successfully */ 
+    if(i_ret_val == -1)
+    {
+			fn_userlog(c_ServiceName,"Error in updating function");
+      fn_errlog(c_ServiceName, "S31060",DEFMSG, c_errmsg);
+			fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg);
+      fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);     
+      exit( -1);
+    }
+
+  	i_ret_val = fn_chk_stts ( c_ServiceName ) ;
+
+  	if ( i_ret_val == -1 )
+  	{
+    	fn_errlog(c_ServiceName, "S31065", DEFMSG, c_errmsg);
+    	fn_close_sck(i_prc_imp_sck_id, c_ServiceName, c_errmsg);
+    	fn_snd_stp_mail(c_ServiceName, c_inpt_xchng_cd);
+    	return;
+   	}
+ }
+
+
+ /* end of while */
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Sucessfully exiting from cln_fo_trl_sndclnt");
+  }
+
+	return;
+}  
+
+void fn_sigusr2_hnd(int i_signal_no)
+{
+	if(DEBUG_MSG_LVL_3)
+	{
+ 		fn_userlog(c_ServiceName,"FOTRL SND CLNT process stopped:Caught signal |%d|", i_signal_no); 
+  }
+
+	i_exit_stts = EXIT;
+}
+
+
+
+/*** This function reads ini file to get send IP and Port ***/
+int fn_read_inifile()
+{
+  int i_ch_val;
+  char c_FileName[256];
+  char c_sleep_time[4];
+  char *ptr_c_tmp;
+	int  i_cep_port_ord = 0;	
+
+  MEMSET(c_FileName);
+  MEMSET(c_errmsg);
+
+/** Get CEP IP Address. **/
+
+  ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName, "FOTRL_IP" );
+
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31070", LIBMSG, c_errmsg);
+    return -1;
+  }
+  else
+  {
+    strcpy(c_cep_ip, ptr_c_tmp );
+  }
+
+/** Get CEP Port Number. **/
+
+  ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName, "FOTRL_SND_PRT" );
+
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31075", LIBMSG, c_errmsg);
+    return -1;
+  }
+  i_cep_port  = atoi(ptr_c_tmp);
+
+/*** Get the sleep parameter value ***/
+
+  ptr_c_tmp = (char *)fn_get_prcs_spc(c_ServiceName, "SLEEP_TIME" );
+
+  if ( ptr_c_tmp == NULL )
+  {
+    fn_errlog(c_ServiceName, "S31080", LIBMSG,  c_errmsg);
+    return -1;
+  }
+  else
+  {
+    strcpy( c_sleep_time, ptr_c_tmp );
+  }
+
+  i_sleep_time = atoi(c_sleep_time);
+
+  return 0;
+}
+
+
+int fn_prcs_trg ( char *c_ServiceName,int i_trg_typ )
+{
+  if ( strcmp ( c_trg_msg, "TRG_STOP_FOTRAIL_SNDCLNT" ) == 0 )
+  {
+		if(DEBUG_MSG_LVL_3)
+		{
+    	fn_userlog(c_ServiceName,"inside fn_prcs_trg TRG_STOP_FOTRAIL_SNDCLNT");
+		}
+
+    i_exit_stts=EXIT;
+  }
+
+  return ( 0 );
+}
+
+int fn_send ( int  i_fd,
+              char *ptr_c_stm,
+              int  *ptr_i_sz
+						)
+{
+  int  i_res;
+  char *ptr_c_temp_stm;
+  int  i_written;
+  int  i_left;
+
+  i_res = 100;
+
+  ptr_c_temp_stm = ptr_c_stm;
+  i_written = 0;
+  i_left = *ptr_i_sz;
+
+  while (i_left > 0)
+  {
+    if ((i_written = write(i_fd, ptr_c_temp_stm, i_left)) <= 0)
+    {
+      if (errno == EINTR)
+      {
+        i_written = 0;
+      }
+      else
+      {
+        i_res = -1;
+        *ptr_i_sz = *ptr_i_sz - i_left;
+        return(i_res);
+      }
+    }
+    i_left = i_left - i_written;
+    ptr_c_temp_stm = ptr_c_temp_stm + i_written;
+  }
+
+  *ptr_i_sz = *ptr_i_sz - i_left;
+  return (i_res);
+}
+
+
+void fn_bat_term(int argc, char *argv[] )
+{
+  return;
+}
+
+
+
+int fn_bat_init(int argc, char *argv[])
+{
+	char c_ServiceName[33]   = {'\0'} ;
+	char c_inpt_xchng_cd[4]  = {'\0'} ;  
+  char c_rerun_mode        = '\0'   ;
+	char c_filter2[32]       = {'\0'} ;
+  int i_returncode         = 0;
+	long  li_trail_trg_hnd   = 0;
+
+	MEMSET(c_ServiceName);
+	MEMSET(c_inpt_xchng_cd);
+
+	strcpy(c_ServiceName, argv[0]);
+  strcpy(c_inpt_xchng_cd, argv[2]);	
+	
+	fn_var = CLN_FO_TRL_SNDCLNT;
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Inside fn_bat_init........................");
+	}
+
+  if(argc < 4 )
+  {
+    printf("Usage: cln_fo_trl_sndclnt <Tag Name> <Exchange code: NFO/BFO/ALL> <Pipe ID> <R-Rerun Mode[optional]> \n");
+		fn_snd_stp_mail(c_ServiceName,c_inpt_xchng_cd);
+    exit(-1);
+  }	
+
+    c_rerun_mode = argv[4][0];
+
+	if(strcmp(c_inpt_xchng_cd,"NFO") != 0 && strcmp(c_inpt_xchng_cd,"BFO") != 0 && strcmp(c_inpt_xchng_cd,"ALL") != 0 )
+  {
+    printf("cln_fo_trl_sndclnt <Wrong exchange code> \n");
+	  fn_snd_stp_mail(c_ServiceName,c_inpt_xchng_cd);
+    exit(-1);
+  }
+
+  MEMSET(c_filter2);
+  strcpy( c_filter2, "FFO_FILTER=='NA'");
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName," c_filter2 :%s:, c_xchng_cd :%s:",c_filter2,c_inpt_xchng_cd);	
+	}
+
+	if(c_rerun_mode == 'R')
+	{
+		i_returncode=fn_resend_ordrs();
+
+	  if ( i_returncode == -1 )
+  	{
+     fn_errlog( c_ServiceName, "S31085",LIBMSG,c_errmsg);
+     fn_snd_stp_mail(c_ServiceName,c_inpt_xchng_cd);
+     return -1;
+  	}	
+	}
+	li_trail_trg_hnd =  tpsubscribe ( "TRG_STOP_FOTRAIL_SNDCLNT",
+                                       (char *)c_filter2,
+                                       (TPEVCTL *)NULL,
+                                       0
+																	);
+  if ( li_trail_trg_hnd == -1 )
+  {
+     fn_errlog( c_ServiceName, "S31090",LIBMSG,c_errmsg);
+     fn_snd_stp_mail(c_ServiceName,c_inpt_xchng_cd);
+     return -1;
+  }
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"Inside fn_bat_init Ends........................");
+	}
+	
+	return ( 0 );
+}
+
+void fn_snd_stp_mail(char *c_ServiceName, char *c_xchng_cd)
+{
+  char c_command[256];
+	sprintf(c_command, "%s/sh_scripts/auto_fo_trail_mail.sh %s %s", tuxgetenv("HOME"), c_ServiceName, c_xchng_cd);
+  system(c_command);
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog(c_ServiceName,"email sent.");
+  }
+
+	return;
+}
+
+int fn_upd_prc_impr(char c_flag , char * c_fto_ord_rowid , char * c_fto_ordr_rfrnc)
+{
+	int i_trnsctn = 0;
+
+	rtrim(c_fto_ord_rowid);
+	rtrim(c_fto_ordr_rfrnc);
+
+	i_trnsctn = tpbegin(TRAN_TIMEOUT,0);
+  if ( i_trnsctn == -1 )
+  {
+      fn_errlog(c_ServiceName, "S31095", LIBMSG, c_errmsg );
+      return -1;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"In function fn_upd_prc_impr - Updating Status as :%c:", c_flag);
+    fn_userlog(c_ServiceName,"For Order reference :%s:, Row Id :%s:", c_fto_ordr_rfrnc, c_fto_ord_rowid);
+  }
+
+   EXEC SQL
+        UPDATE FTO_FO_TRAIL_ORD 
+        SET    FTO_STATUS_FLG = :c_flag ,
+               FTO_SND_DATE   = decode(:c_flag,'Y',sysdate,NULL)
+        WHERE  FTO_ORDR_RFRNC = :c_fto_ordr_rfrnc;
+
+   if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+   {
+     fn_errlog(c_ServiceName, "S31100", SQLMSG , c_errmsg);
+		 tpabort(0);	 
+     return -1;
+   }
+
+	i_trnsctn = tpcommit (0);
+	if ( i_trnsctn == -1 )	
+  {
+ 		tpabort(0); 
+    fn_errlog( c_ServiceName, "S31105",LIBMSG,c_errmsg);
+    return -1;
+  }
+
+  if(DEBUG_MSG_LVL_3) 
+	{
+    fn_userlog(c_ServiceName, "function fn_upd_prc_impr completed successfully");
+  }
+
+  return 0;
+}
+
+int fn_resend_ordrs(void)
+{
+  int i_trnsctn = 0;
+
+  i_trnsctn = tpbegin(TRAN_TIMEOUT,0);
+  if ( i_trnsctn == -1 )
+  {
+      fn_errlog(c_ServiceName, "S31110", LIBMSG, c_errmsg );
+      return -1;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"In function fn_resend_ordrs");
+  }
+
+   EXEC SQL
+		UPDATE FTO_FO_TRAIL_ORD
+     	 SET FTO_STATUS_FLG='N'
+   	 WHERE FTO_STATUS_FLG ='Y'
+     	 AND (FTO_ORDR_RFRNC,FTO_INCR_PRC) in
+    			 (SELECT FOD_ORDR_RFRNC,FXB_INCRMNT_PRC
+          		FROM FOD_FO_ORDR_DTLS,
+                   FXB_FO_XCHNG_BOOK
+           	 WHERE FOD_ORDR_RFRNC = FXB_ORDR_RFRNC
+             	 AND FOD_MDFCTN_CNTR = FXB_MDFCTN_CNTR
+             	 AND FOD_PRCIMPV_FLG=FXB_PRCIMPV_FLG
+               AND FOD_PRCIMPV_FLG='Y'
+               AND FOD_TRD_DT = trunc(sysdate)
+               AND FXB_PLCD_STTS ='A'
+     			);
+
+   if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+   {
+     fn_errlog(c_ServiceName, "S31115", SQLMSG , c_errmsg);
+     tpabort(0);
+     return -1;
+   }
+
+  i_trnsctn = tpcommit (0);
+  if ( i_trnsctn == -1 )
+  {
+    tpabort(0);
+    fn_errlog( c_ServiceName, "S31120",LIBMSG,c_errmsg);
+    return -1;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName, "function fn_resend_ordrs completed successfully");
+  }
+
+  return 0;
+}

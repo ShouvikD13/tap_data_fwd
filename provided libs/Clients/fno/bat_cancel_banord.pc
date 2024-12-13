@@ -1,0 +1,1220 @@
+/***************************************************************************
+* Service name :  BAT_CANCEL_BANORD																				 *
+*                                                                          *
+* Description  :  This batch process cancels the fresh orders(futures/		 *
+*									optios/futureplus orders) placed under a particular scrip*
+*									which is under ban period.This process runs product-wise.*
+*									This process is for both SPAN and NON-SPAN clients .		 *
+*                                                                          *
+* Input        :  Exchange Code                                            *
+*                 Underlying																							 *
+*                                                                          *
+* Output      :    -                                                       *
+*                                                                          *
+* Log         :   23-Jan-2013 Initial Release  - Swati A.B                 *
+* Ver 1.1 		:   05-Mar-2013 Changes done to run the process for all 		 *
+*															underlying or underlyingwise and to send mail*
+*													    giving thedetails of cancelled orders 			 *	
+*															- Swati A.B/Vishnu N 												 *
+*	Ver 1.2			:   18-Mar-2013 Bug Fix - Vishnu N													 *
+* Ver 1.3     :   21-Mar-2013 Bug Fix done to stop marking of partial      *
+*                             cover orders as fresh orders								 *
+*															(Not in FIFO order )  and variable    			 *
+*                             names changed for more clarity - Swati A.B   *
+*	Ver 1.4			:   11-Sep-2013 Bug Fix (Exchnage code handling while        *
+*			        :								selecting disabled underlying) - Swati A.B   *
+* Ver 1.5     :   14-Aug-2015 Contract Master and Trade Quote Table Merger *
+*                             Changes - Ritesh Deolekar                    *
+* Ver TOL     :   23-Aug-2023 Tux on Linux - Agam                          *
+***************************************************************************/
+#include <string.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_read_debug_lvl.h>		
+#include <fo_fml_def.h>
+#include <fml_rout.h>
+#include <fn_span_lib.h>
+#include <math.h>
+#include <stdlib.h>                /* Added in Ver TOL */
+
+#define  EXPIRY  'X'
+#define  OPEN 	 'O'
+#define  FOR_ALL   'A'      	 		 /*** Ver 1.1 ***/
+#define  FOR_UNDRLYNG_WISE 'U'     /*** Ver 1.1 ***/
+
+char c_ServiceName[33];
+char c_xchng[4];
+char str[128];
+void fn_exit( char* c_err_msg, char c_mem_flg );
+
+
+int fn_chk_frsh_cover_ord  ( 	char *c_ServiceName,
+                          		struct st_orderbook *st_ordbk,
+															char	*c_fresh_ord_flg,
+                          		struct st_err_msg *ptr_st_err_msg
+                        	 );
+void print_qry1(char * str, int i_cnt,char * c_ServiceName);  /*** Ver 1.1 ***/
+
+void BAT_CANCEL_BANORD ( int argc, char *argv[] )
+{
+  EXEC SQL INCLUDE "table/exg_xchng_mstr.h";
+  EXEC SQL INCLUDE "table/opm_ord_pipe_mstr.h";
+
+
+  EXEC SQL BEGIN DECLARE SECTION;
+  char   c_rundt[11 + 1];
+  /*** sql_cursor cur_ban_ord; commented In Ver 1.1 ***/
+  EXEC SQL END DECLARE SECTION;
+
+  char c_errmsg[256];
+  int  i_returncode;
+	int	i_ret_cd	=	0;
+	strcpy ( c_ServiceName, argv[0] );
+	
+	INITBATDBGLVL(argv[0]);     
+
+	char c_exg_ovrnght_trd_dt[23];   /***  overnight trade date ****/	
+	char c_exg_ovrnght_mkt_stts; 		 /*** Overnight Market exchnage status ****/
+	char c_underlying[7];
+	char c_user_id[9];
+	char c_remarks[130];
+	char c_channel[4];
+	char c_alias[9];
+	char c_fresh_ord_flg = '\0'; 
+	char c_svc_name [ 20 ];
+	char c_prd_typ[2];
+	char  c_filename[100];		/*** Ver 1.1 ***/
+	char  c_filetime[9]	;			/*** Ver 1.1 ***/
+	char  c_fileheader[500];  /*** Ver 1.1 ***/
+	char  c_filedata[90000];  /*** Ver 1.1 ***/
+	char  c_ip_flg;						/*** Ver 1.1 ***/
+	varchar select_stmt[500]; /*** Ver 1.1 ***/
+  char c_command[100];      /*** Ver 1.1 ***/
+	
+	FILE  *fp ; /*** Ver 1.1 ***/
+
+	/*** Following for Order rout ***/
+	int	i_err[10];	
+	int	i_ferr[10];	
+	int	i_fml_loop = 0;	
+	FBFR32    *ptr_fml_Sbuffer;
+
+	long int li_sssn_id = 0;
+	long int  li_len_tobuf;  /*** Ver 1.3 ***/
+	
+	FBFR32 *ptr_fml_Obuf;    /*** Ver 1.3 ***/
+	
+	struct st_err_msg ptr_st_err_msg ;
+
+	struct st_orderbook st_ordbk;
+
+	MEMSET(sql_exg_xchng_cd);
+	MEMSET(c_underlying);
+	MEMSET(c_rundt);
+	
+	strcpy ( sql_exg_xchng_cd, argv[2] );
+	strcpy ( c_underlying, argv[4] );
+	strcpy(c_prd_typ,argv[5]) ;
+	
+  rtrim(sql_exg_xchng_cd);
+  rtrim(c_rundt);
+
+  fn_bat_pst_msg ( c_ServiceName, " ***** Batch cancel ban orders  Started *****",c_tag );
+
+	/**** Usage : bat_cancel_banord <INI> <EXCHNAGE> <PIPE> <UNDERLYING> <PRODUCT_TYPE> ****/
+	/**** Example : bat_cancel_banord NFO NFO NA RELIND A																****/
+
+
+	if (DEBUG_MSG_LVL_0)      
+  {
+		fn_userlog( c_ServiceName, "Selecting data  from exchange master... ");
+		fn_userlog( c_ServiceName,"argv[5] :%s:",argv[5]); 
+	}
+
+  EXEC SQL
+    SELECT  exg_crrnt_stts,
+						exg_tmp_mkt_stts,
+            exg_nxt_trd_dt,
+						exg_tmp_trd_dt,
+						to_char( GREATEST(exg_nxt_trd_dt,exg_tmp_trd_dt), 'DD-Mon-YYYY' )	
+    INTO    :sql_exg_crrnt_stts,
+						:c_exg_ovrnght_mkt_stts,
+            :sql_exg_nxt_trd_dt,
+						:c_exg_ovrnght_trd_dt,
+						:c_rundt 
+    FROM    exg_xchng_mstr
+    WHERE   exg_xchng_cd = :sql_exg_xchng_cd ; 
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31005",SQLMSG,c_errmsg);
+    fn_exit ( "Unable to fetch exchange status ",'N');
+	  return;
+  }
+
+  SETNULL(sql_exg_nxt_trd_dt);
+
+	if (DEBUG_MSG_LVL_0)     
+  {
+		fn_userlog( c_ServiceName, "Exchange Code Is :%s:",sql_exg_xchng_cd );
+		fn_userlog( c_ServiceName, "Underlying Is :%s:",c_underlying );
+		fn_userlog( c_ServiceName, "sql_exg_nxt_trd_dt:%s:", sql_exg_nxt_trd_dt.arr );
+		fn_userlog( c_ServiceName, "Exchange Status :%c:", sql_exg_crrnt_stts );
+		fn_userlog( c_ServiceName, "Overnight trade date :%s:", c_exg_ovrnght_trd_dt );
+		fn_userlog( c_ServiceName, "Product Type :%s:",c_prd_typ);
+	}
+
+
+  if ( sql_exg_crrnt_stts == OPEN )
+  {
+		fn_exit ( " Cannont run the batch process when Exchange is OPEN - contact system support",'N');
+    return;
+  }
+	else
+	{
+		if (DEBUG_MSG_LVL_3)
+		{
+			fn_userlog( c_ServiceName, " Exchange status Is :%s:",sql_exg_crrnt_stts );
+			fn_userlog( c_ServiceName, " Runnning for Date c_rundt Is :%s:",c_rundt);
+		}
+	}
+
+  ptr_fml_Sbuffer = (FBFR32*)tpalloc("FML32", NULL, MIN_FML_BUF_LEN);
+  if (ptr_fml_Sbuffer == NULL)
+  {
+    errlog(c_ServiceName, "S31010", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    exit(-3);
+  }
+
+	/*** Setting Default Values Starts  ***/
+	strcpy (c_user_id, "system" );
+	strcpy(c_channel,"SYS");
+	strcpy(c_alias,"*");
+  li_sssn_id=0;
+	strcpy(c_remarks,"BAN");
+	/*** Setting Default Values Ends   ***/
+ 
+	/******* Following commented In Ver 1.1 
+	EXEC SQL ALLOCATE :cur_ban_ord; 
+
+	if( c_prd_typ[0] == 'F')
+	{
+		if (DEBUG_MSG_LVL_3)
+		{
+			fn_userlog( c_ServiceName, " Inside Product Future ");
+		}
+  
+		EXEC SQL EXECUTE
+        BEGIN
+         OPEN :cur_ban_ord FOR	
+    					SELECT			fod_ordr_rfrnc ,           
+													fod_clm_mtch_accnt ,       
+													fod_xchng_cd  ,            
+													fod_undrlyng,               
+													fod_prdct_typ ,            
+													fod_indstk ,               
+													TO_DATE(fod_expry_dt,'DD-Mon-YYYY') ,             
+													fod_exer_typ ,             
+													fod_opt_typ ,              
+													fod_strk_prc ,             
+													fod_ordr_flw ,             
+													fod_ordr_stts ,            
+													nvl(fod_spn_flg ,'N'),    
+													fod_pipe_id                
+            		FROM      fod_fo_ordr_dtls 
+            		WHERE     fod_ordr_stts = 'R'
+								AND 			fod_prdct_typ IN ('F','P')	
+            		AND       trunc(fod_trd_dt)   = to_date(:c_rundt,'dd-Mon-yyyy')
+            		AND       fod_xchng_cd        = :sql_exg_xchng_cd
+								AND				fod_undrlyng				= :c_underlying ;
+				END;
+      END-EXEC;
+	}
+	else if ( c_prd_typ[0] == 'O' )
+	{	
+		if (DEBUG_MSG_LVL_3)
+		{
+			fn_userlog( c_ServiceName, " Inside Product Options");
+		}
+
+    EXEC SQL EXECUTE
+        BEGIN
+         OPEN :cur_ban_ord FOR	
+					SELECT            fod_ordr_rfrnc ,
+      	  		              fod_clm_mtch_accnt ,
+        	    		          fod_xchng_cd  ,
+          	      		      fod_undrlyng,
+           	 		       		  fod_prdct_typ ,
+            	  	        	fod_indstk ,
+                	  		    fod_expry_dt ,
+                  	   	 	  fod_exer_typ ,
+                    	 		  fod_opt_typ ,
+                     	 			fod_strk_prc ,
+                      			fod_ordr_flw ,
+                      			fod_ordr_stts ,
+                      			nvl(fod_spn_flg ,'N'),
+                      			fod_pipe_id
+            			FROM      fod_fo_ordr_dtls
+            			WHERE     fod_ordr_stts = 'R'
+            			AND       fod_prdct_typ = 'O'
+            			AND       trunc(fod_trd_dt)   = to_date(:c_rundt,'dd-Mon-yyyy')
+            			AND       fod_xchng_cd        = :sql_exg_xchng_cd
+            			AND       fod_undrlyng        = :c_underlying ;
+					END;
+      END-EXEC;
+	}
+	else
+	{
+		fn_userlog(c_ServiceName,"Invalid Product Type");
+		fn_errlog(c_ServiceName,"S31015","Invalid Product Type",c_errmsg);
+	  fn_exit ( "Invalid Product Type",'N');
+		return;
+	}	
+
+	if( SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName,"S31020",SQLMSG,c_errmsg);
+    fn_exit ( "Unable to delete from back-up table - Contact system support",'Y');
+    return;
+  }
+  
+	Commeneted In Ver 1.1 Ends ****/
+
+	/**** Ver 1.1 Starts ***/
+
+	if(c_prd_typ[0] == 'A' && strcmp(c_underlying,"ALL") == 0 )
+ 	{
+		c_ip_flg  = FOR_ALL;
+	}
+	else if(  strcmp(c_underlying,"ALL") != 0 && c_prd_typ[0] == 'A')
+	{
+		c_ip_flg = FOR_UNDRLYNG_WISE;
+	}
+	else
+	{
+      fn_userlog(c_ServiceName,"Incorrect Operation Type");
+			tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+			fn_exit ( "Incoreect Input to the batch process - Contact system support",'Y');
+   		return;
+	}
+	
+	if (DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"c_ip_flg Is :%c:",c_ip_flg);
+  }
+
+	rtrim(c_rundt);
+	rtrim(sql_exg_xchng_cd);
+	rtrim(c_underlying);
+
+	if (DEBUG_MSG_LVL_3)
+  {
+      fn_userlog(c_ServiceName,"c_rundt Is :%s:",c_rundt);
+      fn_userlog(c_ServiceName,"sql_exg_xchng_cd Is :%s:",sql_exg_xchng_cd);
+      fn_userlog(c_ServiceName,"c_underlying Is :%s:",c_underlying);
+  }
+
+	switch(c_ip_flg)
+	{
+		 case  FOR_ALL :
+
+							if (DEBUG_MSG_LVL_3)
+          		{
+             		fn_userlog( c_ServiceName, " Inside FOR_ALL ");
+          		}
+          		strcpy((char *)select_stmt.arr," SELECT fod_ordr_rfrnc ,fod_clm_mtch_accnt ,fod_xchng_cd  ,");
+          		strcat((char *)select_stmt.arr," fod_undrlyng,fod_prdct_typ ,fod_indstk ,TO_DATE(fod_expry_dt,'DD-Mon-YYYY') ");
+          		strcat((char *)select_stmt.arr," ,fod_exer_typ ,fod_opt_typ ,fod_strk_prc ,fod_ordr_flw ,fod_ordr_stts  ");
+          		strcat((char *)select_stmt.arr," ,nvl(fod_spn_flg ,'N'),fod_pipe_id FROM fod_fo_ordr_dtls ");
+          		strcat((char *)select_stmt.arr," WHERE  fod_ordr_stts = 'R' ");
+          		strcat((char *)select_stmt.arr," AND    fod_prdct_typ IN ('F','P','O') ");
+          		strcat((char *)select_stmt.arr," AND    trunc(fod_trd_dt)   = to_date('");
+          		strcat((char *)select_stmt.arr,c_rundt);
+          		strcat((char *)select_stmt.arr,"','dd-Mon-yyyy')");
+          		strcat((char *)select_stmt.arr,"  AND fod_xchng_cd  = '");
+          		strcat((char *)select_stmt.arr,sql_exg_xchng_cd);
+          /*	strcat((char *)select_stmt.arr,"'AND   fod_undrlyng IN (select distinct fum_undrlyng "); Commented in Ver 1.2 **/
+							strcat((char *)select_stmt.arr,"'AND (fod_undrlyng,decode(fod_prdct_typ,'O','O','F')) IN (select distinct fum_undrlyng,fum_prdct_typ "); /** Added in Ver 1.2 **/ 
+          /*** Commented in Ver 1.5 ***
+          		strcat((char *)select_stmt.arr,"from fum_fo_undrlyng_mstr,fcm_fo_cntrct_mstr ");
+          		strcat((char *)select_stmt.arr,"where fcm_undrlyng = fum_undrlyng(+) ");
+          *** Ver 1.5 Comment Ends ***/
+          /*** Ver 1.5 Starts ***/
+              strcat((char *)select_stmt.arr,"from fum_fo_undrlyng_mstr,ftq_fo_trd_qt ");
+              strcat((char *)select_stmt.arr,"where ftq_undrlyng = fum_undrlyng(+) ");
+          /*** Ver 1.5 Ends ***/
+							strcat((char *)select_stmt.arr,"  AND fum_xchng_cd  = '");                 /*** Ver 1.4 Bug Fix ***/
+							strcat((char *)select_stmt.arr,sql_exg_xchng_cd);													 /*** Ver 1.4 Bug Fix ***/
+          		strcat((char *)select_stmt.arr,"'  and FUM_QT_TRDNG_FLG='Q')");            
+							strcat((char *)select_stmt.arr,"order by fod_clm_mtch_accnt,fod_undrlyng,fod_prdct_typ,"); /*** Ver 1.3 ***/
+							strcat((char *)select_stmt.arr,"fod_expry_dt,fod_opt_typ,fod_strk_prc,fod_ordr_flw,");		 /*** Ver 1.3 ***/
+						  strcat((char *)select_stmt.arr,"fod_ordr_tot_qty ASC ,fod_ordr_rfrnc");										 /*** Ver 1.3 ***/
+
+          		break;
+	 	
+		 case FOR_UNDRLYNG_WISE:
+
+							if (DEBUG_MSG_LVL_3)
+              {
+                fn_userlog( c_ServiceName, " Inside UNDRLYNG_WISE ");
+								fn_userlog(c_ServiceName,"c_underlying Is :%s:",c_underlying);
+              }
+
+							strcpy((char *)select_stmt.arr,"  SELECT      fod_ordr_rfrnc , fod_clm_mtch_accnt , fod_xchng_cd  ,");
+              strcat((char *)select_stmt.arr,"  fod_undrlyng, fod_prdct_typ , fod_indstk ,");
+              strcat((char *)select_stmt.arr,"  TO_DATE(fod_expry_dt,'DD-Mon-YYYY') , fod_exer_typ , fod_opt_typ ,");
+              strcat((char *)select_stmt.arr,"  fod_strk_prc , fod_ordr_flw , fod_ordr_stts , nvl( fod_spn_flg ,'N'), fod_pipe_id ");
+              strcat((char *)select_stmt.arr,"  FROM   fod_fo_ordr_dtls  WHERE  fod_ordr_stts = 'R'  ");
+              strcat((char *)select_stmt.arr,"  AND  fod_prdct_typ IN ('F','P','O') AND  trunc(fod_trd_dt)   = to_date('");
+              strcat((char *)select_stmt.arr,c_rundt);
+              strcat((char *)select_stmt.arr,"','dd-Mon-yyyy')  ");
+              strcat((char *)select_stmt.arr,"  AND fod_xchng_cd  = '");
+              strcat((char *)select_stmt.arr,sql_exg_xchng_cd);
+              strcat((char *)select_stmt.arr,"' AND fod_undrlyng  ='");
+              strcat((char *)select_stmt.arr,c_underlying);
+              strcat((char *)select_stmt.arr,"'");
+							strcat((char *)select_stmt.arr,"order by fod_clm_mtch_accnt,fod_undrlyng,fod_prdct_typ,"); /*** Ver 1.3 ***/
+							strcat((char *)select_stmt.arr,"fod_expry_dt,fod_opt_typ,fod_strk_prc,fod_ordr_flw,");		 /*** Ver 1.3 ***/
+						  strcat((char *)select_stmt.arr,"fod_ordr_tot_qty ASC ,fod_ordr_rfrnc");										 /*** Ver 1.3 ***/
+	
+							break;
+			
+
+		 default :
+							fn_userlog(c_ServiceName,"Invalid InPut Flag");
+      				break;
+
+	}
+
+
+	select_stmt.len = strlen((char *)select_stmt.arr);
+
+	print_qry1((char*)select_stmt.arr,select_stmt.len,c_ServiceName);
+
+  EXEC SQL PREPARE sql_stmt FROM :select_stmt;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName,"S31025",SQLMSG,c_errmsg);
+		tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+    fn_exit ( "Unable to prpare query",'Y');
+    return;
+  }
+
+  EXEC SQL DECLARE cur_ban_ord CURSOR FOR sql_stmt;
+
+  EXEC SQL OPEN cur_ban_ord ;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName,"S31030",SQLMSG,c_errmsg);
+		tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+    fn_exit ( "Unable to declare  cursor ",'Y');
+    return;
+  }
+
+	EXEC SQL
+	 SELECT to_char(sysdate,'yyyymmdd')
+	 INTO :c_filetime
+	 FROM DUAL;
+
+	if(SQLCODE != 0)
+	{
+	 fn_errlog( c_ServiceName, "S31035",SQLMSG,c_errmsg);
+	 tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+	 fn_exit ( "Unable to declare  cursor ",'Y');
+   return;
+	}
+
+
+	sprintf(c_filename,"%s/%s/fno/ban_orders_%s.csv",tuxgetenv("EBALOG_PATH"),c_filetime,c_rundt);
+
+	fn_userlog(c_ServiceName,"File is :%s: ",c_filename);
+
+	fp = (FILE *)fopen(c_filename,"w+") ;
+
+	if(fp == NULL)
+	{
+  	fn_userlog(c_ServiceName,"UNABLE TO OPEN FILE %s",c_filename);
+	}
+	
+	MEMSET(c_fileheader);
+	sprintf(c_fileheader,"Match Account,Underlying,Order Reference No,Product Type");
+	fprintf(fp,"%s\n",c_fileheader);
+
+	/**** Ver 1.1 Ends   ***/
+
+	
+
+
+	while(1)
+  {
+
+		MEMSET(st_ordbk);
+		c_fresh_ord_flg = '\0';
+		memset(st_ordbk.c_expry_dt,'\0',sizeof(st_ordbk.c_expry_dt));
+
+ 	   EXEC SQL
+     /*** FETCH :cur_ban_ord Commented In Ver Ver 1.1  ***/
+     FETCH cur_ban_ord    						/*** Ver 1.1 ***/
+     INTO  :st_ordbk.c_ordr_rfrnc,
+					 :st_ordbk.c_cln_mtch_accnt,
+           :st_ordbk.c_xchng_cd ,
+           :st_ordbk.c_undrlyng,
+           :st_ordbk.c_prd_typ,
+           :st_ordbk.c_ctgry_indstk,
+           :st_ordbk.c_expry_dt,
+           :st_ordbk.c_exrc_typ,
+           :st_ordbk.c_opt_typ,
+           :st_ordbk.l_strike_prc,
+					 :st_ordbk.c_ordr_flw,
+           :st_ordbk.c_ordr_stts,
+           :st_ordbk.c_spn_flg, 
+           :st_ordbk.c_pipe_id; 
+        
+				if ( SQLCODE != 0 )
+        {
+          if ( SQLCODE == NO_DATA_FOUND )
+          {
+						if (DEBUG_MSG_LVL_3)
+						{
+            	fn_userlog(c_ServiceName,"Inside No Data found of Cancellation Placement loop");
+						}
+            break;
+          }
+
+    			fn_errlog(c_ServiceName,"S31040",SQLMSG,c_errmsg);
+					/*** Following Commented In Ver 1.1 
+          EXEC SQL CLOSE :cur_ban_ord;
+					EXEC SQL FREE  :cur_ban_ord;
+					****/
+					/*** Ver 1.1 Starts ***/
+          EXEC SQL CLOSE cur_ban_ord;
+					fclose(fp);	
+					/*** Ver 1.1 Ends   ***/
+					tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+          fn_exit ( "Unable to fetch from cursor - Contact system support",'Y');
+					return;
+        }
+
+
+  			fn_bat_pst_msg ( c_ServiceName, " Fetching orders .....", c_tag );
+
+				if(DEBUG_MSG_LVL_3)
+    		{
+					fn_userlog(c_ServiceName," **  st_ordbk.c_ordr_rfrnc Is [%s]",st_ordbk.c_ordr_rfrnc);         
+					fn_userlog(c_ServiceName," **  st_ordbk.c_cln_mtch_accnt Is [%s]",st_ordbk.c_cln_mtch_accnt); 
+					fn_userlog(c_ServiceName," **  st_ordbk.c_xchng_cd Is [%s]",st_ordbk.c_xchng_cd);             
+					fn_userlog(c_ServiceName," **  st_ordbk.c_undrlyng is [%s]",st_ordbk.c_undrlyng);             
+					fn_userlog(c_ServiceName," **  st_ordbk.c_prd_typ Is [%c]",st_ordbk.c_prd_typ);               
+					fn_userlog(c_ServiceName," **  st_ordbk.c_ctgry_indstk Is [%c]",st_ordbk.c_ctgry_indstk);     
+					fn_userlog(c_ServiceName," **  st_ordbk.c_expry_dt Is [%s]",st_ordbk.c_expry_dt);             
+					fn_userlog(c_ServiceName," **  st_ordbk.c_exrc_typ Is [%c]",st_ordbk.c_exrc_typ);             
+					fn_userlog(c_ServiceName," **  st_ordbk.c_opt_typ Is [%c]",st_ordbk.c_opt_typ);               
+					fn_userlog(c_ServiceName," **  st_ordbk.l_strike_prc Is [%ld]",st_ordbk.l_strike_prc);        
+					fn_userlog(c_ServiceName," **  st_ordbk.c_ordr_flw Is [%c]",st_ordbk.c_ordr_flw);             
+					fn_userlog(c_ServiceName," **  st_ordbk.c_ordr_stts Is [%c]",st_ordbk.c_ordr_stts);           
+					fn_userlog(c_ServiceName," **  st_ordbk.c_spn_flg Is [%c]",st_ordbk.c_spn_flg);               
+					fn_userlog(c_ServiceName," **  st_ordbk.c_pipe_id Is [%s]",st_ordbk.c_pipe_id);               
+
+    		}
+
+  			fn_bat_pst_msg ( c_ServiceName, " Checking if order is fresh or cover order .....", c_tag );
+
+				i_returncode = fn_chk_frsh_cover_ord  ( c_ServiceName,
+																								&st_ordbk,
+																								&c_fresh_ord_flg,
+																								&ptr_st_err_msg
+                           										);
+				if( i_returncode == -1 )
+  			{
+					fn_errlog(c_ServiceName,"S31045",SQLMSG,c_errmsg);
+					/*** Following Commented In Ver 1.1
+          EXEC SQL CLOSE :cur_ban_ord;
+					EXEC SQL FREE  :cur_ban_ord;
+					****/
+					/*** Ver 1.1 Starts ***/
+          EXEC SQL CLOSE cur_ban_ord;
+					fclose(fp);
+					/*** Ver 1.1 Ends   ***/
+					tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+          fn_exit ( "Error while calling function fresh-cover order..- Contact system support",'Y');
+          return;
+ 	 			}
+
+				if (DEBUG_MSG_LVL_3)
+				{	
+       		fn_userlog(c_ServiceName,"For order reference :%s: c_fresh_ord_flg Is = :%c:",st_ordbk.c_ordr_rfrnc,c_fresh_ord_flg);
+				}
+
+				if ( c_fresh_ord_flg == 'Y' )
+				{
+
+					/*** Ver 1.1 Starts ***/
+					MEMSET(c_filedata);
+				  sprintf(c_filedata,"%s,%s,%s,%s",st_ordbk.c_cln_mtch_accnt,st_ordbk.c_undrlyng,st_ordbk.c_ordr_rfrnc,(st_ordbk.c_prd_typ == 'O')?"OPT":"FUT");
+					fprintf(fp,"%s\n",c_filedata);
+					/*** Ver 1.1 Ends   ***/
+
+
+					if ( st_ordbk.c_spn_flg == 'S')
+					{
+        		fn_userlog(c_ServiceName,"Inside SPAN order  Cancellation Placement ");
+						strcpy(c_svc_name,"SFO_SPN_CANCEL");
+					}
+					else if ( st_ordbk.c_spn_flg == 'N')
+					{
+						if( st_ordbk.c_prd_typ == 'F' || st_ordbk.c_prd_typ == 'P' || st_ordbk.c_prd_typ == 'U') 
+						{
+        			fn_userlog(c_ServiceName,"Inside NORMAL order  Cancellation Placement for Futures/FuturePlus  ");
+							strcpy(c_svc_name,"SFO_CANCEL_FUT");
+						}
+						else if( st_ordbk.c_prd_typ == 'O')
+						{
+        			fn_userlog(c_ServiceName,"Inside NORMAL order  Cancellation Placement for Options ");
+							strcpy(c_svc_name,"SFO_CANCEL_OPT");
+						}
+						else
+						{
+							fn_errlog(c_ServiceName,"S31050",SQLMSG,c_errmsg);
+							/*** Following Commented In Ver 1.1
+          		EXEC SQL CLOSE :cur_ban_ord;
+							EXEC SQL FREE  :cur_ban_ord;
+							****/
+							/*** Ver 1.1 Starts ***/
+          		EXEC SQL CLOSE cur_ban_ord;
+							fclose(fp);
+          		/*** Ver 1.1 Ends   ***/
+							tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+          		fn_exit ( "Inside incorrect product type for NORMAL Client..- Contact system support",'Y');
+          		return;
+						}
+					}
+					else
+					{
+						fn_errlog(c_ServiceName,"S31055",SQLMSG,c_errmsg);
+						/*** Following Commented In Ver 1.1
+         		EXEC SQL CLOSE :cur_ban_ord;
+						EXEC SQL FREE  :cur_ban_ord;
+						 ****/
+						/*** Ver 1.1 Starts ***/
+          	EXEC SQL CLOSE cur_ban_ord;
+						fclose(fp);
+          	/*** Ver 1.1 Ends   ***/
+						tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/	
+         		fn_exit ( "Inside incorrect SPAN/Normal Client Flag..- Contact system support",'Y');
+         		return;
+					}
+
+					if (DEBUG_MSG_LVL_3)
+					{
+        		fn_userlog(c_ServiceName,"c_channel = :%s:",c_channel);
+					}		
+
+					i_err[0]  = Fchg32(ptr_fml_Sbuffer, FFO_USR_ID, 0, (char *)c_user_id, 0);
+					i_ferr[0] = Ferror32;
+					i_err[1]  = Fchg32(ptr_fml_Sbuffer, FFO_SSSN_ID, 0, (char *)&li_sssn_id, 0);
+					i_ferr[1] = Ferror32;
+					i_err[2]  = Fchg32(ptr_fml_Sbuffer, FFO_XCHNG_CD, 0,  (char *)st_ordbk.c_xchng_cd, 0);
+					i_ferr[2] = Ferror32;
+					i_err[3] = Fchg32(ptr_fml_Sbuffer, FFO_XCHNG_RMRKS, 0, (char *)c_remarks, 0);
+					i_ferr[3]= Ferror32;
+					i_err[4] = Fchg32(ptr_fml_Sbuffer, FFO_ALIAS, 0, (char *)&c_alias, 0);
+					i_ferr[4]= Ferror32;
+					i_err[5]  = Fchg32(ptr_fml_Sbuffer, FFO_CHANNEL, 0, (char *)c_channel, 0);
+					i_ferr[5] = Ferror32;
+					i_err[6]  = Fchg32(ptr_fml_Sbuffer, FFO_EBA_MTCH_ACT_NO, 0, (char *)st_ordbk.c_cln_mtch_accnt, 0);
+					i_ferr[6] = Ferror32;
+					i_err[7]  = Fchg32(ptr_fml_Sbuffer, FFO_ORDR_RFRNC, 0, (char *)st_ordbk.c_ordr_rfrnc, 0);
+					i_ferr[7] = Ferror32;
+					i_err[8]  = Fchg32(ptr_fml_Sbuffer, FFO_PIPE_ID, 0, (char *)st_ordbk.c_pipe_id, 0);
+					i_ferr[8] = Ferror32;
+					i_err[9]  = Fchg32(ptr_fml_Sbuffer, FFO_SVC_NAME, 0, (char *)c_svc_name, 0);
+					i_ferr[9] = Ferror32;
+
+
+					for(i_fml_loop = 0; i_fml_loop < 10 ; i_fml_loop++)
+					{
+						if(i_err[i_fml_loop] == -1)
+						{
+							fn_userlog(c_ServiceName,"The field number is %d", i_fml_loop);
+							fn_errlog(c_ServiceName, "S31060", Fstrerror32(i_ferr[i_fml_loop]), c_errmsg);
+							/*** Following Commented In Ver 1.1
+							EXEC SQL CLOSE :cur_ban_ord;
+							EXEC SQL FREE  :cur_ban_ord;
+							 ****/
+          		/*** Ver 1.1 Starts ***/
+          		EXEC SQL CLOSE cur_ban_ord;
+							fclose(fp) ;
+          		/*** Ver 1.1 Ends   ***/
+							tpfree ( ( char * ) ptr_fml_Sbuffer);  /*** Ver 1.3 ***/
+							fn_exit ( "Failed while cancelling SPAN order - Contact system support",'Y');
+							return;
+						}
+					}
+
+
+					/**** Following Commented In Ver 1.3 
+					if( tpacall( "SFO_ORD_ROUT", (char*)(ptr_fml_Sbuffer), 0, TPNOTRAN ) == -1 )
+					{
+						fn_errlog(c_ServiceName,"S31065",TPMSG,c_errmsg);
+						*** Following Commented In Ver 1.1
+						EXEC SQL CLOSE :cur_ban_ord;
+						EXEC SQL FREE  :cur_ban_ord;
+						****
+          	*** Ver 1.1 Starts ***
+          	EXEC SQL CLOSE cur_ban_ord;
+						fclose(fp) ;
+          	*** Ver 1.1 Ends   ***
+						fn_exit ( "Inside incorrect SPAN/Normal Client Flag..- Contact system support",'Y');
+						return;
+					}
+					Commented In Ver 1.3 Ends ****/
+					
+					/*** Ver 1.3 Starts ***/
+
+					ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN );
+
+          if ( ptr_fml_Obuf == NULL )
+          {
+            fn_errlog(c_ServiceName,"S31070",SQLMSG,c_errmsg);
+            tpfree ( ( char * ) ptr_fml_Sbuffer);
+            tpfree ( ( char * ) ptr_fml_Obuf );
+            EXEC SQL CLOSE cur_ban_ord;
+            fclose(fp) ;
+            fn_exit ( "Failed while allocating output buffer..- Contact system support",'Y');
+            return;
+          }
+
+          if( tpcall( "SFO_ORD_ROUT", (char*)(ptr_fml_Sbuffer), 0, (char **)&ptr_fml_Obuf, &li_len_tobuf, 0 ) == -1 )
+          {
+            fn_errlog(c_ServiceName,"S31075",SQLMSG,c_errmsg);
+            tpfree ( ( char * ) ptr_fml_Sbuffer);
+            tpfree ( ( char * ) ptr_fml_Obuf );
+            EXEC SQL CLOSE cur_ban_ord;
+            fclose(fp) ;
+            fn_exit ( "Failed while calling cancellation service..- Contact system support",'Y');
+            return;
+          }
+
+					/*** Ver 1.3 Ends   ***/
+
+
+				}
+	
+  } /*** End of while ***/
+	/*** Following Commented In Ver 1.1
+	EXEC SQL
+  CLOSE :cur_ban_ord ;
+	EXEC SQL
+	FREE	:cur_ban_ord;
+	****/
+	/*** Ver 1.1 Starts ***/
+	fclose(fp);
+  EXEC SQL CLOSE cur_ban_ord;
+
+	sprintf( c_command, "ksh sndmail_banord_csv.sh %s", c_filename );
+  fn_userlog( "Mail send command :%s", c_command );
+  system(c_command);
+
+	/*** Ver 1.1 Ends   ***/
+
+  fn_exit ( "*** Batch cancel ban orders Completed ****",'N');
+
+	return;
+}
+
+int fn_chk_frsh_cover_ord  (  char *c_ServiceName,
+                              struct st_orderbook *st_ordbk,
+                              char  *c_fresh_ord_flg,
+                              struct st_err_msg *ptr_st_err_msg
+                           )
+{
+
+		/*** Variable declartion Starts ***/
+		long 	l_open_pos_qty   = 0;
+		long 	l_tot_ord_qty = 0;      /*** Ver 1.3 -- Var name chnged from l_marginable_qty to l_tot_ord_qty ***/
+		/*** long l_diff_qty  = 0;  Commented In Ver 1.3 ***/
+		char	c_fresh_order_flg = '\0';
+		char	c_open_flw				= '\0';
+		int i_flw_same = 0;
+		/*** Variable declartion Ends   ***/
+		
+		
+		rtrim((char *) st_ordbk->c_expry_dt);
+	 	rtrim((char *)st_ordbk->c_undrlyng);
+	
+		fn_userlog(c_ServiceName,"Inside function fn_chk_frsh_cover_ord");
+		
+		if(DEBUG_MSG_LVL_3)
+        {
+					fn_userlog(c_ServiceName," --  Inside function fn_chk_frsh_cover_ord");
+          fn_userlog(c_ServiceName," --  st_ordbk->c_ordr_rfrnc Is [%s]",st_ordbk->c_ordr_rfrnc);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_cln_mtch_accnt Is [%s]",st_ordbk->c_cln_mtch_accnt);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_xchng_cd Is [%s]",st_ordbk->c_xchng_cd);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_undrlyng is [%s]",st_ordbk->c_undrlyng);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_prd_typ Is [%c]",st_ordbk->c_prd_typ);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_ctgry_indstk Is [%c]",st_ordbk->c_ctgry_indstk);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_expry_dt Is [%s]",st_ordbk->c_expry_dt);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_exrc_typ Is [%c]",st_ordbk->c_exrc_typ);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_opt_typ Is [%c]",st_ordbk->c_opt_typ);
+          fn_userlog(c_ServiceName," --  st_ordbk->l_strike_prc Is [%ld]",st_ordbk->l_strike_prc);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_ordr_flw Is [%c]",st_ordbk->c_ordr_flw);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_ordr_stts Is [%c]",st_ordbk->c_ordr_stts);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_spn_flg Is [%c]",st_ordbk->c_spn_flg);
+          fn_userlog(c_ServiceName," --  st_ordbk->c_pipe_id Is [%s]",st_ordbk->c_pipe_id);
+
+        }
+
+
+
+		if (st_ordbk->c_spn_flg == 'N')
+		{
+
+				if (st_ordbk->c_prd_typ == 'O')
+				{
+
+						/*** l_diff_qty = 0 ;Commented In Ver 1.3 ***/
+						l_open_pos_qty = 0;
+						l_tot_ord_qty	 = 0;   /*** Ver 1.3 -- Variable name change ***/
+
+						if (DEBUG_MSG_LVL_3)
+						{
+							fn_userlog(c_ServiceName,"Inside function fn_chk_frsh_cover_ord");
+							fn_userlog(c_ServiceName,"Checking if open position flw is same ...");
+						}		
+
+						c_open_flw = '\0';
+	
+						EXEC SQL
+              SELECT FOP_OPNPSTN_FLW 
+              INTO  :c_open_flw
+              FROM  FOP_FO_OPTIONS_PSTN
+              WHERE FOP_CLM_MTCH_ACCNT =:st_ordbk->c_cln_mtch_accnt
+              AND   FOP_XCHNG_CD       =:st_ordbk->c_xchng_cd
+              AND   FOP_PRDCT_TYP      =:st_ordbk->c_prd_typ
+              AND   FOP_OPT_TYP        =:st_ordbk->c_opt_typ
+              AND   FOP_STRK_PRC       =:st_ordbk->l_strike_prc
+              AND   FOP_INDSTK         =:st_ordbk->c_ctgry_indstk
+              AND   FOP_UNDRLYNG       =:st_ordbk->c_undrlyng
+              AND   FOP_EXPRY_DT       =:st_ordbk->c_expry_dt
+              AND   FOP_EXER_TYP       =:st_ordbk->c_exrc_typ ;
+
+            if ( SQLCODE != 0)
+            {
+              fn_errlog ( c_ServiceName, "S31080", SQLMSG, ptr_st_err_msg->c_err_msg );
+              return FAILURE;
+            }
+
+						if (DEBUG_MSG_LVL_3)
+						{	
+							fn_userlog(c_ServiceName," c_open_flw Is :%c:" ,c_open_flw);
+						}
+					
+						
+						if ( (c_open_flw == st_ordbk->c_ordr_flw ) && c_open_flw !='N')
+						{
+							if (DEBUG_MSG_LVL_3)
+							{
+								fn_userlog(c_ServiceName," As open posiiton flw is same...this is fresh order...");
+							}
+
+							c_fresh_order_flg = 'Y' ;
+						}
+						else if ((c_open_flw != st_ordbk->c_ordr_flw ) && c_open_flw !='N' )
+						{
+				
+							fn_userlog(c_ServiceName,"  open posiiton flw is not same......");
+							EXEC SQL
+								SELECT FOP_OPNPSTN_QTY,
+											 DECODE(:st_ordbk->c_ordr_flw,'B',GREATEST(ABS(FOP_IBUY_QTY),ABS(FOP_EXBUY_QTY)),GREATEST(ABS(FOP_ISELL_QTY),ABS(FOP_EXSELL_QTY)))
+								INTO  :l_open_pos_qty,
+											:l_tot_ord_qty     /*** Ver 1.3 Variable name change ***/
+								FROM FOP_FO_OPTIONS_PSTN
+								WHERE FOP_CLM_MTCH_ACCNT =:st_ordbk->c_cln_mtch_accnt
+								AND   FOP_XCHNG_CD       =:st_ordbk->c_xchng_cd
+								AND   FOP_PRDCT_TYP      =:st_ordbk->c_prd_typ
+								AND   FOP_OPT_TYP        =:st_ordbk->c_opt_typ
+								AND   FOP_STRK_PRC       =:st_ordbk->l_strike_prc
+								AND   FOP_INDSTK         =:st_ordbk->c_ctgry_indstk
+								AND   FOP_UNDRLYNG       =:st_ordbk->c_undrlyng
+								AND   FOP_EXPRY_DT       =:st_ordbk->c_expry_dt
+								AND   FOP_EXER_TYP       =:st_ordbk->c_exrc_typ
+								AND   FOP_OPNPSTN_FLW    =(DECODE(:st_ordbk->c_ordr_flw,'B','S','B'))  ;
+
+							if ( (SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND))
+							{
+								fn_errlog ( c_ServiceName, "S31085", SQLMSG, ptr_st_err_msg->c_err_msg );
+								return FAILURE;
+							}
+
+							if (SQLCODE == NO_DATA_FOUND)
+							{
+								l_open_pos_qty  = 0;
+								l_tot_ord_qty   = 0;  /*** Ver 1.3 -- Variable name change ***/
+							}
+
+
+							/**** Following Commneted In Ver 1.3	
+							l_diff_qty = labs(l_marginable_qty) - labs(l_open_pos_qty);
+
+							if ( l_diff_qty == 0 )
+							{
+								c_fresh_order_flg = 'N' ;
+							}
+							else 
+							{
+								c_fresh_order_flg = 'Y' ;
+							}
+							Commneted In Ver 1.3 Ends *********/
+						
+							/*** Ver 1.3 Starts ***/
+
+              if ( labs(l_tot_ord_qty) <= labs(l_open_pos_qty) )
+              {
+                c_fresh_order_flg = 'N' ;
+              }
+              else
+              {
+                c_fresh_order_flg = 'Y' ;
+              }
+
+              /*** Ver 1.3 Ends   ***/
+
+							if(DEBUG_MSG_LVL_3)
+							{
+								fn_userlog(c_ServiceName,"Open position quantity is |%ld|",l_open_pos_qty);
+								/*** fn_userlog(c_ServiceName,"Marginable quantity is |%ld|",l_marginable_qty);Commented In Ver 1.3 ***/
+								fn_userlog(c_ServiceName," Total Order quantity is |%ld|",l_tot_ord_qty);       	/*** Ver 1.3 ***/
+								/*** fn_userlog(c_ServiceName," Difference  quantity is |%ld|",l_diff_qty);Commented In Ver 1.3 ***/
+								fn_userlog(c_ServiceName," c_fresh_order_flg is |%c|",c_fresh_order_flg);
+							}
+						}
+						else if (  c_open_flw =='N' )
+						{
+							fn_userlog(c_ServiceName," No open posiiton exists ...this is fresh order...");
+              c_fresh_order_flg = 'Y' ;
+						}
+						else
+						{
+							fn_userlog(c_ServiceName," In ERROR CASE ...");
+						}
+				}
+				else if (st_ordbk->c_prd_typ == 'F' || st_ordbk->c_prd_typ == 'P')
+				{
+
+						/*** l_diff_qty = 0 ; Commented In Ver 1.3 ***/
+            l_open_pos_qty = 0;
+            l_tot_ord_qty  = 0;  /*** Ver 1.3 -- Variable name change ***/
+				
+		
+						c_open_flw = '\0';	
+					
+						EXEC SQL
+              SELECT FFP_OPNPSTN_FLW 
+              INTO  :c_open_flw
+              FROM  FFP_FO_FUTURES_PSTN
+              WHERE FFP_CLM_MTCH_ACCNT =:st_ordbk->c_cln_mtch_accnt
+              AND   FFP_XCHNG_CD       =:st_ordbk->c_xchng_cd
+              AND   FFP_PRDCT_TYP      =:st_ordbk->c_prd_typ
+              AND   FFP_INDSTK         =:st_ordbk->c_ctgry_indstk
+              AND   FFP_UNDRLYNG       =:st_ordbk->c_undrlyng
+              AND   FFP_EXPRY_DT       =:st_ordbk->c_expry_dt
+              AND   FFP_EXER_TYP       =:st_ordbk->c_exrc_typ ;
+
+            if ( SQLCODE != 0 )
+            {
+              fn_errlog ( c_ServiceName, "S31090", SQLMSG, ptr_st_err_msg->c_err_msg );
+              return FAILURE;
+            }
+
+						if (DEBUG_MSG_LVL_3)
+						{
+            	fn_userlog(c_ServiceName," For Futures of NORMAL Client:c_open_flw Is :%c:" ,c_open_flw);
+						}	
+
+            if ( ( c_open_flw == st_ordbk->c_ordr_flw) && c_open_flw !='N' )
+            {
+              fn_userlog(c_ServiceName," As open posiiton flw is same...this is fresh order...");
+              c_fresh_order_flg = 'Y' ;
+            }
+            else if (( c_open_flw != st_ordbk->c_ordr_flw ) && c_open_flw != 'N') 
+            {
+
+							fn_userlog(c_ServiceName,"  open posiiton flw is not same......");
+							EXEC SQL
+								SELECT FFP_OPNPSTN_QTY,
+											 DECODE(:st_ordbk->c_ordr_flw,'B',GREATEST(ABS(FFP_IBUY_QTY),ABS(FFP_EXBUY_QTY)),GREATEST(ABS(FFP_ISELL_QTY),ABS(FFP_EXSELL_QTY)))
+								INTO  :l_open_pos_qty,
+											:l_tot_ord_qty     /*** Ver 1.3 -- Variable name change ***/
+								FROM FFP_FO_FUTURES_PSTN
+								WHERE FFP_CLM_MTCH_ACCNT =:st_ordbk->c_cln_mtch_accnt
+								AND   FFP_XCHNG_CD       =:st_ordbk->c_xchng_cd
+								AND   FFP_PRDCT_TYP      =:st_ordbk->c_prd_typ
+								AND   FFP_INDSTK         =:st_ordbk->c_ctgry_indstk
+								AND   FFP_UNDRLYNG       =:st_ordbk->c_undrlyng
+								AND   FFP_EXPRY_DT       =to_date(:st_ordbk->c_expry_dt,'dd-Mon-yyyy')
+								AND   FFP_EXER_TYP       =:st_ordbk->c_exrc_typ
+								AND   FFP_OPNPSTN_FLW    =(DECODE(:st_ordbk->c_ordr_flw,'B','S','B'))  ;
+
+							if ( (SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND))
+							{
+								fn_errlog ( c_ServiceName, "S31095", SQLMSG, ptr_st_err_msg->c_err_msg );
+								return FAILURE;
+							}
+
+							if (SQLCODE == NO_DATA_FOUND)
+							{
+								l_open_pos_qty  = 0;
+								l_tot_ord_qty   = 0;  /*** Variable name change ***/
+							}
+
+							/**** Following Commneted In Ver 1.3
+							l_diff_qty = labs(l_marginable_qty) - labs(l_open_pos_qty);
+
+							if ( l_diff_qty == 0 )
+							{
+								c_fresh_order_flg = 'N' ;
+							}
+							else 
+							{
+								c_fresh_order_flg = 'Y' ;
+							}
+							Commneted In Ver 1.3 Ends *********/
+							
+							/*** Ver 1.3 Starts ***/
+
+              if ( labs(l_tot_ord_qty) <= labs(l_open_pos_qty) )
+              {
+                c_fresh_order_flg = 'N' ;
+              }
+              else
+              {
+                c_fresh_order_flg = 'Y' ;
+              }
+
+              /*** Ver 1.3 Ends   ***/				
+	
+							if(DEBUG_MSG_LVL_3)
+							{
+								fn_userlog(c_ServiceName,"Open position quantity is |%ld|",l_open_pos_qty);
+								/*** fn_userlog(c_ServiceName,"Marginable quantity      quantity is |%ld|",l_marginable_qty);
+								Commented In Ver 1.3 ***/
+								fn_userlog(c_ServiceName," Total Order quantity is |%ld|",l_tot_ord_qty);       /*** Ver 1.3 ***/
+								/*** fn_userlog(c_ServiceName," Difference  quantity is |%ld|",l_diff_qty); Commented In Ver 1.3 ***/
+								fn_userlog(c_ServiceName," c_fresh_order_flg is |%c|",c_fresh_order_flg);
+							}
+						}
+						else if (  c_open_flw == 'N' )
+						{
+							if (DEBUG_MSG_LVL_3)
+							{
+								fn_userlog(c_ServiceName," No open posiiton exists ...this is fresh order...");
+							}
+
+              c_fresh_order_flg = 'Y' ;
+						}
+						else
+						{
+							fn_userlog(c_ServiceName," In ERROR CASE ...");
+						}
+				}
+		} /** End of condition for Normal clients ***/
+		else if (st_ordbk->c_spn_flg == 'S' )
+    {
+			/*** l_diff_qty = 0 ; Commented In Ver 1.3 ***/
+      l_open_pos_qty = 0;
+      l_tot_ord_qty  = 0;   /*** Ver 1.3 -- Variable name change ***/
+
+
+			c_open_flw = '\0' ;   /* \0 Added in Ver TOL */
+
+			EXEC SQL
+        SELECT FCP_OPNPSTN_FLW 
+        INTO  :c_open_flw
+        FROM  FCP_FO_SPN_CNTRCT_PSTN
+        WHERE FCP_CLM_MTCH_ACCNT =:st_ordbk->c_cln_mtch_accnt
+        AND   FCP_XCHNG_CD       =:st_ordbk->c_xchng_cd
+        AND   FCP_PRDCT_TYP      =:st_ordbk->c_prd_typ
+        AND   FCP_OPT_TYP        =:st_ordbk->c_opt_typ
+        AND   FCP_STRK_PRC       =:st_ordbk->l_strike_prc
+        AND   FCP_INDSTK         =:st_ordbk->c_ctgry_indstk
+        AND   FCP_UNDRLYNG       =:st_ordbk->c_undrlyng
+        AND   FCP_EXPRY_DT       =:st_ordbk->c_expry_dt
+        AND   FCP_EXER_TYP       =:st_ordbk->c_exrc_typ ;
+
+      if ( SQLCODE != 0 )
+      {
+      	fn_errlog ( c_ServiceName, "S31100", SQLMSG, ptr_st_err_msg->c_err_msg );
+      	return FAILURE;
+      }
+
+			if (DEBUG_MSG_LVL_3)
+			{
+      	fn_userlog(c_ServiceName," c_open_flw Is :%c:" ,c_open_flw);
+			}
+
+      if ( (c_open_flw == st_ordbk->c_ordr_flw ) && c_open_flw !='N' )
+      {
+				if (DEBUG_MSG_LVL_3)
+				{
+      		fn_userlog(c_ServiceName," As open posiiton flw is same...this is fresh order...");
+				}
+
+      	c_fresh_order_flg = 'Y' ;
+      }
+      else if ( (c_open_flw != st_ordbk->c_ordr_flw ) && c_open_flw !='N')
+      {
+				if (DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"  open posiiton flw is not same......");
+				}
+
+      	EXEC SQL
+        	SELECT FCP_OPNPSTN_QTY,
+          	     DECODE(:st_ordbk->c_ordr_flw,'B',GREATEST(ABS(FCP_IBUY_QTY),ABS(FCP_EXBUY_QTY)),GREATEST(ABS(FCP_ISELL_QTY),ABS(FCP_EXSELL_QTY)))
+        	INTO  :l_open_pos_qty,
+        	      :l_tot_ord_qty 				/*** Ver 1.3 -- Variable name change ***/
+        	FROM  FCP_FO_SPN_CNTRCT_PSTN
+        	WHERE FCP_CLM_MTCH_ACCNT =:st_ordbk->c_cln_mtch_accnt
+        	AND   FCP_XCHNG_CD       =:st_ordbk->c_xchng_cd
+        	AND   FCP_PRDCT_TYP      =:st_ordbk->c_prd_typ
+        	AND   FCP_OPT_TYP        =:st_ordbk->c_opt_typ
+        	AND   FCP_STRK_PRC       =:st_ordbk->l_strike_prc
+        	AND   FCP_INDSTK         =:st_ordbk->c_ctgry_indstk
+        	AND   FCP_UNDRLYNG       =:st_ordbk->c_undrlyng
+        	AND   FCP_EXPRY_DT       =:st_ordbk->c_expry_dt
+        	AND   FCP_EXER_TYP       =:st_ordbk->c_exrc_typ
+        	AND   FCP_OPNPSTN_FLW    =(DECODE(:st_ordbk->c_ordr_flw,'B','S','B'))  ;
+
+      	if ( (SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND))
+      	{
+        	fn_errlog ( c_ServiceName, "L31090", SQLMSG, ptr_st_err_msg->c_err_msg );
+        	return FAILURE;
+      	}
+
+      	if (SQLCODE == NO_DATA_FOUND)
+      	{
+        	l_open_pos_qty  = 0;
+        	l_tot_ord_qty   = 0;  /*** Ver 1.3 -- Variable name change ***/
+      	}
+
+				/**** Following Commneted In Ver 1.3
+				l_diff_qty = labs(l_marginable_qty) - labs(l_open_pos_qty);
+
+				if ( l_diff_qty == 0 )
+				{
+					c_fresh_order_flg = 'N' ;
+				}
+				else 
+				{
+					c_fresh_order_flg = 'Y' ;
+				}
+				Commneted In Ver 1.3 Ends *********/
+				
+				/*** Ver 1.3 Starts ***/
+
+        if ( labs(l_tot_ord_qty) <= labs(l_open_pos_qty) )
+        {
+        	c_fresh_order_flg = 'N' ;
+        }
+        else
+        {
+        	c_fresh_order_flg = 'Y' ;
+        }
+
+        /*** Ver 1.3 Ends   ***/
+	
+
+      	if(DEBUG_MSG_LVL_3)
+      	{
+        	fn_userlog(c_ServiceName,"Open position quantity is |%ld|",l_open_pos_qty);
+        	/*** fn_userlog(c_ServiceName,"Marginable quantity is |%ld|",l_marginable_qty); Commented In Ver 1.3 ***/
+					fn_userlog(c_ServiceName," Total Order quantity is |%ld|",l_tot_ord_qty);       /*** Ver 1.3 ***/
+					/*** fn_userlog(c_ServiceName," Difference  quantity is |%ld|",l_diff_qty); Commented In Ver 1.3 ***/
+					fn_userlog(c_ServiceName," c_fresh_order_flg is |%c|",c_fresh_order_flg);
+      	}
+			}
+			else if( c_open_flw =='N')
+			{
+				if (DEBUG_MSG_LVL_3)
+				{
+        	fn_userlog(c_ServiceName," No open posiiton exists ...this is fresh order...");
+				}
+
+        c_fresh_order_flg = 'Y' ;
+      }
+      else
+      {
+        fn_userlog(c_ServiceName," In ERROR CASE ...");
+      }
+    }
+
+		*c_fresh_ord_flg = c_fresh_order_flg ;
+		return 0 ;
+}
+
+
+void fn_exit( char* c_err_msg, char c_mem_flg )
+{
+    fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+    if( c_mem_flg == 'Y' )
+    {
+      tpabort(0);
+    }
+		return;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+	fn_var = BAT_CANCEL_BANORD;
+
+  if ( argc != 6 )
+  {
+    fn_userlog ( "bat_cancel_banord",
+   "Usage : %s <Tag> <Exchange Code> <Pipe id> <Exchange Next Date>", argv[0] );
+		return -1;
+	}
+
+	return 0;
+}
+
+void fn_bat_term (  int argc, char *argv[] )
+{
+   return ;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}
+
+/*** Ver 1.1 Starts ***/
+void print_qry1(char * str, int i_cnt,char * c_ServiceName)
+   {
+     int idx;
+     char c_tmp_str1[100];
+
+     MEMSET(c_tmp_str1);
+     if( DEBUG_MSG_LVL_3 )
+     {
+      fn_userlog(c_ServiceName,"Printing query");
+     }
+
+     for (idx = 0;idx < i_cnt; idx += 60)
+     {
+      strncpy(c_tmp_str1,str + idx,60);
+      fn_userlog(c_ServiceName,"%s",c_tmp_str1);
+     }
+
+     if( DEBUG_MSG_LVL_3 )
+     {
+      fn_userlog(c_ServiceName,"Finished printing query");
+     }
+   }
+/*** Ver 1.1 Ends ***/

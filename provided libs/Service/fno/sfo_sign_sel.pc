@@ -1,0 +1,1381 @@
+ /************************************************************************************
+******
+Service       : sfo_sign_sel.pc
+
+Purpose       : To get data for signing
+								1. Get data for a particular Contract note if Flag is 'C'
+								2. Get data for the first available unsigned Contract Note if
+								 flag is other than 'C'
+
+Input Param   :	FFO_QT_TRDNG_FLG  : Flag 'C' 
+								FFO_NARRATION_ID  :Contract note number / E/A no
+								FFO_OPERATION_TYP - 'F' or 'E'
+								FFO_FROM_DT       : Start date for vericfication selection
+								FFO_TO_DT         : End date for vericfication selection
+								FFO_SYMBOL        : Used to send sign 
+
+Output         
+Tables        :	FNO_CNTRCT_MSTR  S/U
+								FNO_CNTRCT_DTLS  S/U
+								EA_CONF_MSTR		 S/U
+								EA_CONF_DTLS     S/U
+
+Author        : ICICI Infotech
+
+Date          : 
+
+Version       :	1.1  STT changes by SN for sending STT for signing on 								28-Sep-2004
+							:	1.2 Changes by Firoz Patel (FP) for verification
+							: 1.3 Changes for NNF808  by Vidyayini Krish
+							: 1.4 Changes for IBM by Vidyayini Krish
+							: 1.5 Changes for Buffer Reallocation (Shailesh)												23-May-2008
+							: 1.6 Changes for Exercise STT  (Shamili)																30-May-2008
+							:	1.7	10g order by clause in selection (Shamili)												03-Jun-2008
+							:	1.8 Display of additional changes (Shamili)				  								  08-Jul-2008
+							: 1.9 Resigning of old contracts	(Shamili)															18-Aug-2008
+							:	2.0	bug fixing
+							:	2.1	View to FML Changes (Sachin Birje)  07-Sep-2014
+*************************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <string.h>
+#include <sqlca.h>
+#include <fo_fml_def.h>
+#include <eba_to_ors.h> /* Ver 1.3 */
+
+#include <fo.h>
+/** #include <fo_view_def.h> ** Ver 2.1 **/
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h>
+#include <fn_read_debug_lvl.h> /* Ver 1.4 */
+
+/*#define CURSOR_OUTPUT_FML 11  ***Ver 1.1 10 replaced by 11 ***/ /*commented for Ver 1.8*/
+#define CURSOR_OUTPUT_FML 14 /***Ver 1.8 11 replaced by 14 ***/
+#define UNIQUE_OUTPUT_FML 11 /***Ver 1.1 10 replaced by 11 ***/	
+#define REC_LENGTH 2250
+
+void SFO_SIGN_SEL(TPSVCINFO *ptr_data)
+{
+	char c_ServiceName[33];
+	char c_cntrct_specs[20];
+	char c_flag;
+	char c_oper_typ;
+	char c_errmsg[100];
+	char code[20];
+	char c_src_tx[10];
+	int err[15];
+	int i,j,i_contr_no;
+	int i_fml_cnt=5;												 /* Added in Ver 1.5 */
+	int   arr_otpt[UNIQUE_OUTPUT_FML+1] ;    /*  Error code array for FML's  */
+	int   cur_otpt[CURSOR_OUTPUT_FML+1] ;    /*  Error code array for FML's  */
+	FBFR32 *ptr_ffo_Ibuffer;
+	FBFR32 *ptr_ffo_Obuffer;
+	
+	char temp_ordr[LEN_XCHNG_ACK]; /* Ver 1.3 Changed from 16 to 17 */
+	char temp_trd[16];
+	char c_frm_dt[21]; /** 1.2 **/
+	char c_to_dt[21]; /** 1.2 **/
+	
+	/*** Ver 1.8 **/
+  EXEC SQL BEGIN DECLARE SECTION;
+  varchar  c_ecm_add_ln1[100 + 1];
+  varchar  c_ecm_add_ln2[100 + 1];
+  varchar  c_ecm_add_ln3[100 + 1];
+  varchar  c_ecm_add_ln4[100 + 1];
+  EXEC SQL END DECLARE SECTION;
+
+  /*** Ver 1.8 ends **/
+
+	long  l_space_avl;
+	long  l_space_rqd;
+	long  l_bufferlength;
+	long  l_tm_val;						/** Ver 1.8**/ 
+	FBFR32  *ptr_ffo_temp_buffer;
+
+	EXEC SQL INCLUDE "table/fno_cntrct_mstr.h";
+	EXEC SQL INCLUDE "table/fno_cntrct_dtls.h";
+	EXEC SQL INCLUDE "table/ea_conf_mstr.h";
+	EXEC SQL INCLUDE "table/ea_conf_dtls.h";
+
+	ptr_ffo_Ibuffer = (FBFR32 *)ptr_data->data;
+	l_space_rqd = Fneeded32(1,REC_LENGTH);
+	ptr_ffo_Obuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN *5) ;
+	strcpy(c_ServiceName,ptr_data->name);
+	INITDBGLVL(c_ServiceName);
+	
+	err[0]=Fget32(ptr_ffo_Ibuffer,FFO_QT_TRDNG_FLG,0,(char*)&c_flag,0);
+	err[1]=Fget32(ptr_ffo_Ibuffer,FFO_NARRATION_ID,0,(char*)sql_fcm_cntrct_nmbr.arr,0);
+	err[2]=Fget32(ptr_ffo_Ibuffer,FFO_OPERATION_TYP,0,(char*)&c_oper_typ,0);
+
+	fn_userlog(c_ServiceName,"In sfo_sign_sel");
+/*	if(c_flag != 'C')
+	{
+		c_flag='R';
+	} */ /* commented in 1.2 */
+	SETLEN(sql_fcm_cntrct_nmbr);
+
+	if(tpbegin(TRAN_TIMEOUT,0)== -1)
+	{
+		fn_userlog(c_ServiceName,"TPBEGIN failed");
+		tpfree((char*)ptr_ffo_Obuffer);
+		fn_errlog(c_ServiceName,"S31005",TPMSG,c_errmsg);
+		Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+		tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+	}
+	
+	if(c_oper_typ == 'F')
+	{
+		fn_userlog(c_ServiceName,"In F ");
+		if( c_flag == 'C')
+		{
+			fn_userlog(c_ServiceName,"In C ");
+			fn_userlog(c_ServiceName,"Cntrct nmbr <%s>",sql_fcm_cntrct_nmbr.arr);
+		  EXEC SQL
+		  SELECT
+				FCM_USR_MTCH_ACCNO,
+				nvl(FCM_USR_NM,' '),
+				nvl(FCM_ADD_LN1,' '),
+				nvl(FCM_ADD_LN2,' '),
+				nvl(FCM_ADD_LN3,' '),
+				nvl(FCM_ADD_LN4,' '),
+				nvl(FCM_PAN_NO,' '),
+				nvl(FCM_TEL_NO,' '),
+				FCM_CNTRCT_DT,
+				FCM_CNTRCT_FLG				/*** Ver 1.1 ***/
+		  INTO
+				:sql_fcm_usr_mtch_accno,
+				:sql_fcm_usr_nm,
+				:sql_fcm_add_ln1,
+				:sql_fcm_add_ln2,
+				:sql_fcm_add_ln3,
+				:sql_fcm_add_ln4,
+				:sql_fcm_pan_no,
+				:sql_fcm_tel_no,
+				:sql_fcm_cntrct_dt,
+				:sql_fcm_cntrct_flg			/*** Ver 1.1 ***/
+		  FROM FNO_CNTRCT_MSTR
+		  WHERE FCM_CNTRCT_NMBR=:sql_fcm_cntrct_nmbr
+		  FOR UPDATE OF FCM_SGN_DT,FCM_SGN_FLG ;
+
+			if(SQLCODE != 0)
+			{
+					tpabort(0);
+					fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+					tpfree((char*)ptr_ffo_Obuffer);
+					fn_errlog(c_ServiceName,"S31010",SQLMSG,c_errmsg);
+					Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+					tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+		}
+		else if(c_flag =='R') /* 1.2 changed from !=c to 'R' */
+		{
+			fn_userlog(c_ServiceName,"In !=C ");
+			EXEC SQL
+			SELECT /*+ index(FNO_CNTRCT_MSTR) */ FCM_USR_MTCH_ACCNO,
+				nvl(FCM_USR_NM,' '),
+				nvl(FCM_ADD_LN1,' '),
+				nvl(FCM_ADD_LN2,' '),
+				nvl(FCM_ADD_LN3,' '),
+				nvl(FCM_ADD_LN4,' '),
+				nvl(FCM_PAN_NO,' '),
+				nvl(FCM_TEL_NO,' '),
+				FCM_CNTRCT_NMBR,
+				FCM_CNTRCT_DT,
+				FCM_CNTRCT_FLG		/*** Ver 1.1 ***/
+			INTO
+				:sql_fcm_usr_mtch_accno,
+				:sql_fcm_usr_nm,
+				:sql_fcm_add_ln1,
+				:sql_fcm_add_ln2,
+				:sql_fcm_add_ln3,
+				:sql_fcm_add_ln4,
+				:sql_fcm_pan_no,
+				:sql_fcm_tel_no,
+				:sql_fcm_cntrct_nmbr,
+				:sql_fcm_cntrct_dt,
+				:sql_fcm_cntrct_flg				/*** Ver 1.1 ***/
+			FROM FNO_CNTRCT_MSTR
+			WHERE FCM_SGN_FLG='N'
+			AND rownum =1
+			FOR UPDATE OF FCM_SGN_DT,FCM_SGN_FLG ;
+			
+			
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				tpabort(0);
+				Fadd32(ptr_ffo_Obuffer,FFO_ERR_MSG,"No more records to sign" , 0);
+				tpreturn(TPSUCCESS, 0L,(char*)ptr_ffo_Obuffer,0L, 0);
+			}
+		
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				tpabort(0);
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				fn_errlog(c_ServiceName,"S31015",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+		
+		}
+
+		/**** Ver 1.9 Starts ***************************************/
+
+		else if(c_flag =='M')
+    {
+      fn_userlog(c_ServiceName,"In 'M' ");
+      EXEC SQL
+      SELECT FCM_USR_MTCH_ACCNO,
+        nvl(FCM_USR_NM,' '),
+        nvl(FCM_ADD_LN1,' '),
+        nvl(FCM_ADD_LN2,' '),
+        nvl(FCM_ADD_LN3,' '),
+        nvl(FCM_ADD_LN4,' '),
+        nvl(FCM_PAN_NO,' '),
+        nvl(FCM_TEL_NO,' '),
+        FCM_CNTRCT_NMBR,
+        FCM_CNTRCT_DT,
+        FCM_CNTRCT_FLG    
+      INTO
+        :sql_fcm_usr_mtch_accno,
+        :sql_fcm_usr_nm,
+        :sql_fcm_add_ln1,
+        :sql_fcm_add_ln2,
+        :sql_fcm_add_ln3,
+        :sql_fcm_add_ln4,
+        :sql_fcm_pan_no,
+        :sql_fcm_tel_no,
+        :sql_fcm_cntrct_nmbr,
+        :sql_fcm_cntrct_dt,
+        :sql_fcm_cntrct_flg      
+      FROM FNO_CNTRCT_MSTR
+      WHERE FCM_SGN_FLG='Y'
+			and FCM_OLD_SIGN_FLG='N'
+      AND rownum =1
+      FOR UPDATE OF FCM_SGN_DT,FCM_SGN_FLG,FCM_OLD_SIGN_FLG ;
+
+			if(SQLCODE == NO_DATA_FOUND)
+      {
+        tpabort(0);
+        Fadd32(ptr_ffo_Obuffer,FFO_ERR_MSG,"No more records to sign" , 0);
+        tpreturn(TPSUCCESS, 0L,(char*)ptr_ffo_Obuffer,0L, 0);
+      }
+
+      if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+        tpabort(0);
+        fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+        tpfree((char*)ptr_ffo_Obuffer);
+        fn_errlog(c_ServiceName,"S31020",SQLMSG,c_errmsg);
+        Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+        tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+      }
+
+    }
+	
+		/******* Ver 1.9 Ends **********************************************/ 
+
+		if (c_flag=='C' || c_flag=='R' ) /* Lock record picked for signing */
+		{
+				SETNULL (sql_fcm_cntrct_nmbr);
+        EXEC SQL 
+							UPDATE FNO_CNTRCT_MSTR
+							SET FCM_SGN_DT = sysdate,
+							FCM_SGN_FLG = 'L'
+							WHERE FCM_CNTRCT_NMBR= :sql_fcm_cntrct_nmbr;
+
+				if(SQLCODE != 0)
+				{
+					tpabort(0);
+					fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+					tpfree((char*)ptr_ffo_Obuffer);
+					fn_errlog(c_ServiceName,"S31025",SQLMSG,c_errmsg);
+					Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+					tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+				}
+		}
+	
+	 /******* Ver 1.9 Starts **********************************************/	
+		else if (c_flag == 'M')
+		{
+				SETNULL (sql_fcm_cntrct_nmbr);
+        EXEC SQL
+              UPDATE FNO_CNTRCT_MSTR
+              SET FCM_SGN_DT = sysdate,
+              FCM_OLD_SIGN_FLG = 'L'
+              WHERE FCM_CNTRCT_NMBR= :sql_fcm_cntrct_nmbr;
+
+        if(SQLCODE != 0)
+        {
+          tpabort(0);
+          fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+          tpfree((char*)ptr_ffo_Obuffer);
+          fn_errlog(c_ServiceName,"S31030",SQLMSG,c_errmsg);
+          Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+          tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+        }
+    }	
+
+  	/******* Ver 1.9 Ends **********************************************/		
+		if(c_flag =='X') /* 1.2 Verification selection by date range  */
+		{
+			fn_userlog(c_ServiceName," F In 'X'");
+			err[0]=Fget32(ptr_ffo_Ibuffer,FFO_FROM_DT,0,(char*)c_frm_dt,0);
+    	err[1]=Fget32(ptr_ffo_Ibuffer,FFO_TO_DT,0,(char*)c_to_dt,0);
+    	for(i = 0; i < 2; i++)
+    	{
+      	if(err[i] == -1)
+      	{
+						fn_userlog(c_ServiceName,"i is <%d>",i);
+						tpfree((char*)ptr_ffo_Obuffer);
+						tpabort(0);
+						fn_errlog(c_ServiceName,"Date Range Expected ",SQLMSG,c_errmsg);
+						Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+						tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+      	}
+    	}
+
+			EXEC SQL
+			SELECT /*+ index(FNO_CNTRCT_MSTR) */ 
+				FCM_USR_MTCH_ACCNO,
+				nvl(FCM_USR_NM,' '),
+				nvl(FCM_ADD_LN1,' '),
+				nvl(FCM_ADD_LN2,' '),
+				nvl(FCM_ADD_LN3,' '),
+				nvl(FCM_ADD_LN4,' '),
+				nvl(FCM_PAN_NO,' '),
+				nvl(FCM_TEL_NO,' '),
+				FCM_CNTRCT_NMBR,
+				FCM_CNTRCT_DT,
+				FCM_CNTRCT_FLG,		/*** Ver 1.1 ***/
+				FCM_SIGN          /*** Ver 1.2 ***/ 
+			INTO
+				:sql_fcm_usr_mtch_accno,
+				:sql_fcm_usr_nm,
+				:sql_fcm_add_ln1,
+				:sql_fcm_add_ln2,
+				:sql_fcm_add_ln3,
+				:sql_fcm_add_ln4,
+				:sql_fcm_pan_no,
+				:sql_fcm_tel_no,
+				:sql_fcm_cntrct_nmbr,
+				:sql_fcm_cntrct_dt,
+				:sql_fcm_cntrct_flg,				/*** Ver 1.1 ***/
+				:sql_fcm_sign							/*** Ver 1.2 ***/
+			FROM FNO_CNTRCT_MSTR
+			WHERE FCM_SGN_FLG='Y' 
+			AND 	FCM_VRFY_FLG ='N' 
+			AND FCM_CNTRCT_DT between to_date(:c_frm_dt, 'dd-mon-yyyy hh24:mi:ss') 
+																and to_date(:c_to_dt,  'dd-mon-yyyy hh24:mi:ss')
+			AND rownum =1
+			FOR UPDATE OF FCM_VRFY_FLG, FCM_VRFY_DT ;
+
+		if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				tpabort(0);
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				fn_errlog(c_ServiceName,"S31035",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				tpabort(0);
+				Fadd32(ptr_ffo_Obuffer,FFO_ERR_MSG,"No more records to sign" ,0);
+				tpreturn(TPSUCCESS, 0L,(char*)ptr_ffo_Obuffer,0L, 0);
+			}
+			
+		}
+		else if(c_flag =='O') /* 1.2 Verification selection by contrct Number  */
+		{
+			fn_userlog(c_ServiceName," F In O");
+			EXEC SQL
+			SELECT /*+ index(FNO_CNTRCT_MSTR) */ 
+				FCM_USR_MTCH_ACCNO,
+				nvl(FCM_USR_NM,' '),
+				nvl(FCM_ADD_LN1,' '),
+				nvl(FCM_ADD_LN2,' '),
+				nvl(FCM_ADD_LN3,' '),
+				nvl(FCM_ADD_LN4,' '),
+				nvl(FCM_PAN_NO,' '),
+				nvl(FCM_TEL_NO,' '),
+				FCM_CNTRCT_NMBR,
+				FCM_CNTRCT_DT,
+				FCM_CNTRCT_FLG,						/*** Ver 1.1 ***/
+				NVL(FCM_SIGN,'*')         /*** Ver 1.2 ***/ 
+			INTO
+				:sql_fcm_usr_mtch_accno,
+				:sql_fcm_usr_nm,
+				:sql_fcm_add_ln1,
+				:sql_fcm_add_ln2,
+				:sql_fcm_add_ln3,
+				:sql_fcm_add_ln4,
+				:sql_fcm_pan_no,
+				:sql_fcm_tel_no,
+				:sql_fcm_cntrct_nmbr,
+				:sql_fcm_cntrct_dt,
+				:sql_fcm_cntrct_flg,				/*** Ver 1.1 ***/
+				:sql_fcm_sign							/*** Ver 1.2 ***/
+			FROM FNO_CNTRCT_MSTR
+			WHERE FCM_SGN_FLG			= 'Y' 
+			AND 	FCM_VRFY_FLG 		= 'N' 
+			AND 	FCM_CNTRCT_NMBR = :sql_fcm_cntrct_nmbr
+			FOR 	UPDATE OF FCM_VRFY_FLG,FCM_VRFY_DT ;			
+
+			if(SQLCODE != 0 && SQLCODE!= NO_DATA_FOUND)
+			{
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				tpabort(0);
+				fn_errlog(c_ServiceName,"S31040",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+		}
+		else if(c_flag =='N') /* 1.2 Verification selection by Rownum  */
+		{
+			fn_userlog(c_ServiceName," F In 'N'");
+			EXEC SQL
+			SELECT /*+ index(FNO_CNTRCT_MSTR) */ FCM_USR_MTCH_ACCNO,
+				nvl(FCM_USR_NM,' '),
+				nvl(FCM_ADD_LN1,' '),
+				nvl(FCM_ADD_LN2,' '),
+				nvl(FCM_ADD_LN3,' '),
+				nvl(FCM_ADD_LN4,' '),
+				nvl(FCM_PAN_NO,' '),
+				nvl(FCM_TEL_NO,' '),
+				FCM_CNTRCT_NMBR,
+				FCM_CNTRCT_DT,
+				FCM_CNTRCT_FLG,					  /*** Ver 1.1 ***/
+				NVL(FCM_SIGN,'*')         /*** Ver 1.2 ***/ 
+			INTO
+				:sql_fcm_usr_mtch_accno,
+				:sql_fcm_usr_nm,
+				:sql_fcm_add_ln1,
+				:sql_fcm_add_ln2,
+				:sql_fcm_add_ln3,
+				:sql_fcm_add_ln4,
+				:sql_fcm_pan_no,
+				:sql_fcm_tel_no,
+				:sql_fcm_cntrct_nmbr,
+				:sql_fcm_cntrct_dt,
+				:sql_fcm_cntrct_flg,				/*** Ver 1.1 ***/
+				:sql_fcm_sign							/*** Ver 1.2 ***/
+			FROM FNO_CNTRCT_MSTR
+			WHERE FCM_SGN_FLG= 'Y' 
+			AND 	FCM_VRFY_FLG ='N'  
+			AND 	rownum=1
+			FOR 	UPDATE OF FCM_VRFY_FLG,FCM_VRFY_DT ;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				tpabort(0);
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				fn_errlog(c_ServiceName,"S31045",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				tpabort(0);
+				Fadd32(ptr_ffo_Obuffer,FFO_ERR_MSG,"No more records to sign" , 0);
+				tpreturn(TPSUCCESS, 0L,(char*)ptr_ffo_Obuffer,0L, 0);
+			}
+		}
+
+		if (c_flag=='X' || c_flag=='O' || c_flag=='N') /* Lock record picked for verification */
+		{
+			SETNULL (sql_fcm_cntrct_nmbr);
+      EXEC SQL
+					UPDATE 	FNO_CNTRCT_MSTR
+					SET 		FCM_VRFY_DT 		= sysdate, 
+									FCM_VRFY_FLG 		= 'L'
+					WHERE 	FCM_CNTRCT_NMBR = :sql_fcm_cntrct_nmbr;
+
+			if(SQLCODE != 0)
+			{
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				tpabort(0);
+				fn_errlog(c_ServiceName,"S31050",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+			
+			SETNULL(sql_fcm_sign);	
+      /* fn_userlog(c_ServiceName,"sql_fcm_sign <%s>",sql_fcm_sign.arr);   */
+
+      if(Fadd32(ptr_ffo_Obuffer,FFO_INTADJ_RFRNC ,(char *)sql_fcm_sign.arr, 0)==-1)	
+        {
+          fn_errlog(c_ServiceName,"S31055",FMLMSG,c_errmsg);
+          tpfree((char*)ptr_ffo_Obuffer);
+          tpabort(0); 
+          Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+          tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+        }
+		     
+		}
+
+		if(DEBUG_MSG_LVL_3){
+			fn_userlog(c_ServiceName,"Contr NO 1 <%s>",sql_fcm_cntrct_nmbr.arr);
+		}
+	
+		if(tpcommit(0)== -1)
+		{
+			tpabort(0);
+			tpfree((char*)ptr_ffo_Obuffer);
+			fn_userlog(c_ServiceName,"TPCOMMIT failed");
+			fn_errlog(c_ServiceName,"S31060",TPMSG,c_errmsg);
+			Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+			tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+		}
+
+		
+		SETNULL(sql_fcm_usr_mtch_accno);
+		SETNULL(sql_fcm_usr_nm);
+		SETNULL(sql_fcm_add_ln1);
+		SETNULL(sql_fcm_add_ln2);
+		SETNULL(sql_fcm_add_ln3);
+		SETNULL(sql_fcm_add_ln4);
+		SETNULL(sql_fcm_pan_no);
+		SETNULL(sql_fcm_tel_no);
+		SETNULL(sql_fcm_cntrct_dt);
+
+if(DEBUG_MSG_LVL_3){
+	fn_userlog(c_ServiceName,"Data for Contract note <%s>",sql_fcm_cntrct_nmbr.arr);
+	fn_userlog(c_ServiceName,"Contract date  <%s>",sql_fcm_cntrct_dt.arr);
+	fn_userlog(c_ServiceName,"FCM_CNTRCT_FLG <%c>",sql_fcm_cntrct_flg);
+}
+
+
+	/* To initialize buffer */
+
+/*		Finit32(ptr_ffo_Obuffer, (FLDLEN32) Fsizeof32(ptr_ffo_Obuffer)); */
+
+	/* Populate the output buffer with the unique values  */
+
+		arr_otpt[0] = Fadd32(ptr_ffo_Obuffer,FFO_IP_VIEW_NM,(char*)sql_fcm_usr_nm.arr,0);
+		arr_otpt[1] = Fadd32(ptr_ffo_Obuffer,FFO_INDX_CD,(char*)sql_fcm_add_ln1.arr,0);
+		arr_otpt[2] = Fadd32(ptr_ffo_Obuffer,FFO_UNDRLYNG,(char*)sql_fcm_add_ln2.arr,0);
+		arr_otpt[3] = Fadd32(ptr_ffo_Obuffer,FFO_UND_PRC_TM,(char*)sql_fcm_add_ln3.arr,0);
+		arr_otpt[4] = Fadd32(ptr_ffo_Obuffer,FFO_OP_VIEW_NM,(char*)sql_fcm_add_ln4.arr,0);
+		arr_otpt[5] = Fadd32(ptr_ffo_Obuffer,FFO_SERIES,(char*)sql_fcm_pan_no.arr,0);
+		arr_otpt[6] = Fadd32(ptr_ffo_Obuffer,FFO_OI_INDCTR,(char*)sql_fcm_tel_no.arr,0);
+		arr_otpt[7] = Fadd32(ptr_ffo_Obuffer,FFO_RCRD_DT,(char*)sql_fcm_cntrct_dt.arr,0);
+		arr_otpt[8] = Fadd32(ptr_ffo_Obuffer,FFO_NARRATION_ID,(char*)sql_fcm_cntrct_nmbr.arr,0);
+		arr_otpt[9] = Fadd32(ptr_ffo_Obuffer,FFO_EBA_MTCH_ACT_NO,(char*)sql_fcm_usr_mtch_accno.arr,0);
+		arr_otpt[10] = Fadd32(ptr_ffo_Obuffer,FFO_BILL_NO,(char*)&sql_fcm_cntrct_flg,0); /*** Ver 1.1 ***/
+
+		for(i=0;i < UNIQUE_OUTPUT_FML;i++)
+		{
+			if(arr_otpt[i]==-1)
+			{
+				fn_errlog(c_ServiceName,"S31065",FMLMSG,c_errmsg);
+				Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+				tpfree((char*)ptr_ffo_Obuffer) ;
+				tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+			}
+		}
+
+if(DEBUG_MSG_LVL_3){
+	fn_userlog(c_ServiceName,"before declaring cursor <%s>",sql_fcm_cntrct_nmbr.arr);
+} /* Ver 1.4 removed ; */
+
+		EXEC SQL
+		DECLARE get_fno_det CURSOR for
+				SELECT to_char(nvl(FCD_ORDR_REF,0)),
+					 to_char(FCD_TRD_REF),
+					 to_char(FCD_TRD_DT,'HH24:MI:SS'),
+					 FCD_TRD_FLW,
+					 FCD_PRC,
+					 FCD_QTY,
+					 FCD_BRKG,
+					 to_char(FCD_SRC_TX),
+					 FCD_STT, /*** Ver 1.1 ***/
+				 	 FCD_STRK_PRC,
+				 	 FCD_CNTRCT_AMT,
+				 	 FCD_CNTRCT_SPECS,
+					 nvl(FCD_STAMP_DUTY,0),            /** Ver 1.8 **/
+					 nvl(FCD_SEBI_TT,0),							 /** Ver 1.8 **/
+					 nvl(FCD_TRAN_CHRG,0),						 /** Ver 1.8 **/
+					 nvl(FCD_OTHER_CHRG,0)						 /** Ver 1.8 **/
+				FROM	 FNO_CNTRCT_DTLS
+				WHERE    FCD_CNTRCT_NMBR=:sql_fcm_cntrct_nmbr
+				ORDER BY FCD_ORDR_REF,FCD_TRD_FLW,FCD_TRD_REF,FCD_BRKG;						/** Ver 1.7 **/
+				/*ORDER BY FCD_ORDR_REF,FCD_TRD_FLW;*/									          /** Ver 1.7 **/
+
+		EXEC SQL OPEN get_fno_det;
+		j=0;
+		while(1)
+		{
+			EXEC SQL
+			FETCH get_fno_det
+			INTO :temp_ordr,
+				 	 :temp_trd,
+				 	 :sql_fcd_trd_dt,
+				 	 :sql_fcd_trd_flw,
+				 	 :sql_fcd_prc,
+				 	 :sql_fcd_qty,
+				 	 :sql_fcd_brkg,
+				 	 :c_src_tx,
+					 :sql_fcd_stt,				 /*** Ver 1.1 ***/
+				 	 :sql_fcd_strk_prc,
+				 	 :sql_fcd_cntrct_amt,
+				 	 :sql_fcd_cntrct_specs,
+					 :sql_fcd_stamp_duty,			  /** Ver 1.8**/
+					 :sql_fcd_sebi_tt,				  /** Ver 1.8**/
+					 :sql_fcd_tran_chrg,			  /** Ver 1.8**/
+					 :sql_fcd_other_chrg;			  /** Ver 1.8**/
+
+	 	  if((SQLCODE==NO_DATA_FOUND)&&(j==0))
+			{
+				EXEC SQL
+					CLOSE get_fno_det;
+				fn_errlog(c_ServiceName,"S31070",SQLMSG,c_errmsg);
+				Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,"Matching data not found",0) ;
+				tpfree((char*)ptr_ffo_Obuffer) ;
+				tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+			}
+			else if(SQLCODE==NO_DATA_FOUND)
+			{
+				EXEC SQL
+				CLOSE get_fno_det;
+				break;
+			}
+			else if(SQLCODE)
+			{
+				EXEC SQL
+					CLOSE get_fno_det;
+					fn_errlog(c_ServiceName,"S31075",SQLMSG,c_errmsg);
+					Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+					tpfree((char*)ptr_ffo_Obuffer) ;
+					tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+			}
+		
+			SETNULL(sql_fcd_trd_dt);
+			SETNULL(sql_fcd_cntrct_specs);
+
+			l_space_avl = Funused32(ptr_ffo_Obuffer);
+
+			if (l_space_avl < l_space_rqd)
+			{
+			/* 	 Reallocate a output buffer */
+
+				/**Commented in Ver 1.5
+				l_bufferlength = Fsizeof32(ptr_ffo_Obuffer) + MIN_FML_BUF_LEN * 1000;
+				ptr_ffo_temp_buffer=(FBFR32 *)tprealloc((char *)ptr_ffo_Obuffer,l_bufferlength);
+
+				if (ptr_ffo_temp_buffer == NULL) 
+				{
+					fn_errlog(c_ServiceName,"S31080",FMLMSG,c_errmsg);
+					Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0 );
+					tpfree((char *)ptr_ffo_Obuffer);
+					tpreturn(TPFAIL,0L, (char *)ptr_ffo_Ibuffer, 0L, 0);
+				}
+				else
+				{
+					ptr_ffo_Obuffer = ptr_ffo_temp_buffer;
+					Finit32(ptr_ffo_temp_buffer, Fsizeof32(ptr_ffo_temp_buffer)); * Ver 1.4 Fsizeof to Fsizeof32 *
+				}Comment Ver 1.5 ends**/
+			
+				/**ver 1.5 starts **/
+				i_fml_cnt++;
+				ptr_ffo_Obuffer = (FBFR32 *)tprealloc((char *)ptr_ffo_Obuffer,
+																											Fsizeof32(ptr_ffo_Obuffer) +
+																											(i_fml_cnt * MIN_FML_BUF_LEN) ); 
+
+				if (ptr_ffo_Obuffer == NULL)
+				{
+					fn_errlog(c_ServiceName,"S31085",FMLMSG,c_errmsg);
+					Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0 );
+					tpfree((char *)ptr_ffo_Obuffer);
+					tpreturn(TPFAIL,0L, (char *)ptr_ffo_Ibuffer, 0L, 0);
+				}
+				/**ver 1.5 ends **/
+				
+			}
+			fn_userlog (c_ServiceName,"SN FFO_SPRD_ORD_REF %s",temp_ordr);
+			fn_userlog (c_ServiceName,"SN FFO_TRD_RFRNC %s",temp_trd);
+			fn_userlog (c_ServiceName,"SN FFO_TRD_DT %s",sql_fcd_trd_dt.arr);
+			fn_userlog (c_ServiceName,"SN qty %d",sql_fcd_qty);
+			fn_userlog (c_ServiceName,"SN prc %lf",sql_fcd_prc);
+			fn_userlog (c_ServiceName,"SN sql_fcd_brkg %lf",sql_fcd_brkg);
+			fn_userlog (c_ServiceName,"SN c_src_tx %s",c_src_tx);
+			fn_userlog (c_ServiceName,"SN sql_fcd_cntrct_amt %lf",sql_fcd_cntrct_amt);
+			fn_userlog (c_ServiceName,"SN sql_fcd_trd_flw %c",sql_fcd_trd_flw);
+			fn_userlog (c_ServiceName,"SN sql_fcd_cntrct_specs %s",sql_fcd_cntrct_specs.arr);
+			fn_userlog (c_ServiceName,"SN sql_fcd_stt %lf",sql_fcd_stt);
+			fn_userlog (c_ServiceName,"SD sql_fcd_stamp_duty %lf",sql_fcd_stamp_duty);	/** Ver 1.8 **/
+			fn_userlog (c_ServiceName,"SD sql_fcd_sebi_tt %lf",sql_fcd_sebi_tt);				/** Ver 1.8 **/
+			fn_userlog (c_ServiceName,"SD sql_fcd_tran_chrg %lf",sql_fcd_tran_chrg);		/** Ver 1.8 **/
+			fn_userlog (c_ServiceName,"SD sql_fcd_other_chrg %lf",sql_fcd_other_chrg);		/** Ver 1.8 **/
+
+			cur_otpt[0]=Fadd32(ptr_ffo_Obuffer,FFO_SPRD_ORD_REF,(char*)temp_ordr,0);
+			cur_otpt[1]=Fadd32(ptr_ffo_Obuffer,FFO_TRD_RFRNC,(char*)temp_trd,0);
+			cur_otpt[2]=Fadd32(ptr_ffo_Obuffer,FFO_TRD_DT,(char*)sql_fcd_trd_dt.arr,0);
+			cur_otpt[3]=Fadd32(ptr_ffo_Obuffer,FFO_LST_TRD_QTY,(char*)&sql_fcd_qty,0);
+			cur_otpt[4]=Fadd32(ptr_ffo_Obuffer,FFO_CLS_PRC,(char*)&sql_fcd_prc,0);
+			cur_otpt[5]=Fadd32(ptr_ffo_Obuffer,FFO_BST_BID_PRC,(char*)&sql_fcd_brkg,0);
+			cur_otpt[6]=Fadd32(ptr_ffo_Obuffer,FFO_MTCH_CNTCT_KEY,(char*)c_src_tx,0);
+			cur_otpt[7]=Fadd32(ptr_ffo_Obuffer,FFO_BAL_AMT,(char*)&sql_fcd_cntrct_amt,0);
+			cur_otpt[8]=Fadd32(ptr_ffo_Obuffer,FFO_TRD_FLW,(char*)&sql_fcd_trd_flw,0);
+			cur_otpt[9]=Fadd32(ptr_ffo_Obuffer,FFO_SYMBOL,(char*)sql_fcd_cntrct_specs.arr,0);
+			cur_otpt[10]=Fadd32(ptr_ffo_Obuffer,FFO_LIMIT,(char*)&sql_fcd_stt,0);
+			cur_otpt[11]=Fadd32(ptr_ffo_Obuffer,FFO_OI_HIGH,(char*)&sql_fcd_stamp_duty,0);		/** Ver 1.8 **/
+			cur_otpt[12]=Fadd32(ptr_ffo_Obuffer,FFO_OI_LOW,(char*)&sql_fcd_sebi_tt,0);	  		/** Ver 1.8 **/
+			cur_otpt[13]=Fadd32(ptr_ffo_Obuffer,FFO_JIFFY,(char*)&sql_fcd_tran_chrg,0);	    	/** Ver 1.8 **/
+			cur_otpt[14]=Fadd32(ptr_ffo_Obuffer,FFO_EFF_LTP,(char*)&sql_fcd_other_chrg,0);		/** Ver 1.8 **/
+
+			for(i=0;i <= 14;i++)
+			{
+				if(cur_otpt[i]==-1)
+				{
+					fn_userlog (c_ServiceName,"SN i %d",i);
+					fn_errlog(c_ServiceName,"S31090",FMLMSG,c_errmsg);
+					Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+					tpfree((char*)ptr_ffo_Obuffer) ;
+					tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+				}
+			}
+			j++;
+		}/*End of while */
+		EXEC SQL
+		CLOSE get_fno_det;
+
+		if(SQLCODE)
+		{
+			fn_errlog(c_ServiceName,"S31095",SQLMSG,c_errmsg) ;
+			Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+			tpfree((char*)ptr_ffo_Obuffer) ;
+			tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+		}
+	} /*End of F*/
+	else if(c_oper_typ == 'E')
+	{	
+		fn_userlog(c_ServiceName,"In E ");
+		if(c_flag == 'C')
+		{
+			fn_userlog(c_ServiceName,"In E - C");
+			EXEC SQL
+			SELECT  ECM_USR_MTCH_ACCNO,
+							nvl(ECM_USR_NM,' '),
+							nvl(ECM_ADD_LN1,' '),
+							nvl(ECM_ADD_LN2,' '),
+							nvl(ECM_ADD_LN3,' '),
+							nvl(ECM_ADD_LN4,' '),
+							nvl(ECM_PAN_NO,' '),
+							nvl(ECM_TEL_NO,' '),
+							ECM_TOTAL_AMOUNT
+				INTO    
+							:sql_fcm_usr_mtch_accno,
+							:sql_ecm_usr_nm,
+							:sql_ecm_add_ln1,
+							:sql_ecm_add_ln2,
+							:sql_ecm_add_ln3,
+							:sql_ecm_add_ln4,
+							:sql_ecm_pan_no,
+							:sql_ecm_tel_no,
+							:sql_ecm_total_amount
+			FROM EA_CONF_MSTR
+			WHERE ECM_CNTRCT_NMBR=:sql_fcm_cntrct_nmbr
+			FOR UPDATE OF ECM_SGN_DT,ECM_SGN_FLG;
+
+			if(SQLCODE != 0)
+			{
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				tpabort(0);
+				fn_errlog(c_ServiceName,"S31100",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+		}
+		else if(c_flag == 'R') /* 1.2 changed from != to 'R'*/ 
+		{
+			fn_userlog(c_ServiceName,"In E != C");
+			EXEC SQL
+			SELECT  ECM_USR_MTCH_ACCNO,
+							nvl(ECM_USR_NM,' '),
+							nvl(ECM_ADD_LN1,' '),
+							nvl(ECM_ADD_LN2,' '),
+							nvl(ECM_ADD_LN3,' '),
+							nvl(ECM_ADD_LN4,' '),
+							nvl(ECM_PAN_NO,' '),
+							nvl(ECM_TEL_NO,' '),
+							ECM_CNTRCT_NMBR,
+							ECM_TOTAL_AMOUNT
+			INTO    :sql_fcm_usr_mtch_accno,
+							:sql_ecm_usr_nm,
+							:sql_ecm_add_ln1,
+							:sql_ecm_add_ln2,
+							:sql_ecm_add_ln3,
+							:sql_ecm_add_ln4,
+							:sql_ecm_pan_no,
+							:sql_ecm_tel_no,
+							:sql_fcm_cntrct_nmbr,
+							:sql_ecm_total_amount
+			FROM EA_CONF_MSTR
+			WHERE ECM_SGN_FLG='N'
+			AND rownum =1
+			FOR UPDATE OF ECM_SGN_DT,ECM_SGN_FLG;
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				tpabort(0);
+				Fadd32(ptr_ffo_Obuffer,FFO_ERR_MSG,"No more records to sign" , 0);
+				tpreturn(TPSUCCESS, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+		}
+
+		if (c_flag=='C' || c_flag=='R') /* Lock record picked up for signing */
+		{
+			SETNULL (sql_fcm_cntrct_nmbr);
+      EXEC SQL
+					UPDATE EA_CONF_MSTR 
+					SET ECM_SGN_DT = sysdate,
+							ECM_SGN_FLG = 'L'
+					WHERE  ECM_CNTRCT_NMBR=:sql_fcm_cntrct_nmbr;
+
+				if(SQLCODE != 0)
+				{
+					tpabort(0);
+					fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+					tpfree((char*)ptr_ffo_Obuffer);
+					fn_errlog(c_ServiceName,"S31105",SQLMSG,c_errmsg);
+					Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+					tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+				}
+	
+		}
+
+		if(c_flag =='X') /* 1.2 Verification selection by date range  */
+		{
+			fn_userlog(c_ServiceName,"X in E");
+			err[0]=Fget32(ptr_ffo_Ibuffer,FFO_FROM_DT,0,(char*)c_frm_dt,0);
+    	err[1]=Fget32(ptr_ffo_Ibuffer,FFO_TO_DT,0,(char*)c_to_dt,0);
+    	for(i = 0; i < 2; i++)
+    	{
+      	if(err[i] == -1)
+      	{
+					if(err[i] == -1)
+					{
+							fn_userlog(c_ServiceName,"i is <%d>",i);
+							tpfree((char*)ptr_ffo_Obuffer);
+							tpabort(0);
+							fn_errlog(c_ServiceName,"Date Range Expected ",SQLMSG,c_errmsg);
+							Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+							tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+					}
+      	}
+    	}
+
+			EXEC SQL
+			SELECT  ECM_USR_MTCH_ACCNO,
+							nvl(ECM_USR_NM,' '),
+							nvl(ECM_ADD_LN1,' '),
+							nvl(ECM_ADD_LN2,' '),
+							nvl(ECM_ADD_LN3,' '),
+							nvl(ECM_ADD_LN4,' '),
+							nvl(ECM_PAN_NO,' '),
+							nvl(ECM_TEL_NO,' '),
+							ECM_CNTRCT_NMBR,
+							ECM_TOTAL_AMOUNT,
+							ECM_SIGN
+			INTO    :sql_fcm_usr_mtch_accno,
+							:sql_ecm_usr_nm,
+							:sql_ecm_add_ln1,
+							:sql_ecm_add_ln2,
+							:sql_ecm_add_ln3,
+							:sql_ecm_add_ln4,
+							:sql_ecm_pan_no,
+							:sql_ecm_tel_no,
+							:sql_fcm_cntrct_nmbr,
+							:sql_ecm_total_amount,
+							:sql_ecm_sign
+			FROM 		EA_CONF_MSTR
+			WHERE 	ECM_SGN_FLG		= 'Y' 
+			AND 		ECM_VRFY_FLG 	= 'N' 
+			AND 		ECM_CNTRCT_DT between to_date(:c_frm_dt, 'dd-mon-yyyy hh24:mi:ss') 
+																		and to_date(:c_to_dt,  'dd-mon-yyyy hh24:mi:ss')
+			AND 		rownum =1
+			FOR 		UPDATE OF ECM_VRFY_FLG,ECM_VRFY_DT ;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				tpabort(0);
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				fn_errlog(c_ServiceName,"S31110",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				tpabort(0);
+				Fadd32(ptr_ffo_Obuffer,FFO_ERR_MSG,"No more records to sign" ,0);
+				tpreturn(TPSUCCESS, 0L,(char*)ptr_ffo_Obuffer,0L, 0);
+			}
+
+		}
+		else if(c_flag =='O') /* 1.2 Verification selection by contrct Number  */
+		{
+			fn_userlog(c_ServiceName," F In O");
+			EXEC SQL
+			SELECT  ECM_USR_MTCH_ACCNO,
+							nvl(ECM_USR_NM,' '),
+							nvl(ECM_ADD_LN1,' '),
+							nvl(ECM_ADD_LN2,' '),
+							nvl(ECM_ADD_LN3,' '),
+							nvl(ECM_ADD_LN4,' '),
+							nvl(ECM_PAN_NO,' '),
+							nvl(ECM_TEL_NO,' '),
+							ECM_CNTRCT_NMBR,
+							ECM_TOTAL_AMOUNT,
+							ECM_SIGN
+			INTO    :sql_fcm_usr_mtch_accno,
+							:sql_ecm_usr_nm,
+							:sql_ecm_add_ln1,
+							:sql_ecm_add_ln2,
+							:sql_ecm_add_ln3,
+							:sql_ecm_add_ln4,
+							:sql_ecm_pan_no,
+							:sql_ecm_tel_no,
+							:sql_fcm_cntrct_nmbr,
+							:sql_ecm_total_amount,
+							:sql_ecm_sign
+			FROM 	EA_CONF_MSTR
+			WHERE ECM_SGN_FLG= 'Y' 
+			AND 	ECM_VRFY_FLG ='N' 
+			AND 	ECM_CNTRCT_NMBR = :sql_fcm_cntrct_nmbr
+			FOR 	UPDATE OF ECM_VRFY_FLG,ECM_VRFY_DT ;
+
+			if(SQLCODE != 0)
+			{
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				tpabort(0);
+				fn_errlog(c_ServiceName,"S31115",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+		}
+		else if(c_flag =='N') /* 1.2 Verification selection by Rownum  */
+		{
+			fn_userlog(c_ServiceName," F In 'N'");
+			EXEC SQL
+			SELECT  ECM_USR_MTCH_ACCNO,
+							nvl(ECM_USR_NM,' '),
+							nvl(ECM_ADD_LN1,' '),
+							nvl(ECM_ADD_LN2,' '),
+							nvl(ECM_ADD_LN3,' '),
+							nvl(ECM_ADD_LN4,' '),
+							nvl(ECM_PAN_NO,' '),
+							nvl(ECM_TEL_NO,' '),
+							ECM_CNTRCT_NMBR,
+							ECM_TOTAL_AMOUNT,
+							ECM_SIGN
+			INTO    :sql_fcm_usr_mtch_accno,
+							:sql_ecm_usr_nm,
+							:sql_ecm_add_ln1,
+							:sql_ecm_add_ln2,
+							:sql_ecm_add_ln3,
+							:sql_ecm_add_ln4,
+							:sql_ecm_pan_no,
+							:sql_ecm_tel_no,
+							:sql_fcm_cntrct_nmbr,
+							:sql_ecm_total_amount,
+							:sql_ecm_sign
+			FROM 		EA_CONF_MSTR
+			WHERE 	ECM_SGN_FLG= 'Y' 
+			AND 		ECM_VRFY_FLG ='N' AND rownum=1
+			FOR 		UPDATE OF ECM_VRFY_FLG,ECM_VRFY_DT ;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+				tpabort(0);
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				fn_errlog(c_ServiceName,"S31120",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				tpabort(0);
+				Fadd32(ptr_ffo_Obuffer,FFO_ERR_MSG,"No more records to sign" , 0);
+				tpreturn(TPSUCCESS, 0L,(char*)ptr_ffo_Obuffer,0L, 0);
+			}
+		}
+
+		if (c_flag=='X' || c_flag=='O' || c_flag=='N') /* Lock record picked for verification */
+		{
+			SETNULL (sql_fcm_cntrct_nmbr);
+      EXEC SQL
+					UPDATE 	EA_CONF_MSTR
+					SET 		ECM_VRFY_DT 			= sysdate, 
+									ECM_VRFY_FLG 		= 'L'
+					WHERE 	ECM_CNTRCT_NMBR = :sql_fcm_cntrct_nmbr;
+
+			if(SQLCODE != 0)
+			{
+				fn_userlog(c_ServiceName,"SQLCODE is <%d>",SQLCODE);
+				tpfree((char*)ptr_ffo_Obuffer);
+				tpabort(0);
+				fn_errlog(c_ServiceName,"S31125",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0); 
+			}
+			SETNULL(sql_ecm_sign);	
+			if(Fadd32(ptr_ffo_Obuffer,FFO_INTADJ_RFRNC ,(char *)sql_ecm_sign.arr, 0)==-1)	
+			{
+				tpfree((char*)ptr_ffo_Obuffer);
+				tpabort(0);
+				fn_errlog(c_ServiceName,"S31130",SQLMSG,c_errmsg);
+				Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+				tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+			}
+		}
+
+		if(DEBUG_MSG_LVL_3){
+			fn_userlog(c_ServiceName,"Contr NO <%s>",sql_fcm_cntrct_nmbr.arr);
+		}
+
+		if(tpcommit(0)== -1)
+		{
+			tpabort(0);
+			tpfree((char*)ptr_ffo_Obuffer);
+			fn_userlog(c_ServiceName,"TPCOMMIT failed");
+			fn_errlog(c_ServiceName,"S31135",TPMSG,c_errmsg) ;
+			Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0);
+			tpreturn(TPFAIL, 0L,(char*)ptr_ffo_Ibuffer,0L, 0);
+		}
+	
+		SETNULL(sql_fcm_usr_mtch_accno);
+		SETNULL(sql_ecm_usr_nm);
+		SETNULL(sql_ecm_add_ln1);
+		SETNULL(sql_ecm_add_ln2);
+		SETNULL(sql_ecm_add_ln3);
+		SETNULL(sql_ecm_add_ln4);
+		SETNULL(sql_ecm_pan_no);
+		SETNULL(sql_ecm_tel_no);
+
+if(DEBUG_MSG_LVL_3){
+		fn_userlog(c_ServiceName,"Data for Contract note    <%s>",sql_fcm_cntrct_nmbr.arr);
+		fn_userlog(c_ServiceName,"Code     <%s>",code);
+}
+
+		/* Initialise buffer */
+
+/*		Finit32(ptr_ffo_Obuffer, (FLDLEN32) Fsizeof32(ptr_ffo_Obuffer)); */
+
+		/** Ver 1.8 starts **/
+
+
+		EXEC SQL
+		SELECT ECM_CNTRCT_DT into :sql_ecm_cntrct_dt
+		FROM EA_CONF_MSTR	 
+		WHERE	ECM_CNTRCT_NMBR = :sql_fcm_cntrct_nmbr; 
+		if (SQLCODE)
+    {
+      fn_errlog(c_ServiceName,"S31140",SQLMSG,c_errmsg) ;
+      Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,"contract number not matching",0);
+      tpfree((char*)ptr_ffo_Obuffer) ;
+      tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+    }			
+
+		EXEC SQL
+    SELECT 1 into :l_tm_val
+    FROM dual
+    WHERE to_date(:sql_ecm_cntrct_dt,'dd-Mon-yyyy') >= '15-Sep-2008';
+
+		 /*if (SQLCODE)*/
+    if ((SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND ))   /** Ver 2.0 **/
+    {
+      fn_errlog(c_ServiceName,"S31145",SQLMSG,c_errmsg) ;
+      Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG," contract date not valid ",0);
+      tpfree((char*)ptr_ffo_Obuffer) ;
+      tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+    }
+
+    if(l_tm_val == 1)
+    {
+			fn_userlog(c_ServiceName,"***** Inside IAD ********"); 	
+			
+			MEMSET(c_ecm_add_ln1);  
+			MEMSET(c_ecm_add_ln2);  
+			MEMSET(c_ecm_add_ln3);
+			MEMSET(c_ecm_add_ln4);  
+
+			EXEC SQL
+			SELECT IAD_ADDRESS_1   || ' ' || IAD_ADDRESS_2,
+						 IAD_ADDRESS_3 || ' ' || IAD_ADDRESS_4,
+						 IAD_CITY_CD   || ' ' || IAD_PIN,
+						 IAD_STATE_CD  || ' ' || IAD_COUNTRY_CD
+			INTO  :c_ecm_add_ln1,
+						:c_ecm_add_ln2,
+						:c_ecm_add_ln3,
+						:c_ecm_add_ln4
+			FROM IAD_INFO_ADDRESS_DTLS, IAI_INFO_ACCOUNT_INFO
+			WHERE IAI_MATCH_ACCOUNT_NO=:sql_fcm_usr_mtch_accno
+			AND IAI_SERIAL_NO         = IAD_SERIAL_NO
+			AND IAD_ADDRESS_TYPE      = 'APPLICANT_CORR';
+
+			 if(SQLCODE == NO_DATA_FOUND)
+			{
+				fn_errlog(c_ServiceName,"S31150",SQLMSG,c_errmsg) ;
+				Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,"No data Available",0);
+				tpfree((char*)ptr_ffo_Obuffer) ;
+				tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+			}
+			else if ((SQLCODE != 0) && (SQLCODE != NO_DATA_FOUND))		/** Ver 2.0 **/
+			{
+				fn_errlog(c_ServiceName,"S31155",SQLMSG,c_errmsg) ;
+				Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,"Error Fetching data",0);
+				tpfree((char*)ptr_ffo_Obuffer) ;
+				tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+			}
+
+			SETNULL(c_ecm_add_ln1);   
+			SETNULL(c_ecm_add_ln2);   
+			SETNULL(c_ecm_add_ln3);  
+			SETNULL(c_ecm_add_ln4); 
+		}
+		else
+		{
+			fn_userlog(c_ServiceName,"*** inside IAD else****");	
+			strcpy(c_ecm_add_ln1.arr,sql_ecm_add_ln1.arr);
+			strcpy(c_ecm_add_ln2.arr,sql_ecm_add_ln2.arr);
+			strcpy(c_ecm_add_ln3.arr,sql_ecm_add_ln3.arr);
+			strcpy(c_ecm_add_ln4.arr,sql_ecm_add_ln4.arr);
+
+			SETLEN(c_ecm_add_ln1);
+			SETLEN(c_ecm_add_ln2);
+			SETLEN(c_ecm_add_ln3);
+			SETLEN(c_ecm_add_ln4);
+			
+		}
+
+			/************* Ver 1.8 Ends ****************/ 
+		    
+		/*      Populate  output buffer  */
+
+		arr_otpt[0] = Fadd32(ptr_ffo_Obuffer,FFO_IP_VIEW_NM,(char*)sql_ecm_usr_nm.arr,0);
+		/*************************  Commented in Ver 1.8 ******************************
+		arr_otpt[1] = Fadd32(ptr_ffo_Obuffer,FFO_INDX_CD,(char*)sql_ecm_add_ln1.arr,0);
+		arr_otpt[2] = Fadd32(ptr_ffo_Obuffer,FFO_UNDRLYNG,(char*)sql_ecm_add_ln2.arr,0);
+		arr_otpt[3] = Fadd32(ptr_ffo_Obuffer,FFO_UND_PRC_TM,(char*)sql_ecm_add_ln3.arr,0);
+		arr_otpt[4] = Fadd32(ptr_ffo_Obuffer,FFO_OP_VIEW_NM,(char*)sql_ecm_add_ln4.arr,0) ;
+		 *******************************************************************************/
+	  arr_otpt[1] = Fadd32(ptr_ffo_Obuffer,FFO_INDX_CD,(char*)c_ecm_add_ln1.arr,0);   /* 1.8 */
+    arr_otpt[2] = Fadd32(ptr_ffo_Obuffer,FFO_UNDRLYNG,(char*)c_ecm_add_ln2.arr,0);  /* 1.8 */
+    arr_otpt[3] = Fadd32(ptr_ffo_Obuffer,FFO_UND_PRC_TM,(char*)c_ecm_add_ln3.arr,0);/* 1.8 */
+    arr_otpt[4] = Fadd32(ptr_ffo_Obuffer,FFO_OP_VIEW_NM,(char*)c_ecm_add_ln4.arr,0);/* 1.8 */
+		arr_otpt[5] = Fadd32(ptr_ffo_Obuffer,FFO_SERIES,(char*)sql_ecm_pan_no.arr,0);
+		arr_otpt[6] = Fadd32(ptr_ffo_Obuffer,FFO_OI_INDCTR,(char*)sql_ecm_tel_no.arr,0);
+		arr_otpt[7] = Fadd32(ptr_ffo_Obuffer,FFO_TOTAL_PL,(char*)&sql_ecm_total_amount,0);
+		arr_otpt[8] = Fadd32(ptr_ffo_Obuffer,FFO_NARRATION_ID,(char*)sql_fcm_cntrct_nmbr.arr,0);
+		arr_otpt[9] = Fadd32(ptr_ffo_Obuffer,FFO_EBA_MTCH_ACT_NO,(char*)sql_fcm_usr_mtch_accno.arr,0);
+
+
+		for(i=0;i < UNIQUE_OUTPUT_FML;i++)
+		{
+			if(arr_otpt[i]==-1)
+			{
+				fn_errlog(c_ServiceName,"S31160",FMLMSG,c_errmsg);
+				Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+				tpabort(0);
+				tpfree((char*)ptr_ffo_Obuffer) ;
+				tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+			}
+		}
+
+if(DEBUG_MSG_LVL_3){
+fn_userlog(c_ServiceName,"before declaring EA cursor <%s>",sql_fcm_cntrct_nmbr.arr);
+} /* Ver 1.4 removed ; */
+		EXEC SQL DECLARE get_ea_det CURSOR for
+			 SELECT  substr(ECD_CNTRCT_SPECS,instr(ECD_CNTRCT_SPECS,'-',1,2)+1,9),
+				 ECD_QTY,
+				 ECD_BRKG,
+				 /*ECD_STT,                   **Ver 1.6**/
+				 nvl(ECD_STT,0),             /**Ver 2.0**/
+				 to_char(ECD_SRC_TX),
+				 ECD_STRK_PRC,
+				 ECD_EA_FLG,
+				 ECD_SETLMNT_PRC,
+				 ECD_EXPR_DT,
+				 ECD_CNTRCT_AMT,
+				 ECD_CNTRCT_OPTN_TYP,
+				 ECD_CNTRCT_INST_TYP,
+				 ECD_CNTRCT_SYMBL,
+				 nvl(ECD_STAMP_DUTY,0),	  				/** Ver 1.8 **/
+				 nvl(ECD_SEBI_TT,0),							/** Ver 1.8 **/
+				 nvl(ECD_TRAN_CHRG,0),						/** Ver 1.8 **/
+				 nvl(ECD_OTHER_CHRG,0)					  /** Ver 1.8 **/
+			FROM EA_CONF_DTLS
+			WHERE ECD_CNTRCT_NMBR=:sql_fcm_cntrct_nmbr
+			ORDER BY ECD_CNTRCT_OPTN_TYP;
+			
+		   /* Open the cursor   */
+			
+		EXEC SQL OPEN get_ea_det;
+		j=0;	
+		while(1)
+		{
+			EXEC SQL FETCH get_ea_det
+			INTO :sql_ecd_ea_dt,
+			     :sql_ecd_qty,
+			     :sql_ecd_brkg,
+					 :sql_ecd_stt,    /**Ver 1.6**/
+			     :c_src_tx,
+			     :sql_ecd_strk_prc,
+			     :sql_ecd_ea_flg,
+			     :sql_ecd_setlmnt_prc,
+			     :sql_ecd_expr_dt,
+			     :sql_ecd_cntrct_amt,
+			     :sql_ecd_cntrct_optn_typ,
+			     :sql_ecd_cntrct_inst_typ,
+			     :sql_ecd_cntrct_symbl,
+					 :sql_ecd_stamp_duty,				/** Ver 1.8 **/
+					 :sql_ecd_sebi_tt,					/** Ver 1.8 **/
+					 :sql_ecd_tran_chrg,				/** Ver 1.8 **/
+					 :sql_ecd_other_chrg;				/** Ver 1.8 **/
+
+				if((SQLCODE==NO_DATA_FOUND)&&(j==0))
+				{
+					EXEC SQL CLOSE get_ea_det;
+					fn_errlog(c_ServiceName,"S31165",SQLMSG,c_errmsg);
+					tpabort(0);
+					Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,"matching data not found",0) ;
+					tpfree((char*)ptr_ffo_Obuffer) ;
+					tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+				}
+				else if(SQLCODE==NO_DATA_FOUND)
+				{
+					EXEC SQL
+					CLOSE get_ea_det;
+					break;
+				}
+				else if(SQLCODE)
+				{
+					EXEC SQL
+						CLOSE get_ea_det;
+					fn_errlog(c_ServiceName,"S31170",SQLMSG,c_errmsg);
+					Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+					tpabort(0);
+					tpfree((char*)ptr_ffo_Obuffer) ;
+					tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+				}
+				SETNULL(sql_ecd_ea_dt);
+				SETNULL(sql_ecd_expr_dt);
+				SETNULL(sql_ecd_cntrct_optn_typ);
+				SETNULL(sql_ecd_cntrct_inst_typ);
+				SETNULL(sql_ecd_cntrct_symbl);
+
+				strcpy(code,"");
+				strcat(code,(char *)sql_ecd_cntrct_symbl.arr);
+				strcat(code,"-");
+				strcat(code,(char *)sql_ecd_cntrct_inst_typ.arr);
+		
+				fn_userlog(c_ServiceName,"code %s",code);
+
+				l_space_avl = Funused32(ptr_ffo_Obuffer);
+
+				if (l_space_avl < l_space_rqd)
+				{
+			/*	 Reallocate a output buffer */
+
+					/**Commented for Ver 1.5	
+					l_bufferlength = Fsizeof32(ptr_ffo_Obuffer) + MIN_FML_BUF_LEN * 1000;
+					ptr_ffo_temp_buffer=(FBFR32 *)tprealloc((char *)ptr_ffo_Obuffer,l_bufferlength);
+
+					if (ptr_ffo_temp_buffer == NULL)
+					{
+						fn_errlog(c_ServiceName,"S31175",FMLMSG,c_errmsg);
+						Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0 );
+						tpfree((char *)ptr_ffo_Obuffer);
+						tpreturn(TPFAIL,0L, (char *)ptr_ffo_Ibuffer, 0L, 0);
+					}
+					else
+					{
+						ptr_ffo_Obuffer = ptr_ffo_temp_buffer;
+						Finit32(ptr_ffo_temp_buffer, Fsizeof32(ptr_ffo_temp_buffer)); * Ver 1.4 Fsizeof to Fsizeof32 *
+					}
+					***Comment Ver 1.5 ends**/
+
+					/**ver 1.5 starts **/
+					i_fml_cnt++;
+					ptr_ffo_Obuffer = (FBFR32 *)tprealloc((char *)ptr_ffo_Obuffer,
+																											Fsizeof32(ptr_ffo_Obuffer) +
+																											(i_fml_cnt * MIN_FML_BUF_LEN) ); 
+
+					if (ptr_ffo_Obuffer == NULL)
+					{
+						fn_errlog(c_ServiceName,"S31180",FMLMSG,c_errmsg);
+						Fadd32( ptr_ffo_Ibuffer,FFO_ERR_MSG, c_errmsg, 0 );
+						tpfree((char *)ptr_ffo_Obuffer);
+						tpreturn(TPFAIL,0L, (char *)ptr_ffo_Ibuffer, 0L, 0);
+					}
+					/**ver 1.5 ends **/
+					
+				}
+
+				fn_userlog (c_ServiceName,"SD sql_ecd_stt %lf",sql_ecd_stt);        /** Ver 1.6**/
+
+
+				cur_otpt[0]=Fadd32(ptr_ffo_Obuffer,FFO_ORDR_RFRNC,(char *)sql_ecd_cntrct_optn_typ.arr,0);
+				cur_otpt[1]=Fadd32(ptr_ffo_Obuffer,FFO_TRD_DT,(char*)sql_ecd_ea_dt.arr,0);
+				cur_otpt[2]=Fadd32(ptr_ffo_Obuffer,FFO_LST_TRD_QTY,(char*)&sql_ecd_qty,0);
+				cur_otpt[3]=Fadd32(ptr_ffo_Obuffer,FFO_CLS_PRC,(char*)&sql_ecd_setlmnt_prc,0);
+				cur_otpt[4]=Fadd32(ptr_ffo_Obuffer,FFO_BST_BID_PRC,(char*)&sql_ecd_brkg,0);
+				cur_otpt[5]=Fadd32(ptr_ffo_Obuffer,FFO_MTCH_CNTCT_KEY,(char*)c_src_tx,0);
+				cur_otpt[6]=Fadd32(ptr_ffo_Obuffer,FFO_BAL_AMT,(char*)&sql_ecd_cntrct_amt,0);
+				cur_otpt[7]=Fadd32(ptr_ffo_Obuffer,FFO_TRD_FLW,(char*)&sql_ecd_ea_flg,0);
+				cur_otpt[8]=Fadd32(ptr_ffo_Obuffer,FFO_STRIKE_PRC,(char*)&sql_ecd_strk_prc,0);
+				cur_otpt[9]=Fadd32(ptr_ffo_Obuffer,FFO_SYMBOL,(char *)code,0);
+				cur_otpt[10]=Fadd32(ptr_ffo_Obuffer,FFO_LIMIT,(char*)&sql_ecd_stt,0);  /** Ver 1.6**/
+				cur_otpt[11]=Fadd32(ptr_ffo_Obuffer,FFO_OI_HIGH,(char*)&sql_ecd_stamp_duty,0);  /** Ver 1.8**/
+				cur_otpt[12]=Fadd32(ptr_ffo_Obuffer,FFO_OI_LOW,(char*)&sql_ecd_sebi_tt,0);  /** Ver 1.8**/
+				cur_otpt[13]=Fadd32(ptr_ffo_Obuffer,FFO_JIFFY,(char*)&sql_ecd_tran_chrg,0);  /** Ver 1.8**/
+				cur_otpt[14]=Fadd32(ptr_ffo_Obuffer,FFO_EFF_LTP,(char*)&sql_ecd_other_chrg,0);  /** Ver 1.8**/
+
+				/* for(i=0;i <= 9;i++) Ver 1.6 */
+				for(i=0;i <= 14;i++)
+				{
+					if(cur_otpt[i]==-1)
+					{
+						fn_errlog(c_ServiceName,"S31185",FMLMSG,c_errmsg);
+						Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+						tpfree((char*)ptr_ffo_Obuffer) ;
+						tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+					}
+				}
+				j++;
+		}/*End of while */
+		EXEC SQL
+			CLOSE get_ea_det;
+
+		if(SQLCODE)
+		{
+			fn_errlog(c_ServiceName,"S31190",SQLMSG,c_errmsg) ;
+			Fadd32(ptr_ffo_Ibuffer,FFO_ERR_MSG,c_errmsg,0) ;
+			tpfree((char*)ptr_ffo_Obuffer) ;
+			tpreturn(TPFAIL,0L,(char *)ptr_ffo_Ibuffer,0L,0) ;
+		}
+	}
+	Fprint32(ptr_ffo_Obuffer);
+
+	if(DEBUG_MSG_LVL_3){
+		fn_userlog(c_ServiceName,"Service completed successfully  ");
+	}
+
+	tpreturn(TPSUCCESS,0,(char *)ptr_ffo_Obuffer,0L,0) ;
+}

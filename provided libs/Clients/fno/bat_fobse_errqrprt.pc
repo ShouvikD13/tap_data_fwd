@@ -1,0 +1,814 @@
+/******************************************************************************/
+/*  Program       : bat_fobse_errqrprt.pc                                     */
+/*                                                                            */
+/*  Description   : This program inserts relevant details from err-q packets 	*/
+/*									into FO_ERRQ_REPORT                                       */
+/*                                                                            */
+/*  Input         : <configuration file> <Exchange code> <pipe_id>            */
+/*                                                                            */
+/*  Output        : Success/Failure                                           */
+/*                                                                            */
+/*  Log           : New version : Sachin Birje                                */
+/*  Log           : 1.1  BSE Ack Changes Mahesh Shinde			      */
+/*                : TOL  Tux on Linux (Agam)                                  */
+/******************************************************************************/
+
+#include <memory.h>
+#include <stdlib.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <Usysflds.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+/* #include <fo_bse_exch_comnN.h>   Commented in Ver TOL */
+#include <fn_scklib_tap.h>
+#include <eba_to_ors.h>
+#include <fn_fo_bse_convrtn.h>
+
+void fn_re_enqueue( FBFR32 *ptr_fml_tempbuf,
+                    char c_err_qn[],
+                    char c_qspacename[] );
+
+int fn_read_errq_packet( FBFR32 *ptr_fml_tempbuf,
+                        char c_xchng_cd[] );
+
+int fn_create_reprt(void);
+
+/* Global variables */
+
+EXEC SQL BEGIN DECLARE SECTION;
+	char sql_fer_pipe_cd[3];		
+	short sql_fer_trans_cd;		
+	varchar sql_fer_ordref_ack[18+1];	
+	long sql_fer_mdfctn_cntr;
+	char sql_fer_spd_ordref1[18+1];
+	char sql_fer_spd_ordref2[18+1];	
+	char sql_fer_spd_ordref3[18+1];	
+	char sql_fer_ack[19+1];        /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+	varchar sql_fer_acktrd_tm[22+1];
+	long sql_fer_trd_qty;
+	long sql_fer_trd_rt;		
+	long sql_fer_trd_no;		
+	double sql_fer_jiffy;		
+	short sql_fer_err_cd;
+	short sql_fer_reason_cd;	
+	varchar sql_fer_time[22+1];		
+	varchar sql_fer_remarks[256];
+	varchar c_trd_dt[22+1];
+EXEC SQL END DECLARE SECTION;
+
+char c_ServiceName[33];
+char c_err_msg[256];
+int i_trnsctn;
+int i_ch_val;
+
+void BAT_FOBSE_ERRQRPRT( int argc, char *argv[])
+{
+	FBFR32 *ptr_fml_tempbuf;
+	TPQCTL st_deqctl;
+	long int li_len;
+	char c_xchng_cd[3+1]; 
+  char c_qspacename[32];
+  char c_err_qn[32];
+  char c_time_str[22];
+
+  INITBATDBGLVL( argv[0] );
+
+	MEMSET( sql_fer_trans_cd );
+	MEMSET( sql_fer_ordref_ack );
+	MEMSET( sql_fer_spd_ordref1	);
+	MEMSET( sql_fer_spd_ordref2 );
+	MEMSET( sql_fer_spd_ordref3	);
+	MEMSET( sql_fer_ack	);
+	MEMSET( sql_fer_acktrd_tm );
+	MEMSET( sql_fer_time );
+	MEMSET( sql_fer_remarks );
+  MEMSET( c_err_qn );
+	MEMSET( c_qspacename );
+	MEMSET( c_trd_dt );
+	sql_fer_mdfctn_cntr = 0;
+	sql_fer_trd_qty = 0;
+	sql_fer_trd_rt = 0;
+	sql_fer_trd_no = 0;
+	sql_fer_jiffy = 0.0;
+	sql_fer_err_cd = 0;
+	sql_fer_reason_cd = 0;
+
+	strcpy( c_ServiceName, argv[0] );
+	strcpy( c_xchng_cd, argv[2] );
+	strcpy( sql_fer_pipe_cd, argv[3] );
+
+	/* error qname, qspace name */
+  sprintf( c_err_qn, "ERR_%s_Q", sql_fer_pipe_cd );
+  sprintf( c_qspacename, "%s_QSPACE", sql_fer_pipe_cd );
+
+	if( DEBUG_MSG_LVL_3 )  
+  {
+	 fn_userlog( c_ServiceName, "c_xchng_cd   |%s|", c_xchng_cd );
+	 fn_userlog( c_ServiceName, "sql_fer_pipe_cd   |%s|", sql_fer_pipe_cd );
+   fn_userlog( c_ServiceName, "c_err_qn   |%s|", c_err_qn );
+   fn_userlog( c_ServiceName, "c_qspacename   |%s|", c_qspacename );
+	}
+
+  /* allocating buffers */
+  ptr_fml_tempbuf = (FBFR32 *)tpalloc( "FML32", NULL, 15*MIN_FML_BUF_LEN );
+  if( ptr_fml_tempbuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31005", TPMSG, c_err_msg );
+    return;
+  }
+
+	/* set control parameter to dequeue */
+ 	st_deqctl.flags = TPNOFLAGS;
+
+  /* dequeueing a message from err-q into fml buffer in transaction */
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if( i_trnsctn == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31010", LIBMSG, c_err_msg );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+  }
+
+  i_ch_val = tpdequeue ( c_qspacename, c_err_qn, &st_deqctl,
+                         (char **)&ptr_fml_tempbuf, &li_len, 0 );
+  if ( i_ch_val == -1 )
+  {
+    fn_userlog( c_ServiceName, "ERROR IS %s", tpstrerror(tperrno) );
+    fn_userlog( c_ServiceName, "%d", tperrno );
+    fn_userlog( c_ServiceName, "VALUE OF DIAG is %ld", st_deqctl.diagnostic );
+    if( st_deqctl.diagnostic == QMENOMSG )
+    {
+      fn_userlog( c_ServiceName, "No further message in the queue, BAT_FOBSE_ERRQRPT leaving...");
+      return;
+    }
+		else
+		{
+    	fn_errlog( c_ServiceName, "S31015", TPMSG, c_err_msg );
+		}
+
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+  }
+
+  if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31020", LIBMSG, c_err_msg );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpfree( (char *) ptr_fml_tempbuf );
+    return;
+  }
+
+	EXEC SQL
+		SELECT to_char( exg_nxt_trd_dt, 'dd-mon-yyyy' ),
+					 to_char( sysdate, 'dd-mon-yyyy hh24:mi:ss' )
+		INTO	 :c_trd_dt,
+					 :sql_fer_time
+		FROM	 exg_xchng_mstr
+		WHERE  exg_xchng_cd = :c_xchng_cd ;
+
+	if( SQLCODE != 0 )
+	{
+		fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+		fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+	}
+
+	SETLEN( c_trd_dt );
+	SETLEN( sql_fer_time );
+
+	if( DEBUG_MSG_LVL_3 )  
+  {
+	 fn_userlog( c_ServiceName, "c_trd_dt |%s|", c_trd_dt.arr );
+	 fn_userlog( c_ServiceName, "sql_fer_time |%s|", sql_fer_time.arr );
+	}
+
+  /* Reading queue & inserting into err-q report table in transaction */
+
+	i_ch_val = fn_read_errq_packet( ptr_fml_tempbuf,
+																		c_xchng_cd );
+	if( i_ch_val == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31030", LIBMSG, c_err_msg );
+		fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename );
+    tpfree( ( char * )ptr_fml_tempbuf );
+    return;
+	}
+
+	fn_re_enqueue( ptr_fml_tempbuf, c_err_qn, c_qspacename);
+
+  tpfree( ( char * )ptr_fml_tempbuf );
+  return;
+}
+
+int fn_read_errq_packet( FBFR32 *ptr_fml_tempbuf,
+                    		 char c_xchng_cd[] )
+{
+	FLDLEN32 ud_len;
+	struct vw_xchngbook st_i_xchngbk;
+
+  struct st_trd_cnfrmtn st_trd_cnfrmtn_data;
+  struct  st_trade_rply st_trd_dtls[MAX_RCRDS];
+  struct st_prsnl_trade_ums st_prsnl_trade_ums_data;
+  struct st_prsnl_ordr_ums st_prsnl_ordr_ums_data;
+  struct st_ord_rqst_rply st_ord_rqst_rply_data;
+  struct st_prsnl_sltp_ums st_prsnl_sltp_ums_data;
+  struct st_mkrt_to_lmt_ord st_mkrt_to_lmt_ord_data;
+  struct st_kill_min_fill_ordr st_cancel_ordr;
+  struct st_sltp_ord_ums st_sltp_ord_ums_data;
+ 
+	char *ptr_car_buf;
+  char c_time_str[22];
+
+	long long ll_log_tm_stmp;
+	long int li_sbuf_len;
+  long long ll_ordr_ack;
+  long l_msg_type;
+  long l_total_rec=0;
+  long l_rec_cnt=0;
+  long l_tot_no_records=0;
+  long l_record=0;
+  long l_total_trds=0;
+  long l_ordr_sqnc;
+
+	ptr_car_buf = (char *)tpalloc( "CARRAY", NULL, MIN_FML_BUF_LEN );
+  if( ptr_car_buf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31035", TPMSG, c_err_msg  );
+    return -1;
+  }
+
+	ud_len = ( FLDLEN32 )sizeof( li_sbuf_len );
+
+ 	i_ch_val = Fget32( ptr_fml_tempbuf, FFO_TMPLT, 0, ( char * )&li_sbuf_len, &ud_len );
+  if( i_ch_val == -1 )
+  {
+   	fn_errlog( c_ServiceName, "S31040", FMLMSG, c_err_msg );
+		tpfree ( ( char * )ptr_car_buf );
+    return -1;
+  }
+
+  ud_len = ( FLDLEN32 )li_sbuf_len;
+
+  i_ch_val = Fget32( ptr_fml_tempbuf, FFO_CBUF, 0, ( char * )ptr_car_buf, &ud_len );
+  if( i_ch_val == -1)
+  {
+   	fn_errlog( c_ServiceName, "S31045", FMLMSG, c_err_msg );
+		tpfree ( ( char * )ptr_car_buf );
+    return -1;
+  }
+
+  memcpy(&l_msg_type, ptr_car_buf + sizeof(struct st_bfo_header), sizeof(long));
+  l_msg_type = fn_swap_long(l_msg_type);
+
+  fn_userlog( c_ServiceName, "Error Q Messgae Typ :%ld:",l_msg_type); 
+
+	sql_fer_trans_cd = (int) l_msg_type;
+
+
+	switch( sql_fer_trans_cd )
+  {
+
+		/* Ordinary order response */
+	 case LIMIT_MARKET_ORD :
+
+      MEMSET(st_ord_rqst_rply_data);
+      memcpy (&st_ord_rqst_rply_data,ptr_car_buf,sizeof (struct st_ord_rqst_rply ));
+
+      l_ordr_sqnc = fn_swap_long(st_ord_rqst_rply_data.l_msg_tag1);
+	
+			fn_userlog( c_ServiceName, "Sequence Number Is :%d:", l_ordr_sqnc );
+
+			strcpy( st_i_xchngbk.c_xchng_cd, c_xchng_cd );
+			strcpy( st_i_xchngbk.c_pipe_id, sql_fer_pipe_cd );
+			strcpy( st_i_xchngbk.c_mod_trd_dt, c_trd_dt.arr );
+			st_i_xchngbk.l_ord_seq = l_ordr_sqnc;
+			st_i_xchngbk.c_oprn_typ = FOR_RCV;
+
+			i_ch_val = fn_call_svc ( c_ServiceName,
+                           c_err_msg,
+                           &st_i_xchngbk,
+                           &st_i_xchngbk,
+                           "vw_xchngbook",
+                           "vw_xchngbook",
+                           sizeof ( st_i_xchngbk ),
+                           sizeof ( st_i_xchngbk ),
+                           0,
+                           "SFO_SEQ_TO_OMD");
+
+  		if ( i_ch_val != SUCC_BFR )
+  		{
+    		fn_errlog( c_ServiceName,"S31050", LIBMSG, c_err_msg );
+				tpfree ( ( char * )ptr_car_buf );
+    		return -1;
+ 			}
+
+			strcpy( sql_fer_ordref_ack.arr, st_i_xchngbk.c_ordr_rfrnc );
+			sql_fer_mdfctn_cntr = st_i_xchngbk.l_mdfctn_cntr;
+      
+      fn_tmstmp_dmyhms_to_arr(st_ord_rqst_rply_data.st_tmstmp_dmyhms,c_time_str); 
+      strcpy(sql_fer_acktrd_tm.arr,c_time_str);
+      ll_ordr_ack = fn_swap_ulnglng( st_ord_rqst_rply_data.ll_ord_id);  
+      strcpy(sql_fer_remarks.arr,st_ord_rqst_rply_data.c_rply_txt);       
+			sprintf( sql_fer_ack, "%19.0lld", ll_ordr_ack );  /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+   		sql_fer_jiffy = 0;
+    
+      if( fn_create_reprt()  == -1 )
+      {
+       fn_errlog( c_ServiceName,"S31055", LIBMSG, c_err_msg );
+       tpfree ( ( char * )ptr_car_buf );
+       return -1;
+      }
+    
+		 break;
+ 
+   case STOPLOSS_ORDR_UMS:
+
+      MEMSET(st_sltp_ord_ums_data);
+      memcpy (&st_sltp_ord_ums_data,ptr_car_buf,sizeof (struct st_sltp_ord_ums ));
+
+      MEMSET( sql_fer_ordref_ack );
+      MEMSET( sql_fer_spd_ordref1 );
+      MEMSET( sql_fer_spd_ordref2 );
+      MEMSET( sql_fer_spd_ordref3 );
+      MEMSET( sql_fer_ack );
+      MEMSET( sql_fer_acktrd_tm );
+      MEMSET( sql_fer_remarks );
+      sql_fer_mdfctn_cntr = 0;
+      sql_fer_trd_qty = 0;
+      sql_fer_trd_rt = 0;
+      sql_fer_trd_no = 0;
+      sql_fer_jiffy = 0.0;
+      sql_fer_err_cd = 0;
+      sql_fer_reason_cd = 0; 
+      
+      ll_ordr_ack = fn_swap_ulnglng(st_sltp_ord_ums_data.ll_ordr_id);
+      sprintf( sql_fer_ordref_ack.arr, "%19.0lld",ll_ordr_ack );  /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+      sprintf( sql_fer_ack, "%19.0lld",ll_ordr_ack );             /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+      fn_tmstmp_dmyhms_to_arr(st_sltp_ord_ums_data.st_timestamp_dmyhms,c_time_str); 
+      strcpy(sql_fer_acktrd_tm.arr,c_time_str); 
+      sql_fer_trd_no =0;
+      sql_fer_trd_qty = fn_swap_long(st_sltp_ord_ums_data.l_qty);
+      sql_fer_trd_rt = fn_swap_long(st_sltp_ord_ums_data.l_rate);
+      sql_fer_jiffy = 0 ;
+
+      if( fn_create_reprt()  == -1 )
+      {
+       fn_errlog( c_ServiceName,"S31060", LIBMSG, c_err_msg );
+       tpfree ( ( char * )ptr_car_buf );
+       return -1;
+      }
+   break;
+
+  case CONVRTED_MKT_TO_LMT:
+
+      MEMSET(st_mkrt_to_lmt_ord_data);
+      memcpy (&st_mkrt_to_lmt_ord_data,ptr_car_buf,sizeof (struct st_mkrt_to_lmt_ord ));
+      MEMSET( sql_fer_ordref_ack );
+      MEMSET( sql_fer_spd_ordref1 );
+      MEMSET( sql_fer_spd_ordref2 );
+      MEMSET( sql_fer_spd_ordref3 );
+      MEMSET( sql_fer_ack );
+      MEMSET( sql_fer_acktrd_tm );
+      MEMSET( sql_fer_remarks );
+      sql_fer_mdfctn_cntr = 0;
+      sql_fer_trd_qty = 0;
+      sql_fer_trd_rt = 0;
+      sql_fer_trd_no = 0;
+      sql_fer_jiffy = 0.0;
+      sql_fer_err_cd = 0;
+      sql_fer_reason_cd = 0;   
+    
+      ll_ordr_ack = fn_swap_ulnglng(st_mkrt_to_lmt_ord_data.ll_order_id);
+      sprintf( sql_fer_ordref_ack.arr, "%19.0lld",ll_ordr_ack );  /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+      sprintf( sql_fer_ack, "%19.0lld",ll_ordr_ack );							/*** Ver 1.1 Chnaged size from 16 to 19 ****/
+      sql_fer_trd_rt = fn_swap_long(st_mkrt_to_lmt_ord_data.l_cnvtdrate);
+      strcpy( sql_fer_acktrd_tm.arr ,sql_fer_time.arr);
+      strcpy(sql_fer_remarks.arr,"Converted from Market to limit order");
+
+      if( fn_create_reprt()  == -1 )
+      {
+       fn_errlog( c_ServiceName,"S31065", LIBMSG, c_err_msg );
+       tpfree ( ( char * )ptr_car_buf );
+       return -1;
+      }
+
+  break;
+  
+  case KILL_MIN_FILL_ORDR:
+
+     MEMSET(st_cancel_ordr);
+     memcpy (&st_cancel_ordr,ptr_car_buf,sizeof (struct st_kill_min_fill_ordr));
+     MEMSET( sql_fer_ordref_ack );
+     MEMSET( sql_fer_spd_ordref1 );
+     MEMSET( sql_fer_spd_ordref2 );
+     MEMSET( sql_fer_spd_ordref3 );
+     MEMSET( sql_fer_ack );
+     MEMSET( sql_fer_acktrd_tm );
+     MEMSET( sql_fer_remarks );
+     sql_fer_mdfctn_cntr = 0;
+     sql_fer_trd_qty = 0;
+     sql_fer_trd_rt = 0;
+     sql_fer_trd_no = 0;
+     sql_fer_jiffy = 0.0;
+     sql_fer_err_cd = 0;
+     sql_fer_reason_cd = 0;
+
+     ll_ordr_ack = fn_swap_ulnglng(st_cancel_ordr.ll_ordr_id);
+     sprintf( sql_fer_ordref_ack.arr, "%19.0lld",ll_ordr_ack );   /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+     sprintf( sql_fer_ack, "%19.0lld",ll_ordr_ack );              /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+     sql_fer_trd_qty = fn_swap_long(st_cancel_ordr.l_killed_qty);
+     strcpy( sql_fer_acktrd_tm.arr ,sql_fer_time.arr);
+     strcpy(sql_fer_remarks.arr,"IOC Order Cancellation");
+    
+     if( fn_create_reprt()  == -1 )
+     {
+      fn_errlog( c_ServiceName,"S31070", LIBMSG, c_err_msg );
+      tpfree ( ( char * )ptr_car_buf );
+      return -1;
+     } 
+
+  break;
+
+  case BSE_TRADE_CONFIRMATION :
+     
+      MEMSET(st_trd_cnfrmtn_data);
+      memcpy (&st_trd_cnfrmtn_data,(struct st_trd_cnfrmtn *)ptr_car_buf,sizeof (st_trd_cnfrmtn_data));
+      
+      l_total_trds = fn_swap_long(st_trd_cnfrmtn_data.l_total_rec);
+      l_rec_cnt = 0;
+
+     while(l_rec_cnt < l_total_trds )
+     {
+		  MEMSET( sql_fer_ordref_ack );
+		  MEMSET( sql_fer_spd_ordref1 );
+		  MEMSET( sql_fer_spd_ordref2 );
+		  MEMSET( sql_fer_spd_ordref3 );
+		  MEMSET( sql_fer_ack );
+		  MEMSET( sql_fer_acktrd_tm );
+		  MEMSET( sql_fer_remarks );
+		  sql_fer_mdfctn_cntr = 0;
+		  sql_fer_trd_qty = 0;
+		  sql_fer_trd_rt = 0;
+		  sql_fer_trd_no = 0;
+		  sql_fer_jiffy = 0.0;
+		  sql_fer_err_cd = 0;
+		  sql_fer_reason_cd = 0;
+
+      ll_ordr_ack = fn_swap_ulnglng(st_trd_cnfrmtn_data.st_trd_dtls[l_rec_cnt].ll_transaction_id);      
+			sprintf( sql_fer_ordref_ack.arr, "%19.0lld",ll_ordr_ack );   /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+			sprintf( sql_fer_ack, "%19.0lld",ll_ordr_ack );              /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+			fn_tmstmp_ymdhms_to_arr(st_trd_cnfrmtn_data.st_trd_dtls[l_rec_cnt].st_timestmp_dmyhms, c_time_str); 
+      strcpy(sql_fer_acktrd_tm.arr,c_time_str); 
+			sql_fer_trd_no = fn_swap_long(st_trd_cnfrmtn_data.st_trd_dtls[l_rec_cnt].l_trd_id);
+  		sql_fer_trd_qty = fn_swap_long(st_trd_cnfrmtn_data.st_trd_dtls[l_rec_cnt].l_trd_qty);
+  		sql_fer_trd_rt = fn_swap_long(st_trd_cnfrmtn_data.st_trd_dtls[l_rec_cnt].l_rt);
+			sql_fer_jiffy = 0 ;
+
+      if( fn_create_reprt()  == -1 )
+      {
+       fn_errlog( c_ServiceName,"S31075", LIBMSG, c_err_msg );
+       tpfree ( ( char * )ptr_car_buf );
+       return -1; 
+      }
+      l_rec_cnt ++;
+     }
+	 	 break;
+   
+  case PRSNL_ORDR_DWNLD :
+
+      MEMSET(st_prsnl_ordr_ums_data);
+      memcpy (&st_prsnl_ordr_ums_data,ptr_car_buf,sizeof (struct st_prsnl_ordr_ums ));
+
+      l_tot_no_records = fn_swap_long(st_prsnl_ordr_ums_data.l_no_of_records);
+      fn_userlog (c_ServiceName," Total Number of order being processed in DWLD<%ld>", l_tot_no_records);   
+      l_rec_cnt = 0;
+      while( l_rec_cnt < l_tot_no_records )
+      {
+       fn_userlog (c_ServiceName," Inside 1 "); 
+       MEMSET( sql_fer_ordref_ack );
+       MEMSET( sql_fer_spd_ordref1 );
+       MEMSET( sql_fer_spd_ordref2 );
+       MEMSET( sql_fer_spd_ordref3 );
+       MEMSET( sql_fer_ack );
+       MEMSET( sql_fer_acktrd_tm );
+       MEMSET( sql_fer_remarks );
+       sql_fer_mdfctn_cntr = 0;
+       sql_fer_trd_qty = 0;
+       sql_fer_trd_rt = 0;
+       sql_fer_trd_no = 0;
+       sql_fer_jiffy = 0.0;
+       sql_fer_err_cd = 0;
+       sql_fer_reason_cd = 0;
+
+       ll_ordr_ack = fn_swap_ulnglng(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].ll_order_id);
+       sprintf( sql_fer_ordref_ack.arr, "%19.0lld",ll_ordr_ack );   /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+       sprintf( sql_fer_ack, "%19.0lld",ll_ordr_ack );              /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+       fn_tmstmp_ymdhms_to_arr(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].st_tmstmp_ymdhms, c_time_str);
+       strcpy(sql_fer_acktrd_tm.arr,c_time_str);
+       sql_fer_trd_no = 0;
+       sql_fer_trd_qty = fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_original_qty);
+       sql_fer_trd_rt = fn_swap_long(st_prsnl_ordr_ums_data.st_ums_order_data[l_rec_cnt].l_rate);
+       sql_fer_jiffy = 0 ;
+
+       if( fn_create_reprt()  == -1 )
+       {
+        fn_errlog( c_ServiceName,"S31080", LIBMSG, c_err_msg );
+        tpfree ( ( char * )ptr_car_buf );
+        return -1;
+       }
+
+       l_rec_cnt ++;
+      }
+    break;
+
+  case  PRSN_SLTP_ORDR_DWNLD:
+     
+      MEMSET(st_prsnl_sltp_ums_data);
+      memcpy (&st_prsnl_sltp_ums_data,ptr_car_buf,sizeof (struct st_prsnl_sltp_ums ));
+      l_tot_no_records = fn_swap_long(st_prsnl_sltp_ums_data.l_no_of_records);
+         
+      l_rec_cnt = 0;
+
+      while (l_rec_cnt < l_tot_no_records )
+      { 
+       MEMSET( sql_fer_ordref_ack );
+       MEMSET( sql_fer_spd_ordref1 );
+       MEMSET( sql_fer_spd_ordref2 );
+       MEMSET( sql_fer_spd_ordref3 );
+       MEMSET( sql_fer_ack );
+       MEMSET( sql_fer_acktrd_tm );
+       MEMSET( sql_fer_remarks );
+       sql_fer_mdfctn_cntr = 0;
+       sql_fer_trd_qty = 0;
+       sql_fer_trd_rt = 0;
+       sql_fer_trd_no = 0;
+       sql_fer_jiffy = 0.0;
+       sql_fer_err_cd = 0;
+       sql_fer_reason_cd = 0;
+
+       ll_ordr_ack = fn_swap_ulnglng(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].ll_ordr_id);
+       sprintf( sql_fer_ordref_ack.arr, "%19.0lld",ll_ordr_ack );   /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+       sprintf( sql_fer_ack, "%19.0lld",ll_ordr_ack );							/*** Ver 1.1 Chnaged size from 16 to 19 ****/
+       fn_tmstmp_ymdhms_to_arr(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].st_tmstmp_ymdhms,c_time_str);
+       strcpy(sql_fer_acktrd_tm.arr,c_time_str);
+       sql_fer_trd_no =0 ;
+       sql_fer_trd_qty = fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_qty);
+       sql_fer_trd_rt = fn_swap_long(st_prsnl_sltp_ums_data.st_ums_sltp_data[l_rec_cnt].l_limit_rate);
+       sql_fer_jiffy = 0 ;
+
+       if( fn_create_reprt()  == -1 )
+       {
+        fn_errlog( c_ServiceName,"S31085", LIBMSG, c_err_msg );
+        return -1;
+       }
+       l_rec_cnt ++;       
+
+      }
+    break;
+ 
+    case PRSNL_TRD_DWNLD :
+
+      MEMSET(st_trd_cnfrmtn_data);
+      MEMSET(st_prsnl_trade_ums_data);
+      memcpy (&st_prsnl_trade_ums_data,ptr_car_buf,sizeof (struct st_prsnl_trade_ums ));
+      
+      l_tot_no_records = fn_swap_long(st_prsnl_trade_ums_data.l_no_of_records);
+      fn_userlog(c_ServiceName," Total Records in Trade Download :%ld:",l_tot_no_records);
+      
+      l_rec_cnt = 0;
+      
+      while (l_rec_cnt < l_tot_no_records )
+      {
+       fn_userlog (c_ServiceName," Inside 1 ");
+       MEMSET( sql_fer_ordref_ack );
+       MEMSET( sql_fer_spd_ordref1 );
+       MEMSET( sql_fer_spd_ordref2 );
+       MEMSET( sql_fer_spd_ordref3 );
+       MEMSET( sql_fer_ack );
+       MEMSET( sql_fer_acktrd_tm );
+       MEMSET( sql_fer_remarks );
+       sql_fer_mdfctn_cntr = 0;
+       sql_fer_trd_qty = 0;
+       sql_fer_trd_rt = 0;
+       sql_fer_trd_no = 0;
+       sql_fer_jiffy = 0.0;
+       sql_fer_err_cd = 0;
+       sql_fer_reason_cd = 0;
+
+       ll_ordr_ack = fn_swap_ulnglng(st_prsnl_trade_ums_data.st_ums_trade_data[l_rec_cnt].ll_trnsctn_id);
+       fn_userlog (c_ServiceName," ll_ordr_ack :%lld:",ll_ordr_ack);   
+       sprintf( sql_fer_ordref_ack.arr, "%19.0lld",ll_ordr_ack );   /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+       fn_userlog (c_ServiceName," sql_fer_ordref_ack  :%s:", sql_fer_ordref_ack.arr);
+       sprintf( sql_fer_ack, "%19.0lf",ll_ordr_ack );               /*** Ver 1.1 Chnaged size from 16 to 19 ****/
+       fn_tmstmp_ymdhms_to_arr(st_prsnl_trade_ums_data.st_ums_trade_data[l_rec_cnt].st_tmstmp_ymdhms, c_time_str);
+       strcpy(sql_fer_acktrd_tm.arr,c_time_str); 
+       sql_fer_trd_no = fn_swap_long(st_prsnl_trade_ums_data.st_ums_trade_data[l_rec_cnt].l_trade_id);
+       sql_fer_trd_qty = fn_swap_long(st_prsnl_trade_ums_data.st_ums_trade_data[l_rec_cnt].l_qty);
+       sql_fer_trd_rt = fn_swap_long(st_prsnl_trade_ums_data.st_ums_trade_data[l_rec_cnt].l_rate);
+       sql_fer_jiffy = 0 ;
+
+       if( fn_create_reprt()  == -1 )
+       {
+        fn_errlog( c_ServiceName,"S31090", LIBMSG, c_err_msg );
+        tpfree ( ( char * )ptr_car_buf );
+        return -1;
+       }
+       l_rec_cnt ++;  
+     }
+     break;
+
+	 default:
+			fn_userlog( c_ServiceName, "In OTHERS" );
+			break;
+	}
+	if( DEBUG_MSG_LVL_5 )  
+  {
+   fn_userlog( c_ServiceName, "sql_fer_pipe_cd     :%s:", sql_fer_pipe_cd );
+	 fn_userlog( c_ServiceName, "sql_fer_trans_cd    :%d:", sql_fer_trans_cd );
+	 fn_userlog( c_ServiceName, "sql_fer_ordref_ack  :%s:", sql_fer_ordref_ack.arr );
+	 fn_userlog( c_ServiceName, "sql_fer_spd_ordref1 :%s:", sql_fer_spd_ordref1 );
+	 fn_userlog( c_ServiceName, "sql_fer_spd_ordref2 :%s:", sql_fer_spd_ordref2 );
+	 fn_userlog( c_ServiceName, "sql_fer_spd_ordref3 :%s:", sql_fer_spd_ordref3 );
+	 fn_userlog( c_ServiceName, "sql_fer_ack         :%s:", sql_fer_ack );
+	 fn_userlog( c_ServiceName, "sql_fer_acktrd_tm   :%s:", sql_fer_acktrd_tm.arr );
+	 fn_userlog( c_ServiceName, "sql_fer_trd_qty     :%ld:", sql_fer_trd_qty );
+	 fn_userlog( c_ServiceName, "sql_fer_trd_rt      :%ld:", sql_fer_trd_rt );
+	 fn_userlog( c_ServiceName, "sql_fer_trd_no      :%ld:", sql_fer_trd_no );
+	 fn_userlog( c_ServiceName, "sql_fer_jiffy       :%lf:", sql_fer_jiffy );
+	 fn_userlog( c_ServiceName, "sql_fer_err_cd      :%d:", sql_fer_err_cd );
+	 fn_userlog( c_ServiceName, "sql_fer_reason_cd   :%d:", sql_fer_reason_cd );
+	 fn_userlog( c_ServiceName, "sql_fer_time        :%s:", sql_fer_time.arr );
+	 fn_userlog( c_ServiceName, "sql_fer_remarks     :%s:", sql_fer_remarks.arr );
+	}
+
+	tpfree ( ( char * )ptr_car_buf );
+	return 0;
+}
+
+void fn_re_enqueue( FBFR32 *ptr_fml_tempbuf,
+										char c_err_qn[],
+										char c_qspacename[] )
+{
+	TPQCTL st_enqctl;
+
+  /* set control parameter to enqueue */
+  st_enqctl.flags = TPNOFLAGS;
+
+  /* enqueueing a message into errq in transaction */
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if( i_trnsctn == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31095", LIBMSG, c_err_msg );
+    tpfree ( (char *) ptr_fml_tempbuf );
+    return;
+  }
+
+  i_ch_val = tpenqueue ( c_qspacename, c_err_qn, &st_enqctl,
+                                    (char *)ptr_fml_tempbuf, 0, 0 );
+	if( i_ch_val == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31100", TPMSG, c_err_msg );
+    tpfree ( (char *) ptr_fml_tempbuf );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+
+  if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31105", LIBMSG, c_err_msg );
+    tpfree ( (char *) ptr_fml_tempbuf );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return;
+  }
+}
+
+int fn_create_reprt(void)
+{
+
+   SETLEN( sql_fer_ordref_ack );
+   SETLEN( sql_fer_acktrd_tm );
+   SETLEN( sql_fer_remarks );
+
+   if( DEBUG_MSG_LVL_3 )  
+   {
+    fn_userlog( c_ServiceName, "sql_fer_pipe_cd     :%s:", sql_fer_pipe_cd );
+    fn_userlog( c_ServiceName, "sql_fer_trans_cd    :%d:", sql_fer_trans_cd );
+    fn_userlog( c_ServiceName, "sql_fer_ordref_ack  :%s:", sql_fer_ordref_ack.arr );
+    fn_userlog( c_ServiceName, "sql_fer_spd_ordref1 :%s:", sql_fer_spd_ordref1 );
+    fn_userlog( c_ServiceName, "sql_fer_spd_ordref2 :%s:", sql_fer_spd_ordref2 );
+    fn_userlog( c_ServiceName, "sql_fer_spd_ordref3 :%s:", sql_fer_spd_ordref3 );
+    fn_userlog( c_ServiceName, "sql_fer_ack         :%s:", sql_fer_ack );
+    fn_userlog( c_ServiceName, "sql_fer_acktrd_tm   :%s:", sql_fer_acktrd_tm.arr );
+    fn_userlog( c_ServiceName, "sql_fer_trd_qty     :%ld:", sql_fer_trd_qty );
+    fn_userlog( c_ServiceName, "sql_fer_trd_rt      :%ld:", sql_fer_trd_rt );
+    fn_userlog( c_ServiceName, "sql_fer_trd_no      :%ld:", sql_fer_trd_no );
+    fn_userlog( c_ServiceName, "sql_fer_jiffy       :%lf:", sql_fer_jiffy );
+    fn_userlog( c_ServiceName, "sql_fer_err_cd      :%d:", sql_fer_err_cd );
+    fn_userlog( c_ServiceName, "sql_fer_reason_cd   :%d:", sql_fer_reason_cd );
+    fn_userlog( c_ServiceName, "sql_fer_time        :%s:", sql_fer_time.arr );
+    fn_userlog( c_ServiceName, "sql_fer_remarks     :%s:", sql_fer_remarks.arr );
+   }
+
+
+   i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+   if( i_trnsctn == -1 )
+   {
+    fn_errlog( c_ServiceName, "S31110", LIBMSG, c_err_msg );
+    return -1;
+   }
+
+
+   EXEC SQL
+    INSERT INTO fo_errq_report
+      (
+        fer_pipe_cd,
+        fer_trans_cd,
+        fer_ordref_ack,
+        fer_mdfctn_cntr,
+        fer_spd_ordref1,
+        fer_spd_ordref2,
+        fer_spd_ordref3,
+        fer_ack,
+        fer_acktrd_tm,
+        fer_trd_qty,
+        fer_trd_rt,
+        fer_trd_no,
+        fer_jiffy,
+        fer_err_cd,
+        fer_reason_cd,
+        fer_time,
+        fer_remarks
+      )
+    VALUES
+      (
+        :sql_fer_pipe_cd,
+        :sql_fer_trans_cd,
+        :sql_fer_ordref_ack,
+        :sql_fer_mdfctn_cntr,
+        :sql_fer_spd_ordref1,
+        :sql_fer_spd_ordref2,
+        :sql_fer_spd_ordref3,
+        :sql_fer_ack,
+        to_date( :sql_fer_acktrd_tm, 'dd-Mon-yyyy hh24:mi:ss' ),
+        :sql_fer_trd_qty,
+        :sql_fer_trd_rt,
+        :sql_fer_trd_no,
+        :sql_fer_jiffy,
+        :sql_fer_err_cd,
+        :sql_fer_reason_cd,
+        to_date( :sql_fer_time, 'dd-Mon-yyyy hh24:mi:ss' ),
+        :sql_fer_remarks
+      );
+
+     if( SQLCODE != 0 )
+     {
+      fn_errlog( c_ServiceName, "S31115", SQLMSG, c_err_msg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg ); 
+      return -1;
+     }
+
+     if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+     {
+      fn_errlog( c_ServiceName, "S31120", LIBMSG, c_err_msg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return -1;
+     }   
+
+   return 0;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  if (argc != 4)
+  {
+    fn_userlog( argv[0],
+                "Invalid number of arguments Usage - %s <configuration file> <Exchange code> <pipe_id>",argv[0] );
+    return -1;
+  }
+
+  fn_var = BAT_FOBSE_ERRQRPRT;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  fn_userlog( argv[0], "Batch process %s ended", argv[0] );
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}

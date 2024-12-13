@@ -1,0 +1,658 @@
+/*********************************************************************************************/
+/**Log Ver 1.1	14-Aug-2008 Optimization 								-CRCSN13637	 				Shailesh|Sandeep**/
+/**Log Ver 1.2	14-Aug-2008 Obligation mismatch removal -CRCSN13644  				Shailesh|Sandeep**/
+/**Log Ver 1.3	09-Sep-2008 Rerun enabling in case bulk update is missed 	 					Shailesh**/
+/**Log Ver 1.4	08-Mar-2011	Where clause changed for record selection				Sandeep					**/		
+/**Log Ver 1.5	08-Mar-2011	Margin Shift for SPAN customers									Navina D.       **/		
+/**Log Ver 1.6  02-Apr-2012 Blocked PL added to Blocked margin. As the same needs to be     **/
+/**                         carry forwarded to the next trade date          Navina D.       **/
+/**Log Ver 1.7  10-Sep-2012 Code Optimization  | Sachin Birje.                              **/ 
+/**Log Ver 1.8  26-Feb-2013 Overnight Orders at 4:30 changes | Swati A.B.                   **/
+/**Log Ver 1.9  23-Feb-2013 Game Backoffice Automation                                      **/
+/**Log Ver 2.0  22-Aug-2014 Portfolio process check   Mahesh Shinde                         **/
+/**Log Ver 2.1  10-Mar-2015 Margin Mismatch Fix(CR_ISEC04_61270 Shift Margin                **/ 
+/**                         Process Changes)                                Anand Dhopte    **/
+/** Log Ver 2.2 25-Jul-2019 Block delivery margin on ITM long Call & Put options from       **/
+/**                         Expry-4 days till  Expiry                                       **/
+/** Log Ver 2.3 22-Feb-2022 Validation added to check PEAK MARGIN PROCESS status Ravindra P **/
+/*********************************************************************************************/
+
+#include <sqlca.h>
+#include <string.h>
+#include <stdlib.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_pos.h>  /** Ver 1.9 **/
+
+void BAT_EOD_ADJ ( int argc, char *argv[] )
+{
+	long int li_tot_rcrds=0;
+  int i_ch_val;
+	int i_trnsctn;
+	int i_peak_mrgn_success_flag = 0; /** Ver 2.3 **/
+
+  long int li_cnt;
+  char c_msg[256];
+
+	/**commented for Ver 1.1 	
+	FBFR32 *ptr_fml_buf; 
+	**/
+
+  char c_ServiceName [ 33 ];
+  char c_err_msg [ 256 ];
+	char c_event[256];
+
+  char c_xchng_cd [ 4 ];
+  char c_trd_dt [ LEN_DATE ];
+  char c_cln_mtch_accnt [ 11 ];
+  char c_rout_crt [ 4 ];
+  char c_dr_cr_flg;
+  char c_prdct_typ;
+
+	char c_prtfl_flg = '\0';   /*** Ver 2.0 ***/
+
+	double  d_amount;
+  
+  /**** Ver 1.9 Starts ****/
+  char c_program_nm[33];
+  char c_xchng_cd_tmp[4];
+  char c_match_id[11];
+  char c_error_txt[256];
+
+  MEMSET(c_program_nm);
+  MEMSET(c_xchng_cd_tmp);
+  MEMSET(c_match_id);
+  MEMSET(c_error_txt);
+
+  /**** Ver 1.9 Ends ***/
+
+	EXEC SQL BEGIN DECLARE SECTION; 
+		varchar c_nxt_trd_dt [ LEN_DATE];
+	EXEC SQL END DECLARE SECTION;
+
+  strcpy ( c_ServiceName, argv[0] );
+
+	sprintf ( c_msg, "Batch process %s started", argv[0] );
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	strcpy ( c_msg, "Creating data. Please wait ... " );
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  
+	if(argc < 4 )
+  {
+   sprintf ( c_msg, "Syntax: %s <ini> <NFO> <NA> <trd dt>", argv[0] );
+   printf("%s\n\n",c_msg);
+   fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+   fn_errlog( c_ServiceName, "S31005", LIBMSG, c_err_msg );
+   return;
+  }
+
+
+  strcpy( c_xchng_cd, argv[2] );
+	strcpy( c_trd_dt, argv[4] );
+
+  /*** Ver 1.9 ***/
+  strcpy(c_program_nm,c_ServiceName);
+  strcpy(c_xchng_cd_tmp,c_xchng_cd);
+  /** Ver 1.9 ends ***/
+
+	/*** Ver 2.3 starts here ***/
+	EXEC SQL
+      SELECT   1
+      INTO     :i_peak_mrgn_success_flag
+      FROM     DUAL
+      WHERE    EXISTS (SELECT APR_XCHNG_CD
+                       FROM AUDIT_PROG_RUNSTTS
+                       WHERE APR_PROG_NAME = 'bat_fopk_drcr'
+                       and trunc(APR_TRD_DT) = :c_trd_dt
+                       and APR_SUCC_FLG = 'P'
+                       and APR_XCHNG_CD ='NFO');
+
+  if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+    fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_msg);
+    sprintf(c_event, "Error in checking run of PEAK MARGIN: bat_fopk_drcr program in a day");
+    fn_bat_pst_msg( c_ServiceName, c_event, c_tag );
+    return;
+  }
+  else if ( SQLCODE == NO_DATA_FOUND )
+  {
+    i_peak_mrgn_success_flag = 0;
+  }
+
+	if(i_peak_mrgn_success_flag!= 1)
+  {
+    fn_errlog(c_ServiceName, "S31015", SQLMSG, c_err_msg);
+    sprintf(c_event,"bat_fopk_drcr is not successfully completed for BSE or NSE for<%s>-Please process bat_fopk_drcr first", c_trd_dt);
+    fn_bat_pst_msg( c_ServiceName, c_event, c_tag );
+    return;
+  }
+	/*** Ver 2.3 ends here ***/
+
+  EXEC SQL
+    SELECT  TO_CHAR ( EXG_NXT_TRD_DT, 'dd-Mon-yyyy')
+    INTO    :c_nxt_trd_dt
+    FROM    EXG_XCHNG_MSTR
+    WHERE   EXG_XCHNG_CD = :c_xchng_cd
+    AND     EXG_MKT_TYP  = 'D';
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+		return;
+  }
+
+	/*** Ver 2.0 Start ***/
+
+  EXEC SQL
+    SELECT FSP_PRTFL_FLG
+    INTO   :c_prtfl_flg
+    FROM   FNO_SYSTM_PRMTR
+    WHERE  FSP_PRODCT = 'FNO';
+
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+    strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,"System error. Contact System Support");
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+    return;
+  }
+
+  fn_userlog( c_ServiceName, "Portfolio Flag is |%c|",c_prtfl_flg);
+
+	if ( c_prtfl_flg == 'R' )
+	{
+    fn_userlog( c_ServiceName, "Run process after completion of portfolio process.");
+		strcpy ( c_msg, "System error. Contact system support" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    strcpy(c_error_txt,"System error. Contact System Support");
+    fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);
+    return;
+	}
+  /*** Ver 2.0 End ***/
+
+  fn_init_ddr_pop ( "NA", "NA", "NA" );
+
+/**Commented for Ver 1.1***************************************************************************
+	ptr_fml_buf = fn_create_rs ( c_ServiceName,
+                               c_err_msg,
+                               "SFO_GT_EODADJRC",
+                               TPNOTIME,
+                               2,
+                               FFO_XCHNG_CD, ( char * )c_xchng_cd,
+                               FFO_TRD_DT, ( char * )c_trd_dt);
+	if ( ptr_fml_buf == NULL )
+	{
+		fn_errlog( c_ServiceName, "S31030", LIBMSG, c_err_msg );
+		return;
+	}
+
+	li_tot_rcrds = fn_reccnt_rs ( ptr_fml_buf,
+                                c_ServiceName,
+                                c_err_msg,
+                                FFO_EBA_MTCH_ACT_NO );
+	if ( li_tot_rcrds == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31035", LIBMSG, c_err_msg );
+		fn_dstry_rs ( ptr_fml_buf );
+		return;
+	}
+
+*******************************************************************************/
+
+		/**Ver 1.1 starts **/
+
+		EXEC SQL
+			SELECT COUNT(*) 
+			INTO   :li_tot_rcrds
+			FROM (
+      SELECT  FUP_CLM_MTCH_ACCNT,
+              FUP_PRDCT_TYP,
+              SUM( FUP_UTRD_MRGN + FUP_UORDR_MRGN + FUP_ADD_MRGN_VAL )
+																					/**add_mrgn_val added for Obligation mismatch - Ver 1.2**/
+      FROM    FUP_FUT_UNDRLYNG_PSTN
+      WHERE   FUP_XCHNG_CD = :c_xchng_cd
+			AND			FUP_PRDCT_TYP	!=	'P'					/***	Ver	1.4	***/
+     /***  AND     FUP_TRD_DT = TO_DATE(:c_trd_dt,'DD-Mon-YYYY')  Commented in Ver 2.1 ***/
+			AND			( FUP_UTRD_MRGN + FUP_UORDR_MRGN + FUP_ADD_MRGN_VAL )!=0
+      GROUP BY FUP_CLM_MTCH_ACCNT,FUP_PRDCT_TYP
+      UNION
+      SELECT  FOP_CLM_MTCH_ACCNT,
+              FOP_PRDCT_TYP,
+              SUM( FOP_UEXCTD_MRGN + FOP_UORDR_MRGN + NVL(FOP_UDLVRY_MRGN,0)) /** Ver 2.2 **/
+      FROM    FOP_FO_OPTIONS_PSTN
+      WHERE   FOP_XCHNG_CD = :c_xchng_cd
+      /***  AND     FOP_TRD_DT = TO_DATE(:c_trd_dt,'DD-Mon-YYYY')  Commented in Ver 2.1  ***/
+		  AND     (FOP_UEXCTD_MRGN + FOP_UORDR_MRGN + NVL(FOP_UDLVRY_MRGN,0))!= 0  /** Ver 2.2  **/
+      GROUP BY FOP_CLM_MTCH_ACCNT,FOP_PRDCT_TYP
+			UNION																		/*** Ver 1.5 ***/                                  
+			SELECT	FUS_CLM_MTCH_ACCNT,                                         
+							'S',                                                       
+							SUM( FUS_INITIAL_MRGN + FUS_BLCKD_PL ) /*** P&L Added- Reason:During Closeout ,P&L is Debited **/           		FROM		FUS_FO_UNDRLYNG_SPN_PSTN       /*** The Same Needs tobe  Carried Forward. ***/
+			WHERE		FUS_XCHNG_CD = :c_xchng_cd                                        
+  /*** 	AND			FUS_TRD_DT = TO_DATE(:c_trd_dt,'DD-Mon-YYYY')   Commented in Ver 2.1  ***/        
+      AND			(FUS_INITIAL_MRGN + FUS_BLCKD_PL) !=0   /*** FUS_BLCKD_PL added in Ver 1.6 ***/
+			GROUP BY  FUS_CLM_MTCH_ACCNT 
+			UNION
+      SELECT  FCP_CLM_MTCH_ACCNT,                /*** Ver 1.8 -- Premium shifting for Overnight Orders ***/
+              'P',
+              SUM( FCP_OPT_PREMIUM + NVL(FCP_UDLVRY_MRGN,0))   /** Ver 2.2 **/
+      FROM    FCP_FO_SPN_CNTRCT_PSTN
+      WHERE   FCP_XCHNG_CD     = :c_xchng_cd
+      AND     FCP_PRDCT_TYP = 'O'
+      AND    (FCP_OPT_PREMIUM + NVL(FCP_UDLVRY_MRGN,0))  !=0  /** Ver 2.2 **/
+      GROUP BY FCP_CLM_MTCH_ACCNT
+
+			);
+
+			if( SQLCODE != 0 &&  SQLCODE != NO_DATA_FOUND )
+			{
+				fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg );
+				strcpy ( c_msg, "System error. Contact system support" );
+				fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+        fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+				return;
+			}
+
+			if(li_tot_rcrds == 0)
+			{
+				fn_userlog(c_ServiceName,"No Margin to be shifted to the next trade date");
+				strcpy(c_msg,"No Margin to be shifted to the next trade date");
+				fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );		
+				/**Commented for Ver 1.3 
+				return; **/
+			}
+		
+		EXEC SQL
+      DECLARE cur_eodadj_rec CURSOR FOR
+      SELECT  FUP_CLM_MTCH_ACCNT,
+              FUP_PRDCT_TYP,
+              SUM( FUP_UTRD_MRGN + FUP_UORDR_MRGN + FUP_ADD_MRGN_VAL )/**add_mrgn_val added for Obligation mismatch - Ver 1.2**/
+      FROM    FUP_FUT_UNDRLYNG_PSTN
+      WHERE   FUP_XCHNG_CD = :c_xchng_cd
+			AND			FUP_PRDCT_TYP	!=	'P'					/***	Ver	1.4	***/
+      /*** AND     FUP_TRD_DT = TO_DATE(:c_trd_dt,'DD-Mon-YYYY')  Commented in Ver 2.1  ***/
+			AND			( FUP_UTRD_MRGN + FUP_UORDR_MRGN + FUP_ADD_MRGN_VAL )!=0
+      GROUP BY FUP_CLM_MTCH_ACCNT,FUP_PRDCT_TYP
+      UNION
+      SELECT  FOP_CLM_MTCH_ACCNT,
+              FOP_PRDCT_TYP,
+              SUM( FOP_UEXCTD_MRGN + FOP_UORDR_MRGN + NVL(FOP_UDLVRY_MRGN,0)) /** Ver 2.2 **/
+      FROM    FOP_FO_OPTIONS_PSTN
+      WHERE   FOP_XCHNG_CD = :c_xchng_cd
+      /*** AND     FOP_TRD_DT = TO_DATE(:c_trd_dt,'DD-Mon-YYYY')  Commented in Ver 2.1  ***/
+      AND     (FOP_UEXCTD_MRGN + FOP_UORDR_MRGN + NVL(FOP_UDLVRY_MRGN,0)) != 0  /** Ver 2.2 **/
+      GROUP BY FOP_CLM_MTCH_ACCNT,FOP_PRDCT_TYP
+			UNION																 /*** Ver 1.5 ***/
+			SELECT	FUS_CLM_MTCH_ACCNT,                                         
+							'S',                                                       
+							SUM( FUS_INITIAL_MRGN + FUS_BLCKD_PL )                                     
+			FROM		FUS_FO_UNDRLYNG_SPN_PSTN                                    
+			WHERE		FUS_XCHNG_CD = :c_xchng_cd                                        
+		  /***	AND			FUS_TRD_DT = TO_DATE(:c_trd_dt,'DD-Mon-YYYY')  Commented in Ver 2.1  ***/
+			AND			(FUS_INITIAL_MRGN + FUS_BLCKD_PL)  !=0     /*** FUS_BLCKD_PL added in Ver 1.6 ***/
+			GROUP BY FUS_CLM_MTCH_ACCNT
+			UNION
+      SELECT  FCP_CLM_MTCH_ACCNT,                /*** Ver 1.8 -- Premium shifting for Overnight Orders ***/
+              'P',
+              SUM( FCP_OPT_PREMIUM + NVL(FCP_UDLVRY_MRGN,0))  /** Ver 2.2 **/
+      FROM    FCP_FO_SPN_CNTRCT_PSTN
+      WHERE   FCP_XCHNG_CD     = :c_xchng_cd
+      AND     FCP_PRDCT_TYP = 'O'
+      AND    (FCP_OPT_PREMIUM + NVL(FCP_UDLVRY_MRGN,0)) !=0 /** Ver 2.2 **/
+      GROUP BY FCP_CLM_MTCH_ACCNT ;
+
+    EXEC SQL OPEN cur_eodadj_rec;
+    if( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31045", SQLMSG, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+			return;
+    }
+
+	
+	/**Ver 1.1 ends **/
+
+	strcpy ( c_msg, "Data created." );
+	
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Total records = %ld", li_tot_rcrds );
+	}
+
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	li_cnt = 1;
+
+	while(1)
+	{
+
+/**commented for Ver 1.1*******************************************************************
+	 for ( li_cnt=1; li_cnt<=li_tot_rcrds; li_cnt++ )
+   {
+		i_ch_val = fn_getnxt_rs ( ptr_fml_buf,
+                              c_ServiceName,
+                              c_err_msg,
+                              5,
+                            FFO_XCHNG_CD,( char * )c_xchng_cd, NULL,
+                            FFO_TRD_DT,( char * )c_trd_dt, NULL,
+                            FFO_EBA_MTCH_ACT_NO,( char *)c_cln_mtch_accnt,NULL,
+                            FFO_PRDCT_TYP, ( char * )&c_prdct_typ,NULL,
+                            FFO_AMOUNT,( char * )&d_amount, NULL );
+
+		if ( i_ch_val != 0 )
+		{
+			fn_errlog( c_ServiceName, "S31050", LIBMSG, c_err_msg );
+			fn_dstry_rs ( ptr_fml_buf );
+  		strcpy ( c_msg, "System error. Contact system support" );
+  		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			return;
+		}
+***************************************************************************************/
+
+		EXEC SQL
+        FETCH cur_eodadj_rec
+        INTO  :c_cln_mtch_accnt,
+              :c_prdct_typ,
+              :d_amount;
+
+        if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+        {
+          fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg );
+          EXEC SQL CLOSE cur_eodadj_rec;
+					strcpy ( c_msg, "System error. Contact system support" );
+					fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+          fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+					return;
+        }
+        if( SQLCODE == NO_DATA_FOUND )
+        {
+          break;
+        }
+
+    rtrim(c_cln_mtch_accnt);
+
+    if(li_cnt % 100 == 1)
+		{
+			sprintf ( c_msg, "Processing record %ld of %ld", li_cnt, li_tot_rcrds );
+ 			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		}
+
+    i_ch_val = fn_pre_prcs_rcrd ( c_ServiceName,
+                                  c_err_msg,
+                                 /** "sfr_beod_gtdt", ** Ver 1.7 wrong server name passed ***/
+                                  "sfr_all_eodadj",  /*** Ver 1.7 ***/
+                                  li_cnt,
+                                  li_tot_rcrds );
+    if ( i_ch_val == -1 )
+    {
+			fn_errlog( c_ServiceName, "S31060", LIBMSG, c_err_msg );
+			/**Commented for Ver 1.1 
+			fn_dstry_rs ( ptr_fml_buf ); 
+			**/
+			EXEC SQL CLOSE cur_eodadj_rec;
+  		strcpy ( c_msg, "System error. Contact system support" );
+  		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+			return;
+    }
+
+    fn_cpy_ddr ( c_rout_crt ) ;
+
+		/*** Start Comment under Ver 1.5
+		if ( c_prdct_typ == FUTURES )
+		{
+	    i_ch_val = fn_acall_svc_fml ( c_ServiceName,
+	                                  c_err_msg,
+	                                  "SFO_PRCS_EODADJ",
+	                                  0,
+	                                  7, 
+	                                FFO_XCHNG_CD,( char * )c_xchng_cd,
+	                                FFO_TRD_DT,( char * )c_trd_dt,
+	                                FFO_EBA_MTCH_ACT_NO,( char *)c_cln_mtch_accnt,
+	                                FFO_AMOUNT,( char * )&d_amount,
+	                                FFO_ROUT_CRT, ( char * )c_rout_crt,
+	                                FFO_BAT_TAG, ( char * )c_tag,
+	                                FFO_REC_NO, ( char * )&li_cnt);
+                                  
+	    if ( i_ch_val == -1 )
+	    {
+				fn_errlog( c_ServiceName, "S31065", LIBMSG, c_err_msg );
+				fn_userlog( c_ServiceName,"Failed In Processing Records For Futures");
+				**Commented for Ver 1.1 
+				fn_dstry_rs ( ptr_fml_buf ); 
+				**
+				EXEC SQL CLOSE cur_eodadj_rec;
+	  		strcpy ( c_msg, "System error. Contact system support" );
+	  		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+				return;
+			}
+
+		}
+		else if ( c_prdct_typ == OPTIONS )
+		{
+	    i_ch_val = fn_acall_svc_fml ( c_ServiceName,
+	                                  c_err_msg,
+	                                  "SFO_OPT_EODADJ",
+	                                  0,
+	                                  7,
+	                                FFO_XCHNG_CD,( char * )c_xchng_cd,
+	                                FFO_TRD_DT,( char * )c_trd_dt,
+	                                FFO_EBA_MTCH_ACT_NO,( char *)c_cln_mtch_accnt,
+	                                FFO_AMOUNT,( char * )&d_amount,
+	                                FFO_ROUT_CRT, ( char * )c_rout_crt,
+	                                FFO_BAT_TAG, ( char * )c_tag,
+	                                FFO_REC_NO, ( char * )&li_cnt );
+	    if ( i_ch_val == -1 )
+	    {
+				fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg );
+				fn_userlog( c_ServiceName,"Failed In Processing Records For Options");
+				**Commented for Ver 1.1 
+				fn_dstry_rs ( ptr_fml_buf ); 
+				**
+				EXEC SQL CLOSE cur_eodadj_rec;
+	  		strcpy ( c_msg, "System error. Contact system support" );
+	  		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+				return;
+			}
+
+		}
+		*** End comment Ver 1.5 ***/
+		
+		/*** Start Ver 1.5 change here ***/
+		/*** if (c_prdct_typ == FUTURES || c_prdct_typ == OPTIONS || c_prdct_typ == SPAN ) commented In Ver 1.8 ***/
+		if (c_prdct_typ == FUTURES || c_prdct_typ == OPTIONS || c_prdct_typ == SPAN || c_prdct_typ == 'P') /** Ver 1.8 ***/
+    {
+			i_ch_val = fn_acall_svc_fml ( c_ServiceName,
+																		c_err_msg,
+																		"SFO_ALL_EODADJ",
+																		0,
+																/***		8,  changed to 9 in Ver 2.1 ***/
+                                    9,
+																		FFO_XCHNG_CD,( char * )c_xchng_cd,
+																		FFO_TRD_DT,( char * )c_trd_dt,
+																		FFO_EBA_MTCH_ACT_NO,( char *)c_cln_mtch_accnt,
+																		FFO_AMOUNT,( char * )&d_amount,
+																		FFO_PRDCT_TYP,( char * )&c_prdct_typ,
+																		FFO_ROUT_CRT, ( char * )c_rout_crt,
+																		FFO_BAT_TAG, ( char * )c_tag,
+																		FFO_REC_NO, ( char * )&li_cnt,
+                                    FFO_NXT_TRD_DT, ( char *)c_nxt_trd_dt.arr);    /*** Ver 2.1 ***/
+			if ( i_ch_val == -1 )
+			{
+				fn_errlog( c_ServiceName, "S31075", LIBMSG, c_err_msg );
+				fn_userlog( c_ServiceName,"Failed In Processing Records For Futures");
+				EXEC SQL CLOSE cur_eodadj_rec;
+				strcpy ( c_msg, "System error. Contact system support" );
+				fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+        fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+				return;
+			}
+		}
+		/*** End Ver 1.5 change here ***/
+		else
+		{
+			fn_errlog( c_ServiceName, "S31080", "Invalid product type", c_err_msg );
+			/**Commented for Ver 1.1 
+			fn_dstry_rs ( ptr_fml_buf ); 
+			**/
+      EXEC SQL CLOSE cur_eodadj_rec;
+	  	strcpy ( c_msg, "Invalid product type" );
+	  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+			return;
+		}
+
+		li_cnt++;
+  }
+
+		EXEC SQL CLOSE cur_eodadj_rec;
+
+		/**Ver 1.1 starts **/
+
+	  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  
+		if ( i_trnsctn == -1 )
+  	{
+			fn_errlog(c_ServiceName,"S31085",LIBMSG,c_err_msg);
+    	strcpy ( c_msg, "System error. Contact system support" );
+	  	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/ 
+			return;
+  	}
+
+		EXEC SQL
+    	UPDATE  FUP_FUT_UNDRLYNG_PSTN
+    	SET     FUP_TRD_DT = TO_DATE(:c_nxt_trd_dt,'dd-Mon-yyyy')
+    	WHERE   FUP_XCHNG_CD = :c_xchng_cd
+    	AND     FUP_TRD_DT = TO_DATE(:c_trd_dt,'dd-Mon-yyyy')
+			AND     ( FUP_UTRD_MRGN + FUP_UORDR_MRGN + FUP_ADD_MRGN_VAL ) = 0;
+
+		if ( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"NO DATA FOUND FOR FUTURE");
+    }
+
+    if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    {
+    	fn_errlog( c_ServiceName, "S31090", SQLMSG, c_err_msg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+      return;
+    }
+
+
+		EXEC SQL
+    	UPDATE  FOP_FO_OPTIONS_PSTN
+    	SET     FOP_TRD_DT = TO_DATE(:c_nxt_trd_dt,'dd-Mon-yyyy')
+    	WHERE   FOP_XCHNG_CD = :c_xchng_cd
+    	AND     FOP_TRD_DT = TO_DATE(:c_trd_dt,'dd-Mon-yyyy')
+			AND     (FOP_UEXCTD_MRGN + FOP_UORDR_MRGN + NVL(FOP_UDLVRY_MRGN,0)) = 0; /** Ver 2.2 **/
+
+		if ( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog(c_ServiceName,"NO DATA FOUND FOR OPTION");
+    }
+
+    if( SQLCODE != 0 &&  SQLCODE != NO_DATA_FOUND)
+    {
+    	fn_errlog( c_ServiceName, "S31095", SQLMSG, c_err_msg );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+      return;
+    }
+
+		/*** Start Ver 1.5 change here ***/
+		EXEC SQL
+		UPDATE  FUS_FO_UNDRLYNG_SPN_PSTN
+		SET     FUS_TRD_DT = TO_DATE(:c_nxt_trd_dt,'dd-Mon-yyyy')
+		WHERE   FUS_XCHNG_CD = :c_xchng_cd
+		AND     FUS_TRD_DT = TO_DATE(:c_trd_dt,'dd-Mon-yyyy')
+		AND     (FUS_INITIAL_MRGN + FUS_BLCKD_PL) = 0;		/*** FUS_BLCKD_PL added in Ver 1.6 ***/
+
+		if ( SQLCODE == NO_DATA_FOUND )
+		{
+			fn_userlog(c_ServiceName,"NO DATA FOUND FOR OPTION");
+		}
+
+		if( SQLCODE != 0 &&  SQLCODE != NO_DATA_FOUND)
+		{
+			fn_errlog( c_ServiceName, "S31100", SQLMSG, c_err_msg );
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/
+			return;
+		}
+		/*** End Ver 1.5 change here ***/
+
+    if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  	{
+    	fn_aborttran (c_ServiceName,i_trnsctn,c_err_msg);
+    	fn_errlog ( c_ServiceName,"S31105",LIBMSG,c_err_msg);
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      strcpy(c_error_txt,"System error. Contact System Support");  /*** Ver 1.9 ***/
+      fn_log_prcs_err(c_program_nm,c_xchng_cd_tmp,c_match_id,c_error_txt,c_ServiceName,c_err_msg);  /*** Ver 1.9 ***/ 
+ 			return;
+  	}
+
+		/**Ver 1.1 ends **/
+
+		/**Commented for Ver 1.1 
+		fn_dstry_rs ( ptr_fml_buf ); 
+		**/
+
+		sprintf ( c_msg, "Batch process %s ended", argv[0] );
+ 		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		
+  	return;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+	fn_var = BAT_EOD_ADJ;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+	return 0;
+}

@@ -1,0 +1,1004 @@
+/******************************************************************************/
+/*  Program           : BAT_SAM_UNBLOCK                                       */
+/*                                                                            */
+/*  Input             : FFO_XCHNG_CD                                          */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                      FFO_TRD_DT                                            */
+/*                      FFO_DR_CR_FLG                                         */
+/*                      FFO_AMOUNT                                            */
+/*                      FFO_DWL_FLG                                           */
+/*                      FFO_NARRATION_ID                                      */
+/*                                                                            */
+/*                                                                            */
+/*  Output            :                                                       */
+/*                                                                            */
+/*  Description       : This batch process receives the input for Bulk SAM		*/
+/*											blocking or SAM unblocking and accordingly it computes*/ 
+/*											Limit also by calling service SFO_SAM_BKUBK						*/
+/*                                                                            */
+/*                                                                            */
+/*  Log               : Ver 1.0		24-Jul-2020		Anand Dhopte	  							*/
+/*                                                                            */
+/******************************************************************************/
+/*	1.0    -   New Release(CR_ISEC14_138293 Margin Pledge Changes)	   				*/
+/*                                                                            */
+/******************************************************************************/
+
+#include <stdio.h>      /* C Header File                */
+#include <stdlib.h>     /* C Header File                */
+#include <sqlca.h>      /* Oracle header file           */
+#include <atmi.h>       /* TUXEDO Header File           */
+#include <userlog.h>    /* TUXEDO Header File           */
+#include <fml32.h>      /* TUXEDO Header File           */
+
+/* User defined h files */
+
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fn_log.h>
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_eqsam.h>
+#include "fn_collateral.h"
+#include <fn_read_debug_lvl.h>
+#include <fn_pos.h>
+
+#define BLOCK 'B'
+#define UNBLOCK 'U'
+#define NLVL {'\0'}
+#define LEN_TAG 32
+#define MIN(x,y)  ( (x < y) ? x : y );
+
+char    c_ServiceName[33];
+char    c_msg[256];
+char  c_tag[LEN_TAG]=NLVL;
+char		c_flg = 'F';
+int i_trnsctn;
+int i_return;
+char  c_force_flag = 'F';
+
+EXEC SQL INCLUDE "table/sbr_sam_bkubk_rqst.h";
+EXEC SQL INCLUDE "table/dbd_dp_blck_dtls.h";
+
+int fn_prcs_unblk(char *c_stck_code, char *c_mtch_accnt, char c_rqst_typ);  
+int fn_prcs_rec(char *sql_rowid, char c_rqst_typ);   
+void fn_upd_status(char c_flg, char *sql_rowid);
+int fn_get_limit(char *c_ServiceName,
+                        char *sql_sbr_mtch_clnt_id,
+                        char *c_usr_id,
+                        double* d_free_sam_limit,
+                        struct vw_gt_lmt_dtls st_gt_lmt,
+                        char *c_err_msg,
+                        long sql_sssn_id);    
+
+void main( int argc, char *argv[] )
+{
+  char    c_err_msg[256];
+  char    c_stck_code[7];
+  char    c_narration[61];
+  char    c_run_mode;
+	char    c_mtch_accnt[11];
+	int i_rec_count;
+  char    c_req_typ;  /* Ver 1.1 */
+
+	varchar sql_rowid[25];
+	
+	EXEC SQL INCLUDE "table/sbr_sam_bkubk_rqst.h";
+
+  strcpy ( c_ServiceName, argv[0] );
+
+  INITBATDBGLVL(argv[0]);
+	c_run_mode = argv[4][0];
+  c_req_typ  = argv[7][0];
+
+	if(argc < 6 || argc > 8)   
+	{
+		fn_userlog(c_ServiceName,"Usage: bat_sam_bkubkB <Config File> <Exchange Cd> <Pipe Id> <Run mode>");
+		exit(-1);
+	}
+
+	if ( c_run_mode == BLOCK )
+	{
+		if (argc != 6)  
+		{
+			fn_userlog(c_ServiceName,"Usage: bat_sam_bkubkB <Config File> <Exchange Cd> <Pipe Id> <Run mode> <Req Type>"); 
+			exit(-1);
+		}
+	}
+
+  else if (c_run_mode == UNBLOCK)
+	{
+    if (argc != 8) 
+		{
+			fn_userlog(c_ServiceName,"Usage: bat_sam_bkubkB <Config File> <Exchange Cd> <Pipe Id> <Run mode> <Stock code> <Match Accnt> <Req Type>"); 
+			exit(-1);
+		}
+
+
+    NULLCHAR(c_stck_code);
+  
+    if ( strcmp(argv[5],"A") == 0 )
+    {
+     strcpy(c_stck_code,"%");
+    }
+    else
+    {
+		 strcpy(c_stck_code, argv[5]);
+    }
+
+		NULLCHAR(c_mtch_accnt);
+
+      if ( strcmp( argv[6],"A") == 0 )
+      {
+        strcpy(c_mtch_accnt,"%");
+      }
+      else
+      {
+        strcpy(c_mtch_accnt,argv[6]);
+      } 
+	}
+	sprintf(c_tag,"%s_na",c_ServiceName);
+	init_bat(c_ServiceName,argv[2],argv[3]);
+
+  sprintf ( c_msg, "Prcess %s started....",c_ServiceName);
+  fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+
+	fn_userlog(c_ServiceName,"Run mode :%c:",c_run_mode);
+	fn_userlog(c_ServiceName,"Stock code :%s:",c_stck_code);
+	fn_userlog(c_ServiceName,"Match Accnt :%s:",c_mtch_accnt);
+  fn_userlog(c_ServiceName,"Request Type :%c:", c_req_typ);  
+
+	if (c_run_mode == UNBLOCK)
+	{
+		fn_userlog(c_ServiceName,"Match Accnt1 :%s:",c_mtch_accnt);
+		i_return = fn_prcs_unblk(c_stck_code, c_mtch_accnt, c_req_typ);   
+		if ( i_return == -1 )
+		{
+      strcpy ( c_msg, "Error while processing bulk unblock ..." );
+      fn_errlog( c_ServiceName, "S31005", c_msg, c_err_msg );
+      fn_bat_pst_msg( c_ServiceName,c_msg,c_tag );
+	    destroy_bat();
+		}
+	}
+
+	 EXEC SQL
+		TRUNCATE TABLE TEMP_SBR_SAM_BKUBK_RQST;
+
+
+  i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31010", LIBMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+    destroy_bat();
+  }
+
+	EXEC SQL
+		INSERT INTO TEMP_SBR_SAM_BKUBK_RQST
+								(SBR_ROWID)
+				SELECT	ROWID
+				FROM		SBR_SAM_BKUBK_RQST
+				WHERE		TRUNC(SBR_DT) = TRUNC(SYSDATE)
+				AND			SBR_BKUBK_STATUS = 'N';
+
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog(c_ServiceName, "S31015", SQLMSG, c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    destroy_bat();
+	}
+
+	if ( SQLCODE == NO_DATA_FOUND )
+	{
+		fn_userlog( c_ServiceName,"No details for inputs");
+	}
+
+	i_rec_count = sqlca.sqlerrd[2];
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31020", LIBMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );   
+  }
+
+	fn_userlog(c_ServiceName,"No of records to process :%d:",i_rec_count);
+	sprintf(c_err_msg,"No of records to process :%d:",i_rec_count);
+  fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+
+	while (1)
+	{
+
+		c_flg = 'N';
+
+		EXEC SQL
+		SELECT SBR_ROWID
+			INTO :sql_rowid
+			FROM TEMP_SBR_SAM_BKUBK_RQST
+			WHERE ROWNUM < 2;
+
+		if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+		{
+			fn_errlog(c_ServiceName, "S31025", SQLMSG, c_err_msg);
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			destroy_bat();
+		}
+	
+		if ( SQLCODE == NO_DATA_FOUND )
+		{
+			fn_userlog( c_ServiceName,"All Done");
+			break;
+		}
+
+		i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+		if ( i_trnsctn == -1 )
+		{
+			fn_errlog(c_ServiceName, "S31030", LIBMSG, c_err_msg);
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+			destroy_bat();
+		}
+
+		EXEC SQL
+			DELETE FROM TEMP_SBR_SAM_BKUBK_RQST
+			WHERE SBR_ROWID = :sql_rowid;
+
+		if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+		{
+			fn_errlog(c_ServiceName, "S31035", LIBMSG, c_err_msg);
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );   
+			destroy_bat();
+		}
+		
+	SETNULL(sql_rowid);
+
+		i_return = fn_prcs_rec(sql_rowid.arr, c_req_typ);
+		if ( i_return == -1 )
+		{
+      strcpy ( c_msg, "Error while processing bulk unblock ..." );
+      fn_errlog( c_ServiceName, "S31040", c_msg, c_err_msg );
+      fn_bat_pst_msg( c_ServiceName,c_err_msg,c_tag );
+			c_flg = 'F';
+			fn_upd_status(c_flg, sql_rowid.arr);
+			continue;
+		}
+
+		c_flg = 'Y';
+		fn_upd_status(c_flg, sql_rowid.arr);
+  
+	}
+
+	strcpy ( c_msg, "All Done..." );
+  fn_bat_pst_msg( c_ServiceName,c_msg,c_tag );
+	destroy_bat();
+
+}
+
+int fn_prcs_unblk(char *c_stck_code, char *c_mtch_accnt, char c_rqst_typ)
+{
+
+	double d_plg_haircut = 0.0;
+
+		fn_userlog(c_ServiceName,"Match Accnt1 :%s:",c_mtch_accnt);
+ 
+  i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31045", LIBMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		return -1;
+  }
+
+  if( c_rqst_typ == 'A' )
+  {
+	 EXEC SQL
+		INSERT INTO SBR_SAM_BKUBK_RQST
+								(SBR_DT,
+								SBR_MTCH_CLNT_ID,
+								SBR_DP_ID,
+								SBR_DP_CLNT_ID,
+								SBR_STCK_CD,
+								SBR_ISIN_NO,
+								SBR_BKUBK_FLG,
+								SBR_BKUBK_QTY,
+								SBR_BKUBK_STATUS)
+					SELECT TRUNC(SYSDATE),
+								DBD_CLM_MTCH_ACCNT,
+								DBD_DP_ID,
+								DBD_DP_CLNT_ID,
+								DBD_STCK_CD,
+								DBD_ISIN_NMBR,
+								'U',
+								NVL(DBD_SAM_BLCKD_QTY,0),
+								'N'
+					FROM	DBD_DP_BLCK_DTLS, FAB_FO_ALC_BFT_SMRY, EAB_EQ_ALC_BFT_SMRY
+					WHERE DBD_CLM_MTCH_ACCNT = FAB_CLM_MTCH_ACCNT
+					AND   FAB_CLM_MTCH_ACCNT = EAB_CLM_MTCH_ACCNT
+          AND   DBD_CLM_MTCH_ACCNT like :c_mtch_accnt
+          AND   DBD_STCK_CD like :c_stck_code 
+					AND   FAB_NWB_AMT > 0
+				  AND   FAB_PLG_AMT = 0
+				  AND   EAB_PLG_AMT = 0
+          AND   NVL(DBD_SAM_BLCKD_QTY,0) > 0 ;
+	  }
+    else if ( c_rqst_typ == 'B' )
+    {
+		 EXEC SQL
+         INSERT INTO SBR_SAM_BKUBK_RQST
+                (SBR_DT,
+                SBR_MTCH_CLNT_ID,
+                SBR_DP_ID,
+                SBR_DP_CLNT_ID,
+                SBR_STCK_CD,
+                SBR_ISIN_NO,
+                SBR_BKUBK_FLG,
+                SBR_BKUBK_QTY,
+                SBR_BKUBK_STATUS)
+          SELECT TRUNC(SYSDATE),
+                DBD_CLM_MTCH_ACCNT,
+                DBD_DP_ID,
+                DBD_DP_CLNT_ID,
+                DBD_STCK_CD,
+                DBD_ISIN_NMBR,
+                'U',
+                NVL(DBD_SAM_BLCKD_QTY,0),
+                'N'
+          FROM  DBD_DP_BLCK_DTLS, FAB_FO_ALC_BFT_SMRY, EAB_EQ_ALC_BFT_SMRY
+          WHERE DBD_CLM_MTCH_ACCNT = FAB_CLM_MTCH_ACCNT
+          AND   FAB_CLM_MTCH_ACCNT = EAB_CLM_MTCH_ACCNT
+          AND   DBD_CLM_MTCH_ACCNT like :c_mtch_accnt
+          AND   DBD_STCK_CD like :c_stck_code
+          AND   (NVL(FAB_PLG_AMT,0) > 0 OR  NVL(EAB_PLG_AMT,0) > 0)
+          AND   NVL(DBD_SAM_BLCKD_QTY,0) > 0 ;
+    }
+    else if ( c_rqst_typ == 'C' )
+    {
+     EXEC SQL
+         INSERT INTO SBR_SAM_BKUBK_RQST
+                (SBR_DT,
+                SBR_MTCH_CLNT_ID,
+                SBR_DP_ID,
+                SBR_DP_CLNT_ID,
+                SBR_STCK_CD,
+                SBR_ISIN_NO,
+                SBR_BKUBK_FLG,
+                SBR_BKUBK_QTY,
+                SBR_BKUBK_STATUS)
+          SELECT TRUNC(SYSDATE),
+                DBD_CLM_MTCH_ACCNT,
+                DBD_DP_ID,
+                DBD_DP_CLNT_ID,
+                DBD_STCK_CD,
+                DBD_ISIN_NMBR,
+                'U',
+                NVL(DBD_SAM_BLCKD_QTY,0),
+                'N'
+          FROM  DBD_DP_BLCK_DTLS
+          WHERE NVL(DBD_SAM_BLCKD_QTY,0) > 0 
+            AND DBD_CLM_MTCH_ACCNT IN (
+
+                                        SELECT DISTINCT DBD_CLM_MTCH_ACCNT
+																	      FROM DBD_DP_BLCK_DTLS
+     																		WHERE DBD_SAM_BLCKD_QTY > 0
+
+    																		MINUS
+    																		(
+    																			SELECT DISTINCT FCP_CLM_MTCH_ACCNT
+      																		FROM FCP_FO_SPN_CNTRCT_PSTN
+     																			WHERE FCP_OPNPSTN_FLW != 'N'
+       																		AND FCP_OPNPSTN_QTY != 0
+
+    																			UNION ALL
+
+ 																				  SELECT DISTINCT FFP_CLM_MTCH_ACCNT
+      																		FROM FFP_FO_FUTURES_PSTN
+     																			WHERE FFP_OPNPSTN_FLW != 'N'
+       																		AND FFP_OPNPSTN_QTY != 0
+
+    																			UNION ALL
+
+    																			SELECT DISTINCT FOP_CLM_MTCH_ACCNT
+      																		FROM FOP_FO_OPTIONS_PSTN
+     																			WHERE FOP_OPNPSTN_FLW !='N'
+       																		AND FOP_OPNPSTN_QTY != 0
+
+    																			UNION ALL
+   
+    																			SELECT DISTINCT OTP_CLM_MTCH_ACCT
+      																		FROM OTP_TRD_PSTN
+     																			WHERE OTP_QTY != 0
+
+    																			UNION ALL
+
+    																			SELECT DISTINCT EPB_CLM_MTCH_ACCNT
+      																		FROM EPB_EM_PSTN_BOOK
+     																			WHERE EPB_PSTN_STTS = 'O'
+
+                                       )
+                                      );
+    } 
+    else
+    {
+     fn_errlog(c_ServiceName, "S31050", "Invalid request type", c_err_msg);
+     fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+     return -1;
+    }
+				
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog(c_ServiceName, "S31055", SQLMSG, c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		return -1;
+	}
+
+	if ( SQLCODE == NO_DATA_FOUND )
+	{
+		fn_userlog( c_ServiceName,"No details for inputs");
+		strcpy(c_err_msg,"No records found");
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+	}
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31060", LIBMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return -1;
+  }
+
+	return 1;
+}
+
+int fn_prcs_rec(char *sql_rowid, char c_rqst_typ)
+{
+  int i_trnsctn ;
+	int i_cnt;
+  char c_err_msg[256];
+  int i_err[11];
+  int i_ferr[11];
+	char c_bkubk_flg;
+	FBFR32 *ptr_fml_Ibuf = (FBFR32 *)NULL;
+	FBFR32 *ptr_fml_Obuf = (FBFR32 *)NULL; 
+	char c_xchng_cd[4];
+	char c_channel[4];
+	long sql_sssn_id = 0;
+	long int li_Obuf_len;
+	char c_usr_id[7];
+	char sql_oprn_typ;
+	int d_rec_exist = 0;
+  long l_plg_haircut = 0;
+  double d_plg_rt = 0.0;
+  double d_free_sam_limit = 0.0;
+  double sql_free_qty_val = 0.0;
+  long l_free_qty = 0;
+  long l_free_qty_val = 0;
+  struct vw_gt_lmt_dtls st_gt_lmt;
+
+    fn_userlog ( c_ServiceName,"ROWID IS :%s:",sql_rowid );
+
+	ptr_fml_Ibuf = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+	if (ptr_fml_Ibuf == NULL)
+	{
+		fn_errlog(c_ServiceName, "S31065", TPMSG, c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		return -1;
+	}
+
+	ptr_fml_Obuf = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+	if (ptr_fml_Obuf == NULL)
+	{
+		fn_errlog(c_ServiceName, "S31070", TPMSG, c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		tpfree((char *)ptr_fml_Ibuf);
+		return -1;
+	}
+
+	EXEC SQL
+		SELECT	SBR_MTCH_CLNT_ID,
+						SBR_DP_ID,
+						SBR_DP_CLNT_ID,
+						SBR_STCK_CD,
+						SBR_ISIN_NO,
+						SBR_BKUBK_QTY,
+						SBR_BKUBK_FLG
+			INTO	:sql_sbr_mtch_clnt_id,
+						:sql_sbr_dp_id,
+						:sql_sbr_dp_clnt_id,
+						:sql_sbr_stck_cd,
+						:sql_sbr_isin_no,
+						:sql_sbr_bkubk_qty,
+						:c_bkubk_flg
+			FROM SBR_SAM_BKUBK_RQST
+			WHERE SBR_BKUBK_STATUS = 'N'
+			AND		ROWID = :sql_rowid;
+
+	if ( SQLCODE != 0 )
+	{
+		fn_errlog(c_ServiceName, "S31075", SQLMSG, c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		tpfree((char *)ptr_fml_Ibuf);
+		tpfree((char *)ptr_fml_Obuf);
+		return -1;
+	}
+
+	if (c_bkubk_flg == BLOCK)
+	{
+		sql_oprn_typ = 'P';
+	}
+	else if (c_bkubk_flg == UNBLOCK)
+	{
+		sql_oprn_typ = 'W';
+	}
+
+  
+	Finit32(ptr_fml_Ibuf, (FLDLEN32) Fsizeof32(ptr_fml_Ibuf));
+	Finit32(ptr_fml_Obuf, (FLDLEN32) Fsizeof32(ptr_fml_Obuf));
+	strcpy(c_usr_id, "system");
+
+	fn_userlog(c_ServiceName,"sql_sbr_mtch_clnt_id = :%s:",sql_sbr_mtch_clnt_id);
+	fn_userlog(c_ServiceName,"sql_sbr_dp_id = :%s:",sql_sbr_dp_id);
+	fn_userlog(c_ServiceName,"sql_sbr_dp_clnt_id = :%s:",sql_sbr_dp_clnt_id);
+	fn_userlog(c_ServiceName,"sql_sbr_stck_cd = :%s:",sql_sbr_stck_cd);
+	fn_userlog(c_ServiceName,"sql_sbr_isin_no = :%s:",sql_sbr_isin_no);
+	fn_userlog(c_ServiceName,"sql_sbr_bkubk_qty = :%d:",sql_sbr_bkubk_qty);
+	fn_userlog(c_ServiceName,"c_bkubk_flg = :%c:",c_bkubk_flg);	
+	fn_userlog(c_ServiceName,"sql_oprn_typ = :%c:",sql_oprn_typ);	
+
+
+	EXEC SQL
+		SELECT COUNT(1)
+		INTO :d_rec_exist
+		FROM	DBD_DP_BLCK_DTLS
+		WHERE DBD_CLM_MTCH_ACCNT = :sql_sbr_mtch_clnt_id
+    AND DBD_STCK_CD = :sql_sbr_stck_cd
+    AND DBD_ISIN_NMBR = :sql_sbr_isin_no
+		AND DBD_DP_ID = :sql_sbr_dp_id
+		AND DBD_DP_CLNT_ID = :sql_sbr_dp_clnt_id;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName, "S31080", SQLMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		tpfree((char *)ptr_fml_Ibuf);
+		tpfree((char *)ptr_fml_Obuf);
+    return -1;
+  }
+
+	if(d_rec_exist == 0)
+	{
+    fn_errlog(c_ServiceName, "S31085", SQLMSG, c_err_msg);
+		sprintf(c_err_msg,"No allocation for given parameters");
+    sprintf(c_msg,"%s - %s - %s",sql_sbr_mtch_clnt_id,sql_sbr_stck_cd,c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+		tpfree((char *)ptr_fml_Ibuf);
+		tpfree((char *)ptr_fml_Obuf);
+    return 0;
+	}
+
+
+  if ( c_rqst_typ == 'B' ) 
+  {
+
+    fn_userlog(c_ServiceName,"Before fn_get_limit");
+    i_return = fn_get_limit(c_ServiceName ,
+                               sql_sbr_mtch_clnt_id,
+                               c_usr_id,
+                               &d_free_sam_limit,
+                               st_gt_lmt,
+                               c_err_msg,
+                               sql_sssn_id);
+
+    if(i_return == -1)
+    {
+      fn_errlog( c_ServiceName, "S31090", LIBMSG, c_err_msg  );
+      fn_userlog(c_ServiceName, "%s", c_err_msg);
+      fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+      sprintf(c_msg,"%s - %s - %s",sql_sbr_mtch_clnt_id,sql_sbr_stck_cd,c_err_msg);
+      fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+      tpfree((char *)ptr_fml_Ibuf);
+      tpfree((char *)ptr_fml_Obuf);
+      return 0;
+    }
+
+   
+   l_free_qty = sql_sbr_bkubk_qty;
+
+   l_plg_haircut = 0;
+    d_plg_rt = 0.0;
+
+    EXEC SQL
+    SELECT GREATEST(NVL(CHM_HAIRCUT,0),NVL(STK_PLG_HAIRCUT,0))
+    INTO   :l_plg_haircut
+    FROM   CHM_CLNT_HAIRCUT_MSTR, STK_STK_MSTR
+    WHERE  STK_STCK_CD = CHM_STCK_CD(+)
+    AND    CHM_CLM_MTCH_ACCNT(+) = :sql_sbr_mtch_clnt_id
+    AND    STK_STCK_CD   = :sql_sbr_stck_cd;
+
+    if(SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31095",SQLMSG,c_err_msg);
+      return -1;
+    }
+
+    
+     /****************** Get Pledge Rate from LTQ table *****************/
+
+        EXEC SQL
+        SELECT    NVL(LTQ_PLG_RT,0)
+        INTO      :d_plg_rt
+        FROM      LTQ_TRD_QT
+        WHERE     LTQ_STCK_CD = :sql_sbr_stck_cd
+        AND       LTQ_XCHNG_CD= 'BSE';
+
+        if ( SQLCODE != 0 )
+        {
+          fn_errlog( c_ServiceName, "S31100", SQLMSG, c_err_msg  );
+          return -1;
+        }
+
+        sql_free_qty_val = (l_free_qty * (d_plg_rt *(1 - ((double)(l_plg_haircut)/100))))*100;
+
+        if((long long)(sql_free_qty_val * 100)%100 > 50)
+        {
+          sql_free_qty_val = sql_free_qty_val + 1.0;
+
+          if(DEBUG_MSG_LVL_3){
+            fn_userlog( c_ServiceName, "The rounded off amount for qty is [%lf]",sql_free_qty_val);
+          }
+        }
+
+        l_free_qty_val = (long long) sql_free_qty_val;
+        sql_free_qty_val = (double) l_free_qty_val;
+      if(DEBUG_MSG_LVL_0){
+          fn_userlog(c_ServiceName,"The withdraw val before limit is [%ld] for rate [%lf]",l_free_qty_val,d_plg_rt);
+          fn_userlog(c_ServiceName,"The d_free_sam_limit is [%lf] ",d_free_sam_limit);
+        }
+
+
+        if(d_free_sam_limit < sql_free_qty_val)
+        {
+            if(DEBUG_MSG_LVL_0){
+            fn_userlog(c_ServiceName,"Inside d_free_sam_limit condition");
+            }
+
+            if(l_plg_haircut == 100)
+              l_free_qty = (long)(d_free_sam_limit/100) / (d_plg_rt);
+            else
+              l_free_qty = (long)(d_free_sam_limit/100) / (d_plg_rt * (1 - (double)(l_plg_haircut)/100));
+
+            if(l_free_qty < 0)
+              l_free_qty = 0;
+
+            sql_free_qty_val = (l_free_qty * (d_plg_rt *(1 - ((double)(l_plg_haircut)/100))))*100;
+
+            if((long long)(sql_free_qty_val * 100)%100 > 50)
+            {
+              sql_free_qty_val = sql_free_qty_val + 1.0;
+
+              if(DEBUG_MSG_LVL_3){
+                  fn_userlog( c_ServiceName, "The rounded off amount for qty is [%lf]",sql_free_qty_val);
+              }
+            }
+
+            l_free_qty_val = (long long) sql_free_qty_val;
+            sql_free_qty_val = (double) l_free_qty_val;
+
+            if(DEBUG_MSG_LVL_0){
+            fn_userlog(c_ServiceName," sql_free_qty_val === :%lf:",sql_free_qty_val);
+            }
+        }
+
+        if(DEBUG_MSG_LVL_0){
+          fn_userlog(c_ServiceName,"The withdraw val after limit is [%ld] for rate [%lf]",l_free_qty_val,d_plg_rt);
+          fn_userlog(c_ServiceName,"Free qty available after limit is [%ld]",l_free_qty);
+        } 
+
+       sql_sbr_bkubk_qty = l_free_qty;
+
+   } /* if c_rqst_typ B ends */
+
+  if ( sql_sbr_bkubk_qty <= 0)
+  {
+   fn_userlog(c_ServiceName,"Quantity for unblock cannot be negative");
+   return -1;
+  }
+
+	strcpy(c_channel,"SYS");
+
+	i_err[0] = Fadd32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO, (char *)sql_sbr_mtch_clnt_id ,0);
+	i_err [1] = Fadd32(ptr_fml_Ibuf,FFO_BK_UBK_FLG, (char *)&c_bkubk_flg,0);
+	i_err [2] = Fadd32(ptr_fml_Ibuf,FFO_USR_ID, (char*)c_usr_id,0);
+	i_err [3] = Fadd32(ptr_fml_Ibuf,FFO_STCK_CD, sql_sbr_stck_cd ,0);
+	i_err [4] = Fadd32(ptr_fml_Ibuf,FFO_ORD_TOT_QTY, (char *)&sql_sbr_bkubk_qty ,0);
+	i_err [5] = Fadd32(ptr_fml_Ibuf,FFO_DPID, (char *)sql_sbr_dp_id ,0);
+	i_err [6] = Fadd32(ptr_fml_Ibuf,FFO_DP_CLNT_ID, (char *)sql_sbr_dp_clnt_id ,0);
+	i_err [7] = Fadd32(ptr_fml_Ibuf,FFO_CHANNEL, c_channel,0); 
+	i_err [8] = Fadd32(ptr_fml_Ibuf,FFO_SSSN_ID, (char*)&sql_sssn_id,0);
+	i_err [9] = Fadd32(ptr_fml_Ibuf,FFO_OPT_TYP,(char*)&sql_oprn_typ,0); 
+
+	for ( i_cnt=0; i_cnt < 10; i_cnt++ ) 
+	{
+		if ( i_err[ i_cnt ] == -1 )
+		{
+			sprintf(c_msg, "ERROR : At FML no :%d:",i_cnt);
+			fn_errlog( c_ServiceName,"S31105",Fstrerror32(i_err[i_cnt]),c_err_msg );
+			fn_userlog(c_ServiceName,c_msg);
+			tpfree((char *)ptr_fml_Ibuf);
+			tpfree((char *)ptr_fml_Obuf);
+			strcpy( c_err_msg,"Contact System Support" ); 
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag); 
+			return -1;
+		}
+	}
+
+ 
+  if ( c_rqst_typ == 'C' )
+  {
+
+   i_err[0] = Fadd32(ptr_fml_Ibuf,FML_PLG_FLG, (char *)&c_force_flag,0);
+   if ( i_err[0] == -1 )
+    {
+     fn_errlog( c_ServiceName,"S31110",Fstrerror32(i_err[0]),c_err_msg );
+     fn_userlog(c_ServiceName,c_msg);
+     tpfree((char *)ptr_fml_Ibuf);
+     tpfree((char *)ptr_fml_Obuf);
+     strcpy( c_err_msg,"Contact System Support" );
+     fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+     return -1;
+    }
+
+  } 
+
+	i_return = tpcall( "SFO_PLC_PLG",(char*)ptr_fml_Ibuf,0,(char**)&ptr_fml_Obuf,&li_Obuf_len,0);
+	if( i_return == -1)
+  {
+		if ( tperrno != TPESVCFAIL )
+		{
+			fn_errlog ( c_ServiceName, "S31115", TPMSG,c_err_msg);
+			fn_userlog(c_ServiceName,"ERROR : %s",c_err_msg);
+			tpfree((char *)ptr_fml_Ibuf);
+			tpfree((char *)ptr_fml_Obuf);
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag); 
+		}
+
+		Fget32 ( ptr_fml_Obuf, FFO_ERR_MSG, 0, c_err_msg, 0 );
+		sprintf(c_msg,"%s - %s - %s",sql_sbr_mtch_clnt_id,sql_sbr_stck_cd,c_err_msg);
+		fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+		fn_userlog(c_ServiceName,"ERROR : %s",c_err_msg);
+    sprintf(c_msg, "ERROR In Block Unblock for :%s: Skipping Order...",sql_sbr_mtch_clnt_id);
+		fn_userlog(c_ServiceName,c_msg);
+    fn_bat_pst_msg( c_ServiceName,c_msg,c_tag );
+		return -1;
+	}
+
+    Fget32 ( ptr_fml_Obuf, FFO_ERR_MSG, 0, c_err_msg, 0 );
+    sprintf(c_msg,"%s - %s - %s",sql_sbr_mtch_clnt_id,sql_sbr_stck_cd,c_err_msg);
+    fn_bat_pst_msg( c_ServiceName, c_msg, c_tag );
+		tpfree((char*)ptr_fml_Ibuf);
+		tpfree((char*)ptr_fml_Obuf);
+}
+
+void fn_upd_status(char c_flg, char *sql_rowid)
+{
+  i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31120", LIBMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+    destroy_bat();
+  }
+
+	EXEC SQL 
+		UPDATE SBR_SAM_BKUBK_RQST
+		SET SBR_BKUBK_STATUS = :c_flg
+		WHERE ROWID = :sql_rowid;
+
+	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog(c_ServiceName, "S31125", SQLMSG, c_err_msg);
+		fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+    destroy_bat();
+	}
+
+	  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31130", LIBMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );   
+    destroy_bat();
+  }
+
+}
+
+int fn_get_limit(char *c_ServiceName,
+                        char *sql_sbr_mtch_clnt_id,
+                        char *c_usr_id,
+                        double* d_free_sam_limit,
+                        struct vw_gt_lmt_dtls st_gt_lmt,
+                        char *c_err_msg,
+                        long sql_sssn_id)
+{
+
+  EXEC SQL BEGIN DECLARE SECTION;
+  varchar sql_nxt_trd_dt[13];
+  double d_nfo_limit = 0.0;
+  double d_bfo_limit = 0.0;
+  double d_net_fno_limit = 0.0;
+  double d_eq_sam_limit = 0.0;
+  double sql_fab_plg_amt = 0.0;
+  double sql_fab_nwb_amt = 0.0;
+  long l_ip_len = 0;
+  EXEC SQL END DECLARE SECTION;
+
+  fn_userlog(c_ServiceName,"Inside function fn_get_limit");
+  fn_userlog(c_ServiceName,"Before NFO limit");
+
+  memset(&st_gt_lmt,'\0' , sizeof( struct vw_gt_lmt_dtls) );
+
+  fn_userlog(c_ServiceName,"Before NFO limit2");
+
+  strcpy(st_gt_lmt.c_xchng_cd , "NFO" );
+
+
+  fn_userlog(c_ServiceName,"Before NFO limit3");
+
+  MEMSET(sql_nxt_trd_dt);
+ 
+  EXEC SQL
+    SELECT EXG_NXT_TRD_DT
+    INTO :sql_nxt_trd_dt
+    FROM EXG_XCHNG_MSTR
+    WHERE EXG_XCHNG_CD = 'NFO';
+
+    fn_userlog(c_ServiceName,"Before NFO limit3");
+  if (SQLCODE != 0)
+  {
+    fn_errlog( c_ServiceName, "S31135", SQLMSG, c_err_msg  );
+    return -1;
+  }
+
+  SETNULL(sql_nxt_trd_dt);
+
+  strcpy(st_gt_lmt.c_trd_dt, sql_nxt_trd_dt.arr );
+  strcpy(st_gt_lmt.c_cln_mtch_accnt, sql_sbr_mtch_clnt_id);
+  l_ip_len = (long) sizeof ( struct vw_gt_lmt_dtls);
+  st_gt_lmt.c_rqst_typ = LIMIT_X;
+  fn_cpy_ddr ( st_gt_lmt.c_rout_crt );
+
+
+  fn_userlog(c_ServiceName,"st_gt_lmt.l_gid = :%ld:",st_gt_lmt.l_gid);
+  i_return = fo_get_trd_limit(c_ServiceName,
+                                    st_gt_lmt.c_cln_mtch_accnt,
+                                    st_gt_lmt.c_trd_dt,
+                                    st_gt_lmt.c_rqst_typ,
+                                    st_gt_lmt.c_xchng_cd,
+                                    st_gt_lmt.l_gid,
+                                    &st_gt_lmt.d_amt,
+                                    c_err_msg
+                                    );
+
+  if ( i_return == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31140", LIBMSG, c_err_msg );
+    fn_userlog(c_ServiceName,"SFO_GET_LIMITS FAIL  ");
+    return -1;
+  }
+
+  if(DEBUG_MSG_LVL_3){
+    fn_userlog( c_ServiceName,"NFO Limit Calculated :%lf:",st_gt_lmt.d_amt);
+  }
+
+  d_nfo_limit = st_gt_lmt.d_amt;
+
+  fn_userlog(c_ServiceName,"Before BFO limit");
+
+  memset(&st_gt_lmt,'\0' , sizeof( struct vw_gt_lmt_dtls) );
+  strcpy(st_gt_lmt.c_xchng_cd , "BFO" );
+
+  MEMSET(sql_nxt_trd_dt);
+
+  EXEC SQL
+  SELECT EXG_NXT_TRD_DT
+  INTO :sql_nxt_trd_dt
+  FROM EXG_XCHNG_MSTR
+  WHERE EXG_XCHNG_CD = 'BFO';
+
+  if (SQLCODE != 0)
+  {
+    fn_errlog( c_ServiceName, "S31145", SQLMSG, c_err_msg  );
+    return -1;
+  }
+
+  SETNULL(sql_nxt_trd_dt);
+
+  strcpy(st_gt_lmt.c_trd_dt, sql_nxt_trd_dt.arr );
+  strcpy(st_gt_lmt.c_cln_mtch_accnt, sql_sbr_mtch_clnt_id);
+  l_ip_len = (long) sizeof ( struct vw_gt_lmt_dtls);
+  st_gt_lmt.c_rqst_typ = LIMIT_X;
+  fn_cpy_ddr ( st_gt_lmt.c_rout_crt );
+
+  fn_userlog(c_ServiceName,"st_gt_lmt.l_gid = :%ld:",st_gt_lmt.l_gid);
+  i_return = fo_get_trd_limit(c_ServiceName,
+                                    st_gt_lmt.c_cln_mtch_accnt,
+                                    st_gt_lmt.c_trd_dt,
+                                    st_gt_lmt.c_rqst_typ,
+                                    st_gt_lmt.c_xchng_cd,
+                                    st_gt_lmt.l_gid,
+                                    &st_gt_lmt.d_amt,
+                                    c_err_msg
+                                    );
+
+  if ( i_return == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31150", LIBMSG, c_err_msg );
+    fn_userlog(c_ServiceName,"SFO_GET_LIMITS FAIL  ");
+    return -1;
+  }
+
+
+  d_bfo_limit = st_gt_lmt.d_amt;
+
+  d_net_fno_limit =  MIN(d_nfo_limit,d_bfo_limit);
+
+  if(DEBUG_MSG_LVL_3){
+    fn_userlog( c_ServiceName,"BFO Limit Calculated :%lf:",st_gt_lmt.d_amt);
+    fn_userlog( c_ServiceName,"Net FNO limit        :%lf:",d_net_fno_limit);
+  }
+
+  fn_userlog(c_ServiceName,"Before EQ limit");
+
+  i_return = fn_get_eqsam_limit ( c_ServiceName,
+                                      sql_sbr_mtch_clnt_id,
+                                      &d_eq_sam_limit,
+                                      c_usr_id,
+                                      sql_sssn_id,
+                                      c_err_msg
+                                    );
+
+  if(i_return == -1)
+  {
+    fn_errlog( c_ServiceName, "S31155", LIBMSG, c_err_msg  );
+    return -1;
+  }
+
+  EXEC SQL
+    SELECT  nvl(FAB_PLG_AMT,0),
+            nvl(FAB_NWB_AMT,0)
+    INTO    :sql_fab_plg_amt ,
+            :sql_fab_nwb_amt
+    FROM FAB_FO_ALC_BFT_SMRY
+    WHERE FAB_CLM_MTCH_ACCNT = :sql_dbd_clm_mtch_accnt;
+
+  if(( SQLCODE !=0 ) && (SQLCODE != NO_DATA_FOUND))
+  {
+   fn_errlog( c_ServiceName, "S31160", SQLMSG, c_err_msg  );
+   return -1;
+  }
+
+  if(SQLCODE == NO_DATA_FOUND)
+  {
+    sql_fab_plg_amt = 0.0;
+    sql_fab_nwb_amt = 0.0;
+  }
+
+  *d_free_sam_limit =  sql_fab_nwb_amt + d_eq_sam_limit + MIN(sql_fab_plg_amt , d_net_fno_limit );
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"d_cash_lmt      = :%lf:",d_eq_sam_limit);
+    fn_userlog(c_ServiceName,"d_net_fno_limit = :%lf:",d_net_fno_limit); 
+    fn_userlog(c_ServiceName,"sql_fab_plg_amt = :%lf:",sql_fab_plg_amt);
+    fn_userlog(c_ServiceName,"sql_fab_nwb_amt = :%lf:",sql_fab_nwb_amt);
+    fn_userlog(c_ServiceName,"d_free_sam_limit= :%lf:",d_free_sam_limit);
+  }
+
+  return 0;
+
+}

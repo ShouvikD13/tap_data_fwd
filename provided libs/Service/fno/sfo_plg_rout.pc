@@ -1,0 +1,438 @@
+/********************************************************************************/
+/*  Program            : SFO_PLG_ROUT                                           */ 
+/*	                                                                            */	
+/*																																		  	      */
+/*	Description        :  	This service fetches all the match-id lists having  */
+/*											 the triggered stock pledged and asynchronously calls   */
+/*	                     the service sfo_plg_revln.pc.                          */         
+/*																																							*/
+/*	Log                :																											  */											
+/*																																							*/
+/*																																							*/
+/********************************************************************************/
+/*																																							*/
+/*																																							*/		
+/*	Ver 1.0           : New Release	(Tanmay )																		*/	
+/*	Ver 1.1           : Variable MEMSET (Tanmay ) 09-Nov-2016										*/	
+/*																																							*/			
+/*																																							*/
+/********************************************************************************/	
+
+#include <stdio.h>
+#include <sqlca.h>
+#include <stdlib.h>
+#include <atmi.h>
+#include <fo_fml_def.h>
+#include <string.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_read_debug_lvl.h> 
+
+void SFO_PLG_ROUT ( TPSVCINFO *rqst )
+{
+		FBFR32 *ptr_fml_ibuf;
+		FBFR32 *ptr_fml_obuf;
+
+		char   c_ServiceName[33];
+		char   c_stck_cd[7];
+		char   c_flg ='P';
+		char   c_err_msg[256];
+		char   c_mtch_accnt_no[11];
+		char   c_opncls_flg = '\0';
+    char   c_trg_dttm[23];
+    char   c_plg_prcs_flg='\0';
+    char   c_date_time[22+1];
+    char   c_command[350];
+    char   c_match_string[100];
+    char   c_updwn_flg='\0';
+
+		int i=0;
+		int i_err[9];
+    int i_ferr[9];
+		int i_trnsctn=0;
+    int i_prcs_cnt=0;
+
+    long l_count=0;
+		long l_pro_time=0;
+	  long l_l_inner_counter=0;
+
+		double d_base_prc= 0;
+  	double d_16perUp_prc= 0;
+  	double d_16perDown_prc= 0;
+    double d_udp_price=0;
+    double d_time_diff=0;
+    double d_plg_prcnt=0.0;
+    double d_new_up_bound=0.0;
+    double d_new_low_bound=0.0;
+
+  	EXEC SQL INCLUDE "table/sem_stck_map.h";
+  	EXEC SQL INCLUDE "table/ord_ordr_dtls.h";
+   	
+    typedef struct ___list
+    {
+      char c_mtch_accnt_no[11];
+    } plg_mtch_lst;
+
+    plg_mtch_lst *ptr_plgmtch_lst = NULL;
+	
+		strcpy(c_ServiceName,"SFO_PLG_ROUT");
+		ptr_fml_obuf = (FBFR32 *)tpalloc("FML32", NULL, MIN_FML_BUF_LEN * 5);
+		if(ptr_fml_obuf == NULL)
+   	{
+			fn_errlog(c_ServiceName, "S31005", TPMSG,c_err_msg);
+			tpfree ( ( char * ) ptr_fml_obuf );
+			Fadd32(ptr_fml_ibuf, FFO_ERR_MSG,c_err_msg, 0);
+			tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+    }
+     
+		ptr_fml_ibuf = (FBFR32 *)rqst->data;
+
+		MEMSET(c_stck_cd);
+    MEMSET(c_trg_dttm);
+    MEMSET(sql_ord_xchng_cd);
+    MEMSET(sql_sem_map_vl.arr);
+    MEMSET(c_command);
+    MEMSET(c_date_time);
+		MEMSET(c_match_string);   /** Ver 1.1 ***/
+		
+		i_err[0]= Fget32(ptr_fml_ibuf, FFO_UNDRLYNG,0, (char *)c_stck_cd, 0);
+		i_err[1]= Fget32(ptr_fml_ibuf, FFO_FROM_DT,0, (char *)c_trg_dttm, 0);
+    i_err[2]= Fget32(ptr_fml_ibuf, FFO_PLG_RT,0, (char *)&d_udp_price, 0);        
+    i_err[3]= Fget32(ptr_fml_ibuf, FFO_SYMBOL,0, (char *)sql_sem_map_vl.arr, 0);    
+    i_err[4]= Fget32(ptr_fml_ibuf, FFO_BASE_ORD_VAL,0, (char *)&d_base_prc, 0); 	
+    i_err[5]= Fget32(ptr_fml_ibuf, FFO_OI_HIGH,0, (char *)&d_16perUp_prc, 0); 	
+    i_err[6]= Fget32(ptr_fml_ibuf, FFO_OI_LOW,0, (char *)&d_16perDown_prc, 0); 
+    i_err[7]= Fget32(ptr_fml_ibuf, FFO_XCHNG_CD,0, (char *)sql_ord_xchng_cd, 0); 
+    i_err[8]= Fget32(ptr_fml_ibuf, FFO_PRDCT_TYP,0, (char *)&c_updwn_flg, 0); 		
+
+		for( i =0 ; i <9 ; i++)
+		{
+    	if ( i_err[i] == -1 )
+    	{
+				fn_userlog(c_ServiceName,"error in :%d:",i );
+   		 	fn_errlog( c_ServiceName, "S31010", FMLMSG, c_err_msg);
+    		tpfree ( ( char * ) ptr_fml_obuf );
+    		Fadd32( ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_ibuf, 0, 0 );
+    	}
+		}
+   /****************************** Selecting All  Match Accounts ******************************/
+  i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31015", LIBMSG, c_err_msg);
+    tpfree ( ( char * ) ptr_fml_obuf );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG,c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+  if( DEBUG_MSG_LVL_3 )
+  {	
+	  fn_userlog(c_ServiceName, "the d_udp_price is :%lf:",d_udp_price);
+	  fn_userlog(c_ServiceName, "the sql_sem_map_vl.arr is :%s:",sql_sem_map_vl.arr);
+	  fn_userlog(c_ServiceName, "the d_base_prc is :%lf:",d_base_prc);
+	  fn_userlog(c_ServiceName, "the d_16perUp_prc is :%lf:",d_16perUp_prc);
+	  fn_userlog(c_ServiceName, "the d_16perDown_prc is :%lf:",d_16perDown_prc);
+	  fn_userlog(c_ServiceName, "the sql_ord_xchng_cd is :%s:",sql_ord_xchng_cd);
+  }
+
+	SETLEN(sql_sem_map_vl);
+
+	EXEC SQL
+	INSERT INTO AUTO_EOS_LOG
+							(
+							 AEL_XCHNG_CD,
+							 AEL_STCK_CD,
+							 AEL_SEM_MAP_VL,
+							 AEL_BASE_PRICE,
+							 AEL_16PER_UPPRICE,
+							 AEL_16PER_DWNPRICE,
+               AEL_UPDWN_FLG,
+							 AEL_DATE,
+							 AEL_PLG_FLG,
+               AEL_NEW_PLGRT
+							)
+					VALUES
+							(
+							 :sql_ord_xchng_cd,
+							 :c_stck_cd,
+							 :sql_sem_map_vl,
+							 :d_base_prc,
+							 :d_16perUp_prc,
+							 :d_16perDown_prc,
+               :c_updwn_flg,
+							 sysdate,
+							 'P',
+               :d_udp_price 
+							);
+		
+	if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31020", SQLMSG , c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		tpfree ( ( char * ) ptr_fml_obuf );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG,c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+  EXEC SQL
+     INSERT INTO SPP_STCK_PLG_PRCSNG
+                 ( SPP_CLM_MTCH_ACCNT,
+                   SPP_STCK_CD,
+                   SPP_PRCS_FLG,
+                   SPP_ENTRY_DT
+                 )                  
+                 ( SELECT DISTINCT DBD_CLM_MTCH_ACCNT,
+                           DBD_STCK_CD,
+                           'N',
+                           sysdate
+                    FROM   DBD_DP_BLCK_DTLS
+                    WHERE  (NVL(DBD_SAM_BLCKD_QTY,0)+NVL(DBD_BLOCK_FOR_SALE,0)) > 0
+                    AND    DBD_STCK_CD=:c_stck_cd
+                  );
+  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  { 
+    fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_obuf );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+	  EXEC SQL
+    INSERT  INTO LTQ_TRD_QT_LOG
+    (
+      LTQ_STCK_CD,
+      LTQ_XCHNG_CD,
+      LTQ_DT,
+      LTQ_PLG_RT_OLD,
+      LTQ_PLG_RT_NEW
+    )
+		select  :c_stck_cd,
+					  'BSE',
+					  SYSDATE,
+		 				LTQ_PLG_RT, 
+					  :d_udp_price  FROM  LTQ_TRD_QT where LTQ_XCHNG_CD = 'BSE' AND LTQ_STCK_CD = :c_stck_cd ;
+
+	  if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  	{
+  	  fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg );
+  	  tpfree ( ( char * ) ptr_fml_obuf );
+  	  fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+  	  Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+  	  tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  	}
+
+
+  EXEC SQL
+          UPDATE LTQ_TRD_QT
+          SET    LTQ_PLG_RT = :d_udp_price,
+                 LTQ_PLG_DT  = SYSDATE
+          WHERE  LTQ_XCHNG_CD = 'BSE'
+          AND    LTQ_STCK_CD = :c_stck_cd;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31035", SQLMSG, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_obuf );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31040", LIBMSG, c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_obuf );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG,c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+  l_count=0;
+  EXEC SQL
+    SELECT COUNT(DISTINCT SPP_CLM_MTCH_ACCNT)
+      INTO :l_count
+      FROM SPP_STCK_PLG_PRCSNG
+      WHERE SPP_STCK_CD=:c_stck_cd
+        AND SPP_PRCS_FLG='N'; 
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31045", SQLMSG, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_obuf );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+  if( l_count > 0 )
+  {
+    ptr_plgmtch_lst = calloc(sizeof(plg_mtch_lst),l_count);
+    if (ptr_plgmtch_lst == NULL )
+    {
+      fn_errlog( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+      tpfree ( ( char * ) ptr_fml_obuf );
+      
+      Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0); 
+    } 
+
+    EXEC SQL
+     DECLARE plg_mtch_list CURSOR FOR
+      SELECT DISTINCT SPP_CLM_MTCH_ACCNT 
+        FROM SPP_STCK_PLG_PRCSNG
+       WHERE SPP_STCK_CD=:c_stck_cd
+         AND SPP_PRCS_FLG='N';       
+                           
+    if ( SQLCODE != 0 )
+	  {
+	   	fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg );
+		  tpfree ( ( char * ) ptr_fml_obuf );
+      free((char*)ptr_plgmtch_lst);
+		  Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+	  }
+
+    EXEC SQL OPEN plg_mtch_list;
+ 
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg );
+      tpfree ( ( char * ) ptr_fml_obuf );
+      free((char*)ptr_plgmtch_lst);
+      Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+    }
+
+    EXEC SQL
+         FOR :l_count
+    FETCH plg_mtch_list 
+     INTO  :ptr_plgmtch_lst; 
+ 
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg );
+      tpfree ( ( char * ) ptr_fml_obuf );
+      free((char*)ptr_plgmtch_lst);
+      Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+      tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+    }
+   
+    EXEC SQL CLOSE plg_mtch_list;
+
+    MEMSET(c_match_string);   
+ 
+    for(l_l_inner_counter=0;l_l_inner_counter < l_count ; l_l_inner_counter++)
+    {  
+      MEMSET(c_mtch_accnt_no);
+      strcpy(c_mtch_accnt_no,ptr_plgmtch_lst[l_l_inner_counter].c_mtch_accnt_no);   
+
+      rtrim(c_mtch_accnt_no);
+
+      fn_userlog(c_ServiceName,"Total Records :%ld: processing :%ld: :%s:",l_count,l_l_inner_counter,c_mtch_accnt_no);
+ 
+		  Fchg32( ptr_fml_ibuf,FFO_EBA_MTCH_ACT_NO,0,c_mtch_accnt_no, 0 );
+		  Fchg32( ptr_fml_ibuf,FFO_UNDRLYNG,0,c_stck_cd, 0 );
+
+  	 	if ( tpacall("SFO_PLG_REVLN", (char *)ptr_fml_ibuf,  0, TPNOTRAN|TPNOREPLY) == -1)
+	  	{
+		  	fn_userlog(c_ServiceName,"S31095",TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+		  } 	
+
+      if( l_l_inner_counter < 5 )
+      {
+        if( l_l_inner_counter == 0 )
+        {   
+          strcpy(c_match_string,c_mtch_accnt_no);
+        }
+        else
+        {
+          strcat(c_match_string,",");
+          strcat(c_match_string,c_mtch_accnt_no); 
+        }
+
+      }
+
+    }
+   
+    free((char*)ptr_plgmtch_lst); 
+  }
+  else
+  {
+    fn_userlog(c_ServiceName,"NO Match id for Processing");
+  }	
+
+  if( DEBUG_MSG_LVL_5 ) 
+  {
+    fn_userlog(c_ServiceName,"c_match_string :%s:",c_match_string);
+    fn_userlog(c_ServiceName,"c_updwn_flg :%s:",c_updwn_flg);
+  }
+
+  i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31070", LIBMSG, c_err_msg);
+    tpfree ( ( char * ) ptr_fml_obuf );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG,c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+  EXEC SQL UPDATE AES_AUTO_EOS_SCRIPS
+           SET   AES_BASE_PRICE    =(SELECT LTQ_PLG_RT FROM LTQ_TRD_QT WHERE LTQ_STCK_CD=:c_stck_cd  AND LTQ_XCHNG_CD='BSE'),
+                 AES_ENABLE_FLG    ='Y',
+                 AES_LST_UPDT_DT   = sysdate
+           WHERE AES_STCK_CD       =:c_stck_cd
+           AND   AES_PLG_FLG       ='P'
+           AND   AES_XCHNG_CD      ='BSE';
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_obuf );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31080", LIBMSG, c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_obuf );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG,c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  }  
+
+  EXEC SQL
+    SELECT to_char(sysdate,'dd-Mon-yyyy.hh24:mi:ss'),
+           round(AES_PERCENTAGE,2),
+           round((NVL(AES_BASE_PRICE,0) + (NVL(AES_BASE_PRICE,0) * (NVL(AES_PERCENTAGE,0)/100))),2) "16PER_UP_PRC",
+           round((NVL(AES_BASE_PRICE,0) - (NVL(AES_BASE_PRICE,0) * (NVL(AES_PERCENTAGE,0)/100))),2) "16PER_DOWN_PRC"
+      INTO :c_date_time,
+           :d_plg_prcnt,
+           :d_new_up_bound,
+           :d_new_low_bound
+      FROM AES_AUTO_EOS_SCRIPS
+     WHERE AES_STCK_CD       =:c_stck_cd
+       AND AES_PLG_FLG       ='P'
+       AND AES_XCHNG_CD      ='BSE'; 
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31085", SQLMSG, c_err_msg );
+    tpfree ( ( char * ) ptr_fml_obuf );
+    Fadd32(ptr_fml_ibuf, FFO_ERR_MSG, c_err_msg, 0);
+    tpreturn(TPFAIL, 0, (char *)ptr_fml_ibuf, 0, 0);
+  } 
+
+  
+  MEMSET(c_command);
+  sprintf(c_command,"ksh $HOME/sh_scripts/fo_auto_revaluation_scrips.sh %s %s %lf %lf %lf %lf %lf %c %s",c_date_time,c_stck_cd,d_plg_prcnt,d_base_prc,d_udp_price,d_new_up_bound,d_new_low_bound,c_updwn_flg,c_match_string);
+  fn_userlog(c_ServiceName,"c_command :%s:",c_command);
+  system(c_command);
+ 
+  tpreturn( TPSUCCESS, 0, (char *)ptr_fml_obuf, 0 , 0 );
+
+} 

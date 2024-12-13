@@ -1,0 +1,750 @@
+/***********************************************************************************/
+/*   Service       : bat_coll_click.pc                                             */
+/*                                                                                 */
+/*   Purpose       : Upload details of shares pledged as collateral with idirect   */
+/*                   to its customers.                                             */
+/*                                                                                 */
+/*                                                                                 */
+/*   Input Param   : For date                                                      */
+/*                                                                                 */
+/*   Output        : Success/Failure                                               */
+/*                                                                                 */
+/*   Author        : 3i Infotech                                                   */
+/*                                                                                 */
+/*   Date          : 05-Aug-2009                                                   */
+/*                                                                                 */
+/*   Version       :  1.0      Release                           Vidyayini Krish   */
+/*                 :  1.1      Sequence Number was added in CUG  Vidyayini Krish   */
+/*								 :  1.2			 Tanmay Warkhade																		 */
+/***********************************************************************************/
+#include <stdio.h>      /* C Header File                */
+#include <stdlib.h>     /* C Header File                */
+#include <sqlca.h>      /* Oracle header file           */
+#include <atmi.h>       /* TUXEDO Header File           */
+#include <fml32.h>      /* TUXEDO Header File           */
+#include <Usysflds.h>   /* TUXEDO Field Definitions     */
+#include <fml_def.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fml_rout.h>
+#include <fn_ddr.h>
+#include <eba.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>
+
+/* At a time only MAX_REC will be fetched from our database and inserted into click database */
+
+#define  MAX_REC 100
+#define  LEN_DATE 12
+
+/* Declaring the Send and Receive Buffers */
+
+FBFR32   *ptr_fml_Sbuffer;
+FBFR32   *ptr_fml_Rbuffer;
+
+
+/* Declaring all global variables */
+
+long     l_bufferlength;
+long     li_len_tobuf;
+long     l_rows_fetched;
+
+long     l_count_prm_per_client; 
+long     l_tmp_prm_count;
+long     l_prm_nmbr = 0;
+
+int      i_max_rec_per_fetch = MAX_REC;
+int      i_ch_val;
+int      i_ret_val;
+int      i_err[10];
+int      i_mode=0;
+
+char     c_ServiceName[33];
+char     c_errmsg[256];
+char     c_xchng_cd[6] = {'\0'};
+char     c_for_date[25] = {'\0'};
+char     c_event[256];
+
+char     c_prm_clnt_mtch_accnt[10+1];
+char     c_prm_dp_accnt[8+1];
+char     c_prm_dp_clnt_accnt[8+1];
+char     c_date[LEN_DATE]= {'\0'};
+char     c_prm_isin_no[12+1];
+
+/* Declaring a Pointer to a structure array. This structure array will carry data to our service */
+
+unsigned char *c_msg_cbuf;       
+
+
+/* Declaring the structure which will carry data to our service. Its fields are similar to the table data */
+/* The last field is Record number. Every insert in click database is identified by a record number */
+
+struct   prm_plg_report 
+{
+  char   prm_usr_nm[150+1];
+  char   prm_add_ln1[50+1];
+  char   prm_add_ln2[50+1];
+  char   prm_add_ln3[50+1];
+  char   prm_add_ln4[50+1];
+	char   prm_city_cd[50+1];
+	char   prm_state_cd[50+1];
+	char   prm_country[50+1];
+	char   prm_pin_cd[10+1];
+	char   prm_email_id[100];
+  char   prm_mtch_accnt[10+1];
+  char   prm_stck_cd[6+1];
+  char   prm_dmat_accnt[17+1];
+  double prm_opn_bal;
+  double prm_rjct_qty;
+  double prm_plg_qty;
+  double prm_qty_sold;
+  double prm_qty_wthdrn;
+  double prm_qty_eod;
+	long   prm_rec_nmbr; 
+	char   prm_date[LEN_DATE];
+	char   prm_file_nm[40+1];
+	char 	 prm_isin_no[12+1];		/*** Ver 1.2 ***/
+};
+
+/* Declaring the function used for processing */
+
+int fn_populate_prm(void);
+int fn_upld_tmp(void);
+int fn_ins_log_hdr(void);
+
+
+void BAT_COLL_CLICK (int argc, char* argv[] )
+{
+
+	long    l_err_cd = 0;
+
+  strcpy( c_ServiceName, "bat_coll_click" );
+
+	if(argc == 6)
+  {
+    i_mode = atol(argv[5]);
+  }
+  else if(argc != 5)
+  {
+    printf("USAGE <bat_coll_click> <NFO> <NFO> <NA> <date> <Mode (1-5) optional>");
+    return ;
+	}
+  else
+  {
+    i_mode =1;
+  }
+
+  INITBATDBGLVL(argv[0]);
+
+ 	strcpy(c_for_date,argv[4]);
+  strcpy ( c_tag, "bat_coll_click" );
+  strcat ( c_tag, argv[1]);
+  strcpy (c_xchng_cd,"COLTR");
+	strcpy( c_date,argv[4]);
+
+  fn_userlog( c_ServiceName,"bat_coll_click : started processing for date :%s:",c_date );		
+	sprintf(c_event,"bat_coll_click : started processing ");          
+  fn_bat_pst_msg(c_ServiceName,c_event,c_tag);                      
+
+ 
+	/* 																							PART 1 Begins                                                      */
+	/*   		We store data from our main table PRM_PLG_REPORT_MAIL into a Temp table and then copy from the             */
+  /*      temp table into a structure                                                                                */ 	
+
+
+
+  EXEC SQL TRUNCATE TABLE tmp_prm_plg_mstr;
+
+  if(SQLCODE != 0)
+  {
+    fn_errlog(c_ServiceName, "S31005", SQLMSG, c_errmsg );
+    return ;
+  }	
+
+	/* Beginning our transaction */
+
+	if ( tpbegin( 0, 0 ) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31010", TPMSG, c_errmsg );
+    return ;
+  }
+
+  i_ret_val = fn_upld_tmp();
+
+  if(i_ret_val == -1)
+  {
+    fn_errlog(c_ServiceName, "S31015",SQLMSG, c_errmsg);
+    tpabort(0);
+    return ;
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Data upload to temp table completed");
+  }
+
+  /* Commiting our transaction with values inserted into temp table */
+
+  if ( tpcommit(0) == -1 )
+  {
+    tpabort(0);
+    fn_errlog(c_ServiceName, "S31020", FMLMSG, c_errmsg );
+    return;
+  }
+	/*                                                PART 1 Ends                                                     */
+
+
+
+
+	/*                                                PART 2 Begins                                                   */ 
+
+
+	/* Query below will tell us how many records are there in Temp table */
+
+	EXEC SQL
+			 SELECT COUNT(*)
+			 INTO   :l_tmp_prm_count
+			 FROM   tmp_prm_plg_mstr;
+	
+
+	/* Allocating the receive buffer which is declared in Global declaration area */
+
+  ptr_fml_Rbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  if (ptr_fml_Rbuffer == NULL)
+  {
+    fn_errlog(c_ServiceName, "S31025", TPMSG, c_errmsg);
+    fn_userlog(c_ServiceName,"Click Upload:Unable to Allocate Receive Memory ..");
+    sprintf(c_event,"System Error - Contact Support");             
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag); 
+    return ;
+  }
+
+	/* Beginning our second transaction */
+
+	if ( tpbegin( 0, 0 ) == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31030", TPMSG, c_errmsg );
+    fn_dstry_rs ( ptr_fml_Rbuffer );
+    return ;
+  }
+
+	fn_userlog(c_ServiceName,"Before fn_populate_prm");
+  i_ret_val = fn_populate_prm();
+	fn_userlog(c_ServiceName,"Aftrer fn_populate_prm");
+
+  if(i_ret_val == -1)
+  {
+    tpabort ( 0 );
+    fn_userlog(c_ServiceName,"Failed to populate PRM");
+    sprintf(c_event,"System Error - Contact Support");          
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);     
+    fn_dstry_rs (ptr_fml_Sbuffer );
+    fn_dstry_rs ( ptr_fml_Rbuffer );
+    return ;
+
+  }
+
+	/* The below function inserts one record in click database after we successfully upload data in a run into click. */
+	/* It will say how many records have been dumped into click database and also set a status to '1'. At click end   */
+	/* they look for records with status 1 and then start processing at their end. They have various stages of        */
+	/* processing and the ststus of record keeps changing from 1 to 2, then 3,4, and finally 5                        */
+
+
+	if( l_tmp_prm_count > 0 )
+  {
+		fn_userlog(c_ServiceName,"Before fn_ins_log_hdr");
+    i_ret_val = fn_ins_log_hdr();
+		fn_userlog(c_ServiceName,"After fn_ins_log_hdr");
+
+    if(i_ret_val == -1)
+    {
+      tpabort ( 0 );
+      fn_userlog(c_ServiceName,"Failed to populate INS_LOG_HDR");
+      sprintf(c_event,"System Error - Contact Support");         
+      fn_bat_pst_msg(c_ServiceName,c_event,c_tag);            
+      fn_dstry_rs ( ptr_fml_Sbuffer );
+      fn_dstry_rs ( ptr_fml_Rbuffer );
+      return ;
+    }
+  }
+
+
+	fn_userlog(c_ServiceName,"Before commit");
+  if ( tpcommit(0) == -1 )
+  {
+    tpabort(0);
+    fn_errlog(c_ServiceName, "S31035", FMLMSG,c_errmsg );
+    fn_dstry_rs ( ptr_fml_Sbuffer );
+    fn_dstry_rs ( ptr_fml_Rbuffer );
+    return ;
+  }
+	fn_userlog(c_ServiceName,"After commit");
+
+	/* We are commiting the second transaction */
+
+	/*                                                 PART 2 Ends -                                                     */
+
+
+  fn_dstry_rs( ptr_fml_Rbuffer);
+  return ;
+
+}/* End of Batch */
+
+
+	/* This function will get data from our main table PRM_PLG_REPORT_MAIL and inset them into a temporary table and   */
+	/* give a unique sequence number for every customer to whom we have to send mail. Each customer meaning - the      */
+	/* combination of Match account number, DP Id and DP client Id is unique. So one match account having collateral   */
+	/* liablity in stocks spreading across 2 demat Id will receive 2 mails.                                            */
+
+int fn_upld_tmp(void)
+{
+
+	EXEC SQL BEGIN DECLARE SECTION;
+	varchar  v_date[LEN_DATE];
+	EXEC SQL END DECLARE SECTION; 
+
+  fn_userlog(c_ServiceName,"uploading in TMP_PRM_PLG_MSTR..........");
+
+
+	EXEC  SQL
+    		EXECUTE
+      	BEGIN
+          RESET_SEQUENCE('SEQ_CLK_PRM_SEQ');
+      	END;
+    		END-EXEC;
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in sequence number resetting");
+      sprintf(c_event,"System Error - Contact Support");
+      fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+      fn_errlog(c_ServiceName,"S31040",SQLMSG, c_errmsg);
+      return -1;
+    }
+
+	 EXEC  SQL
+        EXECUTE
+        BEGIN
+          RESET_SEQUENCE('SEQ_CLK_PRM_NMBR');
+        END;
+        END-EXEC;
+
+    if(SQLCODE != 0)
+    {
+      fn_userlog(c_ServiceName,"Error in second sequence number resetting");
+      sprintf(c_event,"System Error - Contact Support");
+      fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+      fn_errlog(c_ServiceName,"S31045",SQLMSG, c_errmsg);
+      return -1;
+    }
+
+  /* The below cursor will pick up distinct clients to whom we have to send mail */
+
+	fn_userlog( c_ServiceName,"Date is :%s:",c_date );
+	strcpy((char *)v_date.arr,c_date);
+	fn_userlog( c_ServiceName,"Date is :%s:",v_date.arr );
+	SETLEN ( v_date );
+
+
+	EXEC SQL
+			 DECLARE cur_prm_count CURSOR FOR 
+			 SELECT distinct(prm_clnt_mtch_accnt), 
+							prm_dp_accnt, 
+							prm_dp_clnt_accnt 
+			 FROM	  prm_plg_report_mail 
+			 WHERE  trunc(prm_rep_dt) = to_date(:v_date,'dd-Mon-YYYY'); 
+
+
+	EXEC SQL OPEN cur_prm_count;
+
+	if(SQLCODE != 0)
+  {
+    fn_userlog(c_ServiceName,"Could not open the cursor");
+    sprintf(c_event,"System Error - Contact Support");
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+    fn_errlog(c_ServiceName,"S31050",SQLMSG, c_errmsg);
+		EXEC SQL
+               CLOSE cur_prm_count;
+    return -1;
+  }
+
+	fn_userlog( c_ServiceName,"After opening the CURSOR" );
+
+	
+  while(1)  /* Loop Starts */
+  {
+		EXEC ORACLE OPTION (char_map=string);
+    EXEC SQL
+         FETCH cur_prm_count
+         INTO  :c_prm_clnt_mtch_accnt,
+               :c_prm_dp_accnt,
+               :c_prm_dp_clnt_accnt;
+
+				 if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+    	   {	
+      			fn_userlog(c_ServiceName,"Could not fetch from the cursor");
+      			sprintf(c_event,"System Error - Contact Support");
+      			fn_bat_pst_msg(c_ServiceName,c_event,c_tag);
+      			fn_errlog(c_ServiceName,"S31055",SQLMSG, c_errmsg);
+						EXEC SQL
+               CLOSE cur_prm_count;
+      			return -1;
+    		 } 
+				 if(SQLCODE == NO_DATA_FOUND)
+				 {
+					  break;
+				 }
+
+		/* Generating a sequence number for each customer inserted into click. i.e for each mail */
+
+		EXEC SQL
+				 SELECT SEQ_CLK_PRM_NMBR.NEXTVAL
+				 INTO   :l_prm_nmbr
+				 FROM DUAL;
+
+		if(SQLCODE != 0)
+  	{
+      fn_userlog(c_ServiceName,"Error in sequence number resetting");
+      sprintf(c_event,"System Error - Contact Support");         
+      fn_bat_pst_msg(c_ServiceName,c_event,c_tag);     
+      fn_errlog(c_ServiceName,"S31060",SQLMSG, c_errmsg);
+			EXEC SQL
+               CLOSE cur_prm_count;
+		  return -1;
+  	}	
+
+		fn_userlog( c_ServiceName,"Date is :%s:",c_date );
+		fn_userlog( c_ServiceName,"Match is :%s:",c_prm_clnt_mtch_accnt );
+    fn_userlog( c_ServiceName,"DP Account is :%s:", c_prm_dp_accnt );
+    fn_userlog( c_ServiceName,"Client is :%s:", c_prm_dp_clnt_accnt );
+
+
+		EXEC SQL
+       	 INSERT INTO tmp_prm_plg_mstr
+         (
+         		tmp_prm_name,	
+		     		tmp_prm_addr1,
+		     		tmp_prm_addr2,
+		     		tmp_prm_addr3,
+		     		tmp_prm_addr4,
+						tmp_prm_city,
+						tmp_prm_state,
+						tmp_prm_cntry,
+						tmp_prm_pin,
+						tmp_prm_email,
+		     		tmp_prm_mtch_accnt,
+		    	 	tmp_prm_script,
+		     		tmp_prm_dmat_accnt,
+		     		tmp_prm_opn_bal,
+		     		tmp_prm_rjct_qty,
+		    	 	tmp_prm_plg_qty,
+		     		tmp_prm_qty_sold,
+		     		tmp_prm_qty_wth,
+		    	 	tmp_prm_qty_eod,
+		     		tmp_prm_record_no,
+						tmp_prm_seq_no,
+						tmp_prm_date,
+						tmp_prm_filenm,
+						TMP_PRM_ISIN_NO																						/** Ver 1.2 **/
+		   	)
+	      (
+				    SELECT nvl(ipd_first_name,' ')||' '|| nvl(ipd_middle_name,' ')||' '|| nvl(ipd_last_name,' '),
+								   iad_address_1,
+			             iad_address_2,
+									 iad_address_3,
+			 						 iad_address_4,
+					         iad_city_cd,
+									 iad_state_cd,
+									 iad_country_cd,	
+			             iad_pin,
+									 usr_email_addrss,
+							     prm_clnt_mtch_accnt,
+							     prm_stck_cd,
+								   prm_dp_accnt || ' ' || prm_dp_clnt_accnt,
+								   prm_opn_bal,
+							     prm_rjct_qty,
+								   prm_plg_qty,
+								   prm_sqoff_qty,
+								   prm_wdl_qty,
+								   prm_tot_qty,
+								   SEQ_CLK_PRM_NMBR.CURRVAL,
+									 SEQ_CLK_PRM_SEQ.NEXTVAL,
+								   trunc(prm_rep_dt),
+									 'Collateral_Statement'||'_'||trunc(prm_rep_dt)||'_'||SEQ_CLK_PRM_NMBR.CURRVAL,   /* Ver 1.1 */
+									 PRM_ISIN_NO																										/** Ver 1.2 **/
+				    FROM   usr_user_master,
+								   uac_usr_accnts,
+								   iad_info_address_dtls,
+								   iai_info_account_info,
+								   prm_plg_report_mail,
+									 ipd_info_personal_dtls,
+									 icd_info_client_dtls
+				    WHERE  prm_clnt_mtch_accnt   = uac_clm_mtch_accnt
+					  AND    icd_user_id 					 = uac_usr_id
+						AND    icd_serial_no 				 = ipd_serial_no
+						AND    ipd_type 						 = 'APPLICANT'
+				    AND    uac_usr_id            = usr_usr_id
+				    AND    iai_match_account_no  = prm_clnt_mtch_accnt
+				    AND    iai_serial_no         = iad_serial_no
+				    AND    TRUNC(prm_rep_dt)     = to_date(:v_date,'dd-Mon-YYYY') 
+				    AND    prm_clnt_mtch_accnt   = :c_prm_clnt_mtch_accnt
+				    AND    prm_dp_accnt          = :c_prm_dp_accnt
+				    AND    prm_dp_clnt_accnt     = :c_prm_dp_clnt_accnt 
+				    AND    iad_address_type      = 'APPLICANT_CORR'
+			   );
+
+				if(SQLCODE != 0)
+  			{
+      			fn_userlog(c_ServiceName,"Error in TMP_PRM Upload");
+            sprintf(c_event,"Error in TMP_PRM Upload"); 
+      			fn_bat_pst_msg(c_ServiceName,c_event,c_tag); 
+      			fn_errlog(c_ServiceName,"S31065",SQLMSG, c_errmsg);
+						EXEC SQL
+               CLOSE cur_prm_count;
+      			return -1;
+  			}	
+
+				/* Getting to know how many records were inserted for the client */
+
+			  l_count_prm_per_client = sqlca.sqlerrd[2];
+
+			  fn_userlog( c_ServiceName,"Number of records for :%s: , :%s: , :%s: is   = [%ld]",c_prm_clnt_mtch_accnt,
+										c_prm_dp_accnt,c_prm_dp_clnt_accnt,l_count_prm_per_client );
+
+				memset(c_prm_clnt_mtch_accnt,0x00,sizeof(c_prm_clnt_mtch_accnt));
+    		memset(c_prm_dp_accnt,0x00,sizeof(c_prm_dp_accnt));
+    		memset(c_prm_dp_clnt_accnt,0x00,sizeof(c_prm_dp_clnt_accnt));
+
+	 }/* End of while loop */
+
+	 EXEC SQL
+               CLOSE cur_prm_count;
+
+	return 0;
+
+} /* End of fn_upld_tmp */
+
+
+  		/* Below function gets data from temp table into a structure and calls the service */ 
+
+int fn_populate_prm()
+{
+
+	int  i_counter;
+	long l_count=1;
+	char c_ins_flg;
+  
+	/* Defining a structure array here. It has MAX_REC structures in it */
+
+	struct prm_plg_report prm_plg_report_arr[MAX_REC];
+
+	/* Getting the size of the entire array of MAX_REC structures */
+
+  l_bufferlength  = Fneeded32(1, sizeof(prm_plg_report_arr));
+
+  ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32",NULL,l_bufferlength);
+
+  if (ptr_fml_Sbuffer == NULL)
+  {
+    fn_userlog(c_ServiceName,"Error in Allocating buffer prm_plg_report_arr");
+    sprintf(c_event,"System Error - Contact Support");             
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);           
+    fn_errlog(c_ServiceName, "S31070", TPMSG, c_errmsg);
+    return(-1);
+  }
+
+  c_ins_flg = 'A';  /* This variable is used in Servcie */
+
+  for ( l_count=0; l_count < l_tmp_prm_count; l_count += i_max_rec_per_fetch )
+  {
+    MEMSET(prm_plg_report_arr);
+
+    EXEC ORACLE OPTION (char_map=string);
+
+    EXEC SQL
+         SELECT
+         tmp_prm_name,
+				 tmp_prm_addr1,
+				 tmp_prm_addr2,
+				 tmp_prm_addr3,
+				 tmp_prm_addr4,
+				 tmp_prm_city,
+				 tmp_prm_state,
+				 tmp_prm_cntry,
+				 tmp_prm_pin,
+				 tmp_prm_email,
+				 tmp_prm_mtch_accnt,
+         tmp_prm_script,
+         tmp_prm_dmat_accnt,
+         tmp_prm_opn_bal,
+         tmp_prm_rjct_qty,
+         tmp_prm_plg_qty,
+         tmp_prm_qty_sold,
+         tmp_prm_qty_wth,
+         tmp_prm_qty_eod,
+         tmp_prm_record_no,
+				 to_char(tmp_prm_date,'dd-Mon-YYYY'),
+				 tmp_prm_filenm,
+				 TMP_PRM_ISIN_NO																					/** Ver 1.2 **/
+				 INTO 
+				 :prm_plg_report_arr
+				 FROM tmp_prm_plg_mstr
+				 WHERE tmp_prm_seq_no >= :l_count + 1
+         AND   tmp_prm_seq_no <= :l_count + :i_max_rec_per_fetch; 
+
+		if( SQLCODE != 0 && SQLCODE != -1405 )  /** 1405 Null data , if we get Null data we will keep proceeding **/
+    {
+      if( SQLCODE == 1403) /* No data found error */
+      {
+        if (sqlca.sqlerrd[2] == 0)
+          break;
+      }
+      else
+      {
+        fn_userlog(c_ServiceName,"Data select for PRM_CLK failed");
+        sprintf(c_event,"System Error - Contact Support");            
+        fn_bat_pst_msg(c_ServiceName,c_event,c_tag);        
+        fn_errlog(c_ServiceName, "S31075", SQLMSG, c_errmsg);
+        return (-1);
+      }
+    }
+
+		/* How many rows have we selected and are going to send through the structure to service */
+
+	  l_rows_fetched = (l_count + i_max_rec_per_fetch > l_tmp_prm_count)? l_tmp_prm_count%i_max_rec_per_fetch : i_max_rec_per_fetch;
+
+    fn_userlog(c_ServiceName,"bat_coll_click : Rows fetched : |%d| |%d|", l_rows_fetched, SQLCODE );
+
+    Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+    Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+
+		/* Pointer to array of struture now points to the first structure in the array */
+
+    MEMSET(c_msg_cbuf);
+    c_msg_cbuf = (unsigned char *)prm_plg_report_arr;		
+
+		l_bufferlength =  sizeof(prm_plg_report_arr);
+
+    i_err[0]=Fadd32(ptr_fml_Sbuffer,FML_VLME,(char *)&l_bufferlength,0);
+    i_err[1]=Fadd32(ptr_fml_Sbuffer,FML_SBUF,(char *)c_msg_cbuf,l_bufferlength);
+    i_err[2]=Fadd32(ptr_fml_Sbuffer,FML_STTLMNT_NMBR,(char *)&l_rows_fetched,0);
+    i_err[3]=Fadd32(ptr_fml_Sbuffer,FML_DAM_TRNSCTN,(char *)&c_ins_flg,0);
+
+    for(i_counter = 0;i_counter < 4;i_counter++)
+    {
+      if(i_err[i_counter] == -1)
+      {
+        fn_userlog(c_ServiceName,"Error in Fadd i_counter :%d:",i_counter);
+        sprintf(c_event,"System Error - Contact Support");             
+        fn_bat_pst_msg(c_ServiceName,c_event,c_tag);               
+        fn_errlog(c_ServiceName, "S31080", FMLMSG, c_errmsg);
+        return(-1);
+      }
+    }
+
+    i_ch_val = tpcall("SFO_PRM_UPLD", (char *)ptr_fml_Sbuffer, 0,
+                       (char **)&ptr_fml_Rbuffer, &li_len_tobuf, 0);
+    if (i_ch_val == -1)
+    {
+      fn_userlog(c_ServiceName,"Error in calling service for PRM");
+      sprintf(c_event,"System Error - Contact Support");       
+      fn_bat_pst_msg(c_ServiceName,c_event,c_tag);   
+      if(TPCODE != TPESVCFAIL)
+      {
+        fn_errlog(c_ServiceName, "S31085", TPMSG, c_errmsg);
+      }
+      else
+      {
+          Fget32(ptr_fml_Rbuffer,FML_ERR_MSG,0,c_errmsg,0);
+          fn_errlog(c_ServiceName, "S31090", c_errmsg, c_errmsg);
+      }
+      return(-1);
+    }
+
+  }
+
+  fn_dstry_rs( ptr_fml_Sbuffer);
+  return (0);
+
+}
+
+int fn_ins_log_hdr()
+{
+  int  i_counter;
+  char c_ins_flg;
+  char c_xchng_cd[6] = { "COLTR" };
+
+  ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+  if (ptr_fml_Sbuffer == NULL)
+  {
+    fn_userlog(c_ServiceName,"Unable to allocate send buffer ");
+    sprintf(c_event,"System Error - Contact Support");           
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);               
+    fn_errlog(c_ServiceName, "S31095", TPMSG, c_errmsg);
+    return(-1);
+  }
+
+	
+  Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+  Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+
+  c_ins_flg = 'L';
+
+  i_err[0] = Fadd32(ptr_fml_Sbuffer,FML_DAM_TRNSCTN,(char *)&c_ins_flg,0);
+  i_err[1] = Fadd32(ptr_fml_Sbuffer,FML_XCHNG_CD,(char *)c_xchng_cd,0);
+  i_err[2] = Fadd32(ptr_fml_Sbuffer,FML_TRD_DT,(char *)c_for_date,0);
+  i_err[3] = Fadd32(ptr_fml_Sbuffer,FML_TRN_NO,(char *)&i_mode,0);
+
+  for(i_counter =0 ;i_counter<=3;i_counter++)
+  {
+    if(i_err[i_counter] == -1)
+    {
+      fn_errlog(c_ServiceName, "S31100", FMLMSG, c_errmsg);
+      fn_userlog(c_ServiceName,"Value of i =[%d]",i_counter);
+      return (-1);
+    }
+  }
+
+  i_ch_val = tpcall("SFO_PRM_UPLD", (char *)ptr_fml_Sbuffer, 0,
+                       (char **)&ptr_fml_Rbuffer, &li_len_tobuf, 0);
+  if (i_ch_val == -1)
+  {
+    fn_userlog(c_ServiceName,"Error in calling service for INS_LOG_HDR");
+    sprintf(c_event,"System Error - Contact Support");               
+    fn_bat_pst_msg(c_ServiceName,c_event,c_tag);           
+    if(TPCODE != TPESVCFAIL)
+    {
+      fn_errlog(c_ServiceName, "S31105", TPMSG, c_errmsg);
+    }
+    else
+    {
+      Fget32(ptr_fml_Rbuffer,FML_ERR_MSG,0,c_errmsg,0);
+      fn_errlog(c_ServiceName, "S31110", c_errmsg, c_errmsg);
+    }
+    return(-1);
+  }
+
+  fn_dstry_rs( ptr_fml_Sbuffer);
+  return (0);
+}
+
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_COLL_CLICK;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}
+
+

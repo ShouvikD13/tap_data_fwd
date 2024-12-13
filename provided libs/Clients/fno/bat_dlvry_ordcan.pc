@@ -1,0 +1,1337 @@
+/******************************************************************
+* Service name :  BAT_DLVRY_ORDCAN                                *
+*                                                                 *
+* Description  :  This Batch Program cancels all Pending Orders   *
+*                 of Delivery Underlying Contracts in FNO.        *
+*                                                                 *
+* Input        :  XCHNG_CD																				*
+               :  UNDRLYNG / ALL                                  *
+*              :  EXPRY_DT                                        *
+* Output      :                                                   *
+*                                                                 *
+* Log         :   03-Jul-2018 Initial Release  - Bhushan Harekar  *
+*	Log					:		1.1 	31-Jul-2018	 	Bhushan Harekar							*
+* Log					:   1.2   02-Jan-2019		Bhushan Harekar							*
+* Log					:   1.3   24-Jun-2019		Bhushan Harekar							*
+* Log         :   1.4   15-Apr-2021   Akash B                     *
+* Log         :   1.5   10-Jun-2021   Abhinav Kumbhar             *
+* Log					:   1.6   10-Feb-2022		Shlok Ghan									*
+* Log  				:   1.7   21-Oct-2022   Bhavana 										*
+* Log  				:   1.8   23-Jun-2023   Edwin		 										*
+*******************************************************************
+* 1.1		-	Physical Sttlement phase - 2								          	*
+* 1.2   - Query changed																						*
+* 1.3   - Rollover with Spread changes														*
+* 1.4   - FNO Physical settlement Exception                       *   
+* 1.5   - Physical Delivery for Stock Derivatives                 *
+* 1.6		-	CR-ISEC14-165712 Enhancements to Physical settlement Stocks disable contracts and EOS for Options Buy *
+* 1.7   - CR-ISEC14-173493_Physical_delivery_EOS_cancellation_process_for_Options *   
+* 1.8   - RQ:3117 FNO GTT changes																  *   
+******************************************************************/
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_session.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>
+
+FBFR32   *ptr_fml_buf;
+
+int fn_get_canord_rs( char* c_ServiceName, 
+											char* c_err_msg, 
+											char*	c_flag,				/** Ver 1.1 **/
+											char c_buysell_flg,	/*** ver 1.6 ***/
+											char* c_xchng_cd, 
+											char	c_prdct_typ,
+											char* c_undrlyng, 
+											char* c_expry_dt );
+
+void BAT_DLVRY_ORDCAN ( int argc, char *argv[] )
+{
+	 
+	int      i_ch_val;
+  int      i_trnsctn;
+	int			 i_exist = 0;	
+	int			 i_ucount = 0;			/*** Ver 1.1 ***/
+	int 		 i_rollsprd_cnt = 0; /*** Ver 1.3 **/
+  long int li_cnt = 0; 
+	long int li_tot_rcrds = 0;
+  char     c_msg[256];
+  char     c_ServiceName [ 33 ];
+	char		 c_xchng_cd[ 4 ];
+	char		 c_undrlyng[ 100 ];  						/*** variable size changes from 7 to 100 in ver 1.1 ***/
+	char		 c_tmp_undrlyng[ 100 ]; /*** Ver 1.1 ***/
+  char     c_err_msg [ 256 ];
+  char     c_rout_str [ 4 ];
+  char     c_svc_name[ 30 ];
+	char		 c_run_mod[4];					/** Ver 1.1 **/
+	char		 c_prdct_typ = '\0';
+	char		 c_exist	= 'P';				/** Ver 1.1 **/
+	char*		 token;									/** Ver 1.1 **/
+	char		 c_buysell_flg = '\0';  /*** Ver 1.6 ***/
+
+	EXEC SQL INCLUDE "table/fod_fo_ordr_dtls.h";
+
+	EXEC SQL BEGIN DECLARE SECTION;
+   char    c_exg_stts ;
+	 varchar v_expry_dt[23];
+  EXEC SQL END DECLARE SECTION;
+
+	/*** Ver 1.1 Starts ***/
+	MEMSET(c_msg);
+	MEMSET(c_xchng_cd);
+	MEMSET(c_undrlyng);
+	MEMSET(c_tmp_undrlyng);
+	MEMSET(c_err_msg);
+	MEMSET(c_rout_str);
+	MEMSET(c_ServiceName);
+	MEMSET(c_svc_name);
+	MEMSET(c_run_mod);
+	MEMSET(v_expry_dt.arr);
+	/*** Ver 1.1 Ends ***/
+
+  strcpy ( c_ServiceName, argv[0] );
+  INITBATDBGLVL(c_ServiceName);
+
+	sprintf ( c_msg, "Batch process %s started", argv[0] );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+	
+	strcpy( c_xchng_cd, argv[2] );
+	c_prdct_typ = argv[4][0];
+	strcpy( c_undrlyng, argv[5] );
+	strcpy( v_expry_dt.arr, argv[6] );
+
+	rtrim(c_xchng_cd);
+	rtrim(c_undrlyng);
+	SETLEN(v_expry_dt);
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog( c_ServiceName,"========== Input Parameters ==========");
+		fn_userlog( c_ServiceName,"c_xchng_cd	:%s:",c_xchng_cd);
+		fn_userlog( c_ServiceName,"c_prdct_typ :%c:",c_prdct_typ);
+		fn_userlog( c_ServiceName,"c_undrlyng :%s:",c_undrlyng);
+		fn_userlog( c_ServiceName,"v_expry_dt :%s:",v_expry_dt.arr);
+	}
+
+  if( c_prdct_typ != 'F' && c_prdct_typ != 'O' )
+  {
+   fn_errlog( c_ServiceName, "S31005","Invalid Product Type", c_err_msg );
+   strcpy ( c_msg, "Invalid Product Type" );
+   fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+   return;
+  }
+
+  /*** Added in Ver 1.6 ***/
+
+  if( c_prdct_typ == 'O')
+  {
+    if(argc != 8 )
+    {
+      fn_userlog( c_ServiceName,"Additional argument required as input for OPTIONs. ");
+      fn_errlog( c_ServiceName, "S31010","Invalid Product Type", c_err_msg );
+      fn_bat_pst_msg ( c_ServiceName, "Invalid number of arguments", c_tag );
+      return ;
+    }
+    c_buysell_flg = argv[7][0];
+   fn_userlog( c_ServiceName,"c_buysell_flg :%c:",c_buysell_flg);
+    if( c_buysell_flg == 'A' )
+    {
+      c_buysell_flg = '%'; 
+    }
+  }
+
+	if(c_prdct_typ == 'F' )
+	{
+		c_buysell_flg = '%';	
+	}
+  fn_userlog( c_ServiceName,"c_buysell_flg :%c:",c_buysell_flg);
+  /*** Ver 1.6 ends here ***/	
+
+	if( c_prdct_typ == 'F' )	/*** if condition added in Ver 1.1 ***/
+	{
+		EXEC SQL
+       SELECT  exg_crrnt_stts
+       INTO    :c_exg_stts
+       FROM    exg_xchng_mstr
+       WHERE   exg_xchng_cd = :c_xchng_cd 
+       AND     exg_mkt_typ  = 'D';
+
+		if( SQLCODE != 0 )
+  	{
+    	fn_errlog( c_ServiceName, "S31015", SQLMSG, c_err_msg );
+    	strcpy ( c_msg, "System error. Contact system support" );
+    	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    	return;
+  	}
+	
+		if( c_exg_stts != EXCHANGE_OPEN )
+		{
+			fn_errlog( c_ServiceName, "B28520", DEFMSG, c_err_msg );
+			strcpy ( c_msg, "Exchange should be open for running Physical Settlement Cancellation" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			return;
+		}
+	}
+
+	if (strcmp(c_undrlyng ,"ALL") == 0 )
+	{
+		MEMSET(c_undrlyng);
+		strcpy(c_undrlyng,"%");
+		strcpy(c_run_mod,"ALL");	/*** Ver 1.1 ***/
+	}
+	else
+	{
+		/*** Commented in Ver 1.1 ***
+		EXEC SQL
+			SELECT COUNT(1)
+			INTO	:i_exist
+			FROM FUM_FO_UNDRLYNG_MSTR
+			WHERE	FUM_XCHNG_CD =:c_xchng_cd 
+			AND		FUM_PRDCT_TYP	=:c_prdct_typ
+			AND		FUM_UNDRLYNG	=:c_undrlyng
+			AND		FUM_SETLMNT_FLG = 'P';
+		*** Ver 1.1 Comment Ends ***/
+
+		/*** Ver 1.1 Starts ***/
+
+		strcpy(c_tmp_undrlyng,c_undrlyng);
+		rtrim(c_tmp_undrlyng);
+
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"c_tmp_undrlyng :%s:",c_tmp_undrlyng);
+		}
+
+		token = strtok( c_tmp_undrlyng,",");	
+
+		while (token != NULL) 
+		{
+			token = strtok(NULL, ",");
+			i_ucount++;
+		}
+
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"Total Underlyings - i_ucount  :%d:",i_ucount);
+		}
+
+		if( i_ucount > 12 )
+		{
+			fn_userlog( c_ServiceName,"Maximum 12 underlying can be passed in Multiple underlying mode.");
+			strcpy ( c_msg, "Maximum 12 underlying can be passed in Multiple underlying mode." );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			return;		
+		}
+		
+		EXEC SQL
+			SELECT COUNT(1)
+			INTO  :i_exist
+			FROM	FTQ_FO_TRD_QT
+			WHERE	FTQ_XCHNG_CD =:c_xchng_cd
+			AND		FTQ_PRDCT_TYP =:c_prdct_typ
+			AND		FTQ_EXPRY_DT  =:v_expry_dt
+			AND		FTQ_SETLMNT_FLG = 'P'
+			AND		TRIM(FTQ_UNDRLYNG)  IN( SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) 
+																FROM DUAL 
+																CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL);
+
+		/*** Ver 1.1 Ends ***/
+
+		if( SQLCODE != 0 )
+		{
+			fn_errlog( c_ServiceName, "S31020", SQLMSG, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			return;
+		}
+
+		if( i_exist <= 0) 
+		{
+			fn_userlog( c_ServiceName,"The Underlying chosen for Cancellation is not marked for Physical Settlement. Please choose correct underlying to run the process");
+			strcpy ( c_msg, "The Underlying chosen for Cancellation is not marked for Physical Settlement. Please choose correct underlying to run the process" );
+			fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			return;	
+		}
+		strcpy(c_run_mod,"UND");	/*** Ver 1.1 ***/
+	}
+
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+	  if ( i_trnsctn == -1 )
+  {
+      fn_errlog(c_ServiceName, "S31025", LIBMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      return;
+  }
+
+	if(DEBUG_MSG_LVL_3) /*** Ver 1.1 ***/
+	{
+		fn_userlog( c_ServiceName,"c_run_mod :%s:",c_run_mod);
+	}
+
+	/*** Commented in Ver 1.1 ***
+	EXEC SQL 
+			 UPDATE  FTQ_FO_TRD_QT 
+			 SET		 FTQ_DLVRY_POS_ALLWD	=	'N' 
+       WHERE  FTQ_XCHNG_CD  =:c_xchng_cd
+       AND    FTQ_EXPRY_DT  = :v_expry_dt
+       AND    FTQ_PRDCT_TYP = :c_prdct_typ
+       AND    FTQ_UNDRLYNG IN ( SELECT DISTINCT FUM_UNDRLYNG
+                                FROM FUM_FO_UNDRLYNG_MSTR
+                                WHERE FUM_XCHNG_CD =:c_xchng_cd
+                                AND   FUM_PRDCT_TYP =:c_prdct_typ
+                                AND   TRIM(FUM_UNDRLYNG)  LIKE :c_undrlyng
+                                AND   FUM_SETLMNT_FLG = 'P');
+
+  if( SQLCODE != 0 )
+  {
+      fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+  }
+	*** Ver 1.1 Comment Ends ***/
+
+	/*** Ver 1.1 Starts ***/
+	
+	if ( strcmp(c_undrlyng,"%") == 0 )
+	{
+	 if ( c_prdct_typ == 'F' )     /*** If condition added in Ver 1.6 ***/
+    {
+	
+		EXEC SQL
+			 	UPDATE  FTQ_FO_TRD_QT
+				SET    FTQ_DLVRY_POS_ALLWD  = 'N'
+				WHERE  FTQ_XCHNG_CD  =:c_xchng_cd
+				AND    FTQ_EXPRY_DT  = :v_expry_dt
+				AND    FTQ_PRDCT_TYP = :c_prdct_typ
+				AND    TRIM(FTQ_UNDRLYNG)  LIKE :c_undrlyng
+				AND		 FTQ_SETLMNT_FLG = 'P';		
+		}
+		/*** Added in Ver 1.6 ***/
+    else if ( c_prdct_typ == 'O' )
+    {
+      EXEC SQL
+      UPDATE  FTQ_FO_TRD_QT
+      SET     FTQ_DLVRY_POS_ALLWD  = 'N',
+              FTQ_BUY_ALLWD = DECODE ( :c_buysell_flg,'B','N','%','N',FTQ_BUY_ALLWD),
+              FTQ_SELL_ALLWD = DECODE ( :c_buysell_flg,'S','N','%','N',FTQ_SELL_ALLWD)
+      WHERE   FTQ_XCHNG_CD  = :c_xchng_cd
+      AND     FTQ_EXPRY_DT  = :v_expry_dt
+      AND     FTQ_PRDCT_TYP = :c_prdct_typ
+      AND     TRIM(FTQ_UNDRLYNG)  LIKE :c_undrlyng
+      AND     FTQ_SETLMNT_FLG = 'P';
+    }
+    /*** Ver 1.6 ends here ***/
+	
+  	if( SQLCODE != 0 )
+  	{
+      fn_errlog( c_ServiceName, "S41025", SQLMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+ 		}
+
+
+		EXEC SQL
+		INSERT INTO FPS_FO_PHYCAL_SETLMNTEOSLOG
+		(
+			FPS_XCHNG_CD,
+			FPS_PRDCT_TYP,
+			FPS_UNDRLYNG,
+			FPS_EXPRY_DT,
+			FPS_RUN_MODE,
+			FPS_INSRT_DT,
+			FPS_BUY_ALLWD,	/*** ver 1.6 ***/
+			FPS_SELL_ALLWD	/*** ver 1.6 ***/
+		)
+		(
+			SELECT DISTINCT FTQ_XCHNG_CD,
+					 	FTQ_PRDCT_TYP,
+					 	FTQ_UNDRLYNG,
+					 	FTQ_EXPRY_DT,
+					 	:c_run_mod,
+					 	sysdate,
+						FTQ_BUY_ALLWD,		/*** ver 1.6 ***/
+						FTQ_SELL_ALLWD 		/*** ver 1.6 ***/
+			FROM 	 FTQ_FO_TRD_QT
+   	 	WHERE  FTQ_XCHNG_CD  =:c_xchng_cd
+    	AND    FTQ_EXPRY_DT  = :v_expry_dt
+    	AND    FTQ_PRDCT_TYP = :c_prdct_typ
+    	AND    TRIM(FTQ_UNDRLYNG)  LIKE :c_undrlyng
+    	AND    FTQ_SETLMNT_FLG = 'P'
+		);
+
+    if( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S41025", SQLMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+
+/* Ver 1.8 */
+        EXEC SQL
+                UPDATE FGL_FO_GTT_LEGDTLS
+                SET FGL_GTT_STTS = 'C', FGL_REMARKS = 'Cancelled by system during EOS'
+                WHERE TRIM(FGL_UNDRLYNG) like :c_undrlyng
+                AND FGL_EXPRY_DT = :v_expry_dt
+                AND FGL_PRDCT_TYP = :c_prdct_typ
+                AND FGL_XCHNG_CD = :c_xchng_cd
+                AND FGL_GTT_STTS in ('I', 'A');
+
+        if ( SQLCODE != 0 )
+        {
+                if( SQLCODE != NO_DATA_FOUND )
+                {
+                        fn_errlog( c_ServiceName, "S41125", SQLMSG, c_err_msg );
+                        strcpy ( c_msg, "System error. Contact system support" );
+                        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+                        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+                        return;
+                }
+                else{ fn_userlog(c_ServiceName, "NO GTT REQUESTS TO CANCEL"); }
+        }
+/* Ver 1.8 ends */
+
+	}
+	else
+	{
+	 if ( c_prdct_typ == 'F' )     /*** IF condition added in Ver 1.6 ***/
+    {
+		 EXEC SQL
+			UPDATE  FTQ_FO_TRD_QT
+      SET			FTQ_DLVRY_POS_ALLWD  = 'N'
+      WHERE  	FTQ_XCHNG_CD  =:c_xchng_cd
+      AND 		FTQ_EXPRY_DT  =:v_expry_dt 
+      AND 		FTQ_PRDCT_TYP =:c_prdct_typ 
+			AND 		FTQ_SETLMNT_FLG = 'P'
+      AND			TRIM(FTQ_UNDRLYNG) IN  (SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM)
+																			FROM DUAL
+																			CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL);
+		}
+
+		/*** Added in Ver 1.6 ***/
+    else if ( c_prdct_typ == 'O' )
+    {
+      EXEC SQL
+      UPDATE  FTQ_FO_TRD_QT
+      SET     FTQ_DLVRY_POS_ALLWD  = 'N',
+              FTQ_BUY_ALLWD = DECODE ( :c_buysell_flg,'B','N','%','N',FTQ_BUY_ALLWD),
+              FTQ_SELL_ALLWD = DECODE ( :c_buysell_flg,'S','N','%','N',FTQ_SELL_ALLWD)
+      WHERE   FTQ_XCHNG_CD  =:c_xchng_cd
+      AND     FTQ_EXPRY_DT  =:v_expry_dt
+      AND     FTQ_PRDCT_TYP =:c_prdct_typ
+      AND     FTQ_SETLMNT_FLG = 'P'
+      AND     TRIM(FTQ_UNDRLYNG) IN  (SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM)
+                                      FROM   DUAL
+                                      CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL);
+    }
+    /*** Ver 1.6 ends here ***/
+
+		if( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S41021", SQLMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+
+    EXEC SQL
+    INSERT INTO FPS_FO_PHYCAL_SETLMNTEOSLOG
+    (
+      FPS_XCHNG_CD,
+      FPS_PRDCT_TYP,
+      FPS_UNDRLYNG,
+      FPS_EXPRY_DT,
+      FPS_RUN_MODE,
+      FPS_INSRT_DT,
+			FPS_BUY_ALLWD,	/*** ver 1.6 ***/
+			FPS_SELL_ALLWD	/*** ver 1.6 ***/	
+    )
+    (
+      SELECT DISTINCT FTQ_XCHNG_CD,
+             FTQ_PRDCT_TYP,
+             FTQ_UNDRLYNG,
+             FTQ_EXPRY_DT,
+             :c_run_mod,
+             sysdate,
+						 FTQ_BUY_ALLWD,	/*** ver 1.6 ***/
+						 FTQ_SELL_ALLWD /*** ver 1.6 ***/
+      FROM   FTQ_FO_TRD_QT
+      WHERE  FTQ_XCHNG_CD  =:c_xchng_cd
+      AND    FTQ_EXPRY_DT  = :v_expry_dt
+      AND    FTQ_PRDCT_TYP = :c_prdct_typ
+      AND    FTQ_SETLMNT_FLG = 'P'
+			AND    TRIM(FTQ_UNDRLYNG) IN  (SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM)
+                                      FROM DUAL
+                                      CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL)
+    );
+
+    if( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S41025", SQLMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+
+/*edwin*/
+        EXEC SQL
+                UPDATE FGL_FO_GTT_LEGDTLS
+                SET FGL_GTT_STTS = 'C', FGL_REMARKS = 'Cancelled by system during EOS'
+                WHERE TRIM(FGL_UNDRLYNG) IN  (SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM)
+                                                FROM   DUAL
+                                                CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL)
+                AND FGL_EXPRY_DT = :v_expry_dt
+                AND FGL_PRDCT_TYP = :c_prdct_typ
+                AND FGL_XCHNG_CD = :c_xchng_cd
+                AND FGL_GTT_STTS in ('I', 'A');
+
+        if ( SQLCODE != 0 )
+        {
+                if( SQLCODE != NO_DATA_FOUND )
+                {
+                        fn_errlog( c_ServiceName, "S41125", SQLMSG, c_err_msg );
+                        strcpy ( c_msg, "System error. Contact system support" );
+                        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+                        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+                        return;
+                }
+                else{ fn_userlog(c_ServiceName, "NO GTT REQUESTS TO CANCEL"); }
+        }
+/*edwin*/
+
+	}
+
+	/*** Vet 1.1 Ended ***/
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+      fn_errlog( c_ServiceName, "S31035",LIBMSG,c_err_msg);
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+  }
+
+	/** Ver 1.1 Starts ** To allow for Option **
+
+	if( c_prdct_typ == 'O' )
+	{
+		fn_userlog( c_ServiceName, "Skipping for product type :%c:",c_prdct_typ );
+		strcpy ( c_msg, "Skipping for product type :O:");
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return;
+	}
+
+	** Ver 1.1 Ends **/
+
+	strcpy ( c_msg, "Creating data. Please wait ... " );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	i_ch_val = fn_get_canord_rs(	c_ServiceName,
+																c_err_msg,
+																&c_exist,			/** Ver 1.1 **/
+																c_buysell_flg,	/*** ver 1.6 ***/
+																c_xchng_cd, 
+																c_prdct_typ,
+																c_undrlyng,
+																v_expry_dt.arr );
+																	
+
+
+	/*** if ( i_ch_val != SUCCESS || ptr_fml_buf == NULL ) *** Commented in Ver 1.1 ***/
+	if ( i_ch_val != SUCCESS )	/*** if condition added in Ver 1.1 ***/
+	{
+		fn_errlog( c_ServiceName, "S31040", LIBMSG, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return;
+	}
+
+	/*** Ver 1.1 Starts ***/
+
+	if ( i_ch_val == SUCCESS && c_exist == 'N' )
+	{
+		fn_userlog( c_ServiceName,"No record exist");
+		strcpy ( c_msg, "No record exist");	
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return;
+	}
+
+	/*** Ver 1.1 Ends ***/
+
+	li_tot_rcrds = fn_reccnt_rs ( ptr_fml_buf,
+                                c_ServiceName,
+                                c_err_msg,
+                                FFO_EBA_MTCH_ACT_NO);
+
+	if ( li_tot_rcrds == -1 ) 
+	{
+		fn_errlog( c_ServiceName, "S31045", LIBMSG, c_err_msg );
+		strcpy ( c_msg, "System error. Contact system support" );
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		fn_dstry_rs ( ptr_fml_buf );
+		return;
+	}
+
+	strcpy ( c_msg, "Data created." );
+	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	sprintf ( c_msg, "Total records = %ld", li_tot_rcrds );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	for ( li_cnt=1; li_cnt<=li_tot_rcrds; li_cnt++ )
+	{
+		i_ch_val = fn_getnxt_rs ( ptr_fml_buf,
+                              c_ServiceName,
+                              c_err_msg,
+                              9, /** Changed from 8 to 9 in Ver 1.3 **/
+                              FFO_EBA_MTCH_ACT_NO, ( char * ) sql_fod_clm_mtch_accnt, NULL,
+                              FFO_XCHNG_CD, ( char * )sql_fod_xchng_cd, NULL,
+                              FFO_PRDCT_TYP, ( char * )&sql_fod_prdct_typ, NULL,
+                              FFO_CTGRY_INDSTK, ( char * )&sql_fod_indstk, NULL,
+                              FFO_UNDRLYNG, ( char * )sql_fod_undrlyng, NULL,
+                              FFO_ORDR_RFRNC, ( char * )sql_fod_ordr_rfrnc, NULL,  
+                              FFO_EXPRY_DT, (char * )sql_fod_expry_dt.arr, NULL,
+                              FFO_PIPE_ID, ( char * )sql_fod_pipe_id, NULL,
+															FFO_SPL_FLG, ( char * )&sql_fod_spl_flag, NULL);  /** Ver 1.3 **/
+
+		if ( i_ch_val != 0 )
+		{
+			fn_errlog( c_ServiceName, "S31050", LIBMSG, c_err_msg );
+			strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			fn_dstry_rs ( ptr_fml_buf );
+      return;
+    }
+
+    rtrim(sql_fod_clm_mtch_accnt);
+    rtrim(sql_fod_ordr_rfrnc);
+    rtrim(sql_fod_xchng_cd);
+    rtrim(sql_fod_undrlyng);
+    rtrim(sql_fod_pipe_id);
+    SETLEN(sql_fod_expry_dt);
+
+		sprintf ( c_msg, "Processing record %ld of %ld", li_cnt, li_tot_rcrds );
+		fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		
+		i_ch_val = fn_pre_prcs_rcrd ( c_ServiceName,
+																	c_err_msg,
+                                  "sfr_pfs_cmb_qt",
+                                  li_cnt,
+                                  li_tot_rcrds );
+		if ( i_ch_val == -1 )
+		{
+			fn_errlog( c_ServiceName, "S31055", LIBMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_dstry_rs ( ptr_fml_buf );
+      return;
+		}
+
+		strcpy( c_svc_name,"SFO_PRC_DLVRCAN");
+	  fn_init_ddr_pop ( sql_fod_pipe_id,TRADING_SECTION,F_CS); 	
+		fn_cpy_ddr( c_rout_str );
+
+		fn_userlog ( c_ServiceName,"ROUT STRING IS :%s:",c_rout_str );	
+
+		i_ch_val = fn_acall_svc_fml ( c_ServiceName,
+                                  c_err_msg,
+                                  "SFO_ORD_ROUT",
+                                  0,
+                                  13, /** Changed from 12 to 13 in Ver 1.3 **/
+                                  FFO_XCHNG_CD, ( char * )sql_fod_xchng_cd,
+                                  FFO_EBA_MTCH_ACT_NO,(char *)sql_fod_clm_mtch_accnt,
+                                  FFO_PRDCT_TYP, ( char * )&sql_fod_prdct_typ,
+                                  FFO_UNDRLYNG, ( char * )sql_fod_undrlyng,
+                                  FFO_CTGRY_INDSTK, ( char * )&sql_fod_indstk,
+                                  FFO_ORDR_RFRNC, ( char * )sql_fod_ordr_rfrnc, 
+                                  FFO_SVC_NAME, (char*)c_svc_name,
+                                  FFO_BAT_TAG, ( char * )c_tag,
+                                  FFO_REC_NO, ( char * )&li_cnt,
+                                  FFO_EXPRY_DT, (char * )sql_fod_expry_dt.arr,
+                                  FFO_PIPE_ID, ( char * )sql_fod_pipe_id,
+                                  FFO_ROUT_CRT, ( char *)c_rout_str,
+																	FFO_SPL_FLG, ( char * )&sql_fod_spl_flag); /** Ver 1.3 **/
+
+    if ( i_ch_val == -1 )
+    {
+      fn_errlog( c_ServiceName, "S31060", LIBMSG, c_err_msg );
+      strcpy ( c_msg, "System error. Contact system support" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_dstry_rs ( ptr_fml_buf );
+      return;
+    }
+	}
+
+	fn_dstry_rs ( ptr_fml_buf );
+
+	sprintf ( c_msg, "Batch process %s ended", argv[0] );
+	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	return;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  char c_m[20]="\0";
+  fn_var = BAT_DLVRY_ORDCAN;
+    sprintf ( c_m,"c_m :%d:",argc);
+  fn_bat_pst_msg( argv[0],c_m, c_tag );
+	if(( argv[4][0] == 'F' && argc != 7 ) || ( argv[4][0] == 'O' && argc != 8 ) )
+	{
+		fn_userlog( argv[0],"Usage - %s <configuration file> <Exchange code> <pipe_id> <Product Type> <Underlying/ALL> <Expiry date> ",argv[0]);
+		fn_bat_pst_msg ( argv[0], "Invalid number of arguments", c_tag ); /** Added in Ver 1.1 **/
+		fn_userlog ( argv[0], "Invalid number of arguments" );
+		 return -1;
+	}
+
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+	fn_userlog ( argv[0], "BAT_DLVRY_ORDCAN ended" );
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}
+
+
+int fn_get_canord_rs( char* c_ServiceName, 
+											char* c_err_msg, 
+											char*	c_flag,				/** Ver 1.1 **/
+											char	c_buysell_flg,	/*** ver 1.6 ***/
+											char* c_xchng_cd,
+											char	c_prdct_typ,
+											char* c_undrlyng,
+											char* c_expry_dt )
+{
+
+	
+	int 	i_counter	=	0;
+	int 	i_rollsprd_cnt = 0; /*** Ver 1.3 **/
+	int 	i_returncode;
+  int   i_exceptn_exist=0;  /** Ver 1.4 **/
+	int   i_cnt_ref_no = 0;   /** Ver 1.5 **/
+	char  c_span_allwd_flg = '\0';    /** Ver 1.5 **/
+
+	EXEC SQL BEGIN DECLARE SECTION;
+   varchar v_expry_dt[23];
+	 sql_cursor  sys_cursor;
+  EXEC SQL END DECLARE SECTION;
+
+	EXEC SQL INCLUDE "table/fod_fo_ordr_dtls.h";
+
+	Finit32(ptr_fml_buf,MIN_FML_BUF_LEN);
+/*	ptr_fml_buf	=	(FBFR32 *)tpalloc("FML32", NULL, MIN_FML_BUF_LEN * 5);
+
+	if(ptr_fml_buf == NULL)
+	{
+		 fn_errlog( c_ServiceName, "S31065", TPMSG, c_err_msg );
+		 return FAILURE;
+	}*/
+
+	strcpy(v_expry_dt.arr,c_expry_dt);
+	SETLEN(v_expry_dt);
+
+  if(DEBUG_MSG_LVL_0)
+  {
+    fn_userlog( c_ServiceName,"Inside fn_get_canord_rs");
+  }
+
+    fn_userlog( c_ServiceName,"Inside fn_get_canord_rs c_buysell_flg :%c:",c_buysell_flg);
+	/*** Commented in Ver 1.1 ***
+
+  EXEC SQL
+    DECLARE cur_canord CURSOR FOR
+      SELECT
+             FOD_CLM_MTCH_ACCNT,
+             FOD_UNDRLYNG,
+             FOD_EXPRY_DT,
+             FOD_PRDCT_TYP,
+             FOD_XCHNG_CD,
+             FOD_ORDR_RFRNC,
+             FOD_PIPE_ID,
+             FOD_INDSTK
+      FROM FOD_FO_ORDR_DTLS, FUM_FO_UNDRLYNG_MSTR
+      WHERE FOD_XCHNG_CD =:c_xchng_cd
+      AND   FOD_XCHNG_CD  = FUM_XCHNG_CD
+      AND   FOD_UNDRLYNG  = FUM_UNDRLYNG
+      AND   FOD_PRDCT_TYP = FUM_PRDCT_TYP
+      AND   FOD_PRDCT_TYP =:c_prdct_typ
+      AND   FOD_EXPRY_DT  =:v_expry_dt
+      AND   TRIM(FUM_UNDRLYNG)  LIKE :c_undrlyng
+      AND   FUM_SETLMNT_FLG = 'P'
+      AND   FOD_ORDR_STTS in ('P','O','R');	
+
+	EXEC SQL
+		OPEN	cur_canord;
+
+	if(SQLCODE != 0)
+	{
+	  fn_errlog( c_ServiceName, "S31070", SQLMSG, c_err_msg );	
+		EXEC SQL CLOSE	cur_canord;
+	*		tpfree((char *)ptr_fml_buf);*
+		return FAILURE;
+	}
+
+	*** Ver 1.1 Comment Ends ***/
+
+	/*** Ver 1.1 Starts ***/
+
+	EXEC SQL ALLOCATE :sys_cursor;
+	/** Ver 1.7 starts here **/
+	
+	if(c_prdct_typ != 'O')/** same as previous process **/
+	{
+		if( strcmp(c_undrlyng,"%") == 0 )
+ 	  {
+    EXEC SQL EXECUTE
+      BEGIN
+        OPEN :sys_cursor FOR
+        SELECT
+              FOD_CLM_MTCH_ACCNT,
+              FOD_UNDRLYNG,
+              FOD_EXPRY_DT,
+              FOD_PRDCT_TYP,
+              FOD_XCHNG_CD,
+              FOD_ORDR_RFRNC,
+              FOD_PIPE_ID,
+              FOD_INDSTK,
+              FOD_SPL_FLAG ,     /*** Ver 1.3 ***/
+              FOD_OPT_TYP,        /*** Ver 1.4 ***/
+              FOD_STRK_PRC       /*** Ver 1.4 ***/
+        FROM  FOD_FO_ORDR_DTLS, FTQ_FO_TRD_QT
+        WHERE FOD_XCHNG_CD =:c_xchng_cd
+        AND   FOD_XCHNG_CD  = FTQ_XCHNG_CD
+        AND   FOD_UNDRLYNG  = FTQ_UNDRLYNG
+        AND   FOD_PRDCT_TYP = FTQ_PRDCT_TYP
+        AND   FOD_EXPRY_DT  = FTQ_EXPRY_DT
+        AND   FOD_OPT_TYP   = FTQ_OPT_TYP   /*** Ver 1.2 ***/
+        AND   FOD_STRK_PRC  = FTQ_STRK_PRC  /*** Ver 1.2 ***/
+        AND   FOD_PRDCT_TYP =:c_prdct_typ
+        AND   FOD_EXPRY_DT  =:v_expry_dt
+			  AND   TRIM(FOD_UNDRLYNG)  LIKE :c_undrlyng
+        AND   FTQ_SETLMNT_FLG = 'P'
+        AND   FOD_ORDR_STTS in ('P','O','R')
+        AND   FOD_ORDR_FLW LIKE :c_buysell_flg; /*** ver 1.6 ***/
+    END;
+    END-EXEC;
+   }
+   else
+   {
+    EXEC SQL EXECUTE
+      BEGIN
+        OPEN :sys_cursor FOR
+        SELECT
+              FOD_CLM_MTCH_ACCNT,
+              FOD_UNDRLYNG,
+              FOD_EXPRY_DT,
+              FOD_PRDCT_TYP,
+              FOD_XCHNG_CD,
+              FOD_ORDR_RFRNC,
+              FOD_PIPE_ID,
+              FOD_INDSTK,
+              FOD_SPL_FLAG,      /*** Ver 1.3 ***/
+              FOD_OPT_TYP,       /*** Ver 1.4 ***/
+              FOD_STRK_PRC       /*** Ver 1.4 ***/
+        FROM  FOD_FO_ORDR_DTLS, FTQ_FO_TRD_QT
+        WHERE FOD_XCHNG_CD =:c_xchng_cd
+        AND   FOD_XCHNG_CD  = FTQ_XCHNG_CD
+        AND   FOD_UNDRLYNG  = FTQ_UNDRLYNG
+        AND   FOD_PRDCT_TYP = FTQ_PRDCT_TYP
+			  AND   FOD_EXPRY_DT  = FTQ_EXPRY_DT
+        AND   FOD_OPT_TYP   = FTQ_OPT_TYP   /*** Ver 1.2 ***/
+        AND   FOD_STRK_PRC  = FTQ_STRK_PRC  /*** Ver 1.2 ***/
+        AND   FOD_PRDCT_TYP =:c_prdct_typ	
+				AND   FOD_EXPRY_DT  =:v_expry_dt
+        AND   FTQ_SETLMNT_FLG = 'P'
+        AND   FOD_ORDR_STTS in ('P','O','R')
+        AND   FOD_ORDR_FLW LIKE :c_buysell_flg /*** ver 1.6 ***/
+        AND   TRIM(FOD_UNDRLYNG) IN(SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM)
+                                      FROM DUAL
+                                      CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL);
+    END;
+    END-EXEC;
+   }
+	}
+	else
+	{
+ 		if( strcmp(c_undrlyng,"%") == 0 )
+    {
+    EXEC SQL EXECUTE
+      BEGIN
+        OPEN :sys_cursor FOR
+        SELECT
+              FOD_CLM_MTCH_ACCNT,
+              FOD_UNDRLYNG,
+              FOD_EXPRY_DT,
+              FOD_PRDCT_TYP,
+              FOD_XCHNG_CD,
+              FOD_ORDR_RFRNC,
+              FOD_PIPE_ID,
+              FOD_INDSTK,
+              FOD_SPL_FLAG ,     /*** Ver 1.3 ***/
+              FOD_OPT_TYP,        /*** Ver 1.4 ***/
+              FOD_STRK_PRC       /*** Ver 1.4 ***/
+        FROM  FOD_FO_ORDR_DTLS, FTQ_FO_TRD_QT
+        WHERE FOD_XCHNG_CD =:c_xchng_cd
+        AND   FOD_XCHNG_CD  = FTQ_XCHNG_CD
+        AND   FOD_UNDRLYNG  = FTQ_UNDRLYNG
+        AND   FOD_PRDCT_TYP = FTQ_PRDCT_TYP
+        AND   FOD_EXPRY_DT  = FTQ_EXPRY_DT
+        AND   FOD_OPT_TYP   = FTQ_OPT_TYP   /*** Ver 1.2 ***/
+        AND   FOD_STRK_PRC  = FTQ_STRK_PRC  /*** Ver 1.2 ***/
+        AND   FOD_PRDCT_TYP =:c_prdct_typ
+        AND   FOD_EXPRY_DT  =:v_expry_dt
+        AND   TRIM(FOD_UNDRLYNG)  LIKE :c_undrlyng
+				AND   FTQ_SETLMNT_FLG = 'P'
+        AND   FOD_ORDR_STTS in ('P','O','R')
+				AND   FOD_ORDR_FLW Like Decode(:c_buysell_flg, '%','%',:c_buysell_flg) /**Below lines are added in Ver 1.7 **/
+				AND FOD_SPL_FLAG != 'C'/** this query will consider all fresh pending orders except squareoff orders placed in input flw **/
+			UNION 
+				SELECT
+              FOD_CLM_MTCH_ACCNT,
+              FOD_UNDRLYNG,
+              FOD_EXPRY_DT,
+              FOD_PRDCT_TYP,
+              FOD_XCHNG_CD,
+              FOD_ORDR_RFRNC,
+              FOD_PIPE_ID,
+              FOD_INDSTK,
+              FOD_SPL_FLAG ,     /*** Ver 1.3 ***/
+              FOD_OPT_TYP,        /*** Ver 1.4 ***/
+              FOD_STRK_PRC       /*** Ver 1.4 ***/
+        FROM  FOD_FO_ORDR_DTLS, FTQ_FO_TRD_QT
+        WHERE FOD_XCHNG_CD =:c_xchng_cd
+        AND   FOD_XCHNG_CD  = FTQ_XCHNG_CD
+        AND   FOD_UNDRLYNG  = FTQ_UNDRLYNG
+        AND   FOD_PRDCT_TYP = FTQ_PRDCT_TYP
+        AND   FOD_EXPRY_DT  = FTQ_EXPRY_DT
+        AND   FOD_OPT_TYP   = FTQ_OPT_TYP   /*** Ver 1.2 ***/
+        AND   FOD_STRK_PRC  = FTQ_STRK_PRC  /*** Ver 1.2 ***/
+        AND   FOD_PRDCT_TYP =:c_prdct_typ
+        AND   FOD_EXPRY_DT  =:v_expry_dt
+        AND   TRIM(FOD_UNDRLYNG)  LIKE :c_undrlyng
+        AND   FTQ_SETLMNT_FLG = 'P'
+        AND   FOD_ORDR_STTS in ('P','O','R')
+				AND   FOD_ORDR_FLW Like Decode(:c_buysell_flg, '%','%', 'B','S','S','B') /**Ver 1.7 **/
+        AND   FOD_SPL_FLAG = 'C'; /**Ver 1.7 **/
+    END;
+    END-EXEC;
+   }
+   else
+   {
+    EXEC SQL EXECUTE
+      BEGIN
+        OPEN :sys_cursor FOR
+        SELECT
+              FOD_CLM_MTCH_ACCNT,
+              FOD_UNDRLYNG,
+              FOD_EXPRY_DT,
+              FOD_PRDCT_TYP,
+              FOD_XCHNG_CD,
+              FOD_ORDR_RFRNC,
+              FOD_PIPE_ID,
+              FOD_INDSTK,
+              FOD_SPL_FLAG,      /*** Ver 1.3 ***/
+              FOD_OPT_TYP,       /*** Ver 1.4 ***/
+              FOD_STRK_PRC       /*** Ver 1.4 ***/
+        FROM  FOD_FO_ORDR_DTLS, FTQ_FO_TRD_QT
+        WHERE FOD_XCHNG_CD =:c_xchng_cd
+        AND   FOD_XCHNG_CD  = FTQ_XCHNG_CD
+        AND   FOD_UNDRLYNG  = FTQ_UNDRLYNG
+        AND   FOD_PRDCT_TYP = FTQ_PRDCT_TYP
+				AND   FOD_EXPRY_DT  = FTQ_EXPRY_DT
+        AND   FOD_OPT_TYP   = FTQ_OPT_TYP   /*** Ver 1.2 ***/
+        AND   FOD_STRK_PRC  = FTQ_STRK_PRC  /*** Ver 1.2 ***/
+        AND   FOD_PRDCT_TYP =:c_prdct_typ
+				AND   FOD_EXPRY_DT  =:v_expry_dt
+        AND   FTQ_SETLMNT_FLG = 'P'
+        AND   FOD_ORDR_STTS in ('P','O','R')
+			  /** AND   FOD_ORDR_FLW LIKE :c_buysell_flg; commented in Ver 1.7 */ /*** ver 1.6 ***/	
+				AND   FOD_ORDR_FLW Like Decode(:c_buysell_flg, '%','%',:c_buysell_flg) /**Below lines are added in Ver 1.7 **/
+        AND FOD_SPL_FLAG != 'C'/** this query will consider all fresh pending orders except squareoff orders placed in input flw **/
+        AND   TRIM(FOD_UNDRLYNG) IN(SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM)
+                                      FROM DUAL
+                                      CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL)
+			UNION 
+				SELECT
+              FOD_CLM_MTCH_ACCNT,
+              FOD_UNDRLYNG,
+              FOD_EXPRY_DT,
+              FOD_PRDCT_TYP,
+              FOD_XCHNG_CD,
+              FOD_ORDR_RFRNC,
+              FOD_PIPE_ID,
+              FOD_INDSTK,
+              FOD_SPL_FLAG,      /*** Ver 1.3 ***/
+              FOD_OPT_TYP,       /*** Ver 1.4 ***/
+              FOD_STRK_PRC       /*** Ver 1.4 ***/
+        FROM  FOD_FO_ORDR_DTLS, FTQ_FO_TRD_QT
+        WHERE FOD_XCHNG_CD =:c_xchng_cd
+        AND   FOD_XCHNG_CD  = FTQ_XCHNG_CD
+        AND   FOD_UNDRLYNG  = FTQ_UNDRLYNG
+        AND   FOD_PRDCT_TYP = FTQ_PRDCT_TYP
+				AND   FOD_EXPRY_DT  = FTQ_EXPRY_DT
+        AND   FOD_OPT_TYP   = FTQ_OPT_TYP   /*** Ver 1.2 ***/
+        AND   FOD_STRK_PRC  = FTQ_STRK_PRC  /*** Ver 1.2 ***/
+        AND   FOD_PRDCT_TYP =:c_prdct_typ
+        AND   FOD_EXPRY_DT  =:v_expry_dt
+        AND   FTQ_SETLMNT_FLG = 'P'
+        AND   FOD_ORDR_STTS in ('P','O','R')
+				/** AND   FOD_ORDR_FLW LIKE :c_buysell_flg;commented in Ver 1.7*/ /*** ver 1.6 ***/
+        AND   FOD_ORDR_FLW Like Decode(:c_buysell_flg, '%','%', 'B','S','S','B') /**Ver 1.7 **/
+        AND FOD_SPL_FLAG = 'C' /**Ver 1.7 **/
+        AND   TRIM(FOD_UNDRLYNG) IN(SELECT REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM)
+                                      FROM DUAL
+                                      CONNECT BY REGEXP_SUBSTR(:c_undrlyng,'[^,]+',1,ROWNUM) IS NOT NULL);	
+    END;
+    END-EXEC;
+   		 
+ 	  }
+  }
+
+/**Ver 1.7 ends here **/
+  if( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31075",SQLMSG, c_err_msg );
+		EXEC SQL CLOSE :sys_cursor;
+		EXEC SQL FREE  :sys_cursor;
+    return FAILURE;
+  }
+	/*** Ver 1.1 Ends ***/
+
+	i_counter = 0;
+
+	while(1)
+	{
+		MEMSET(sql_fod_clm_mtch_accnt);
+		MEMSET(sql_fod_undrlyng);
+		MEMSET(sql_fod_expry_dt);
+		MEMSET(sql_fod_xchng_cd);
+		MEMSET(sql_fod_ordr_rfrnc);
+		MEMSET(sql_fod_pipe_id);
+		sql_fod_prdct_typ = '\0';
+		sql_fod_indstk	=	'\0';
+		sql_fod_spl_flag = '\0';  /*** Ver 1.3 ***/
+    sql_fod_opt_typ='\0'; /*** Ver 1.4 ***/
+    sql_fod_strk_prc=0;   /*** Ver 1.4 ***/
+    i_exceptn_exist =0;   /*** Ver 1.4 ***/
+
+		EXEC SQL
+			/** FETCH	cur_canord ** commented in Ver 1.1 **/
+			FETCH :sys_cursor   	/*** Added in Ver 1.1 ***/
+			INTO	:sql_fod_clm_mtch_accnt,
+						:sql_fod_undrlyng,
+						:sql_fod_expry_dt,
+						:sql_fod_prdct_typ,
+						:sql_fod_xchng_cd,
+						:sql_fod_ordr_rfrnc,
+						:sql_fod_pipe_id,
+						:sql_fod_indstk,
+						:sql_fod_spl_flag,  /*** Ver 1.3 ***/
+            :sql_fod_opt_typ,   /*** Ver 1.4 ***/
+            :sql_fod_strk_prc;  /*** Ver 1.4 ***/
+
+		if(SQLCODE != 0)
+		{
+			if(SQLCODE ==	NO_DATA_FOUND)
+			{
+				fn_userlog( c_ServiceName,"Inside Break");
+
+				/*** Ver 1.1 Starts ***/
+				if( i_counter == 0 )
+				{
+					*c_flag = 'N';
+				}
+
+				EXEC SQL CLOSE :sys_cursor;
+				EXEC SQL FREE  :sys_cursor;
+
+				/*** Ver 1.1 Ends ***/
+
+				/*** EXEC SQL CLOSE	cur_canord; *** Commented in Ver 1.1 ***/
+				break;
+			}
+		
+			fn_errlog( c_ServiceName, "S31080",SQLMSG, c_err_msg );
+			/*** EXEC SQL CLOSE  cur_canord; *** Commented in Ver 1.1 ***/
+			EXEC SQL CLOSE :sys_cursor;  /*** Ver 1.1 ***/
+			EXEC SQL FREE  :sys_cursor;	 /*** Ver 1.1 ***/
+			if( i_counter != 0)
+			{
+				tpfree((char *)ptr_fml_buf);
+			}
+			return FAILURE;
+		}
+
+		i_counter = 1;
+
+		rtrim(sql_fod_clm_mtch_accnt);
+		rtrim(sql_fod_undrlyng);
+		rtrim(sql_fod_xchng_cd);
+		rtrim(sql_fod_ordr_rfrnc);
+		rtrim(sql_fod_pipe_id);
+		SETNULL(sql_fod_expry_dt);
+
+		if(DEBUG_MSG_LVL_5)
+		{
+			fn_userlog( c_ServiceName,"sql_fod_clm_mtch_accnt :%s:",sql_fod_clm_mtch_accnt);
+			fn_userlog( c_ServiceName,"sql_fod_undrlyng	:%s:",sql_fod_undrlyng);
+			fn_userlog( c_ServiceName,"sql_fod_expry_dt :%s:",sql_fod_expry_dt.arr);
+			fn_userlog( c_ServiceName,"sql_fod_prdct_typ :%c:",sql_fod_prdct_typ);
+			fn_userlog( c_ServiceName,"sql_fod_xchng_cd	:%s:",sql_fod_xchng_cd);
+			fn_userlog( c_ServiceName,"sql_fod_ordr_rfrnc :%s:",sql_fod_ordr_rfrnc);
+			fn_userlog( c_ServiceName,"sql_fod_pipe_id	:%s:",sql_fod_pipe_id);
+			fn_userlog( c_ServiceName,"sql_fod_indstk	  :%c:",sql_fod_indstk);
+			fn_userlog( c_ServiceName,"sql_fod_spl_flag :%c:",sql_fod_spl_flag);	/** Ver 1.3 **/
+      fn_userlog( c_ServiceName,"sql_fod_opt_typ :%c:",sql_fod_opt_typ);    /** Ver 1.4 **/
+      fn_userlog( c_ServiceName,"sql_fod_strk_prc :%ld:",sql_fod_strk_prc);  /** Ver 1.4 **/
+		}
+
+    /***** Ver 1.4 ******/
+
+    if ( sql_fod_prdct_typ == 'F')
+    {   
+     EXEC SQL
+     SELECT COUNT(*)
+     into :i_exceptn_exist
+     FROM FPE_FO_PHYEOS_EXCPTNMSTR
+     where TRIM(FPE_MTCH_ACCNT)=:sql_fod_clm_mtch_accnt
+     and TRIM(FPE_XCHNG_CD)=:sql_fod_xchng_cd
+     and FPE_PRDCT_TYP=:sql_fod_prdct_typ
+     and TRIM(FPE_UNDRLYNG)=:sql_fod_undrlyng
+     and FPE_EXPRY_DT=:sql_fod_expry_dt      
+     and FPE_ACTV_FLG='A'
+     and trunc(FPE_UPLD_TM)=trunc(sysdate);
+
+     if(SQLCODE != 0)
+     {
+      fn_errlog( c_ServiceName, "S31085",SQLMSG, c_err_msg );
+      EXEC SQL CLOSE :sys_cursor;  
+      EXEC SQL FREE  :sys_cursor; 
+      tpfree((char *)ptr_fml_buf);
+      return FAILURE;
+     }
+    }
+
+    if ( sql_fod_prdct_typ == 'O')
+    {
+
+     EXEC SQL
+     SELECT COUNT(*)
+     into :i_exceptn_exist
+     FROM FPE_FO_PHYEOS_EXCPTNMSTR
+     where TRIM(FPE_MTCH_ACCNT)=:sql_fod_clm_mtch_accnt
+     and TRIM(FPE_XCHNG_CD)=:sql_fod_xchng_cd
+     and FPE_PRDCT_TYP=:sql_fod_prdct_typ
+     and TRIM(FPE_UNDRLYNG)=:sql_fod_undrlyng
+     and FPE_EXPRY_DT=:sql_fod_expry_dt
+     and FPE_OPT_TYP=:sql_fod_opt_typ
+     and FPE_STRK_PRC=:sql_fod_strk_prc
+     and FPE_ACTV_FLG='A'
+     and trunc(FPE_UPLD_TM)=trunc(sysdate);
+
+     if(SQLCODE != 0)
+     {
+      fn_errlog( c_ServiceName, "S31090",SQLMSG, c_err_msg );
+      EXEC SQL CLOSE :sys_cursor;
+      EXEC SQL FREE  :sys_cursor;
+      tpfree((char *)ptr_fml_buf);
+      return FAILURE;
+     }
+    }
+
+
+
+    if ( i_exceptn_exist > 0 )
+    {
+     fn_userlog(c_ServiceName,"Skipping record - Exception exist for  :%s-%s-%c",sql_fod_clm_mtch_accnt,sql_fod_undrlyng,sql_fod_prdct_typ);
+     continue; 
+    }
+
+    /***** Ver 1.4 ******/
+
+		/*** Ver 1.5 Start ***/
+		i_cnt_ref_no = 0;  
+    c_span_allwd_flg = '\0'; 
+		EXEC SQL
+				SELECT    CLM_SPAN_ALLWD
+				INTO   	  :c_span_allwd_flg
+				FROM      CLM_CLNT_MSTR
+				WHERE     CLM_MTCH_ACCNT = :sql_fod_clm_mtch_accnt;
+		
+		if ( SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31095", SQLMSG, c_err_msg  );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_buf, 0, 0 );
+    }
+		
+		if( c_span_allwd_flg == 'Y' )
+		{
+			EXEC SQL
+          SELECT  count(FOD.FOD_CLM_MTCH_ACCNT)
+          INTO    :i_cnt_ref_no
+          FROM    FCP_FO_SPN_CNTRCT_PSTN FCP,FOD_FO_ORDR_DTLS FOD
+          WHERE   FOD.FOD_ORDR_RFRNC = :sql_fod_ordr_rfrnc
+          AND     FOD.FOD_CLM_MTCH_ACCNT = FCP.FCP_CLM_MTCH_ACCNT
+          AND     FOD.FOD_XCHNG_CD = FCP.FCP_XCHNG_CD
+          AND     FOD.FOD_PRDCT_TYP = FCP.FCP_PRDCT_TYP
+          AND     FOD.FOD_INDSTK = FCP.FCP_INDSTK
+          AND     FOD.FOD_UNDRLYNG = FCP.FCP_UNDRLYNG
+          AND     FOD.FOD_EXPRY_DT = FCP_EXPRY_DT
+          AND     FOD.FOD_EXER_TYP =FCP.FCP_EXER_TYP
+          AND     FOD.FOD_OPT_TYP = FCP.FCP_OPT_TYP
+          AND     FOD.FOD_STRK_PRC = FCP.FCP_STRK_PRC
+          AND     NVL(FCP.FCP_DLVRY_MODE_FLAG,'N') = 'Y'
+          AND     (NVL(FCP.FCP_DLVRY_OBLGAMT_BLCKD,0) != 0
+          OR      NVL(FCP.FCP_DLVRY_QTY_BLCKD,0) != 0);
+
+        if ( SQLCODE != 0 )
+        {
+          fn_errlog( c_ServiceName, "S31100", SQLMSG, c_err_msg  );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_buf, 0, 0 );
+        }
+
+        if ( i_cnt_ref_no > 0 )
+        {
+					continue;
+          fn_userlog( c_ServiceName,"Continue...for Span");
+          fn_errlog( c_ServiceName, "S31105", SQLMSG, c_err_msg  );
+          Fadd32( ptr_fml_buf, FFO_ERR_MSG, c_err_msg, 0 );
+        }
+		}
+		else
+		{
+			if( c_prdct_typ == 'F' )
+			{
+				EXEC SQL
+            SELECT  count(FOD.FOD_CLM_MTCH_ACCNT)
+            INTO    :i_cnt_ref_no
+            FROM    FFP_FO_FUTURES_PSTN FFP,FOD_FO_ORDR_DTLS FOD
+            WHERE   FOD.FOD_ORDR_RFRNC = :sql_fod_ordr_rfrnc
+            AND     FOD.FOD_CLM_MTCH_ACCNT = FFP.FFP_CLM_MTCH_ACCNT
+            AND     FOD.FOD_XCHNG_CD = FFP.FFP_XCHNG_CD
+            AND     FOD.FOD_PRDCT_TYP = FFP.FFP_PRDCT_TYP
+            AND     FOD.FOD_INDSTK = FFP.FFP_INDSTK
+            AND     FOD.FOD_UNDRLYNG = FFP.FFP_UNDRLYNG
+            AND     FOD.FOD_EXPRY_DT = FFP.FFP_EXPRY_DT
+            AND     FOD.FOD_EXER_TYP = FFP.FFP_EXER_TYP
+            AND     NVL(FFP.FFP_DLVRY_MODE_FLAG,'N') = 'Y'
+          	AND     (NVL(FFP.FFP_DLVRY_OBLGAMT_BLCKD,0) != 0
+          	OR      NVL(FFP.FFP_DLVRY_QTY_BLCKD,0) != 0);
+
+        if( SQLCODE != 0 )
+        {
+          fn_errlog( c_ServiceName, "S31110",SQLMSG, c_err_msg );
+          tpreturn(TPFAIL, ERR_BFR, (char *)c_err_msg, 0, 0 );
+        }
+
+        if ( i_cnt_ref_no > 0 )
+        {
+					continue;
+          fn_userlog( c_ServiceName,"Continue...for Future");
+          fn_errlog( c_ServiceName, "S31115", SQLMSG, c_err_msg  );
+          Fadd32( ptr_fml_buf, FFO_ERR_MSG, c_err_msg, 0 );
+        }
+			}
+			if( c_prdct_typ == 'O' )
+			{
+				EXEC SQL
+          SELECT count(FOD.FOD_CLM_MTCH_ACCNT)
+          INTO    :i_cnt_ref_no
+          FROM FOP_FO_OPTIONS_PSTN FOP,FOD_FO_ORDR_DTLS FOD
+          WHERE FOD.FOD_ORDR_RFRNC = :sql_fod_ordr_rfrnc
+          AND FOD.FOD_CLM_MTCH_ACCNT = FOP.FOP_CLM_MTCH_ACCNT
+          AND FOD.FOD_XCHNG_CD = FOP.FOP_XCHNG_CD
+          AND FOD.FOD_PRDCT_TYP = FOP.FOP_PRDCT_TYP
+          AND FOD.FOD_INDSTK = FOP.FOP_INDSTK
+          AND FOD.FOD_UNDRLYNG = FOP.FOP_UNDRLYNG
+          AND FOD.FOD_EXPRY_DT = FOP.FOP_EXPRY_DT
+          AND FOD.FOD_EXER_TYP =FOP.FOP_EXER_TYP
+          AND FOD.FOD_OPT_TYP = FOP.FOP_OPT_TYP
+          AND FOD.FOD_STRK_PRC = FOP.FOP_STRK_PRC
+          AND NVL(FOP.FOP_DLVRY_MODE_FLAG,'N') = 'Y'
+          AND (NVL(FOP.FOP_DLVRY_OBLGAMT_BLCKD,0) != 0
+          OR  NVL(FOP.FOP_DLVRY_QTY_BLCKD,0) != 0);
+
+      if( SQLCODE != 0 )
+      {
+        fn_errlog( c_ServiceName, "S31120",SQLMSG, c_err_msg );
+        tpreturn(TPFAIL, ERR_BFR, (char *)c_err_msg, 0, 0 );
+      }
+
+      if ( i_cnt_ref_no > 0 )
+      {
+        fn_userlog( c_ServiceName,"Continue...for Options");
+				continue;
+      }
+			}
+		}
+		
+		/*** Ver 1.5 End ***/	
+
+		int i_rollsprd_cnt = 0; /*** Ver 1.3 **/
+		if(sql_fod_spl_flag == 'O')  /** Ver 1.3 **/
+		{
+			i_rollsprd_cnt ++;
+			
+			if(DEBUG_MSG_LVL_5)
+			{
+				fn_userlog( c_ServiceName,"1st leg rollover_with_spread_ord[%d] ref:%s:",i_rollsprd_cnt,sql_fod_ordr_rfrnc);
+			}
+		}
+
+		i_returncode = fn_pack_vartofml (c_ServiceName,
+																		 c_err_msg,
+																		 &ptr_fml_buf,
+																		 9, /** changed from 8 to 8 in Ver 1.3 **/
+																		 FFO_EBA_MTCH_ACT_NO, ( char * )sql_fod_clm_mtch_accnt,
+																		 FFO_UNDRLYNG, ( char * )sql_fod_undrlyng,
+																		 FFO_EXPRY_DT, ( char * )sql_fod_expry_dt.arr,
+																		 FFO_PRDCT_TYP,( char * )&sql_fod_prdct_typ,
+																		 FFO_XCHNG_CD,( char * )sql_fod_xchng_cd,
+																		 FFO_ORDR_RFRNC,( char * )sql_fod_ordr_rfrnc,
+																		 FFO_PIPE_ID,( char * )sql_fod_pipe_id,
+																		 FFO_CTGRY_INDSTK,( char * )&sql_fod_indstk, 
+																		 FFO_SPL_FLG,( char * )&sql_fod_spl_flag);	/** Ver 1.3 **/
+		if( i_returncode == -1 )
+		{
+			fn_errlog( c_ServiceName, "S31125",LIBMSG, c_err_msg );
+			/** EXEC SQL CLOSE  cur_canord; ** Commented in Ver 1.1 **/
+			EXEC SQL CLOSE :sys_cursor; /** Ver 1.1 **/
+			EXEC SQL FREE  :sys_cursor; /** Ver 1.1 **/
+			tpfree((char *)ptr_fml_buf);
+			return FAILURE;
+		}
+	}
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog( c_ServiceName,"Total rollover with spread 1st leg orders count :%d:",i_rollsprd_cnt); /** Ver 1.3 **/
+		fn_userlog( c_ServiceName,"End of fn_get_canord_rs");
+	}	
+
+	return SUCCESS;			
+}

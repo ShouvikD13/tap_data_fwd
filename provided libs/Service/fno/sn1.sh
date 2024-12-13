@@ -1,0 +1,10 @@
+comp_c sfo_fos_trg
+comp_c sfo_exreq_ack
+comp_c sfo_enq_msg
+comp_c sfo_new_rout
+comp_c sfo_call_frwdB
+comp_c sfo_call_frwdA
+comp_c sfo_heckyl_find
+comp_c sfo_ftov
+comp_c_lzo sfo_brdlzo_rout
+comp_c sfo_cnt_dwld

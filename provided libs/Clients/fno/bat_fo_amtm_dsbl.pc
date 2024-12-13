@@ -1,0 +1,454 @@
+/************************************************************************************************/
+/*  PROGRAM : BAT_FO_AMTM_DSBL               											         										 	*/
+/*                                                                                              */ 
+/*  Description : Stop auto MTM if extra squareoff place by system throught Auto MTM process    */
+/*  Input Parameters : NFO / BFO                                                                */
+/*  Output Parameters : NA                                                                      */  
+/*  Author            : Sachin Birje                                                            */
+/*  Created on        : 01-Jul-2015                                                             */
+/*  Version           : Log                                                                     */ 
+/*  version           : 1.1 Future Trail Changes (Bhupendra Malik)                              */
+/************************************************************************************************/
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_ddr.h>
+#include <string.h>	
+#include <stdlib.h> 
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>   
+void BAT_FO_AMTM_DSBL ( int argc, char *argv[] )
+{
+	long int li_tot_rcrds;
+  int i_ch_val;
+  int i_trnsctn;
+	int i_cnt=0;
+
+  int  i_net_pos_qty=0;
+  int  i_xcptn_count=0;
+  int  i_order_rate=0;
+  long int li_cnt=0;
+  long l_buy_qty=0;
+  long l_sell_qty=0;
+
+  char c_trg_name[30];
+  char c_msg[256];
+  char c_filter[30];
+
+	char c_ServiceName [ 33 ];
+  char c_svc_name [ 33 ];
+  char c_err_msg [ 256 ];
+	char c_rqst_typ='\0';
+	char c_run_mode='\0';
+	char c_prc_flg='\0';		
+  char c_pos_flw='\0';
+  char c_sys_pos_flw='\0';
+
+  char c_clm_mtch_acnt [ 11 ];
+  char c_undrlyng [ 7 ];
+	char c_indstk='\0';
+	char c_cntrct_tag='\0';
+  char c_imtm_remarks [ 256 ];
+  char c_rout_str [ 4 ];
+	char c_ordr_ref[19]; /*** Ver 1.1 ***/
+
+  EXEC SQL BEGIN DECLARE SECTION;
+		sql_cursor sys_mtm_und;			
+		char	c_exg_stts ;
+  	long int l_report_no;
+  	char c_xchng_cd [ 4 ];
+		char c_prd_typ;
+  EXEC SQL END DECLARE SECTION;
+
+  EXEC SQL INCLUDE "table/exg_xchng_mstr.h";
+  EXEC SQL INCLUDE "table/par_systm_prmtr.h";
+
+  struct vw_tradebook st_tradebook;
+ 
+  strcpy ( c_ServiceName, argv[0] );
+
+	INITBATDBGLVL(argv[0]);    
+
+	sprintf ( c_msg, "Batch process %s started", argv[0] );
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	strcpy ( c_msg, "Creating data. Please wait ... " );
+
+  strcpy( c_xchng_cd, argv[2] );
+	fn_userlog(c_ServiceName,"Exchange Code :%s:",c_xchng_cd);
+
+  /*** For DDR routing of the service SFO_PRC_FIMTMRP ***/
+  fn_init_ddr_pop("NA", "NA", "NA");
+
+  EXEC SQL
+    SELECT  NVL(EXG_MAX_MRGNPLS_XCPTN_ALLWD,0),
+            PAR_PRFT_CHK_INTRVL_SEC,
+            PAR_MAX_PRFT_ORD_RATE
+    INTO    :sql_exg_max_mrgnpls_xcptn_allwd,
+            :sql_par_prft_chk_intrvl_sec,
+            :sql_par_max_prft_ord_rate
+    FROM    EXG_XCHNG_MSTR, PAR_SYSTM_PRMTR
+    WHERE   EXG_MKT_TYP   = 'D'
+    AND     EXG_XCHNG_CD  = :c_xchng_cd;
+
+  if( SQLCODE != 0 )
+  {
+   fn_errlog(c_ServiceName, "S31005", SQLMSG, c_err_msg);
+   return;
+  }
+
+  /*** Check for Extra System placed square off order more than open position ***/
+ 
+  EXEC SQL
+    DECLARE cur_auto_mtm_sqrf CURSOR FOR
+     SELECT DISTINCT FTD_CLM_MTCH_ACCNT,
+            FTD_XCHNG_CD,
+            FTD_PRDCT_TYP,
+            FTD_UNDRLYNG,
+            FTD_INDSTK,
+            FTD_EXPRY_DT,
+            FTD_OPT_TYP,
+            FTD_STRK_PRC,
+            TO_CHAR(MAX(FTD_TRD_DT), 'DD-Mon-YYYY HH24:MI:SS') TRD_DT,
+            FTD_TRD_FLW
+       FROM FTD_FO_TRD_DTLS,
+            FOD_FO_ORDR_DTLS
+      WHERE FOD_CLM_MTCH_ACCNT = FTD_CLM_MTCH_ACCNT
+        AND FOD_ORDR_RFRNC = FTD_ORDR_RFRNC
+        AND FOD_TRD_DT = trunc(FTD_TRD_DT)
+        AND FOD_CHANNEL ='SYS'
+        AND FOD_SPL_FLAG = 'M'  
+        AND FTD_PRDCT_TYP in ('F','P','O')
+        AND FTD_TRD_DT < SYSDATE
+        AND FTD_TRD_DT > (SYSDATE - (:sql_par_prft_chk_intrvl_sec/(24*60*60)))
+        AND NVL(FOD_SPN_FLG,'N') ='N'
+        AND FTD_XCHNG_CD = :c_xchng_cd
+        GROUP BY FTD_CLM_MTCH_ACCNT,
+                 FTD_XCHNG_CD,
+                 FTD_PRDCT_TYP,
+                 FTD_UNDRLYNG,
+                 FTD_INDSTK,
+                 FTD_EXPRY_DT,
+                 FTD_OPT_TYP,
+                 FTD_STRK_PRC,
+                 FTD_TRD_FLW;
+          
+   EXEC SQL OPEN cur_auto_mtm_sqrf;
+
+   if( SQLCODE != 0 )
+   {
+     fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_msg);
+     EXEC SQL CLOSE cur_auto_mtm_sqrf;
+     return;
+   }
+
+   while(1)
+   {
+     EXEC SQL
+      FETCH cur_auto_mtm_sqrf
+      INTO  :st_tradebook.c_cln_mtch_accnt,
+            :st_tradebook.c_xchng_cd,
+            :st_tradebook.c_prd_typ,
+            :st_tradebook.c_undrlyng,
+            :st_tradebook.c_ctgry_indstk,
+            :st_tradebook.c_expry_dt,
+            :st_tradebook.c_opt_typ,
+            :st_tradebook.l_strike_prc,
+            :st_tradebook.c_trd_dt,
+            :st_tradebook.c_trd_flw;
+    if(SQLCODE != 0)
+    {
+      if(SQLCODE == NO_DATA_FOUND)
+      {
+        fn_userlog(c_ServiceName,"No Data Found");
+        break;
+      }
+      fn_errlog(c_ServiceName, "S31015", SQLMSG, c_err_msg);
+      EXEC SQL CLOSE cur_auto_mtm_sqrf;
+      return;
+    }
+
+    EXEC SQL
+     SELECT SUM(BUY_TRD_QTY),
+            SUM(SELL_TRD_QTY)
+       INTO :l_buy_qty,
+            :l_sell_qty
+     FROM
+     ( 
+     SELECT nvl(sum(DECODE(FTD_TRD_FLW,'B',FTD_EXCTD_QTY)),0) BUY_TRD_QTY,
+            nvl( sum(DECODE(FTD_TRD_FLW,'S',FTD_EXCTD_QTY)),0) SELL_TRD_QTY 
+       FROM FTD_FO_TRD_DTLS
+      WHERE FTD_XCHNG_CD = :st_tradebook.c_xchng_cd
+        AND FTD_CLM_MTCH_ACCNT =:st_tradebook.c_cln_mtch_accnt
+        AND FTD_PRDCT_TYP =:st_tradebook.c_prd_typ
+        AND FTD_INDSTK =:st_tradebook.c_ctgry_indstk
+        AND FTD_UNDRLYNG =:st_tradebook.c_undrlyng
+        AND FTD_EXPRY_DT =:st_tradebook.c_expry_dt
+        AND FTD_OPT_TYP =:st_tradebook.c_opt_typ
+        AND FTD_STRK_PRC =:st_tradebook.l_strike_prc
+        AND FTD_TRD_DT <= to_date(:st_tradebook.c_trd_dt,'dd-Mon-yyyy hh24:mi:ss') 
+    UNION ALL
+     SELECT nvl(sum(DECODE(FTD_TRD_FLW,'B',FTD_EXCTD_QTY)),0) BUY_TRD_QTY,
+            nvl( sum(DECODE(FTD_TRD_FLW,'S',FTD_EXCTD_QTY)),0) SELL_TRD_QTY
+       FROM FTD_FO_TRD_DTLS_HSTRY
+      WHERE FTD_XCHNG_CD = :st_tradebook.c_xchng_cd
+        AND FTD_CLM_MTCH_ACCNT =:st_tradebook.c_cln_mtch_accnt
+        AND FTD_PRDCT_TYP =:st_tradebook.c_prd_typ
+        AND FTD_INDSTK =:st_tradebook.c_ctgry_indstk
+        AND FTD_UNDRLYNG =:st_tradebook.c_undrlyng
+        AND FTD_EXPRY_DT =:st_tradebook.c_expry_dt
+        AND FTD_OPT_TYP =:st_tradebook.c_opt_typ
+        AND FTD_STRK_PRC =:st_tradebook.l_strike_prc    
+    );
+   
+    if( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName, "S31020", SQLMSG, c_err_msg);
+      EXEC SQL CLOSE cur_auto_mtm_sqrf;
+      return;
+    }
+
+    fn_userlog(c_ServiceName,"Total Buy Quantity :%ld:",l_buy_qty);
+    fn_userlog(c_ServiceName,"Total Sell Quantity :%ld:",l_sell_qty);
+
+    if( l_buy_qty > l_sell_qty )
+    {
+      c_sys_pos_flw = 'B';
+    }
+    else
+    {
+      c_sys_pos_flw = 'S';
+    }
+
+    fn_userlog(c_ServiceName,"Consolidated Trade Level Flow :%c:",c_sys_pos_flw);
+    fn_userlog(c_ServiceName,"st_tradebook.c_trd_flw :%c:",st_tradebook.c_trd_flw);
+ 
+    if( c_sys_pos_flw == st_tradebook.c_trd_flw )
+    {
+       /** go for further checking at open position level **/ 
+    }   
+    else 
+    {
+      fn_userlog(c_ServiceName," trade cosolidated flag not same as current trade flag so skip "); 
+      continue;
+    }
+     
+    if( st_tradebook.c_prd_typ == 'F' || st_tradebook.c_prd_typ == 'P' )
+    {
+     EXEC SQL
+      SELECT FUP_UOPNPSTN_FLW
+        INTO :c_pos_flw
+        FROM FUP_FUT_UNDRLYNG_PSTN
+       WHERE FUP_CLM_MTCH_ACCNT = :st_tradebook.c_cln_mtch_accnt
+         AND FUP_XCHNG_CD = :st_tradebook.c_xchng_cd
+         AND FUP_PRDCT_TYP = :st_tradebook.c_prd_typ
+         AND FUP_INDSTK = :st_tradebook.c_ctgry_indstk
+         AND FUP_UNDRLYNG = :st_tradebook.c_undrlyng;
+     if( SQLCODE != 0 )
+     {
+       fn_errlog(c_ServiceName, "S31025", SQLMSG, c_err_msg);
+       EXEC SQL CLOSE cur_auto_mtm_sqrf;
+       return;
+     }
+    }       
+    else if( st_tradebook.c_prd_typ == 'O' )
+    {
+     EXEC SQL
+      SELECT FOP_OPNPSTN_FLW 
+        INTO :c_pos_flw
+        FROM FOP_FO_OPTIONS_PSTN
+       WHERE FOP_CLM_MTCH_ACCNT = :st_tradebook.c_cln_mtch_accnt 
+         AND FOP_XCHNG_CD =:st_tradebook.c_xchng_cd
+         AND FOP_PRDCT_TYP =:st_tradebook.c_prd_typ
+         AND FOP_INDSTK = :st_tradebook.c_ctgry_indstk
+         AND FOP_UNDRLYNG = :st_tradebook.c_undrlyng
+         AND FOP_EXPRY_DT = :st_tradebook.c_expry_dt
+         AND FOP_STRK_PRC = :st_tradebook.l_strike_prc 
+         AND FOP_OPT_TYP = :st_tradebook.c_opt_typ;
+     if( SQLCODE != 0 )
+     {
+       fn_errlog(c_ServiceName, "S31030", SQLMSG, c_err_msg);
+       EXEC SQL CLOSE cur_auto_mtm_sqrf;
+       return;
+     }
+         
+    }
+
+    fn_userlog(c_ServiceName,"Position Level Flow :%c:",c_pos_flw); 
+    fn_userlog(c_ServiceName,"Consolidated Trade Level Flow :%c:",c_sys_pos_flw);
+ 
+    if( c_pos_flw == c_sys_pos_flw )
+    {
+     fn_userlog(c_ServiceName,"System place quantity is greater then actual position.");
+     i_xcptn_count = i_xcptn_count + 1; 
+    }
+
+    if( i_xcptn_count > sql_exg_max_mrgnpls_xcptn_allwd )
+    {
+      fn_pst_trg ( c_ServiceName,
+                   "TRG_STOP_FOMTM_RCVCLNT",
+                   "TRG_STOP_FOMTM_RCVCLNT",
+                   c_xchng_cd);
+
+      fn_pst_trg ( c_ServiceName,
+                   "TRG_STOP_FOMTM_SNDCLNT",
+                   "TRG_STOP_FOMTM_SNDCLNT",
+                   c_xchng_cd);
+    }
+  } /** End of while loop **/
+
+
+  EXEC SQL CLOSE cur_auto_mtm_sqrf;
+
+  /** Order rate check in last 1 minute **/
+  
+  EXEC SQL
+  SELECT COUNT(1)
+    INTO :i_order_rate
+    FROM FOD_FO_ORDR_DTLS,CLM_CLNT_MSTR
+   WHERE FOD_CLM_MTCH_ACCNT = CLM_MTCH_ACCNT  
+    AND  FOD_TRD_DT = trunc(SYSDATE)
+    AND  FOD_XCHNG_CD = :c_xchng_cd
+    AND  FOD_PRDCT_TYP in ('F','P','O')
+    AND  FOD_CHANNEL ='SYS'
+    AND  Decode(:c_xchng_cd,'NFO',CLM_SPAN_ALLWD,'BFO',CLM_BSESPAN_ALLWD) !='N' 
+    AND  FOD_ORDR_STTS != 'E'
+    AND  FOD_TRD_DT > (sysdate - (1/(24*60)));
+
+    if( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName, "S31035", SQLMSG, c_err_msg);
+       return;     
+    } 
+
+    if(i_order_rate > sql_par_max_prft_ord_rate)
+    {
+      fn_pst_trg ( c_ServiceName,
+                   "TRG_STOP_FOMTM_RCVCLNT",
+                   "TRG_STOP_FOMTM_RCVCLNT",
+                   c_xchng_cd);
+
+      fn_pst_trg ( c_ServiceName,
+                   "TRG_STOP_FOMTM_SNDCLNT",
+                   "TRG_STOP_FOMTM_SNDCLNT",
+                   c_xchng_cd); 
+    }
+
+  /**
+    fn_pst_trg ( c_ServiceName,
+                   "TRG_STOP_FOMTM_RCVCLNT",
+                   "TRG_STOP_FOMTM_RCVCLNT",
+                   "NA");
+
+    fn_pst_trg ( c_ServiceName,
+                 "TRG_STOP_FOMTM_SNDCLNT",
+                   "TRG_STOP_FOMTM_SNDCLNT",
+                   "NA");
+  */
+  fn_userlog(c_ServiceName,"Process %s Ended ",c_ServiceName);	
+	/******** Ver 1.1 Starts ***************************/
+	EXEC SQL
+		DECLARE cur_prc_imp_rej CURSOR FOR
+		SELECT  FOD_ORDR_RFRNC
+		FROM		FOD_FO_ORDR_DTLS,
+						FXB_FO_XCHNG_BOOK,
+						FSP_FO_SYSTM_PRMTR
+		WHERE   FOD_PRCIMPV_FLG='Y'
+		AND     FOD_PRDCT_TYP='F'
+		AND     FOD_ORDR_STTS='O'
+		AND     FOD_TRD_DT=TRUNC(sysdate)
+		AND     FOD_ORDR_RFRNC=FXB_ORDR_RFRNC
+		AND     FXB_PRCIMPV_FLG=FOD_PRCIMPV_FLG
+		AND     FXB_MOD_TRD_DT=FOD_TRD_DT
+		AND     FXB_PLCD_STTS='J'
+		AND     FXB_RQST_TYP='M'
+		AND     FXB_XCHNG_CD=:c_xchng_cd
+		AND     FOD_CHANNEL='SYS'
+		GROUP BY FOD_ORDR_RFRNC,
+						 par_prcimp_rjct_cnt
+		HAVING  COUNT(FXB_PLCD_STTS) > par_prcimp_rjct_cnt;
+
+	EXEC SQL OPEN cur_prc_imp_rej;
+	
+	if(SQLCODE != 0)
+	{
+		fn_errlog(c_ServiceName, "S31040", SQLMSG, c_err_msg);
+    EXEC SQL CLOSE cur_prc_imp_rej;
+    return;		
+	}	
+	
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+	if ( i_trnsctn == -1 )
+	{
+		fn_errlog(c_ServiceName,"S31045",LIBMSG,c_err_msg);
+		return;
+	}
+	while(1)
+  {
+		MEMSET(c_ordr_ref);
+
+		EXEC SQl
+			FETCH cur_prc_imp_rej
+			INTO  :c_ordr_ref;
+
+		if(SQLCODE != 0)
+		{
+			if(SQLCODE == NO_DATA_FOUND)
+			{
+				fn_userlog(c_ServiceName,"In NO_DATA_FOUND");
+				break;
+			}
+			fn_errlog(c_ServiceName, "S31050", SQLMSG, c_err_msg);
+    	EXEC SQL CLOSE cur_prc_imp_rej;
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			return; 
+		}
+		
+		EXEC SQL
+		  UPDATE FOD_FO_ORDR_DTLS
+			SET    FOD_PRCIMPV_FLG='N'
+			WHERE  FOD_ORDR_RFRNC=:c_ordr_ref;
+		
+			if(SQLCODE != 0)
+			{
+				fn_errlog(c_ServiceName, "S31055", SQLMSG, c_err_msg);
+				EXEC SQL CLOSE cur_prc_imp_rej;
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				return;
+			}
+	 }
+	 EXEC SQL CLOSE cur_prc_imp_rej;
+	 i_trnsctn = fn_committran( c_ServiceName, i_trnsctn,c_err_msg);
+	 if ( i_trnsctn  == -1 )
+	 {
+			fn_errlog(c_ServiceName,"S31060",LIBMSG,c_err_msg);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			return;
+	 }
+	/******************* Ver 1.1 Ends *****************/
+  return;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+	fn_var = BAT_FO_AMTM_DSBL;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+	return 0;
+}

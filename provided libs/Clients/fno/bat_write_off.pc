@@ -1,0 +1,1083 @@
+/**********************************************************************************************************
+* Program     :   bat_write_off                                                                           *
+*                                                                                                         *
+* Description :   Write-off customer's outstanding balances.                                              *
+*                                                                                                         *
+* Input       :   No Inputs                                                                               *
+*                                                                                                         *
+* Output      :   Success/Failure                                                                         *
+*                                                                                                         *
+* Version     :   1.0   17-Sep-2014   New Release (Suraj Bharambe)                                        *
+*							:		1.1		21-Feb-2022 changes for CR-ISEC03-171481-BSE MF Star Related changes  reports (bhadresh)*
+**********************************************************************************************************/
+#include <stdio.h>      /* C Header File             */
+#include <stdlib.h>     /* C Header File             */
+#include<string.h>      /* C Header File             */
+#include <sqlca.h>      /* Oracle header file        */
+#include <atmi.h>       /* TUXEDO Header File        */
+#include <userlog.h>    /* TUXEDO Header File        */
+#include <fn_read_debug_lvl.h>
+#include <eba.h>
+#include <fo_fml_def.h>
+
+#define FAILED 'F'
+#define SUCCESS 'Y'
+#define MANUAL_RECONCILIATION "MR"
+#define DEBIT 'D' 
+#define CREDIT 'C' 
+#define DEBIT_WITHOUT_LIMIT 'Y'
+#define CASH_TYP 2 
+#define MARGIN_TYP 2 
+#define TOTAL_FML 10
+
+int fn_connect_tux ( char * );
+void fn_close_bat ( char * );
+void fn_upd_clnt_writeoff_dtls( char *, char, char *, long );
+void  fn_snd_stp_mail(char *);
+
+char  c_ServiceName[33];
+char  c_errmsg[256];
+char  c_tag[32];
+int 	i_returncode;
+
+FBFR32 *ptr_fml_Sbuffer;
+FBFR32 *ptr_fml_Rbuffer;
+
+void main(int argc, char* argv[])
+{
+  /*******************************
+  *    Variable Declaration      *
+  *******************************/
+	
+	EXEC SQL INCLUDE "table/cwd_clnt_writeoff_dtls.h";
+	EXEC SQL INCLUDE "table/eac_am_ctd_rcvry.h";
+	EXEC SQL INCLUDE "table/eld_em_lpc_dtls.h";
+	EXEC SQL INCLUDE "table/bdc_bnk_dbcr.h";
+	
+  char  c_event_msg[256];
+	char  c_success_flg;
+	char	c_dwl_flg;
+	char  c_fail_msg[LEN_CWD_REMARKS];
+	char  c_cwd_dr_cr_flg;
+
+	int		i_total;
+	int		i_loop;
+	int		i_rec_loop;
+	int		i_err[TOTAL_FML];
+	int   i_ferr[TOTAL_FML];
+
+	long	l_recvlen;
+
+	double d_bal_amt_diff;
+	double d_cwd_amount;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		varchar v_rowid[25];
+		varchar v_narration_id[3];
+	EXEC SQL END DECLARE SECTION;
+
+
+  /*******************************
+  *    Variable Initialization   *
+  *******************************/
+
+	ptr_fml_Sbuffer = (FBFR32 *)NULL;
+	ptr_fml_Rbuffer = (FBFR32 *)NULL;
+
+  MEMSET(c_ServiceName);
+  MEMSET(c_event_msg);
+  MEMSET(c_errmsg);
+  MEMSET(c_tag);
+  MEMSET(v_rowid);
+	MEMSET(c_fail_msg);
+	
+	c_success_flg = ' ';
+	sql_eac_prcss_flg	= ' ';
+	sql_eac_mtch_prcss_flg	= ' ';
+	sql_eac_bsnss_fld_flg	= ' ';
+
+	i_returncode 		= 0;
+	i_total      		= 0;
+	i_rec_loop   		= 0;
+	i_loop       		= 0;
+
+	l_recvlen    		= 0;
+	sql_cwd_run_no 	= 0;
+
+	d_bal_amt_diff 	= 0;
+	d_cwd_amount 		= 0;
+
+  INITBATDBGLVL(argv[0]);
+
+  strcpy(c_ServiceName, "bat_write_off");
+  sprintf( c_tag, "%s_na", "bat_write_off");
+
+	/*******************************
+  *    Connect to Tuxedo         *
+  *******************************/	
+
+  if(fn_connect_tux ( c_ServiceName ) == -1)
+  {
+    userlog("Unable to connect Tuxedo");
+    strcpy(c_event_msg, "System Error : Contact system support");
+    fn_bat_pst_msg(c_ServiceName, c_event_msg, c_tag);
+		fn_snd_stp_mail(c_ServiceName);
+    exit(-1);
+  }
+
+	/*******************************
+  *    Register batch program    *
+  *******************************/
+
+  if(fn_rgstr_bat('R', c_ServiceName, "NA", "BO") != 1)
+  {
+    sprintf(c_event_msg, "Process |%s| is already running", c_ServiceName);
+    fn_bat_pst_msg(c_ServiceName, c_event_msg, c_tag);
+		fn_snd_stp_mail(c_ServiceName);
+    tpclose();
+    tpterm();
+    exit(-1);
+  }
+
+  sprintf(c_event_msg, "BAT_WRITE_OFF process started......");
+  fn_bat_pst_msg(c_ServiceName, c_event_msg, c_tag);
+
+	/*******************************
+  *       Program Logic          *
+  *******************************/
+
+	/*** Allocating Send buffer ****/
+  ptr_fml_Sbuffer = (FBFR32 *)tpalloc("FML32", NULL, MIN_FML_BUF_LEN);
+  if(ptr_fml_Sbuffer == NULL)
+  {
+    errlog(c_ServiceName, "S31005", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		fn_bat_pst_msg(c_ServiceName, "System error : contact system support", c_tag );
+    fn_close_bat(c_ServiceName);
+    exit(-1);
+  }
+
+	/*** Allocating Receiving buffer ****/
+  ptr_fml_Rbuffer = (FBFR32 *)tpalloc("FML32", NULL, MIN_FML_BUF_LEN);
+  if(ptr_fml_Rbuffer == NULL)
+  {
+    errlog(c_ServiceName, "S31010", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		fn_bat_pst_msg(c_ServiceName, "System error : contact system support", c_tag );
+    fn_close_bat(c_ServiceName);
+    exit(-1);
+  }
+
+	i_returncode = fn_equ_begintran(c_ServiceName, DEF_USR, DEF_SSSN, c_errmsg);
+
+  if(i_returncode == -1)
+  {
+    errlog(c_ServiceName,"S31015",TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+		fn_bat_pst_msg( c_ServiceName, "System Error : contact system support", c_tag );
+    fn_close_bat(c_ServiceName);
+    exit(-1);
+  }
+
+	EXEC SQL
+		UPDATE 		PAR_SYSTM_PRMTR
+		SET 			PAR_BNK_RUN_NMBR = PAR_BNK_RUN_NMBR + 1
+		RETURNING PAR_BNK_RUN_NMBR
+		INTO			:sql_cwd_run_no;
+
+	if(SQLCODE != 0)
+  {
+    errlog(c_ServiceName, "S31020", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    fn_equ_aborttran( c_ServiceName, i_returncode, c_errmsg );
+    fn_bat_pst_msg(c_ServiceName, "System Error : contact system support", c_tag );
+    fn_close_bat(c_ServiceName);
+    exit(-1);
+  }
+
+	if(fn_equ_committran( c_ServiceName, DEF_USR, DEF_SSSN, i_returncode, c_errmsg ) == -1)
+  {
+    errlog(c_ServiceName,"S31025",TPMSG, DEF_USR, DEF_SSSN,c_errmsg);
+    fn_equ_aborttran( c_ServiceName, i_returncode, c_errmsg );
+		fn_bat_pst_msg(c_ServiceName, "System Error : contact system support", c_tag );
+    fn_close_bat(c_ServiceName);
+    exit(-1);
+  }
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		userlog("bat_write_off Run Number :%ld:",sql_cwd_run_no);
+	}
+
+	EXEC SQL
+		SELECT 	COUNT(*)
+		INTO		:i_total
+		FROM 		CWD_CLNT_WRITEOFF_DTLS
+		WHERE		TRUNC(CWD_ENTRY_DT) 	= TRUNC(SYSDATE)
+		AND			CWD_WRITEOFF_FLG 			= 'N';
+
+	if(SQLCODE != 0)
+ 	{
+   	errlog(c_ServiceName, "S31030", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+   	fn_bat_pst_msg(c_ServiceName, "System error : contact system support", c_tag );
+   	fn_close_bat(c_ServiceName);
+   	exit(-1);
+ 	}
+
+	sprintf(c_event_msg,"Total %d records to be processed..",i_total);
+	fn_bat_pst_msg(c_ServiceName, c_event_msg, c_tag );
+
+
+	for(i_rec_loop = 0; i_rec_loop < i_total; i_rec_loop ++)
+	{
+		MEMSET(sql_cwd_prdct_sgmnt);
+		MEMSET(sql_cwd_xchng_cd);
+		MEMSET(sql_cwd_mtch_accnt);
+		MEMSET(sql_cwd_trd_dt);
+		MEMSET(sql_cwd_xchng_sgmnt_cd);
+		MEMSET(sql_cwd_mdc_prdct_typ);
+		MEMSET(sql_cwd_mdc_from_dt);
+		MEMSET(sql_cwd_mdc_to_dt);
+		MEMSET(sql_cwd_mdc_stck_cd);
+		MEMSET(sql_cwd_remarks);
+		MEMSET(v_rowid);
+		MEMSET(c_fail_msg);
+
+		sql_cwd_sttlmnt_no 	= 0;
+
+		sql_cwd_amount 			= 0.0;
+		d_bal_amt_diff 			= 0.0;
+		d_cwd_amount 				= 0.0;
+
+		c_success_flg 							= ' ';
+		c_cwd_dr_cr_flg     				= ' ';
+		sql_cwd_dr_cr_flg 					= ' ';
+		sql_eac_prcss_flg 					= ' ';
+  	sql_eac_mtch_prcss_flg  		= ' ';
+  	sql_eac_bsnss_fld_flg 			= ' ';
+		sql_eld_prcs_flg						= ' ';
+		sql_eld_bsnss_fld_flg				= ' ';
+		sql_eld_mtch_prcs_flg				= ' ';
+		sql_bdc_prccsd_flg					= ' ';
+		sql_bdc_bsnss_fld_flg				= ' ';
+		
+		EXEC SQL
+			SELECT 	/*+ INDEX(CWD_CLNT_WRITEOFF_DTLS IDX_CWD_ENRTY_DT) */
+							CWD_PRDCT_SGMNT,
+							NVL(CWD_XCHNG_CD,'*'),
+							CWD_MTCH_ACCNT,
+							NVL(TO_CHAR(CWD_TRD_DT,'DD-Mon-YYYY'),'*'),
+							NVL(CWD_XCHNG_SGMNT_CD,'*'),
+							NVL(CWD_STTLMNT_NO,0),
+							NVL(CWD_MDC_PRDCT_TYP,'*'),
+							NVL(TO_CHAR(CWD_MDC_FROM_DT,'DD-Mon-YYYY'),'*'),
+							NVL(TO_CHAR(CWD_MDC_TO_DT,'DD-Mon-YYYY'),'*'),
+							NVL(CWD_MDC_STCK_CD,'*'),
+							NVL(CWD_AMOUNT,0),
+							CWD_DR_CR_FLG, 
+							ROWID
+			INTO		:sql_cwd_prdct_sgmnt,
+							:sql_cwd_xchng_cd,
+							:sql_cwd_mtch_accnt,
+							:sql_cwd_trd_dt,
+							:sql_cwd_xchng_sgmnt_cd,
+							:sql_cwd_sttlmnt_no,
+							:sql_cwd_mdc_prdct_typ,
+							:sql_cwd_mdc_from_dt,
+							:sql_cwd_mdc_to_dt,
+							:sql_cwd_mdc_stck_cd,
+							:sql_cwd_amount,
+							:sql_cwd_dr_cr_flg,
+							:v_rowid
+			FROM		CWD_CLNT_WRITEOFF_DTLS
+			WHERE  	CWD_WRITEOFF_FLG = 'N'
+			AND			TRUNC(CWD_ENTRY_DT) = TRUNC(SYSDATE)
+			AND			ROWNUM = 1;
+
+		if(SQLCODE != 0)
+  	{
+    	errlog(c_ServiceName, "S31035", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    	fn_bat_pst_msg(c_ServiceName, "System error : contact system support", c_tag );
+    	fn_close_bat(c_ServiceName);
+    	exit(-1);
+  	}
+
+		SETNULL(sql_cwd_prdct_sgmnt);
+		SETNULL(sql_cwd_trd_dt);
+		SETNULL(sql_cwd_mdc_from_dt);
+		SETNULL(sql_cwd_mdc_to_dt);
+		SETNULL(v_rowid);
+
+		rtrim(sql_cwd_mdc_prdct_typ);
+		rtrim(sql_cwd_mdc_stck_cd);
+		rtrim(sql_cwd_xchng_sgmnt_cd);
+
+		if(DEBUG_MSG_LVL_3)
+		{
+			userlog("bat_write_off CWD details :%s:%s:%s:%s:%s:%ld:%s:%s:%s:%s:%lf:%c:%ld:%s:",sql_cwd_prdct_sgmnt.arr,sql_cwd_xchng_cd,sql_cwd_mtch_accnt,sql_cwd_trd_dt.arr,sql_cwd_xchng_sgmnt_cd,sql_cwd_sttlmnt_no,sql_cwd_mdc_prdct_typ,sql_cwd_mdc_from_dt.arr,sql_cwd_mdc_to_dt.arr,sql_cwd_mdc_stck_cd,sql_cwd_amount,sql_cwd_dr_cr_flg,sql_cwd_run_no,v_rowid.arr);
+		}
+
+		if(strcmp (sql_cwd_prdct_sgmnt.arr, "MDC") == 0)
+		{
+			sprintf(c_event_msg,"Processing record %s-%s-%s-%s",sql_cwd_prdct_sgmnt.arr,sql_cwd_mdc_prdct_typ,sql_cwd_mtch_accnt,sql_cwd_mdc_from_dt.arr);
+		}
+		else
+		{
+		 	sprintf(c_event_msg,"Processing record %s-%s-%s-%s",sql_cwd_prdct_sgmnt.arr,sql_cwd_xchng_cd,sql_cwd_mtch_accnt,sql_cwd_trd_dt.arr);
+		}
+
+		fn_bat_pst_msg(c_ServiceName, c_event_msg, c_tag );
+
+		i_returncode = 0;
+	
+		i_returncode = fn_equ_begintran(c_ServiceName, DEF_USR, DEF_SSSN, c_errmsg);
+
+  	if(i_returncode == -1)
+  	{
+   		errlog(c_ServiceName,"S31040",TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+   		fn_bat_pst_msg( c_ServiceName, "System error : contact system support", c_tag );
+   		fn_close_bat(c_ServiceName);
+   		exit(-1);
+  	}	
+
+		if( strcmp(sql_cwd_prdct_sgmnt.arr, "EQ") == 0 )
+		{
+			if(DEBUG_MSG_LVL_3)
+			{
+				userlog("bat_write_off Inside EQ : checking Obligation");
+			}		
+
+			EXEC SQL
+				SELECT 	ABS(BDC_BAL_AMNT - :sql_cwd_amount),
+								NVL(BDC_PRCCSD_FLG,'N'),
+								NVL(BDC_BSNSS_FLD_FLG,'N')
+				INTO		:d_bal_amt_diff,
+								:sql_bdc_prccsd_flg,
+								:sql_bdc_bsnss_fld_flg
+				FROM 		BDC_BNK_DBCR
+				WHERE 	BDC_CLNT_MTCH_ACCNT 	= :sql_cwd_mtch_accnt
+				AND 		BDC_XCHNG_CD 					= :sql_cwd_xchng_cd
+				AND 		BDC_SGMNT_CD 					= :sql_cwd_xchng_sgmnt_cd
+				AND 		BDC_STTLMNT_NMBR 			= :sql_cwd_sttlmnt_no
+				AND 		BDC_DB_CR_FLG 				= :sql_cwd_dr_cr_flg;
+
+			if(SQLCODE != 0)
+  		{
+    		errlog(c_ServiceName, "S31045", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+				c_success_flg = FAILED;
+				strcpy(c_fail_msg,"Error occured while processing record.");
+				fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);	
+				continue;
+  		}
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				userlog("%s :%lf:%c:%c",c_ServiceName,d_bal_amt_diff,sql_bdc_prccsd_flg,sql_bdc_bsnss_fld_flg);
+			}
+
+			if(d_bal_amt_diff  > 0.01)
+			{
+				errlog(c_ServiceName, "S31050", "write off and obligation amount mismatch.", DEF_USR, DEF_SSSN, c_errmsg);
+				c_success_flg = FAILED;
+				strcpy(c_fail_msg,"write off and obligation amount mismatch.");
+				fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);	
+				continue;
+			}
+
+			d_cwd_amount = (sql_cwd_dr_cr_flg == DEBIT) ? (sql_cwd_amount * -1) : sql_cwd_amount;
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				userlog("bat_write off Calling upd_limit_details-1 :%lf:",d_cwd_amount);
+			}
+
+			if( upd_limit_details( sql_cwd_mtch_accnt, sql_cwd_xchng_cd, sql_cwd_xchng_sgmnt_cd,
+														 sql_cwd_sttlmnt_no, "WRITE-OFF", d_cwd_amount, DEF_USR, DEF_SSSN,
+														 c_ServiceName, c_errmsg, 'M', MANUAL_RECONCILIATION, CASH_TYP) == -1)
+			{
+				errlog(c_ServiceName, "S31055", LIBMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+			} 
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				userlog("bat_write off updating BDC_BNK_DBCR");
+			}
+
+			/* BDC_PRCCSD_FLG Marked as 'F' (FUlly recovered) and rec will be not picked for accounting entry */
+
+			EXEC SQL
+				UPDATE 	BDC_BNK_DBCR
+				SET 		BDC_BAL_AMNT 				= BDC_BAL_AMNT - :sql_cwd_amount,
+								BDC_PRCCSD_FLG			= 'F',
+								BDC_WRITEOFF_FLG 		= 'Y'
+				WHERE 	BDC_CLNT_MTCH_ACCNT = :sql_cwd_mtch_accnt
+				AND 		BDC_XCHNG_CD 				= :sql_cwd_xchng_cd
+				AND 		BDC_SGMNT_CD 				= :sql_cwd_xchng_sgmnt_cd
+				AND 		BDC_STTLMNT_NMBR 		= :sql_cwd_sttlmnt_no
+				AND 		BDC_DB_CR_FLG 			= :sql_cwd_dr_cr_flg;
+
+			if(SQLCODE != 0)
+  		{
+    		errlog(c_ServiceName, "S31060", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+				c_success_flg = FAILED;
+				strcpy(c_fail_msg,"Error occured while processing record.");
+				fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);	
+				continue;
+  		}
+			
+			if(DEBUG_MSG_LVL_3)
+			{
+				userlog("bat_write_off BDC_BNK_DBCR [%ld] row updated", sqlca.sqlerrd[2]);
+				userlog("bat_write off Exiting EQ for :%s:",sql_cwd_mtch_accnt);
+			}
+
+		}
+		else if( strcmp(sql_cwd_prdct_sgmnt.arr, "EM") == 0 )
+		{
+			if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write_off Inside EM : checking Obligation");
+      }
+
+      EXEC SQL
+				SELECT 	ABS(EAC_BAL_AMT - :sql_cwd_amount),
+								NVL(EAC_PRCSS_FLG,'N'),
+								NVL(EAC_MTCH_PRCSS_FLG,'N'),
+								NVL(EAC_BSNSS_FLD_FLG,'N')
+				INTO		:d_bal_amt_diff,
+								:sql_eac_prcss_flg,
+								:sql_eac_mtch_prcss_flg,
+								:sql_eac_bsnss_fld_flg
+				FROM 		EAC_AM_CTD_RCVRY
+				WHERE 	EAC_CLM_MTCH_ACCNT			= :sql_cwd_mtch_accnt
+				AND 		EAC_STLMNT_NMBR					= :sql_cwd_sttlmnt_no
+				AND 		EAC_DBCR_FLG						= :sql_cwd_dr_cr_flg
+				AND 		EAC_XCHNG_CD 						= :sql_cwd_xchng_cd;
+		
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31065", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				userlog("%s :%lf:%c:%c:%c:",c_ServiceName,d_bal_amt_diff,sql_eac_prcss_flg,sql_eac_mtch_prcss_flg,sql_eac_bsnss_fld_flg);
+			}
+
+      if(d_bal_amt_diff  > 0.01)
+      {
+        errlog(c_ServiceName, "S31070", "write off and obligation amount mismatch.", DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"write off and obligation amount mismatch.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+			/* Dr/Cr flag value always will be DEBIT in EM */
+      d_cwd_amount = (sql_cwd_dr_cr_flg == DEBIT) ? (sql_cwd_amount * -1) : sql_cwd_amount;
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write off Calling upd_limit_details-2 :%lf:",d_cwd_amount);
+      }
+
+      if( upd_limit_details( sql_cwd_mtch_accnt, sql_cwd_xchng_cd, sql_cwd_xchng_sgmnt_cd,
+                             sql_cwd_sttlmnt_no, "WRITE-OFF",d_cwd_amount,DEF_USR, DEF_SSSN,
+                             c_ServiceName, c_errmsg, 'M', MANUAL_RECONCILIATION, MARGIN_TYP) == -1)
+      {
+        errlog(c_ServiceName, "S31075", "Failed while limit updation", DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write off updating EAC_AM_CTD_RCVRY");
+      }
+
+			/* update EAC_PRCSS_FLG as 'F'(Fully recoverd) to avoid bank hit
+					and update EAC_MTCH_PRCSS_FLG as 'P'(POSTED) so that this record will be not picked for acc entry*/
+
+      EXEC SQL
+				UPDATE 	EAC_AM_CTD_RCVRY
+				SET 		EAC_BAL_AMT					= EAC_BAL_AMT - :sql_cwd_amount,
+								EAC_PRCSS_FLG				=	'F',													/* Marked as Fully recovered */
+								EAC_MTCH_PRCSS_FLG	=	'P',													/* Marked as acc entry posted */
+								EAC_WRITEOFF_FLG 		= 'Y'
+				WHERE 	EAC_CLM_MTCH_ACCNT 	= :sql_cwd_mtch_accnt
+				AND 		EAC_XCHNG_CD 				= :sql_cwd_xchng_cd
+				AND 		EAC_STLMNT_NMBR 		= :sql_cwd_sttlmnt_no
+				AND 		EAC_DBCR_FLG 				= :sql_cwd_dr_cr_flg;
+
+
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31080", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+				userlog("bat_write_off EAC_AM_CTD_RCVRY [%ld] row updated", sqlca.sqlerrd[2]);
+        userlog("bat_write off Exiting EM for :%s:",sql_cwd_mtch_accnt);
+      }
+		}
+		else if( strcmp(sql_cwd_prdct_sgmnt.arr, "LPC") == 0 )
+		{
+			if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write_off Inside LPC : checking Obligation");
+      }
+
+      EXEC SQL
+				SELECT 	ABS(ELD_BAL_AMT - :sql_cwd_amount),
+								NVL(ELD_PRCS_FLG,'N'),
+								NVL(ELD_BSNSS_FLD_FLG,'N'),
+								NVL(ELD_MTCH_PRCS_FLG,'N')
+				INTO		:d_bal_amt_diff,	
+								:sql_eld_prcs_flg,
+								:sql_eld_bsnss_fld_flg,
+								:sql_eld_mtch_prcs_flg
+				FROM 		ELD_EM_LPC_DTLS
+				WHERE 	ELD_CLM_MTCH_ACCNT	= :sql_cwd_mtch_accnt
+				AND 		ELD_STLMNT_NMBR			= :sql_cwd_sttlmnt_no
+				AND 		ELD_XCHNG_CD 				= :sql_cwd_xchng_cd
+				AND			ELD_RUN_DATE				= :sql_cwd_trd_dt;
+
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31085", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        userlog("%s :%lf:%c:%c:%c:",c_ServiceName,d_bal_amt_diff,sql_eld_prcs_flg,sql_eld_bsnss_fld_flg,sql_eld_mtch_prcs_flg);
+      }
+
+      if(d_bal_amt_diff  > 0.01)
+      {
+        errlog(c_ServiceName, "S31090", "write off and obligation amount mismatch.", DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"write off and obligation amount mismatch.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+			/* Dr/Cr flag value always will be DEBIT in LPC*/
+      d_cwd_amount = (sql_cwd_dr_cr_flg == DEBIT) ? (sql_cwd_amount * -1) : sql_cwd_amount;
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write off Calling upd_limit_details-3 :%lf:",d_cwd_amount);
+      }
+
+      if( upd_limit_details( sql_cwd_mtch_accnt, sql_cwd_xchng_cd, sql_cwd_xchng_sgmnt_cd,
+                             sql_cwd_sttlmnt_no, "WRITE-OFF",d_cwd_amount,DEF_USR, DEF_SSSN,
+                             c_ServiceName, c_errmsg, 'M', MANUAL_RECONCILIATION, MARGIN_TYP) == -1)
+      {
+        errlog(c_ServiceName, "S31095", "Failed while limit updation", DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write off updating ELD_EM_LPC_DTLS");
+      }
+
+			/* update ELD_PRCS_FLG as 'F'(Fully recoverd) to avoid bank hit
+					and update ELD_MTCH_PRCS_FLG as 'P'(POSTED), hence this record will not be picked for acc entry */
+
+      EXEC SQL
+				UPDATE 	ELD_EM_LPC_DTLS
+				SET 		ELD_BAL_AMT 				= ELD_BAL_AMT - :sql_cwd_amount,
+								ELD_PRCS_FLG				=	'F',
+								ELD_MTCH_PRCS_FLG		= 'P',
+								ELD_WRITEOFF_FLG 		= 'Y'
+				WHERE 	ELD_CLM_MTCH_ACCNT 	= :sql_cwd_mtch_accnt
+				AND 		ELD_STLMNT_NMBR 		= :sql_cwd_sttlmnt_no
+				AND 		ELD_XCHNG_CD 				= :sql_cwd_xchng_cd
+				AND			ELD_RUN_DATE				= :sql_cwd_trd_dt;
+
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31100", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+				userlog("bat_write_off ELD_EM_LPC_DTLS [%ld] row updated", sqlca.sqlerrd[2]);
+        userlog("bat_write off Exiting LPC for :%s:",sql_cwd_mtch_accnt);
+      }
+		}
+		else if( strcmp(sql_cwd_prdct_sgmnt.arr, "MDC") == 0 )
+		{
+			if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write_off Inside MDC : checking Obligation");
+      }
+
+      EXEC SQL
+				SELECT 	ABS((MDC_TOT_AMT - MDC_BNK_UPD_AMT) - :sql_cwd_amount)
+				INTO		:d_bal_amt_diff
+				FROM 		MDC_MISC_DR_CR
+				WHERE 	MDC_CLM_MTCH_ACCNT	= :sql_cwd_mtch_accnt
+				AND 		MDC_PRDCT_TYP				= :sql_cwd_mdc_prdct_typ
+				AND 		trunc(MDC_FROM_DT) 	= :sql_cwd_mdc_from_dt		/*1.1 added trunc*/
+				AND 		MDC_TO_DT 					= :sql_cwd_mdc_to_dt
+				AND 		MDC_DR_CR_FLG 			= :sql_cwd_dr_cr_flg
+				AND 		MDC_STCK_CD 				= :sql_cwd_mdc_stck_cd;
+
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31105", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(d_bal_amt_diff  > 0.01)
+      {
+        errlog(c_ServiceName, "S31110", "write off and obligation amount mismatch.", DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"write off and obligation amount mismatch.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write off updating MDC table :%lf:",sql_cwd_amount);
+      }
+
+			/* Update MDC_MTCH_STTS as 'W', hence this rec will not be picked for accounting entry */
+
+      EXEC SQL
+				UPDATE 	MDC_MISC_DR_CR
+				SET 		MDC_BNK_UPD_AMT 			= MDC_BNK_UPD_AMT + :sql_cwd_amount,
+								MDC_MTCH_STTS					= 'W',
+								MDC_WRITEOFF_FLG 			= 'Y'
+				WHERE 	MDC_CLM_MTCH_ACCNT		= :sql_cwd_mtch_accnt
+				AND 		MDC_PRDCT_TYP					= :sql_cwd_mdc_prdct_typ
+				AND 		trunc(MDC_FROM_DT) 		= :sql_cwd_mdc_from_dt		/*1.1 added trunc*/
+				AND 		MDC_TO_DT 						= :sql_cwd_mdc_to_dt
+				AND 		MDC_DR_CR_FLG 				= :sql_cwd_dr_cr_flg
+				AND 		MDC_STCK_CD 					= :sql_cwd_mdc_stck_cd;
+
+
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31115", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+				userlog("bat_write_off MDC_MISC_DR_CR [%ld] row updated", sqlca.sqlerrd[2]);
+        userlog("bat_write off Exiting MDC for :%s:",sql_cwd_mtch_accnt);
+      }
+		}
+		else if( strcmp(sql_cwd_prdct_sgmnt.arr, "CDX") == 0 )
+		{
+			if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write_off Inside CDX : checking Obligation");
+      }
+
+      EXEC SQL
+				SELECT  ABS((CBD_DC_AMT -  CBD_PI_PO_AMT -  CBD_INT_ADJ_AMT) - :sql_cwd_amount)
+				INTO 		:d_bal_amt_diff
+				FROM 		CBD_CDX_BNK_DBCR
+				WHERE 	CBD_XCHNG_CD 				= :sql_cwd_xchng_cd
+				AND 		CBD_CLM_MTCH_ACCNT 	= :sql_cwd_mtch_accnt
+				AND 		CBD_DC_FLG 					= :sql_cwd_dr_cr_flg
+				AND 		CBD_TRD_DT 					= :sql_cwd_trd_dt;
+
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31120", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+      if(d_bal_amt_diff  > 0.01)
+      {
+        errlog(c_ServiceName, "S31125", "write off and obligation amount mismatch.", DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"write off and obligation amount mismatch.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+			c_cwd_dr_cr_flg = (sql_cwd_dr_cr_flg == DEBIT) ? CREDIT : DEBIT;
+			/* Note : amount should be positive for SCD_UPD_LIMITS */
+      d_cwd_amount = (sql_cwd_dr_cr_flg == DEBIT) ? (sql_cwd_amount * -1) : sql_cwd_amount;
+			c_dwl_flg = DEBIT_WITHOUT_LIMIT;
+			strcpy(sql_cwd_remarks.arr,"write off");
+			strcpy(v_narration_id.arr,"Z2");
+
+			SETLEN(sql_cwd_remarks);
+			SETLEN(v_narration_id);
+
+      if(DEBUG_MSG_LVL_3)
+      {
+				userlog(":%s:%S:%c:%lf:%c:%s:%s:%s:",sql_cwd_xchng_cd,sql_cwd_trd_dt.arr,c_cwd_dr_cr_flg,d_cwd_amount,c_dwl_flg,sql_cwd_mtch_accnt,sql_cwd_remarks.arr,v_narration_id.arr);
+        userlog("bat_write off adding details to send buffer");
+      }
+
+			Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+			Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+
+			INIT(i_err, TOTAL_FML);
+			INIT(i_ferr, TOTAL_FML);
+
+			i_err	[0] = Fadd32(ptr_fml_Sbuffer, FFO_XCHNG_CD, (char *)sql_cwd_xchng_cd, 0);
+      i_ferr[0]	= Ferror32;
+      i_err	[1] = Fadd32(ptr_fml_Sbuffer, FFO_TRD_DT, (char *)sql_cwd_trd_dt.arr, 0);
+      i_ferr[1] = Ferror32;
+      i_err	[2] = Fadd32(ptr_fml_Sbuffer, FFO_DR_CR_FLG, (char *)&c_cwd_dr_cr_flg, 0);
+      i_ferr[2] = Ferror32;
+      i_err	[3] = Fadd32(ptr_fml_Sbuffer, FFO_AMOUNT, (char *)&d_cwd_amount, 0);
+      i_ferr[3] = Ferror32;
+      i_err	[4] = Fadd32(ptr_fml_Sbuffer, FFO_DWL_FLG, (char *)&c_dwl_flg, 0);
+      i_ferr[4] = Ferror32;
+      i_err	[5] = Fadd32(ptr_fml_Sbuffer, FFO_EBA_MTCH_ACT_NO, (char *)sql_cwd_mtch_accnt, 0);
+      i_ferr[5] = Ferror32;
+      i_err	[6] = Fadd32(ptr_fml_Sbuffer, FFO_REMARKS, (char *)sql_cwd_remarks.arr, 0);
+      i_ferr[6] = Ferror32;
+      i_err	[7] = Fadd32(ptr_fml_Sbuffer, FFO_NARRATION_ID, (char *)v_narration_id.arr, 0);
+      i_ferr[7] = Ferror32;
+		
+			for(i_loop = 0; i_loop < 8 ; i_loop++)
+      {
+        if(i_err[i_loop] == -1)
+        {
+        	errlog(c_ServiceName, "S31130", "", DEF_USR, DEF_SSSN, c_errmsg);
+        	c_success_flg = FAILED;
+        	strcpy(c_fail_msg,"Error occured while processing records.");
+        	fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        	continue;
+        }
+      }
+
+      if(tpcall("SCD_UPD_LIMITS", (char *)ptr_fml_Sbuffer, 0, (char **)&ptr_fml_Rbuffer, &l_recvlen, 0) == -1)
+      {
+        if(TPCODE != TPESVCFAIL)
+        {
+          errlog(c_ServiceName, "S31135", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        }
+        else
+        {
+          if(Fget32(ptr_fml_Rbuffer, FFO_ERR_MSG, 0, c_errmsg, 0) == -1)
+          {
+            errlog(c_ServiceName, "S31140", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+          }
+        }
+				userlog("bat_write_off %s",c_errmsg);
+				c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing records.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }	
+
+			EXEC SQL
+				UPDATE  CBD_CDX_BNK_DBCR
+				SET 		CBD_PI_PO_AMT 			= CBD_PI_PO_AMT + :sql_cwd_amount,
+								CBD_WRITEOFF_FLG 		= 'Y'
+				WHERE 	CBD_XCHNG_CD 				= :sql_cwd_xchng_cd
+				AND 		CBD_CLM_MTCH_ACCNT 	= :sql_cwd_mtch_accnt
+				AND 		CBD_DC_FLG 					= :sql_cwd_dr_cr_flg
+				AND 		CBD_TRD_DT 					= :sql_cwd_trd_dt;
+
+      if(SQLCODE != 0)
+      {
+        errlog(c_ServiceName, "S31145", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing record.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }
+
+			if(DEBUG_MSG_LVL_3)
+			{
+				userlog("bat_write_off CBD_CDX_BNK_DBCR [%ld] row updated", sqlca.sqlerrd[2]);
+        userlog("bat_write off Exiting CDX for :%s:",sql_cwd_mtch_accnt);
+			}
+		}
+		else if( strcmp(sql_cwd_prdct_sgmnt.arr, "FNO") == 0 )
+		{
+			if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write_off Inside FNO : adding details to send buffer");
+      }
+
+			Finit32(ptr_fml_Sbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Sbuffer));
+			Finit32(ptr_fml_Rbuffer, (FLDLEN32) Fsizeof32(ptr_fml_Rbuffer));
+
+			INIT(i_err, TOTAL_FML);
+			INIT(i_ferr, TOTAL_FML);
+
+			i_err	[0] = Fadd32(ptr_fml_Sbuffer, FFO_XCHNG_CD, (char *)sql_cwd_xchng_cd, 0);
+      i_ferr[0]	= Ferror32;
+      i_err	[1] = Fadd32(ptr_fml_Sbuffer, FFO_TRD_DT, (char *)sql_cwd_trd_dt.arr, 0);
+      i_ferr[1] = Ferror32;
+      i_err	[2] = Fadd32(ptr_fml_Sbuffer, FFO_EBA_MTCH_ACT_NO, (char *)sql_cwd_mtch_accnt, 0);
+      i_ferr[2] = Ferror32;
+      i_err	[3] = Fadd32(ptr_fml_Sbuffer, FFO_PI_PO_AMT, (char *)&sql_cwd_amount, 0);
+      i_ferr[3] = Ferror32;
+      i_err	[4] = Fadd32(ptr_fml_Sbuffer, FFO_DR_CR_FLG, (char *)&sql_cwd_dr_cr_flg, 0);
+      i_ferr[4] = Ferror32;
+		
+			for(i_loop = 0; i_loop < 5 ; i_loop++)
+      {
+        if(i_err[i_loop] == -1)
+        {
+        	errlog(c_ServiceName, "S31150", "", DEF_USR, DEF_SSSN, c_errmsg);
+        	c_success_flg = FAILED;
+        	strcpy(c_fail_msg,"Error occured while processing records.");
+        	fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        	continue;
+        }
+      }
+
+      if(tpcall("SFO_WRITE_OFF", (char *)ptr_fml_Sbuffer, 0, (char **)&ptr_fml_Rbuffer, &l_recvlen, 0) == -1)
+      {
+        if(TPCODE != TPESVCFAIL)
+        {
+          errlog(c_ServiceName, "S31155", TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+        }
+        else
+        {
+          if(Fget32(ptr_fml_Rbuffer, FFO_ERR_MSG, 0, c_errmsg, 0) == -1)
+          {
+            errlog(c_ServiceName, "S31160", FMLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+          }
+        }
+				userlog("bat_write_off %s",c_errmsg);
+				c_success_flg = FAILED;
+        strcpy(c_fail_msg,"Error occured while processing records.");
+        fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+        continue;
+      }	
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        userlog("bat_write off Exiting FNO for :%s:",sql_cwd_mtch_accnt);
+      }
+		}
+		else
+		{
+			errlog(c_ServiceName,"S31165","Invalid Product segment", DEF_USR, DEF_SSSN, c_errmsg);
+    	fn_equ_aborttran( c_ServiceName, i_returncode, c_errmsg );
+      fn_bat_pst_msg( c_ServiceName, "System Error : contact system support", c_tag );
+      fn_close_bat(c_ServiceName);
+      exit(-1);
+		}
+
+		/* Add entry in My Messages for client on successful write-off */
+
+		EXEC SQL
+			INSERT INTO CSM_CLNT_SPEC_MSG
+			(
+				 	CSM_MTCH_ACCNT,
+        	CSM_UPD_DT,
+        	CSM_MSG_TYPE,
+        	CSM_MESSAGE,
+        	CSM_NEW
+			)
+			VALUES
+			(
+					:sql_cwd_mtch_accnt,
+					SYSDATE,
+					'WO',
+					'WriteOff successful. Amount:'||:sql_cwd_amount,
+					'N'
+			);	
+
+		if(SQLCODE != 0)
+    {
+     	errlog(c_ServiceName, "S31170", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+      c_success_flg = FAILED;
+      strcpy(c_fail_msg,"Error occured while processing record.");
+      fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+      continue;
+    }
+
+		c_success_flg = SUCCESS;
+		strcpy(c_fail_msg,"success");
+
+		fn_upd_clnt_writeoff_dtls(v_rowid.arr,c_success_flg,c_fail_msg,sql_cwd_run_no);
+	
+		if(strcmp (sql_cwd_prdct_sgmnt.arr, "MDC") == 0)
+		{
+			sprintf(c_event_msg,"Processing completed for record %s-%s-%s-%s",sql_cwd_prdct_sgmnt.arr,sql_cwd_mdc_prdct_typ,sql_cwd_mtch_accnt,sql_cwd_mdc_from_dt.arr);
+		}
+		else
+		{
+		 	sprintf(c_event_msg,"Processing completed for record %s-%s-%s-%s",sql_cwd_prdct_sgmnt.arr,sql_cwd_xchng_cd,sql_cwd_mtch_accnt,sql_cwd_trd_dt.arr);
+		}
+
+		fn_bat_pst_msg(c_ServiceName, c_event_msg, c_tag );
+
+		if(DEBUG_MSG_LVL_3)
+		{
+			userlog("bat_write off processing completed for :%s:",sql_cwd_mtch_accnt);
+		}
+		
+	} /* End of for loop */
+		
+	strcpy(c_event_msg, "BAT_WRITE_OFF Completed successfully....");
+  fn_bat_pst_msg(c_ServiceName, c_event_msg, c_tag );
+
+	/*******************************
+  *      Unregister Program      *
+  *******************************/
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    userlog("BAT_WRITE_OFF Completed successfully....");
+  }
+
+  fn_close_bat(c_ServiceName);
+  exit(1);
+}
+
+void fn_upd_clnt_writeoff_dtls(char *c_rowid, char c_success_flg,char *c_fail_msg, long l_run_no)
+{
+	if(DEBUG_MSG_LVL_3)
+	{
+		userlog("bat_write_off Updating CWD table :%s:%c:%s:%ld:",c_rowid,c_success_flg,c_fail_msg,l_run_no);
+	}
+
+	if(c_success_flg == FAILED )
+	{
+		fn_equ_aborttran( c_ServiceName, i_returncode, c_errmsg );	
+	
+		i_returncode = fn_equ_begintran(c_ServiceName, DEF_USR, DEF_SSSN, c_errmsg);
+
+ 		if(i_returncode == -1)
+ 		{
+ 			errlog(c_ServiceName,"S31175",TPMSG, DEF_USR, DEF_SSSN, c_errmsg);
+ 			fn_bat_pst_msg( c_ServiceName, "System Error : contact system support", c_tag );
+ 			fn_close_bat(c_ServiceName);
+ 			exit(-1);
+ 		}	
+	}
+
+	EXEC SQL
+		UPDATE 	CWD_CLNT_WRITEOFF_DTLS
+		SET			CWD_WRITEOFF_FLG 		= :c_success_flg,
+						CWD_WRITEOFF_UPD_DT = SYSDATE,
+						CWD_REMARKS 				= :c_fail_msg,
+						CWD_RUN_NO 					= :l_run_no
+		WHERE		ROWID 							= :c_rowid;
+
+	if(SQLCODE != 0)
+  {
+    errlog(c_ServiceName, "S31180", SQLMSG, DEF_USR, DEF_SSSN, c_errmsg);
+    fn_bat_pst_msg(c_ServiceName, "System Error : contact system support", c_tag );
+    fn_close_bat(c_ServiceName);
+    exit(-1);
+  }
+
+	if(fn_equ_committran( c_ServiceName, DEF_USR, DEF_SSSN, i_returncode, c_errmsg ) == -1)
+ 	{
+   	errlog(c_ServiceName,"S31185",TPMSG, DEF_USR, DEF_SSSN,c_errmsg);
+   	fn_equ_aborttran( c_ServiceName, i_returncode, c_errmsg );
+   	fn_bat_pst_msg(c_ServiceName, "System Error : contact system support", c_tag );
+   	fn_close_bat(c_ServiceName);
+   	exit(-1);
+ 	}
+	
+}
+
+int fn_connect_tux (char *c_ServiceName)
+{
+  TPINIT *ptr_st_tpinfo = (TPINIT *)NULL;
+
+  if(c_ServiceName[0] == NULL)
+  {
+    errlog ( c_ServiceName, "S31190", "Check Program name", DEF_USR, DEF_SSSN, c_err_msg );
+    return -1;
+  }
+
+  ptr_st_tpinfo = (TPINIT *) tpalloc ( "TPINIT", NULL, TPINITNEED( 0 ) );
+  if ( ptr_st_tpinfo == NULL )
+  {
+    errlog ( c_ServiceName, "S31195", TPMSG, DEF_USR, DEF_SSSN, c_err_msg );
+    return ( -1 );
+  }
+
+  if (tuxgetenv("ORA_GRP") == NULL)
+  {
+    errlog(c_ServiceName,"S31200", TPMSG, DEF_USR, DEF_SSSN, c_err_msg);
+    tpfree ( (char *)ptr_st_tpinfo );
+    return ( -1 );
+  }
+
+  strcpy ( ptr_st_tpinfo->passwd, "\0" );
+  strcpy ( ptr_st_tpinfo->usrname, c_ServiceName );
+  strcpy ( ptr_st_tpinfo->grpname, tuxgetenv("ORA_GRP") );
+  ptr_st_tpinfo->flags = 0;
+
+  if ( tpinit ((TPINIT *) ptr_st_tpinfo ) == -1 )
+  {
+    errlog ( c_ServiceName, "S31205", TPMSG, DEF_USR, DEF_SSSN, c_err_msg );
+    tpfree ( (char *)ptr_st_tpinfo );
+    return ( -1 );
+  }
+
+  tpfree ( (char *) ptr_st_tpinfo );
+
+  if(tpopen() == -1)
+  {
+    errlog(c_ServiceName, "S31210", TPMSG, (char *)DEF_USR, DEF_SSSN, c_err_msg);
+    tpterm();
+    return ( -1 );
+  }
+
+  return 0;
+}
+
+void fn_close_bat(char *c_ServiceName)
+{
+  fn_rgstr_bat('U', c_ServiceName, "NA", "BO");
+	fn_snd_stp_mail(c_ServiceName);
+	tpfree((char *)ptr_fml_Sbuffer);
+	tpfree((char *)ptr_fml_Rbuffer);
+  tpclose();
+  tpterm();
+}
+
+void fn_snd_stp_mail(char* c_ServiceName)
+{
+  char c_command[256];
+  sprintf(c_command, "%s/sh_scripts/write_off_outstanding_balances_mailer.sh", tuxgetenv("HOME"));
+  system(c_command);
+  return;
+}

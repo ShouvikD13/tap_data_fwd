@@ -1,0 +1,622 @@
+/*************************************************************************************************/
+/*  File			      : bat_cal_immm.pc																														 */
+/*  									    																																			 */
+/* 													    																																 */
+/*  Description     : This program will calculate the initial margin(IM) and minimum margin(MM)  */
+/*                    for futures , options and future plus for all underlying.                  */
+/*														    																															 */
+/*															    																														 */
+/*																    																												   */
+/*  Calling Programs: None																																			 */
+/*																																															 */
+/*																																															 */
+/*  Called From     : Backoffice front end																											 */
+/*  																																														 */
+/*  																																														 */
+/*  Author          : Vidyayini Krish 																													 */
+/* 																																														   */
+/*  Created on      : 21-Jul-2009																																 */
+/*  																																														 */
+/*																																															 */
+/*  Modification History: 																																			 */
+/* 		 																																													 */
+/*  Date    Version No.    Modified by    Modification Description                               */	
+/*  05-Oct-2009   Ver 1.1  Vidyayini Krish  Removed Rounding off                                 */
+/*																																															 */
+/*************************************************************************************************/
+
+/* Standards include files*/
+
+#include<stdio.h>           /* C Header File */
+#include<stdlib.h>          /* C Header File */
+#include<sqlca.h>           /* Oracle header file */
+#include <atmi.h>           /* TUXEDO Header File */
+#include <userlog.h>        /* TUXEDO Header File */
+#include <fml32.h>          /* TUXEDO Header File */
+#include <fml_def.h>
+#include <string.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_collateral.h>
+#include <fn_battmpt.h>
+#include <time.h>
+
+#define TOTAL_ELEMENTS_IN_FILE 14
+#define LEN_ROW_ID  25
+
+void trim(char *str);
+int fn_upd_srd_status(char *str);
+
+void BAT_CAL_IMMM ( int argc, char *argv[] )
+{
+
+	char c_err_msg [ 256 ];
+  char c_event_msg[256];	
+	char c_xchng_cd [ 4 ];
+	char c_msg[256];
+	char c_date [ LEN_DATE ];
+	char c_ServiceName[33];
+	char c_pt_in_time[45];
+	char c_portfolio[30];
+	char c_und_ctgry;
+	char c_stck_cd[7];
+
+	int  i_trnsctn;
+	int  i_ch_val;
+	int  i;
+	int  i_srd_count=0;
+	int  i_count=0;
+	int  i_return_val=0;
+
+	long l_run_no=0;
+
+	double d_long_fut_val=0.0;
+	double d_short_fut_val=0.0;
+	double d_net_fut_val=0.0;
+	double d_long_opt_val=0.0;
+	double d_short_opt_val=0.0;
+	double d_net_opt_val=0.0;
+  double d_tot_val=0.0;
+	double d_SPAN_req_maint=0.0;
+	double d_total_req_maint=0.0;
+	double d_SPAN_req_init=0.0;
+	double d_total_req_init=0.0;
+	double d_fut_opt_min_mrgn=0.0;
+	double d_fut_pls_min_mrgn=0.0;
+	double d_fut_opt_ini_mrgn=0.0;
+	double d_fut_pls_ini_mrgn=0.0;
+	double d_span_mrgn=0.0;
+	double d_fut_pls_span_mrgn=0.0;
+	double d_init_mrgn_prcnt=0.0;
+	double d_min_mrgn_prcnt=0.0;
+  double d_fp_init_mrgn_prcnt=0.0;
+  double d_fp_min_mrgn_prcnt=0.0;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+	varchar sql_rowid[LEN_ROW_ID];
+	EXEC SQL END DECLARE SECTION;
+
+	time_t time_stmp;
+	FILE   *fpfile;
+
+	EXEC SQL INCLUDE "table/fum_fo_undrlyng_mstr.h";
+
+	struct vw_err_msg *ptr_st_err_msg;
+	ptr_st_err_msg = (struct vw_err_msg *)tpalloc ("VIEW32","vw_err_msg",
+                                                         sizeof ( struct vw_err_msg ) );
+
+  if ( ptr_st_err_msg ==  NULL )
+  {
+    fn_errlog ( c_ServiceName, "S31005", TPMSG, c_event_msg );
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+  }	
+
+	INITBATDBGLVL(argv[0]);
+
+  strcpy ( c_ServiceName, argv[0] );
+
+	sprintf ( c_msg, "Batch process %s started", argv[0] );	
+  fn_userlog( c_ServiceName,"Usage is :NFO NFO NA Date RunNo" );	
+	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	strcpy( c_xchng_cd, argv[2] );
+  strcpy( c_date, argv[4] );
+	trim(c_date);
+	sscanf( argv[5] ,"%ld", &l_run_no );
+
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    sprintf ( c_msg, "upload date |%s|", argv[4]); 
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+  }
+
+	EXEC SQL
+			 SELECT COUNT(*)
+			 INTO   :i_srd_count
+			 FROM   srd_span_risk_dtls
+			 WHERE  srd_run_nmbr = :l_run_no
+			 AND    trunc(srd_trd_dt) =  to_date(:c_date,'dd-Mon-YYYY'); 
+
+	if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+  {
+    fn_userlog( c_ServiceName,"Unable to get Risk Master details" );
+    sprintf ( c_msg , "Unable to get Risk Master details" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    fn_errlog(c_ServiceName,  "S31010", SQLMSG, c_err_msg);
+		exit;
+  }
+
+
+	for( i_count = 0; i_count < i_srd_count; i_count++ )
+	{
+
+		MEMSET(sql_rowid);
+
+		EXEC SQL
+				 SELECT  srd_pt_intm,
+								 srd_nse_stck_cd,
+								 srd_long_fut_val,
+								 srd_short_fut_val,
+								 srd_net_fut_val,
+								 srd_long_opt_val,
+								 srd_short_opt_val,
+								 srd_net_opt_val,
+								 srd_total_val,
+								 srd_span_req_maint,
+								 srd_total_req_maint,
+								 srd_span_req_ini,
+								 srd_total_req_ini,
+								 srd_span_risk_dtls.ROWID
+      	 INTO    :c_pt_in_time,
+							   :c_portfolio,
+							   :d_long_fut_val,
+							   :d_short_fut_val,
+							   :d_net_fut_val,
+							   :d_long_opt_val,
+							   :d_short_opt_val,
+							   :d_net_opt_val,
+							   :d_tot_val,
+					  	   :d_SPAN_req_maint,
+							   :d_total_req_maint,
+							   :d_SPAN_req_init,
+							   :d_total_req_init,
+							   :sql_rowid
+				 FROM    srd_span_risk_dtls
+				 WHERE   srd_run_nmbr = :l_run_no
+				 AND     trunc(srd_trd_dt) =  to_date(:c_date,'dd-Mon-YYYY')
+				 AND     srd_prcsd_flg NOT IN  ('Y','F')
+				 AND     ROWNUM < 2
+				 ORDER BY srd_nse_stck_cd;
+
+			if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+      {
+					   fn_userlog( c_ServiceName,"Unable to get Risk Master details" );
+    			   sprintf ( c_msg , "Unable to get Risk Master details" );
+    			   fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+						 fn_errlog(c_ServiceName,  "S31015", SQLMSG, c_err_msg);
+						 break;
+      }
+
+      if( SQLCODE == NO_DATA_FOUND )
+      {
+        break;
+      }
+
+		trim(c_pt_in_time);
+		trim(c_portfolio);
+		SETNULL(sql_rowid);
+							
+		fn_userlog( c_ServiceName," Point in Time is :%s:", c_pt_in_time );
+		fn_userlog( c_ServiceName," Portfolio is :%s:", c_portfolio );
+		fn_userlog( c_ServiceName," Long Fut Value is :%lf:", d_long_fut_val );
+		fn_userlog( c_ServiceName," Short Fut Value is :%lf:", d_short_fut_val );
+		fn_userlog( c_ServiceName," Net Fut Value is :%lf:", d_net_fut_val );
+		fn_userlog( c_ServiceName," Long Opt Value is :%lf:", d_long_opt_val );
+		fn_userlog( c_ServiceName," Short Opt Value is :%lf:", d_short_opt_val );
+		fn_userlog( c_ServiceName," Net Opt Value is :%lf:", d_net_opt_val );
+		fn_userlog( c_ServiceName," Total Value is :%lf:", d_tot_val );
+		fn_userlog( c_ServiceName," SPAN Required Margin for maintenance is :%lf:", d_SPAN_req_maint );
+		fn_userlog( c_ServiceName," Total Required for maintenance is :%lf:", d_total_req_maint );
+		fn_userlog( c_ServiceName," SPAN required for initial margin is :%lf:", d_SPAN_req_init );
+		fn_userlog( c_ServiceName," Total Required Initially is :%lf:", d_total_req_init );
+
+	  fn_userlog( c_ServiceName,"Exchange code is :%s:",c_xchng_cd );
+
+		EXEC SQL
+				 SELECT sem_stck_cd 
+				 INTO   :c_stck_cd
+				 FROM   sem_stck_map 
+				 WHERE  trim(sem_map_vl) = :c_portfolio
+				 AND    sem_entty = 1; /* Entty is 1 for NSE */
+
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Could not select stock code" );
+      sprintf ( c_msg , "Could not select from SEM table" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"No data for NSE stockcode" );
+      sprintf ( c_msg , "No data in SEM table" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+	  }
+
+		EXEC SQL
+				 SELECT fum_undrlyng_ctgry
+				 INTO   :c_und_ctgry
+				 FROM   fum_fo_undrlyng_mstr
+				 WHERE  fum_xchng_cd = :c_xchng_cd
+				 AND    fum_undrlyng = :c_stck_cd
+				 AND    fum_prdct_typ = 'F';
+
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Could not select category" );
+      sprintf ( c_msg , "Could not select from SEM table" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"No data for category of stock" );
+      sprintf ( c_msg , "No data in SEM table" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+
+	  EXEC SQL
+				SELECT	spm_init_mrgn_prcnt,
+							  spm_min_mrgn_prcnt,
+								spm_fp_init_mrgn_prcnt,
+							  spm_fp_min_mrgn_prcnt 
+				INTO    :d_init_mrgn_prcnt,
+								:d_min_mrgn_prcnt,
+								:d_fp_init_mrgn_prcnt,
+								:d_fp_min_mrgn_prcnt
+			   FROM   spm_span_parameter_mstr
+			   WHERE  spm_undrlyng_ctgry = :c_und_ctgry;
+
+	  if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Could not select margin percentages" );
+      sprintf ( c_msg , "Could not select from SEM table" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"No data for margin percentages of stock" );
+      sprintf ( c_msg , "No data in SEM table" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+
+		fn_userlog( c_ServiceName,"Underlying Category is :%c:",c_und_ctgry );
+		fn_userlog( c_ServiceName,"Initial Margin percent is :%lf:",d_init_mrgn_prcnt );
+		fn_userlog( c_ServiceName,"Minimum Margin percent is :%lf:",d_min_mrgn_prcnt );
+		fn_userlog( c_ServiceName,"FP Initial Margin percent is :%lf:",d_fp_init_mrgn_prcnt );
+		fn_userlog( c_ServiceName,"FP Minimum Margin percent is :%lf:",d_fp_min_mrgn_prcnt );
+
+
+		/* Calculation for Futures and Options Begins */
+
+		EXEC SQL
+		     SELECT floor(round(((:d_total_req_init/:d_tot_val)*100),2))
+				 INTO   :d_span_mrgn
+				 FROM   dual;
+
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Rounding off failed" );
+      sprintf ( c_msg , "Rounding off failed" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Rounding off failed 1" );
+      sprintf ( c_msg , "Rounding off failed 1" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+
+		fn_userlog( c_ServiceName,"Span Margin percent is :%lf:",d_span_mrgn );
+
+		if( c_und_ctgry == 'N' )
+		{
+		  d_fut_opt_min_mrgn  = d_span_mrgn + d_min_mrgn_prcnt;
+			d_fut_opt_ini_mrgn  = d_span_mrgn + d_init_mrgn_prcnt;
+		}
+		else if( c_und_ctgry == 'I' )
+    {
+      d_fut_opt_min_mrgn  = d_span_mrgn + d_min_mrgn_prcnt;
+      d_fut_opt_ini_mrgn  = d_span_mrgn + d_init_mrgn_prcnt;
+    }
+		else if( c_und_ctgry == 'O' )
+    {
+      d_fut_opt_min_mrgn  = d_span_mrgn + d_min_mrgn_prcnt;
+      d_fut_opt_ini_mrgn  = d_span_mrgn + d_init_mrgn_prcnt;
+    }
+		else
+		{
+		  fn_userlog( c_ServiceName,"Invalid underlying category" );
+		  break;
+		}
+
+		/* Calculation for Future Plus Begins */
+
+    EXEC SQL
+         /* SELECT ceil(round(((:d_total_req_init/:d_tot_val)*100),2))  Ver 1.1 Removed Round function */
+				 SELECT ceil(((:d_total_req_init/:d_tot_val)*100))
+         INTO   :d_fut_pls_span_mrgn
+         FROM   dual;
+
+    if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Rounding off failed" );
+      sprintf ( c_msg , "Rounding off failed" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Rounding off failed 1" );
+      sprintf ( c_msg , "Rounding off failed 1" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+
+    if( c_und_ctgry == 'N' )
+    {
+      d_fut_pls_min_mrgn  = d_fut_pls_span_mrgn - d_fp_min_mrgn_prcnt;
+      d_fut_pls_ini_mrgn  = d_fut_pls_span_mrgn;
+    }
+    else if( c_und_ctgry == 'I' )
+    {
+      d_fut_pls_min_mrgn  = d_fut_pls_span_mrgn - d_fp_min_mrgn_prcnt;
+      d_fut_pls_ini_mrgn  = d_fut_pls_span_mrgn;
+    }
+    else if( c_und_ctgry == 'O' )
+    {
+      d_fut_pls_min_mrgn  = d_fut_pls_span_mrgn - d_fp_min_mrgn_prcnt;
+      d_fut_pls_ini_mrgn  = d_fut_pls_span_mrgn;
+    }
+    else
+    {
+      fn_userlog( c_ServiceName,"Invalid underlying category" );
+      continue; 
+    }
+
+		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  	if(i_trnsctn == -1)
+  	{
+    	sprintf ( c_msg, "  Error beginning a transaction");
+    	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    	fn_errlog( c_ServiceName, "S31020", TPMSG, c_event_msg);
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+			return;
+  	} 	
+
+		EXEC SQL
+				 INSERT INTO fmm_fo_mrgn_mstr_log
+										 (
+												fmm_undrlyng_bskt_id,
+												fmm_prdct_typ,
+												fmm_undrlyng,
+												fmm_init_mrgn_prcnt,
+												fmm_min_mrgn_prcnt,
+												fmm_somc_prcnt,
+												fmm_avm_prcnt,
+												fmm_spread_mrgn,
+												fmm_min_spread_mrgn,
+												fmm_update_date,
+												fmm_thrshd_mrgn_prcnt,
+												fmm_fp_multplr,
+												fmm_span_mrgn_prcnt,
+												fmm_run_no
+										 )
+										 (
+											  SELECT fmm_undrlyng_bskt_id,
+															 fmm_prdct_typ,
+															 fmm_undrlyng,
+															 fmm_init_mrgn_prcnt,
+															 fmm_min_mrgn_prcnt,
+															 fmm_somc_prcnt,
+															 fmm_avm_prcnt,
+															 fmm_spread_mrgn,
+															 fmm_min_spread_mrgn,
+															 sysdate,
+															 fmm_thrshd_mrgn_prcnt,
+															 fmm_fp_multplr,
+															 fmm_span_mrgn_prcnt,
+															 :l_run_no
+												FROM   fmm_fo_mrgn_mstr
+												WHERE  fmm_undrlyng = :c_stck_cd
+										 );
+
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Insert into Audit trail failed" );
+      sprintf ( c_msg , "Insert into Audit trail failed" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"No data for inserting into audit trail" );
+      sprintf ( c_msg , "No data for inserting into audit trail" );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+
+		EXEC SQL
+				 UPDATE fmm_fo_mrgn_mstr
+				 SET    fmm_init_mrgn_prcnt = :d_fut_opt_ini_mrgn,
+							  fmm_min_mrgn_prcnt  = :d_fut_opt_min_mrgn,	
+								fmm_thrshd_mrgn_prcnt = :d_fut_pls_min_mrgn,
+								fmm_span_mrgn_prcnt = :d_fut_pls_ini_mrgn						
+				 WHERE  fmm_undrlyng = :c_stck_cd;
+	
+		if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Updating margin values failed" );
+      sprintf ( c_msg , "Updating margin values failed" );
+			fn_errlog(c_ServiceName,  "S31025", SQLMSG, c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"No data for updating in master" );
+      sprintf ( c_msg , "No data for updating in master" );
+			fn_errlog(c_ServiceName,  "S31030", SQLMSG, c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+
+		EXEC SQL
+         UPDATE srd_span_risk_dtls
+         SET    srd_prcsd_flg = 'Y'
+         WHERE  ROWID = :sql_rowid;
+
+    if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"Updating margin values failed" );
+      sprintf ( c_msg , "Updating margin values failed" );
+			fn_errlog(c_ServiceName,  "S31035", SQLMSG, c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			i_return_val =  fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+    if( SQLCODE == NO_DATA_FOUND )
+    {
+      fn_userlog( c_ServiceName,"No data for updating in master" );
+      sprintf ( c_msg , "No data for updating in master" );
+			fn_errlog(c_ServiceName,  "S31040", SQLMSG, c_err_msg);
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+      continue;
+    }
+
+
+		if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    {
+    	sprintf ( c_msg, "  Error commiting transaction");
+    	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    	fn_errlog( c_ServiceName, "S31045", TPMSG, c_event_msg);
+    	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			i_return_val = fn_upd_srd_status(sql_rowid.arr);
+			return;
+    }
+
+
+	}/* End of For Loop */	
+
+
+	sprintf ( c_msg, "Batch process %s ended", argv[0] );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  return;
+
+} /* End of BAT_CAL_IMMM */
+
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_CAL_IMMM;
+  return 0;
+}
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}
+
+void trim(char *str)
+{
+	int i=0;
+  char *ptr;
+  ptr = str;
+	while ( *str != '\0' )
+	{
+    if (*str != ' ' && *str != '\t')	
+		{
+			i=i+1;
+    	*ptr++=*str;
+		}
+		str++;
+	}
+  *ptr='\0';
+	while( i != 0 )
+	{
+		ptr--;
+		i=i-1;
+	}
+  str = ptr;
+}
+int fn_upd_srd_status(char *sql_rowid)
+{
+
+	int i_trnsctn ;
+  char c_err_msg[256];
+	char c_ServiceName[33];
+
+	strcpy(c_ServiceName,"bat_cal_immm");
+
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31050",LIBMSG,c_err_msg);
+  }
+
+	EXEC SQL
+			 UPDATE srd_span_risk_dtls
+			 SET    srd_prcsd_flg = 'F'
+			 WHERE  ROWID = :sql_rowid;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31055",SQLMSG,c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return(FAILURE);
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31060",LIBMSG,c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return(FAILURE);
+  }
+	return( SUCCESS);
+}

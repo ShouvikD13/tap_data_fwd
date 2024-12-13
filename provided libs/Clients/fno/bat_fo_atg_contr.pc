@@ -1,0 +1,633 @@
+/**************************************************************************************/
+/*  Program         : BAT_FO_ATG_CONTR                                 								*/
+/*																																										*/
+/*	Description			:	This batch process calls the service SFO_ATG_CONTR to get				*/
+/*										various contract details from the CLASS & insert the same 			*/
+/*										details in the corresponding table at the EBA side. 						*/
+/*                                                                          					*/
+/*	Input						:	None																														*/
+/*                                                                          					*/
+/*	Output					:	Success / Failure																								*/
+/*                                                                          					*/
+/*	Log							:																																	*/
+/**************************************************************************************/
+/*                                                                          					*/
+/*          Ver 1.0 - 15-12-2008	SKS	ATG-Contract-Dtls	New Release 									*/
+/*          Ver 1.1 - 06-01-2010	CRAT31845- To display dealer's address (Amisha)			*/
+/*          Ver 1.2 - 14-08-2014 Common Contract Note Changes(Sandip)            		*/
+/**************************************************************************************/
+
+/* C Header File */
+#include <string.h>
+#include <stdlib.h>
+#include <sqlca.h>
+
+/* TUXEDO Header File */
+#include <atmi.h>
+#include <fo_fml_def.h>
+
+/* Application Header */
+#include <eba.h>
+#include <fn_log.h>
+#include <fn_fo_atg.h>
+#include <fn_tuxlib.h>
+#include <fn_read_debug_lvl.h>
+
+/* Macros */
+#define SRVCNM_SZ       33
+#define ERRMSG_SZ       256
+#define TOTAL_FML				10
+#define TOTAL_RQST  		3
+
+int Z;
+#define INIT(x,y)       for(Z=0; Z< y; Z++) x[Z] =0
+
+union un_atg_cntrct
+{
+	struct fno_cntrct_mstr		st_var_cntrct_mstr;
+	struct fno_cntrct_dtls		st_var_cntrct_dtls;
+	struct fno_annx_dtls			st_var_anxr_dtls;
+};
+
+void main ( int argc , char *argv[] )
+{
+	/* Local Variables */
+	TPINIT 	*ptr_tpinfo;
+	FBFR32  *ptr_fml_Sbuf;
+	FBFR32  *ptr_fml_Rbuf;
+	char		*ptr_car_rbuf;
+	char 		c_ServiceName[SRVCNM_SZ];
+	char		c_tag[SRVCNM_SZ+3];
+	char 		c_err_msg[ERRMSG_SZ];
+	char		c_rqst_typ[TOTAL_RQST+1];
+	int			i_trnsctn;
+	int			i_rqst_loop;
+	int			i_fml_occur;
+	int			i_total_occur;
+	int			i_total_rec;
+	int			i_occur_loop;
+	int			i_recds_per_occur;
+	int			i_recds_per_rqst;
+	int			i_ret_val;
+	int			i_err[TOTAL_FML];
+	int			i_ferr[TOTAL_FML];
+	int			i_fget_loop;
+	long		l_Rbuf_len;
+	long		l_carr_buf_len;
+	long		l_buf_len;
+
+	/* function declaration */
+	int   fn_validate_rec ( char *, char **, char * );
+	int 	fo_populate_cnm ( char *, char **, long, int, char * );
+	int 	fo_populate_cnd ( char *, char **, long, int, char * );
+	int 	fo_populate_cad ( char *, char **, long, int, char * );
+	void 	fn_exit ( char *, int, FBFR32 **, FBFR32 **, char ** );
+
+	/* Initialization */
+	INITBATDBGLVL ( argv[0] );
+	
+	/* Get the input arguments */
+	MEMSET ( c_ServiceName );
+	strcpy ( c_ServiceName, argv[0] );	
+
+	/* Create the pipe */
+  if( fn_create_pipe() == -1)
+	{
+		printf ( "Unable to create pipe." );
+  	exit(-1);
+	}
+
+	sprintf( c_tag, "%s_%s", c_ServiceName, "na" );
+
+	/* Allocate space to typed buffer pointer */
+	ptr_tpinfo = ( TPINIT * ) tpalloc ( "TPINIT", NULL, TPINITNEED ( 0 ) );
+	if ( ptr_tpinfo == NULL )
+  {
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+		fn_errlog ( c_ServiceName, "S31005", TPMSG, c_err_msg );
+    exit ( -1 );
+  }
+	
+	/* Check if ORA_GRP group is present in the system */
+	if ( tuxgetenv( "ORA_GRP" ) == NULL )
+  {
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+		fn_errlog ( c_ServiceName, "S31010", TPMSG, c_err_msg );
+    tpfree ( ( char * ) ptr_tpinfo );
+    exit ( -1 );
+  }
+
+	/* Prepare the values */
+	strcpy ( ptr_tpinfo->passwd, "\0" );
+  strcpy ( ptr_tpinfo->cltname, "\0" );
+  strcpy ( ptr_tpinfo->grpname, tuxgetenv( "ORA_GRP" ) );
+  strcpy ( ptr_tpinfo->usrname, c_ServiceName );
+	ptr_tpinfo->flags = 0;
+
+	/* Join the system application */
+	if ( tpinit( (TPINIT *) ptr_tpinfo ) == -1 )
+  {
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+		fn_errlog ( c_ServiceName, "S31015", TPMSG, c_err_msg );
+    tpfree ( (char *) ptr_tpinfo );
+    exit ( -1 );
+  }
+
+	/* Free the space allocated to typed buffer pointer */
+	tpfree ( (char *) ptr_tpinfo );
+
+	/* Open the Resource Manager */
+	if ( tpopen() == -1 )
+  {
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+		fn_errlog ( c_ServiceName, "S31020", TPMSG, c_err_msg );
+    tpterm ( );
+    exit ( -1 );
+  }
+
+	/* Allocate space to send buffer */
+	ptr_fml_Sbuf = (FBFR32 *) tpalloc ( "FML32", NULL, MIN_FML_BUF_LEN );
+	if ( ptr_fml_Sbuf == NULL )
+	{
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+    fn_errlog ( c_ServiceName, "S31025", TPMSG, c_err_msg );
+    tpclose ( );
+    tpterm ( );
+    exit ( -1 );
+	}
+
+	/* Calculate receive buffer length */
+	l_Rbuf_len = 		sizeof ( union un_atg_cntrct ) * MAX_REC
+								+	sizeof ( long ) * MAX_REC
+								+	sizeof ( l_buf_len ) * MAX_REC
+								+	300;
+
+	/* Allocate space to receive buffer */
+	ptr_fml_Rbuf = (FBFR32 *) tpalloc ( "FML32", NULL, l_Rbuf_len );
+	if ( ptr_fml_Rbuf == NULL )
+	{
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+    fn_errlog ( c_ServiceName, "S31030", TPMSG, c_err_msg );
+		tpfree ( (char *)ptr_fml_Sbuf );
+    tpclose ( );
+    tpterm ( );
+    exit ( -1 );
+	}
+
+	/* Calculate carray buffer len */
+	l_carr_buf_len =  sizeof ( union un_atg_cntrct ) * MAX_REC;
+
+	/* Allocate space to the CARRAY buffer pointer based on buffer length received. */
+	ptr_car_rbuf = tpalloc ( "CARRAY", NULL, l_carr_buf_len );
+	if ( ptr_car_rbuf == NULL )
+	{
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+ 		fn_errlog ( c_ServiceName, "S31035", TPMSG, c_err_msg );
+		tpfree ( (char *)ptr_fml_Sbuf );
+		tpfree ( (char *)ptr_fml_Rbuf );
+		tpclose ( );
+    tpterm ( );
+    exit ( -1 );
+	}
+
+	/* Register the batch */
+	if ( fn_rgstr_bat( 'R', c_ServiceName, "NFO", "BO" ) != 1 )
+  {
+		fn_bat_pst_msg ( c_ServiceName, "System Error : 1 instance already running.", c_tag );
+    fn_errlog ( c_ServiceName, "S31040", LIBMSG, c_err_msg );
+		tpfree ( (char *)ptr_fml_Sbuf );
+		tpfree ( (char *)ptr_fml_Rbuf );
+		tpfree ( ptr_car_rbuf );
+    tpclose ( );
+    tpterm ( );
+    exit ( -1 );
+  }
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog( c_ServiceName, "Batch registered. Getting the contract details to be uploaded.");
+	}
+
+	/* Begin the transaction */
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+	if ( i_trnsctn == -1 )
+	{
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+    fn_errlog ( c_ServiceName, "S31045", LIBMSG, c_err_msg );
+		fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+	}
+
+	/* Prepare the request type */
+	c_rqst_typ[0] = NOTE_MSTR;
+	c_rqst_typ[1] = NOTE_DTLS;
+	c_rqst_typ[2] = ANXR_DTLS;
+	c_rqst_typ[3] = '\0';
+
+	fn_userlog( c_ServiceName, "Total Request :%d: Request Types :%s:", TOTAL_RQST, c_rqst_typ );
+
+	i_total_occur = 0;
+	i_total_rec = 0;
+
+	/* Enter into the loop for each request type */
+	for ( i_rqst_loop = 0; i_rqst_loop < TOTAL_RQST; i_rqst_loop++ )
+	{
+		sprintf ( c_err_msg, "******* For request type :%c: i.e., -> ", c_rqst_typ[i_rqst_loop] );
+    switch ( c_rqst_typ[i_rqst_loop] )
+    {
+    	case NOTE_MSTR :
+				strcat ( c_err_msg, "FNO CONTRACT NOTE MASTER" );
+      	break;
+
+      case NOTE_DTLS :
+				strcat ( c_err_msg, "FNO CONTRACT NOTE DETAILS" );
+        break;
+
+      case ANXR_DTLS :
+				strcat ( c_err_msg, "FNO CONTRACT ANNEXURE DETAILS" );
+        break;
+    }
+		fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+
+	  if ( Finit32 ( ptr_fml_Rbuf, (FLDLEN32) Fsizeof32 ( ptr_fml_Rbuf ) ) == -1 )
+  	{
+			fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+			fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+    	fn_errlog ( c_ServiceName, "S31050", FMLMSG, c_err_msg );
+			fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+  	}
+
+		/* Add the request type to the send buffer */
+		if ( Fchg32 ( ptr_fml_Sbuf, FFO_PRDCT_TYP, 0, (char *)&c_rqst_typ[i_rqst_loop], 0 ) == -1 )
+		{
+			fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+			fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+    	fn_errlog ( c_ServiceName, "S31055", FMLMSG, c_err_msg );
+			fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+		}
+
+		/* Call the service to get the contract details as per the request type */
+		i_ret_val = tpcall ( "SFO_ATG_CONTR", (char *)ptr_fml_Sbuf, 0,
+																					(char **)&ptr_fml_Rbuf, &l_Rbuf_len, TPNOTRAN );
+		if ( i_ret_val == -1 )
+		{
+			fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+			if ( TPCODE == TPESVCFAIL )
+			{
+				Fget32 ( ptr_fml_Rbuf, FFO_ERR_MSG, 0, c_err_msg, 0 );
+				fn_userlog( c_ServiceName, "Error in the called service :%s:", c_err_msg );
+			}
+			else
+			{
+				fn_userlog( c_ServiceName, "Error while calling the service." );
+			}
+    	fn_errlog ( c_ServiceName, "S31060", TPMSG, c_err_msg );
+			fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+			fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+		}
+
+		/* Get the no. of occurance of data in the received buffer */
+		i_fml_occur = Foccur32 ( ptr_fml_Rbuf, FFO_SUB_BUF_CNT );
+		if ( i_fml_occur <= 0 )
+		{
+			fn_userlog( c_ServiceName, "i_fml_occur is :%d:", i_fml_occur );
+			if ( i_fml_occur == 0 )
+			{
+				sprintf ( c_err_msg, "No data received for request type :%c:. Hence exiting the batch.",
+															c_rqst_typ[i_rqst_loop] );
+				fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+			}
+			else
+			{
+				fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+    		fn_errlog ( c_ServiceName, "S31065", TPMSG, c_err_msg );
+			}
+/*			continue;  ** to be removed **/
+			fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+			fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+		}
+
+		i_total_occur += i_fml_occur;
+		i_recds_per_rqst = 0;
+
+		/* Enter into loop for each occurance of data in received buffer */
+		for ( i_occur_loop = 0; i_occur_loop < i_fml_occur; i_occur_loop++ )
+		{
+			INIT ( i_err, TOTAL_FML );
+			INIT ( i_ferr, TOTAL_FML );
+
+			i_err[0] = Fget32 ( ptr_fml_Rbuf, FFO_SUB_BUF_CNT, i_occur_loop, (char *)&i_recds_per_occur, 0 );
+			i_ferr[0]= Ferror32;
+			i_err[1] = Fget32 ( ptr_fml_Rbuf, FFO_TMPLT, i_occur_loop, (char *)&l_buf_len, 0 );
+			i_ferr[1]= Ferror32;
+			i_err[2] = Fget32 ( ptr_fml_Rbuf, FFO_CBUF, i_occur_loop, ptr_car_rbuf, (FLDLEN32 *)&l_buf_len );
+			i_ferr[2]= Ferror32;
+
+			for ( i_fget_loop = 0; i_fget_loop < 3; i_fget_loop++ )
+			{
+				if ( i_err[i_fget_loop] == -1 )
+				{
+					fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+					fn_userlog( c_ServiceName, "Error while getting data at position :%d:", i_fget_loop );
+				  fn_errlog ( c_ServiceName, "S31070", Fstrerror32(i_ferr[i_fget_loop]), 
+																	c_err_msg );
+  				fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+					fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+				}
+			} /* End of Fget Loop */
+
+			i_recds_per_rqst += i_recds_per_occur;
+
+			/* Check if records already exist */
+      if ( c_rqst_typ[i_rqst_loop] == NOTE_MSTR && i_occur_loop == 0 )
+      {
+        fn_userlog ( c_ServiceName, "Validating the 1st rec. received for 1st request only." );
+        i_ret_val = fn_validate_rec ( c_ServiceName, &ptr_car_rbuf, c_err_msg );
+        if ( i_ret_val != 0 )
+        {
+          fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+          fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+          fn_userlog ( c_ServiceName, "Error while validating received data with return val :%d:", 
+																			i_ret_val );
+          fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+        }
+      }
+
+			sprintf ( c_err_msg, "In step %d of request type :%c:, %ld records received.", 
+														i_occur_loop+1, c_rqst_typ[i_rqst_loop], i_recds_per_occur );
+			fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+			fn_userlog( c_ServiceName, "Record size :%ld:", l_buf_len );
+
+			i_ret_val = 0;
+			switch ( c_rqst_typ[i_rqst_loop] )
+			{
+				case NOTE_MSTR :
+				{
+					i_ret_val = fo_populate_cnm ( c_ServiceName, &ptr_car_rbuf, l_buf_len, 
+																											i_recds_per_occur, c_err_msg );
+					break;
+
+				}
+				case NOTE_DTLS :
+				{
+					i_ret_val = fo_populate_cnd ( c_ServiceName, &ptr_car_rbuf, l_buf_len, 
+																											i_recds_per_occur, c_err_msg );
+					break;
+
+				}
+				case ANXR_DTLS :
+				{
+					i_ret_val = fo_populate_cad ( c_ServiceName, &ptr_car_rbuf, l_buf_len, 
+																											i_recds_per_occur, c_err_msg );
+					break;
+
+				}
+				default :
+				{
+					i_ret_val = -1;
+				}
+			}	/* End of switch case for request type */
+
+			if ( i_ret_val == -1 )
+			{
+				fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_userlog( c_ServiceName, "Error in the called function with sqlcode :%d:", SQLCODE );
+				fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+				fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+			}
+		}	/* End of for loop for each occurance of data in received buffer */
+
+		sprintf ( c_err_msg, "For request typ :%c:, %ld total records have been received in %d steps.", 
+														c_rqst_typ[i_rqst_loop], i_recds_per_rqst, i_fml_occur );
+		fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+
+		i_total_rec += i_recds_per_rqst; 
+	} /* End of for loop for each request type */
+
+	/* Commit the Transaction */
+	i_ret_val = fn_committran ( c_ServiceName, i_trnsctn, c_err_msg );
+	if ( i_ret_val == -1 )
+	{
+		fn_aborttran ( c_ServiceName, i_trnsctn, c_err_msg );
+		fn_bat_pst_msg ( c_ServiceName, "System Error : contact system support", c_tag );
+    fn_errlog ( c_ServiceName, "S31075", LIBMSG, c_err_msg );
+		fn_exit ( c_ServiceName, -1, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+	}
+
+	sprintf ( c_err_msg, "Batch process completed successfully receiving total of %d records in %d steps.",
+												i_total_rec, i_total_occur );
+	fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+
+	fn_exit ( c_ServiceName, 0, &ptr_fml_Sbuf, &ptr_fml_Rbuf, &ptr_car_rbuf );
+}
+
+/* to check if record already exists */
+int fn_validate_rec ( char  *c_ServiceName,
+                      char  **ptr_car_rbuf,
+                      char  *c_err_msg )
+{
+	int i_rec_exist=0;
+	struct fno_cntrct_mstr	st_var_cntrct_mstr;
+
+	MEMSET ( st_var_cntrct_mstr );
+	memcpy ( ( char * )&st_var_cntrct_mstr, *ptr_car_rbuf, sizeof ( struct fno_cntrct_mstr ) );
+
+	EXEC SQL
+    SELECT  1
+		INTO		:i_rec_exist
+		FROM		ATG_FCM_CNTRCT_MSTR
+		WHERE		trunc ( FCM_CNTRCT_DT ) = :st_var_cntrct_mstr.sql_fcm_cntrct_dt
+		AND			rownum < 2;
+
+  if ( SQLCODE == NO_DATA_FOUND )
+  {
+    fn_userlog ( c_ServiceName, "No record exist, hence processing :%d:", i_rec_exist );
+    return 0;
+  }
+  else if ( SQLCODE != 0 )
+  {
+    errlog ( c_ServiceName, "S31080", SQLMSG, DEF_USR, DEF_SSSN, c_err_msg );
+    strcpy ( c_err_msg, "System Error : Contact System Support." );
+    return -1;
+  }
+  else if ( i_rec_exist == 1 )
+  {
+    errlog ( c_ServiceName, "S31085", "Record Exist", DEF_USR, DEF_SSSN, c_err_msg );
+    strcpy ( c_err_msg, "NOTE : Records Already Processed." );
+    return -2;
+  }
+	return -3;
+}
+
+/* fn to upload the received customer note master data into EBA */
+int	fo_populate_cnm ( 	char 	*c_ServiceName, 
+											char 	**ptr_car_rbuf, 
+											long	l_buf_len, 
+											int		i_recds_per_occur, 
+											char 	*c_err_msg )
+{
+	struct fno_cntrct_mstr	st_var_cntrct_mstr[MAX_REC];
+
+	MEMSET ( st_var_cntrct_mstr );
+	memcpy ( ( char * )&st_var_cntrct_mstr, *ptr_car_rbuf, l_buf_len );
+
+	EXEC SQL FOR :i_recds_per_occur
+		INSERT INTO 
+		ATG_FCM_CNTRCT_MSTR
+		(
+      FCM_USR_MTCH_ACCNO,
+      FCM_EXCNG_CD,
+      FCM_CNTRCT_NMBR,
+      FCM_CNTRCT_DT,
+      FCM_USR_NM,
+      FCM_ADDR1,
+      FCM_ADDR2,
+      FCM_ADDR3,
+      FCM_ADDR4,
+      FCM_UCC_CD,
+      FCM_PAN_NO,
+      FCM_TEL_NO,
+      FCM_EMAIL_ID1,
+      FCM_EMAIL_ID2,
+      FCM_TOTAL,
+      FCM_STT,
+      FCM_TRNS_CHRG,
+      FCM_STMP_DUTY,
+      FCM_SEBI_SRV_TX,
+			/* Ver 1.1 */
+ 			FCM_DEAL_OFF_ADDR1, 
+		  FCM_DEAL_OFF_ADDR2, 
+ 			FCM_DEAL_OFF_CITY,  
+ 			FCM_DEAL_OFF_ZIP,   
+ 			FCM_DEAL_OFF_STATE, 
+ 			FCM_DEAL_OFF_CNTRY, 
+ 			FCM_DEAL_OFF_PHONE, 
+ 			FCM_DEAL_OFF_FAX ,
+			FCM_PAYINOUT,												/** Ver 1.2 **/
+			FCM_NETAMTDUE,											/** Ver 1.2 **/
+			FCM_NETBFORLEVIES,									/** Ver 1.2 **/
+			FCM_BROKERAGE,											/** Ver 1.2 **/
+			FCM_CNTRCT_FLG											/** Ver 1.2 **/
+		)
+		VALUES ( :st_var_cntrct_mstr );
+
+	if ( SQLCODE != 0 )
+	{
+   	fn_errlog ( c_ServiceName, "S31090", SQLMSG, c_err_msg );
+		return -1;
+	}
+
+	if(DEBUG_MSG_LVL_3) {
+		fn_userlog( c_ServiceName, "sqlcode is :%d: & rows processed :%d: for :%d: records.", 
+																SQLCODE, sqlca.sqlerrd[2], i_recds_per_occur );
+	}
+
+	return 0;
+}
+
+/* fn to upload the received customer note details data into EBA */
+int	fo_populate_cnd ( 	char 	*c_ServiceName, 
+											char 	**ptr_car_rbuf, 
+											long	l_buf_len, 
+											int		i_recds_per_occur, 
+											char 	*c_err_msg )
+{
+	struct fno_cntrct_dtls	st_var_cntrct_dtls[MAX_REC];
+
+	MEMSET ( st_var_cntrct_dtls );
+	memcpy ( ( char * )&st_var_cntrct_dtls, *ptr_car_rbuf, l_buf_len );
+
+	EXEC SQL FOR :i_recds_per_occur
+		INSERT INTO 
+		ATG_FCD_CNTRCT_DTLS
+		(
+      FCD_CNTRCT_NMBR,
+      FCD_USR_MTCH_ACCNO,
+      FCD_CNTRCT_DT,
+      FCD_ORDR_REF,
+      FCD_ORDR_TM,
+      FCD_TRD_REF,
+      FCD_TRD_TM,
+      FCD_TRD_FLW,
+      FCD_PRC,
+      FCD_QTY,
+      FCD_BRKG,
+      FCD_SRC_TX,
+      FCD_STRK_PRC,
+      FCD_CNTRCT_AMT,
+      FCD_CNTRCT_SPECS,
+      FCD_TOTAL
+		)
+		VALUES ( :st_var_cntrct_dtls );
+
+	if ( SQLCODE != 0 )
+	{
+   	fn_errlog ( c_ServiceName, "S31095", SQLMSG, c_err_msg );
+		return -1;
+	}
+
+	if(DEBUG_MSG_LVL_3) {
+		fn_userlog( c_ServiceName, "sqlcode is :%d: & rows processed :%d: for :%d: records.", 
+																SQLCODE, sqlca.sqlerrd[2], i_recds_per_occur );
+	}
+
+	return 0;
+}
+
+/* fn to upload the received customer annexure details data into EBA */
+int	fo_populate_cad ( 	char 	*c_ServiceName, 
+											char 	**ptr_car_rbuf, 
+											long	l_buf_len, 
+											int		i_recds_per_occur, 
+											char 	*c_err_msg )
+{
+	struct fno_annx_dtls		st_var_anxr_dtls[MAX_REC];
+
+	MEMSET ( st_var_anxr_dtls );
+	memcpy ( ( char * )&st_var_anxr_dtls, *ptr_car_rbuf, l_buf_len );
+
+	EXEC SQL FOR :i_recds_per_occur
+		INSERT INTO 
+		ATG_FAD_ANNX_DTLS
+		(
+      FAD_CNTRCT_NMBR,
+      FAD_MTCH_ACCNT,
+      FAD_CNTRCT_DT,
+      FAD_UNDRLYNG,
+      FAD_EXP_DT,
+      FAD_FUT_SELL,
+      FAD_FUT_STT,
+      FAD_OPT_SELL,
+      FAD_OPT_STT,
+      FAD_TOT_STT
+		)
+		VALUES ( :st_var_anxr_dtls );
+
+	if ( SQLCODE != 0 )
+	{
+   	fn_errlog ( c_ServiceName, "S31100", SQLMSG, c_err_msg );
+		return -1;
+	}
+
+	if(DEBUG_MSG_LVL_3) {
+		fn_userlog( c_ServiceName, "sqlcode is :%d: & rows processed :%d: for :%d: records.", 
+																SQLCODE, sqlca.sqlerrd[2], i_recds_per_occur );
+	}
+
+	return 0;
+}
+
+/* fn to exit from the batch */
+void fn_exit ( 	char 		*c_ServiceName, 
+								int 		i_exit_val, 
+								FBFR32 	**ptr_fml_Sbuf,
+								FBFR32  **ptr_fml_Rbuf,
+								char		**ptr_car_rbuf )
+{
+	fn_rgstr_bat ( 'U', c_ServiceName, "NFO", "BO" );
+	tpfree ( (char *) *ptr_fml_Sbuf );
+	tpfree ( (char *) *ptr_fml_Rbuf );
+	tpfree ( *ptr_car_rbuf );
+	tpclose ( );
+	tpterm ( );
+	exit ( i_exit_val );
+}

@@ -1,0 +1,466 @@
+/************************************************************************************************
+* Service name :  BAT_PRTFL_MISMATCH																														*
+*																																																*
+* Description  :  This Batch Program will get the positions with brokerage mismatch in portfolio*
+*                 and correct them accordingly using Tradebook                     			        *
+*																																																*
+* Input        :  Exchange Code																																	*
+*							 :  Pipe Id																																				*
+*							 :  Trade date																																		*
+*							 :  Match Account																																	*
+*              :  Stock Code																																		*
+*																																																*
+* Output      :																																									*
+*																																																*
+* Log         :   28-Feb-2018 Initial Release  - Navina D.       																*
+*************************************************************************************************/
+
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fn_ddr.h>
+#include <string.h>
+#include <fn_read_debug_lvl.h>
+#include <fo_view_def.h>
+
+EXEC SQL INCLUDE "table/ftd_fo_trd_dtls.h";
+
+void BAT_PRTFL_MISMATCH ( int argc, char *argv[] )
+{
+  char 		 c_ServiceName [ 33 ];
+  char 		 c_err_msg [ 256 ];
+	char 		 c_msg[256];
+	char     c_exg_stts = '\0';
+	char     c_pipe_id[4]="\0";
+	int			 i_trnsctn;
+	int      i_cnt = 0;
+	int      i_rec = 0;
+	long   	 l_ftd_pstn = 0;
+	long   	 l_pcp_pstn = 0;
+  long     l_ftd_brkg  = 0;
+  long     l_pcp_brkg = 0;
+
+	struct vw_tradebook st_trdbk;
+
+  strcpy ( c_ServiceName, argv[0] );
+	INITBATDBGLVL(c_ServiceName);
+
+  sprintf ( c_msg, "Batch process %s started", argv[0] );
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  if( argc != 7 ) 
+  {
+		fn_bat_pst_msg ( c_ServiceName, "Invalid Number of Arguments", c_tag );
+    sprintf(c_msg,"Usage:bat_prtfl_mismatch <ini> <Exchange Code> <Pipe Id> <Trade Date> <Match Account/NA> <Underlying/NA>\n");
+    fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+    return;
+  }
+
+	memset(sql_ftd_xchng_cd,'\0',sizeof(sql_ftd_xchng_cd));
+	memset(c_pipe_id,'\0',sizeof(c_pipe_id));
+	memset(sql_ftd_clm_mtch_accnt,'\0',sizeof(sql_ftd_clm_mtch_accnt));
+	memset(sql_ftd_undrlyng,'\0',sizeof(sql_ftd_undrlyng));
+	MEMSET(sql_ftd_trd_dt);
+	MEMSET(st_trdbk);
+
+  strcpy( sql_ftd_xchng_cd, argv[2] );
+	strcpy( c_pipe_id, argv[3] );
+	strcpy( (char *) sql_ftd_trd_dt.arr,argv[4] );
+	strcpy( sql_ftd_clm_mtch_accnt,argv[5] );
+	strcpy( sql_ftd_undrlyng,argv[6] );
+
+  SETLEN(sql_ftd_trd_dt);
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Input Parameters are : ");
+		fn_userlog(c_ServiceName,"Exchange Code			:%s:", sql_ftd_xchng_cd);
+		fn_userlog(c_ServiceName,"Pipe Id						:%s:", c_pipe_id);
+		fn_userlog(c_ServiceName,"Trade Date				:%s:", sql_ftd_trd_dt.arr);
+		fn_userlog(c_ServiceName,"Match Account			:%s:", sql_ftd_clm_mtch_accnt);
+		fn_userlog(c_ServiceName,"Underlying        :%s:", sql_ftd_undrlyng);            
+	}
+	
+	if( strcmp(sql_ftd_clm_mtch_accnt,"NA") == 0 )
+	{
+		strcpy ( sql_ftd_clm_mtch_accnt,"%" );
+	}
+	if( strcmp(sql_ftd_undrlyng,"NA") == 0)
+	{
+		strcpy( sql_ftd_undrlyng,"%" );
+	}
+
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+     	fn_errlog(c_ServiceName, "S31005", LIBMSG, c_err_msg );
+     	return ;
+  }
+
+  EXEC SQL 
+	  SELECT count(0)
+		INTO   :i_cnt
+    FROM   PCP_PRTFL_CNTRCT_PRDCT PCP ,PCP_PRTFL_CNTRCT_PRDCT_HSTRY HPCP
+    WHERE  PCP.PCP_XCHNG_CD				= HPCP.PCP_XCHNG_CD						AND
+					 PCP.PCP_CLM_MTCH_ACCNT = HPCP.PCP_CLM_MTCH_ACCNT			AND
+					 PCP.PCP_PRDCT_TYP			= HPCP.PCP_PRDCT_TYP					AND
+					 PCP.PCP_UNDRLYNG				= HPCP.PCP_UNDRLYNG						AND
+					 PCP.PCP_EXPRY_DT				= HPCP.PCP_EXPRY_DT						AND
+					 PCP.PCP_STRK_PRC				= HPCP.PCP_STRK_PRC						AND
+					 PCP.PCP_OPT_TYP				= HPCP.PCP_OPT_TYP						AND
+					 PCP.PCP_EXER_TYP				= HPCP.PCP_EXER_TYP						AND
+					 PCP.PCP_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt  AND
+					 PCP.PCP_UNDRLYNG			  LIKE :sql_ftd_undrlyng;
+
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+	{
+		fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_msg);
+		fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+		return;
+	}
+
+	if ( i_cnt > 0 )
+	{
+			fn_userlog(c_ServiceName,":%d: Contract exists in both PCP & PCP history",i_cnt );
+			fn_errlog(c_ServiceName, "S31015", SQLMSG, c_err_msg);
+			fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+			return;
+	}
+
+  EXEC SQL 
+  DECLARE cur_prtfl_mismatch CURSOR FOR
+	SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_EXER_TYP,FTD_STRK_PRC,FTD_OPT_TYP, NVL(FTD.pstn,0) ,NVL(PCP.pstn,0),
+	NVL(FTD.brokerage,0),NVL(PCP.brokerage,0) from 
+	(
+		SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_EXER_TYP,FTD_STRK_PRC,FTD_OPT_TYP, NVL(SUM(position),0) pstn ,NVL(SUM(brk),0) brokerage
+		FROM
+	 (
+			SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_EXER_TYP,FTD_STRK_PRC,FTD_OPT_TYP, 
+						 SUM(DECODE(FTD_TRD_FLW,'B',FTD_EXCTD_QTY,'S',FTD_EXCTD_QTY * -1)) position ,
+						 SUM( NVL(FTD_BRKG,0) + NVL(FTD_SRC_TX,0) + NVL(FTD_STT,0) + NVL(FTD_TRAN_CHRG,0) + NVL(FTD_SEBI_TT,0) + NVL(FTD_STAMP_DUTY,0) + NVL(FTD_OTHER_CHRG,0) + NVL(FTD_BRKRG_IGST,0) + NVL(FTD_BRKRG_CGST,0) + NVL(FTD_BRKRG_SGST,0) + NVL(FTD_BRKRG_UGST,0)) brk
+			FROM
+			(
+				 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_EXER_TYP,FTD_STRK_PRC,FTD_OPT_TYP, FTD_TRD_FLW,FTD_EXCTD_QTY,
+								FTD_BRKG,FTD_SRC_TX,FTD_STT,FTD_TRAN_CHRG,FTD_SEBI_TT,FTD_STAMP_DUTY,FTD_OTHER_CHRG,FTD_BRKRG_IGST,FTD_BRKRG_CGST,FTD_BRKRG_SGST,FTD_BRKRG_UGST
+				 FROM		FTD_FO_TRD_DTLS_HSTRY
+				 WHERE (FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP) IN
+							 (	
+									SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									FROM	 FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+									UNION
+									SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									FROM	 FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+								)
+				UNION ALL
+				SELECT	FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_EXER_TYP,FTD_STRK_PRC,FTD_OPT_TYP, FTD_TRD_FLW,FTD_EXCTD_QTY,
+								FTD_BRKG,FTD_SRC_TX,FTD_STT,FTD_TRAN_CHRG,FTD_SEBI_TT,FTD_STAMP_DUTY,FTD_OTHER_CHRG,FTD_BRKRG_IGST,FTD_BRKRG_CGST,FTD_BRKRG_SGST,FTD_BRKRG_UGST
+				FROM		FTD_FO_TRD_DTLS 
+				WHERE	 (FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP) IN
+							 (	
+									SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									FROM	 FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+									UNION
+									SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									FROM	 FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+								)
+		 )
+		 GROUP BY FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_EXER_TYP,FTD_STRK_PRC,FTD_OPT_TYP
+		 UNION ALL
+		 (
+				SELECT FCO_XCHNG_CD,FCO_CLM_MTCH_ACCNT,FCO_PRDCT_TYP,FCO_UNDRLYNG,FCO_EXPRY_DT,FCO_EXER_TYP,FCO_STRK_PRC,FCO_OPT_TYP, SUM(NVL(FCO_CLS_QTY,0)) position ,0 brk
+				FROM
+				(
+					 SELECT FCO_XCHNG_CD,FCO_CLM_MTCH_ACCNT,FCO_PRDCT_TYP,FCO_UNDRLYNG,FCO_EXPRY_DT,FCO_EXER_TYP,FCO_STRK_PRC,FCO_OPT_TYP, FCO_CLS_QTY
+					 FROM FCO_FO_FCLSOUT_HSTRY
+					 WHERE (FCO_XCHNG_CD,FCO_CLM_MTCH_ACCNT,FCO_PRDCT_TYP,FCO_UNDRLYNG,FCO_EXPRY_DT,FCO_STRK_PRC,FCO_OPT_TYP,FCO_EXER_TYP) IN
+					 (
+							 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+							 FROM		FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+							 UNION
+							 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+							 FROM		FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+					 )
+				UNION ALL
+				SELECT FCO_XCHNG_CD,FCO_CLM_MTCH_ACCNT,FCO_PRDCT_TYP,FCO_UNDRLYNG,FCO_EXPRY_DT,FCO_EXER_TYP,FCO_STRK_PRC,FCO_OPT_TYP,FCO_CLS_QTY
+				FROM	 FCO_FO_FCLSOUT
+				WHERE  (FCO_XCHNG_CD,FCO_CLM_MTCH_ACCNT,FCO_PRDCT_TYP,FCO_UNDRLYNG,FCO_EXPRY_DT,FCO_STRK_PRC,FCO_OPT_TYP,FCO_EXER_TYP) IN
+							 (
+									SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									FROM	 FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+									UNION
+									SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									FROM	 FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+							 ) 
+				 )
+				 GROUP BY FCO_XCHNG_CD,FCO_CLM_MTCH_ACCNT,FCO_PRDCT_TYP,FCO_UNDRLYNG,FCO_EXPRY_DT,FCO_EXER_TYP,FCO_STRK_PRC,FCO_OPT_TYP
+			)
+		 UNION ALL
+		 (
+				SELECT FEC_XCHNG_CD,FEC_CLM_MTCH_ACCNT,FEC_PRDCT_TYP,FEC_UNDRLYNG,FEC_EXPRY_DT,FEC_EXER_TYP,FEC_STRK_PRC,FEC_OPT_TYP, SUM(NVL(FEC_EXRC_QTY,0)*-1) position ,0 brk
+				FROM
+				(
+					 SELECT FEC_XCHNG_CD,FEC_CLM_MTCH_ACCNT,FEC_PRDCT_TYP,FEC_UNDRLYNG,FEC_EXPRY_DT,FEC_EXER_TYP,FEC_STRK_PRC,FEC_OPT_TYP, FEC_EXRC_QTY
+					 FROM		FEC_FO_EXRC_CONF_HSTRY
+					 WHERE (FEC_XCHNG_CD,FEC_CLM_MTCH_ACCNT,FEC_PRDCT_TYP,FEC_UNDRLYNG,FEC_EXPRY_DT,FEC_STRK_PRC,FEC_OPT_TYP,FEC_EXER_TYP) IN
+								 (
+										SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+										FROM	 FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+										UNION
+										SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+										FROM FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+								 )
+					 UNION ALL
+					 SELECT FEC_XCHNG_CD,FEC_CLM_MTCH_ACCNT,FEC_PRDCT_TYP,FEC_UNDRLYNG,FEC_EXPRY_DT,FEC_EXER_TYP,FEC_STRK_PRC,FEC_OPT_TYP, FEC_EXRC_QTY
+					 FROM		FEC_FO_EXRC_CONF
+					 WHERE (FEC_XCHNG_CD,FEC_CLM_MTCH_ACCNT,FEC_PRDCT_TYP,FEC_UNDRLYNG,FEC_EXPRY_DT,FEC_STRK_PRC,FEC_OPT_TYP,FEC_EXER_TYP) IN
+								 (
+									 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									 FROM FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+									 UNION
+									 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									 FROM FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+								 )
+				)
+				GROUP BY FEC_XCHNG_CD,FEC_CLM_MTCH_ACCNT,FEC_PRDCT_TYP,FEC_UNDRLYNG,FEC_EXPRY_DT,FEC_EXER_TYP,FEC_STRK_PRC,FEC_OPT_TYP
+			)
+			UNION ALL
+			(
+				 SELECT FAB_XCHNG_CD,FAB_CLM_MTCH_ACCNT,FAB_PRDCT_TYP,FAB_UNDRLYNG,FAB_EXPRY_DT,FAB_EXER_TYP,FAB_STRK_PRC,FAB_OPT_TYP, SUM(NVL(FAB_ASGND_QTY,0)) position , 0 brk
+				 FROM
+				(
+					 SELECT FAB_XCHNG_CD,FAB_CLM_MTCH_ACCNT,FAB_PRDCT_TYP,FAB_UNDRLYNG,FAB_EXPRY_DT,FAB_EXER_TYP,FAB_STRK_PRC,FAB_OPT_TYP, FAB_ASGND_QTY
+					 FROM		FAB_FO_ASGNMNT_BOOK_HSTRY
+					 WHERE (FAB_XCHNG_CD,FAB_CLM_MTCH_ACCNT,FAB_PRDCT_TYP,FAB_UNDRLYNG,FAB_EXPRY_DT,FAB_STRK_PRC,FAB_OPT_TYP,FAB_EXER_TYP) IN
+								 (
+										SELECT	FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+										FROM		FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+										UNION
+										SELECT	FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+										FROM		FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+								 )
+					 UNION ALL
+					 SELECT FAB_XCHNG_CD,FAB_CLM_MTCH_ACCNT,FAB_PRDCT_TYP,FAB_UNDRLYNG,FAB_EXPRY_DT,FAB_EXER_TYP,FAB_STRK_PRC,FAB_OPT_TYP, FAB_ASGND_QTY
+					 FROM		FAB_FO_ASGNMNT_BOOK
+					 WHERE (FAB_XCHNG_CD,FAB_CLM_MTCH_ACCNT,FAB_PRDCT_TYP,FAB_UNDRLYNG,FAB_EXPRY_DT,FAB_STRK_PRC,FAB_OPT_TYP,FAB_EXER_TYP) IN
+								(
+									 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									 FROM   FTD_FO_TRD_DTLS_HSTRY  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+									 UNION
+									 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+									 FROM		FTD_FO_TRD_DTLS  WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+								 )
+				)
+				GROUP BY FAB_XCHNG_CD,FAB_CLM_MTCH_ACCNT,FAB_PRDCT_TYP,FAB_UNDRLYNG,FAB_EXPRY_DT,FAB_EXER_TYP,FAB_STRK_PRC,FAB_OPT_TYP
+		 )
+		)
+		GROUP BY FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_EXER_TYP,FTD_STRK_PRC,FTD_OPT_TYP
+		) FTD , 
+ 		(
+			 SELECT PCP_XCHNG_CD,PCP_CLM_MTCH_ACCNT,PCP_PRDCT_TYP,PCP_UNDRLYNG,PCP_EXPRY_DT,PCP_EXER_TYP,PCP_STRK_PRC,PCP_OPT_TYP,NVL(PCP_OPNPSTN_QTY,0) pstn ,NVL(PCP_BRKG_VAL,0) brokerage
+			 FROM		PCP_PRTFL_CNTRCT_PRDCT
+			 WHERE (PCP_XCHNG_CD,PCP_CLM_MTCH_ACCNT,PCP_PRDCT_TYP,PCP_UNDRLYNG,PCP_EXPRY_DT,PCP_STRK_PRC,PCP_OPT_TYP,PCP_EXER_TYP) IN
+						 (
+								SELECT	FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+								FROM		FTD_FO_TRD_DTLS_HSTRY WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+								UNION
+								SELECT	FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+								FROM		FTD_FO_TRD_DTLS WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+						 )
+			 UNION ALL
+			 SELECT PCP_XCHNG_CD,PCP_CLM_MTCH_ACCNT,PCP_PRDCT_TYP,PCP_UNDRLYNG,PCP_EXPRY_DT,PCP_EXER_TYP,PCP_STRK_PRC,PCP_OPT_TYP,NVL(PCP_OPNPSTN_QTY,0) pstn ,NVL(PCP_BRKG_VAL,0) brokerage
+			 FROM		PCP_PRTFL_CNTRCT_PRDCT_HSTRY
+			 WHERE (PCP_XCHNG_CD,PCP_CLM_MTCH_ACCNT,PCP_PRDCT_TYP,PCP_UNDRLYNG,PCP_EXPRY_DT,PCP_STRK_PRC,PCP_OPT_TYP,PCP_EXER_TYP) IN
+						 (
+							 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+							 FROM FTD_FO_TRD_DTLS_HSTRY WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+							 UNION
+							 SELECT FTD_XCHNG_CD,FTD_CLM_MTCH_ACCNT,FTD_PRDCT_TYP,FTD_UNDRLYNG,FTD_EXPRY_DT,FTD_STRK_PRC,FTD_OPT_TYP,FTD_EXER_TYP
+							 FROM FTD_FO_TRD_DTLS WHERE TRUNC(FTD_TRD_DT)= :sql_ftd_trd_dt  AND FTD_CLM_MTCH_ACCNT LIKE :sql_ftd_clm_mtch_accnt AND TRIM(FTD_UNDRLYNG) LIKE :sql_ftd_undrlyng
+						 )
+		 ) PCP
+		 WHERE 
+		 FTD_XCHNG_CD = PCP_XCHNG_CD AND FTD_CLM_MTCH_ACCNT = PCP_CLM_MTCH_ACCNT AND FTD_PRDCT_TYP = PCP_PRDCT_TYP AND FTD_UNDRLYNG = PCP_UNDRLYNG AND 
+		 FTD_EXPRY_DT = PCP_EXPRY_DT AND FTD_EXER_TYP = PCP_EXER_TYP AND FTD_STRK_PRC = PCP_STRK_PRC AND FTD_OPT_TYP = PCP_OPT_TYP AND 
+		 FTD.pstn = PCP.pstn  AND FTD.brokerage <> PCP.brokerage;
+
+	EXEC SQL
+    OPEN cur_prtfl_mismatch;
+
+	if( SQLCODE != 0 )
+	{
+		fn_userlog(c_ServiceName, "Unable to get mismatch records");
+		fn_errlog(c_ServiceName, "S31020", SQLMSG, c_err_msg);
+		fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+		return;
+	}
+
+	i_rec = 0;
+	while(1)
+  {
+    memset(&st_trdbk,'\0' , sizeof( struct vw_tradebook) );
+		l_ftd_pstn = 0;
+		l_pcp_pstn = 0;
+    l_ftd_brkg  = 0;
+    l_pcp_brkg = 0;
+
+    EXEC SQL  
+			FETCH   cur_prtfl_mismatch
+			INTO    :st_trdbk.c_xchng_cd,
+							:st_trdbk.c_cln_mtch_accnt,
+							:st_trdbk.c_prd_typ,
+							:st_trdbk.c_undrlyng,
+							:st_trdbk.c_expry_dt,
+							:st_trdbk.c_exrc_typ,
+							:st_trdbk.l_strike_prc,
+							:st_trdbk.c_opt_typ,
+							:l_ftd_pstn,
+							:l_pcp_pstn,
+							:l_ftd_brkg,
+							:l_pcp_brkg;
+
+      if ( SQLCODE != 0 )
+      {
+        if ( SQLCODE == NO_DATA_FOUND )
+        {
+          break;
+        }
+        fn_errlog ( c_ServiceName, "S31025", SQLMSG, c_err_msg );
+        EXEC SQL CLOSE cur_prtfl_mismatch;
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        return ;
+      }
+			
+			rtrim(st_trdbk.c_undrlyng);
+			rtrim(st_trdbk.c_expry_dt);
+
+			if(DEBUG_MSG_LVL_5)
+			{
+				fn_userlog(c_ServiceName,"Fetched contract details are : ");
+				fn_userlog(c_ServiceName,"Exchange Code			:%s:", st_trdbk.c_xchng_cd);
+				fn_userlog(c_ServiceName,"Match Account			:%s:", st_trdbk.c_cln_mtch_accnt);
+				fn_userlog(c_ServiceName,"Product Type			:%c:", st_trdbk.c_prd_typ);
+				fn_userlog(c_ServiceName,"Underlying  			:%s:", st_trdbk.c_undrlyng);
+				fn_userlog(c_ServiceName,"Expiry Date       :%s:", st_trdbk.c_expry_dt);   
+				fn_userlog(c_ServiceName,"Exercise Type     :%c:", st_trdbk.c_exrc_typ);            
+				fn_userlog(c_ServiceName,"Strike Price      :%ld:", st_trdbk.l_strike_prc);            
+				fn_userlog(c_ServiceName,"Option Type       :%c:", st_trdbk.c_opt_typ);            
+				fn_userlog(c_ServiceName,"Open Pstn TrdBK   :%ld:", l_ftd_pstn);            
+				fn_userlog(c_ServiceName,"Open Pstn Prtfl   :%ld:", l_pcp_pstn);            
+				fn_userlog(c_ServiceName,"Brokerage TrdBK   :%ld:", l_ftd_brkg);            
+				fn_userlog(c_ServiceName,"Brokerage Prtfl   :%ld:", l_pcp_brkg);            
+			}
+
+	    EXEC SQL
+			UPDATE  PCP_PRTFL_CNTRCT_PRDCT
+			SET		  PCP_BRKG_VAL						= :l_ftd_brkg
+			WHERE 
+							PCP_XCHNG_CD						= :st_trdbk.c_xchng_cd
+					AND PCP_CLM_MTCH_ACCNT			= :st_trdbk.c_cln_mtch_accnt
+					AND PCP_PRDCT_TYP						= :st_trdbk.c_prd_typ
+					AND PCP_UNDRLYNG						= :st_trdbk.c_undrlyng
+					AND PCP_EXPRY_DT						= :st_trdbk.c_expry_dt
+					AND PCP_EXER_TYP						= :st_trdbk.c_exrc_typ
+					AND PCP_OPT_TYP							= :st_trdbk.c_opt_typ
+					AND PCP_STRK_PRC						= :st_trdbk.l_strike_prc
+				  AND NVL(PCP_OPNPSTN_QTY,0)  = :l_ftd_pstn
+				  AND NVL(PCP_BRKG_VAL,0)			<> :l_ftd_brkg;
+
+			if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+			{
+        fn_errlog ( c_ServiceName, "S31030", SQLMSG, c_err_msg );
+        EXEC SQL CLOSE cur_prtfl_mismatch;
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				return;
+			}
+
+			if ( SQLCODE == NO_DATA_FOUND )
+		  {
+				if(DEBUG_MSG_LVL_3)
+				{
+					fn_userlog(c_ServiceName,"Inside No data found in PCP Main...update PCP history ");
+				}
+
+				EXEC SQL
+					UPDATE  PCP_PRTFL_CNTRCT_PRDCT_HSTRY
+					SET		  PCP_BRKG_VAL						= :l_ftd_brkg
+					WHERE 
+									PCP_XCHNG_CD						= :st_trdbk.c_xchng_cd
+							AND PCP_CLM_MTCH_ACCNT			= :st_trdbk.c_cln_mtch_accnt
+							AND PCP_PRDCT_TYP						= :st_trdbk.c_prd_typ
+							AND PCP_UNDRLYNG						= :st_trdbk.c_undrlyng
+							AND PCP_EXPRY_DT						= :st_trdbk.c_expry_dt
+							AND PCP_EXER_TYP						= :st_trdbk.c_exrc_typ
+							AND PCP_OPT_TYP							= :st_trdbk.c_opt_typ
+							AND PCP_STRK_PRC						= :st_trdbk.l_strike_prc
+							AND NVL(PCP_OPNPSTN_QTY,0)	= :l_ftd_pstn
+							 AND NVL(PCP_BRKG_VAL,0)		<> :l_ftd_brkg;
+
+					if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+					{
+						fn_errlog ( c_ServiceName, "S31035", SQLMSG, c_err_msg );
+						EXEC SQL CLOSE cur_prtfl_mismatch;
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						return;
+					}
+
+					if ( SQLCODE == NO_DATA_FOUND )
+					{
+							fn_userlog(c_ServiceName,"No record found in Portfolio for :%s:%c-%s-%s-%ld-%c-%ld:", st_trdbk.c_cln_mtch_accnt,st_trdbk.c_prd_typ,st_trdbk.c_undrlyng,st_trdbk.c_expry_dt,st_trdbk.l_strike_prc,st_trdbk.c_opt_typ,l_ftd_pstn );
+					}
+		 } 
+		 i_rec ++;
+	} 
+
+	EXEC SQL CLOSE cur_prtfl_mismatch;
+
+	if(SQLCODE != 0 )
+	{
+		fn_errlog ( c_ServiceName, "S31040", SQLMSG, c_err_msg );
+		fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+		return;
+	}
+
+	if(DEBUG_MSG_LVL_0)
+	{
+		fn_userlog(c_ServiceName,"Total no. of mismatch records are :|%d|",  i_rec );
+	}
+
+	if ( i_rec == 0)
+	{
+		fn_userlog(c_ServiceName,"There is No Brokerage Mismatch found between tradebook and portfolio" );
+		fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+		return;
+	}
+	
+	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+	{
+ 		  fn_errlog( c_ServiceName, "S31045",LIBMSG,c_err_msg);
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			return;
+	}
+
+	sprintf ( c_msg, "Batch process %s ended", argv[0] );
+	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	return;
+}
+
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_PRTFL_MISMATCH;
+  return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+  return 0;
+}

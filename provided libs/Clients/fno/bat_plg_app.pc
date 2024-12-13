@@ -1,0 +1,1112 @@
+/******************************************************************************/
+/*  Program           : BAT_PLG_APPROPRIATION                                 */
+/*                                                                            */
+/*  Input             : <bat_plg_appropriation><exchange><Trade date>         */
+/*                                                                            */
+/*  Output            :  Integer 1 on sucess and 0 on fail                    */
+/*                                                                            */
+/*  Description       : This process would run for all clients who have a     */ 
+/*																																						*/
+/*	Negative limit. The total margin collected for open position will be      */ 
+/*	ascertained. Weights for each position will be ascertained by							*/ 
+/*	Margin on the open position\Total margin. The negative limit will be			*/
+/*  neutralized by reducing the margin from individual positions in the       */
+/*	proportion of the weights. If however, the negative limit is more than    */
+/*	the total margin blocked, the neutralization will be done only to the     */
+/*  extent of the total margin and there will be some net negative limit.     */
+/*																																						*/
+/*  Log               : 1.0		18-Aug-2003		Infotech|Himanshu Ahire	          */
+/*										: 1.1   20-Dec-2007		Infotech|Ranjit 									*/
+/*                    : 1.2   07-Jan-2015   Infotech|Samip M                  */
+/*  Reviewed By       : 1.0                 Infotech|Sangeet Sinha            */
+/*                    : 1.3   09-Oct-2014   Infotech|Sachin Birje             */
+/*                                                                            */
+/******************************************************************************/
+/*   1.0  -  New release	                                                    */
+/*	 1.1  - IBM Migration 																										*/
+/*   1.2  - SAM Block Unblock Changes                                         */
+/*	 1.3  - View to FML CHanges       																				*/
+/******************************************************************************/
+
+#include "fn_collateral.h"
+#include <math.h>
+#include <fn_pos.h>
+#include <fn_ddr.h>		/* Ver 1.1 */
+#include <fn_read_debug_lvl.h>		/* ver 1.1 */
+#include <fml_rout.h>    /*** Ver 1.3 **/
+
+#define MARGIN_ADJ_APPROPRIATION "A5"
+ 
+
+double find_appropriation( char* c_ServiceName ,
+														double d_fut_trd_mrgn,
+														double d_totl_trd_mrgn,
+														double d_ngtv_lmt);
+
+double round_off(double d_update_mrgn );
+
+int main(int argc, char* argv[] )
+{
+
+		int i_returncode;
+		int i_returnval;
+		int i_trnsctn = 0;
+		int i_opt_succ , i_fut_succ ;
+
+		long l_count=0;
+		long l_counter=0;
+		long l_no_of=0;
+		long l;
+	
+		TPINIT *ptr_tpinfo;
+		struct vw_err_msg *ptr_st_err_msg;
+		struct vw_pstn_actn *ptr_st_pstn_actn;
+		struct vw_gt_lmt_dtls st_gt_lmt;
+
+		EXEC SQL BEGIN DECLARE SECTION;
+
+		double d_update_mrgn;
+		double d_fut_tot_mrgn;
+		double d_opt_tot_mrgn;
+		double d_totl_trd_mrgn;
+		double d_ngtv_lmt;
+		double d_strk_prc;
+		double d_new_totl_mrgn =0 ;
+		double d_tot_reduce =0 ;
+		double d_fut_amt_reducde;
+		double d_opt_amt_reduce;
+		double d_uexctd_mrgn_cng;
+		double d_fut_trd_mrgn = 0;
+		double d_opt_trd_mrgn = 0;
+		double d_amt_tobe_reduce = 0;
+		double d_utrd_mrgn_chg = 0;
+		double d_utrd_mrgn = 0;
+		double d_balance_amt = 0;
+
+		char c_unlyng [ 7 ];
+		char c_cln_mtch_accnt [ 11 ];
+		char c_trd_dt[12];
+		char c_expry_dt[12];
+		char c_xchng_cd[4];
+		char c_tag[32];
+		char c_ServiceName [ 33 ];
+		char c_err_msg[256 + 1];
+		char c_msg		  [256];
+		char c_pipe_id[3];
+		char ch_tm[25];
+		char c_remark[133];
+		char c_narration_id[4];
+		char c_indstk;
+		char c_opt_typ;
+		char c_cntrct_tag;
+		char c_uopnpstn_flw;
+		char c_exer_typ;
+		char c_dr_without_lmt_flg;
+
+
+		EXEC SQL END DECLARE SECTION;
+
+		NULLCHAR(c_ServiceName);
+		NULLCHAR(c_tag);
+		NULLCHAR(c_msg);
+		NULLCHAR(c_err_msg);
+
+
+		strcpy(c_ServiceName ,"bat_plg_app");
+
+		INITBATDBGLVL(argv[0]);	/* ver 1.1 */
+
+    if(argc != 5)
+		{
+				fn_userlog(c_ServiceName, "Usage: bat_plg_app <Config File> <Exchange Cd> <Pipe Id>\
+				< Trade Date >");
+				exit(-1);
+		}
+
+	  strcpy( c_msg, "STAGE 1.0 Starting BAT_PLG_APP...");
+	  fn_userlog( c_ServiceName,c_msg);
+	  fn_userlog( c_ServiceName,"config File :%s:"   ,argv[1]);
+	  fn_userlog( c_ServiceName,"Exchange Code :%s:" ,argv[2]);
+	  fn_userlog( c_ServiceName,"Pipe Id :%s:"       ,argv[3]);
+    fn_userlog( c_ServiceName,"Trade Date :%s:"		,argv[4]);
+
+    sprintf(c_tag,"%s_%s",c_ServiceName,argv[1]);
+    init_bat(c_ServiceName,argv[2],argv[3]);
+
+    fn_userlog( c_ServiceName,c_msg);
+    fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+				
+		/************************ Get all client match ids ************************/
+		
+		i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+
+		if ( i_trnsctn == -1 )
+		{
+				fn_errlog( c_ServiceName, "S31005", LIBMSG, c_err_msg  );
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				destroy_bat();
+		}
+
+		EXEC SQL DELETE TCM_TEMP_CLM_MTCH_ACCNT;
+
+		EXEC SQL	
+		INSERT into TCM_TEMP_CLM_MTCH_ACCNT
+		(
+				SELECT distinct DBD_CLM_MTCH_ACCNT
+				FROM   DBD_DP_BLCK_DTLS
+        /** WHERE  (NVL(DBD_TIFP_QTY,0) + NVL(DBD_PLG_REQ_QTY,0) + NVL(DBD_BLOCK_FOR_SALE,0))> 0 ** Commented for Ver 1.2 ***/
+        WHERE  (NVL(DBD_SAM_BLCKD_QTY,0) + NVL(DBD_BLOCK_FOR_SALE,0))> 0
+		);
+		
+		if(SQLCODE != 0)
+		{
+				fn_errlog(c_ServiceName, "S31010", SQLMSG, c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				destroy_bat();
+		}
+
+		if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+		{
+				fn_errlog( c_ServiceName, "S31015",LIBMSG,c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				destroy_bat();
+		}
+
+		l_count =0;
+		EXEC SQL 
+		SELECT count(*)
+		INTO	 :l_count
+		FROM		TCM_TEMP_CLM_MTCH_ACCNT;
+
+		if(SQLCODE != 0)
+		{
+				fn_errlog(c_ServiceName, "S31020", SQLMSG, c_err_msg);
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				destroy_bat();
+		}
+
+		if(l_count <= 0)
+		{
+				strcpy(c_msg,"No Data to Process....");
+				fn_userlog(c_ServiceName,c_msg);
+				fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				destroy_bat();
+		}
+		
+	
+		sprintf(c_msg,"STAGE 2.1 Total :%ld: Match A/c to be updated...",l_count);
+		fn_userlog( c_ServiceName,c_msg);
+		fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+
+		/*************  Get Narration Discription for update Limit ************/
+
+		NULLCHAR(c_remark);
+
+		EXEC SQL
+		SELECT	FNM_NARRATION_DESC
+		INTO		:c_remark
+		FROM FNM_FO_NARRATION_MSTR
+		WHERE FNM_NARRATION_ID = 'A5';
+		
+		if(SQLCODE != 0 )
+		{
+				fn_errlog( c_ServiceName, "S31025", SQLMSG, c_err_msg  );
+				fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				destroy_bat();
+		}
+		if(DEBUG_MSG_LVL_3)		/* ver 1.1 */
+		{
+			fn_userlog(c_ServiceName,c_remark);
+		}
+
+		
+		/******************** Get All match accounts one by one ******************/
+
+		for(l_counter=1;l_counter <= l_count ;l_counter++)
+		{
+				long l_ip_len ;
+				int flag = 0;
+				int flag1 = 0;
+				int furure_flag =0;
+				int option_flag =0;
+
+				NULLCHAR(c_cln_mtch_accnt);
+				NULLCHAR(c_msg);
+
+				EXEC SQL
+				SELECT TCM_CLM_MTCH_ACCNT
+				INTO :c_cln_mtch_accnt
+				FROM TCM_TEMP_CLM_MTCH_ACCNT
+				WHERE rownum < 2 ;
+
+				if ( SQLCODE != 0 )
+				{
+						fn_errlog( c_ServiceName, "S31030", SQLMSG, c_err_msg  );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						destroy_bat();
+				}
+
+				i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+				if ( i_trnsctn == -1 )
+				{
+						fn_errlog( c_ServiceName, "S31035", LIBMSG, c_err_msg  );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						destroy_bat();
+				}
+
+				EXEC SQL
+				DELETE FROM TCM_TEMP_CLM_MTCH_ACCNT
+				WHERE rownum < 2 ; 
+
+				if(SQLCODE != 0 )
+				{
+						fn_errlog(c_ServiceName, "S31040", SQLMSG, c_err_msg); 
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						destroy_bat();
+				}			
+
+				if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+				{
+						fn_errlog( c_ServiceName, "S31045",LIBMSG,c_err_msg);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						destroy_bat();
+				}
+
+				sprintf(c_msg," Processing Match A/c %s",c_cln_mtch_accnt);
+				fn_userlog( c_ServiceName,c_msg);
+				fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+
+
+				/*************** Prepare data to Get limit of match account *****************/
+
+				memset(&st_gt_lmt,'\0' , sizeof( struct vw_gt_lmt_dtls) );
+				NULLCHAR(c_xchng_cd);
+				strcpy(st_gt_lmt.c_xchng_cd ,argv[1] );
+				strcpy(st_gt_lmt.c_trd_dt   ,argv[4] );
+				strcpy(st_gt_lmt.c_cln_mtch_accnt ,c_cln_mtch_accnt);
+				l_ip_len = (long) sizeof ( struct vw_gt_lmt_dtls);
+				st_gt_lmt.c_rqst_typ = LIMIT_X;
+				fn_cpy_ddr ( st_gt_lmt.c_rout_crt );
+
+        /***** Commented in Ver 1.3 ***************************************************
+				i_returncode = fn_call_svc( c_ServiceName, c_err_msg, &st_gt_lmt, &st_gt_lmt,
+													"vw_gt_lmt_dtls", "vw_gt_lmt_dtls", l_ip_len,
+													l_ip_len, 0, "SFO_GET_LIMITS" );
+
+				if ( i_returncode == -1 )
+				{
+						fn_errlog( c_ServiceName, "S31050", LIBMSG, c_err_msg );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						fn_userlog(c_ServiceName,"SFO_GET_LIMITS FAIL  ");
+						continue;
+				}
+        ***************** Ver 1.3 ****************************************************/
+      
+        /****** Ver 1.3 Starts Here ************************/
+        i_returncode = fo_get_trd_limit(c_ServiceName,
+                                    st_gt_lmt.c_cln_mtch_accnt,
+                                    st_gt_lmt.c_trd_dt,
+                                    st_gt_lmt.c_rqst_typ,
+                                    st_gt_lmt.c_xchng_cd,
+                                    st_gt_lmt.l_gid,
+                                    &st_gt_lmt.d_amt,
+                                    c_err_msg
+                                    );
+        if ( i_returncode == -1 )
+        {
+            fn_errlog( c_ServiceName, "S31055", LIBMSG, c_err_msg );
+            fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+            fn_userlog(c_ServiceName,"fo_get_trd_limit FAIL  ");
+            continue;
+        } 
+         
+        /****** Ver 1.3 Ends Here **************************/
+
+				if(DEBUG_MSG_LVL_3)		/* ver 1.1 */
+				{
+						sprintf(c_msg,"Limit Calculated :%lf:",st_gt_lmt.d_amt);
+						fn_userlog( c_ServiceName,c_msg);
+						fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+				}
+
+				/************** check limit is Positive if yes skip  *************************/
+
+				if(st_gt_lmt.d_amt >= 0 )
+				{
+						sprintf(c_msg,"Skiping Match ID :%s: as limit positive",c_cln_mtch_accnt);
+						fn_userlog( c_ServiceName,c_msg);
+						fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+						continue;
+				}
+
+				d_ngtv_lmt =  (-1 * st_gt_lmt.d_amt); /** convert negative to positive **/
+
+
+				/******************* Get  margin of Future *****************************/
+
+				d_fut_tot_mrgn =0;
+				EXEC SQL
+				SELECT	NVL(SUM(NVL(FUP_UEXCTD_MRGN,0)),0)
+				INTO		:d_fut_tot_mrgn  
+				FROM 		FUP_FUT_UNDRLYNG_PSTN
+				WHERE 	FUP_CLM_MTCH_ACCNT =:c_cln_mtch_accnt;
+
+				if( (SQLCODE != 0) )
+				{
+						fn_errlog(c_ServiceName, "S31060", SQLMSG, c_err_msg);
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						continue;
+				}	
+
+				/******************* Get  margin of Option  *****************************/
+
+				d_opt_tot_mrgn =0;
+				EXEC SQL
+				SELECT  NVL(SUM(NVL(FOP_UEXCTD_MRGN,0)),0)
+				INTO		:d_opt_tot_mrgn
+				FROM 		FOP_FO_OPTIONS_PSTN
+				WHERE  	FOP_CLM_MTCH_ACCNT =:c_cln_mtch_accnt;
+
+				if( SQLCODE != 0 )
+				{
+						fn_errlog(c_ServiceName, "S31065", SQLMSG, c_err_msg);
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						continue;
+				}
+
+
+				/*****************   Calcultate total margin ***************************/
+
+				d_totl_trd_mrgn  = 0;
+				d_totl_trd_mrgn  = d_fut_tot_mrgn + d_opt_tot_mrgn;
+
+				furure_flag =0;
+				option_flag =0;
+
+				/**********************************************************************
+				furure_flag & option flag are added for round off issue. Negative limit
+				is divided into multiple parts to reduce from margin. this leads to 
+				round off issue.so each part is first round off.Now Amount need to be 
+				adjusted because of roundoff is updated in last record.Last record is
+				in future table if there is no record in option table else last record is
+				in option table.for this logic flag is set to one
+				**********************************************************************/
+
+				if(d_fut_tot_mrgn > 0)
+				{
+						furure_flag = 1;
+				}
+
+				if (d_opt_tot_mrgn >0 )
+				{
+						option_flag = 1;
+				}
+
+				if (d_totl_trd_mrgn <= 0 )	
+				{
+						strcpy(c_msg,"Total margin is 0 Skipping Match Account...");
+						fn_userlog(c_ServiceName,c_msg);
+						fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+						continue; 
+				}
+
+				if(DEBUG_MSG_LVL_3)			/* ver 1.1 */
+				{	
+						fn_userlog( c_ServiceName," Future Total Margin :%lf:",d_fut_tot_mrgn);
+						fn_userlog( c_ServiceName," Option Total Margin :%lf:",d_opt_tot_mrgn);
+						fn_userlog( c_ServiceName," Total Trade Margin :%lf:" ,d_totl_trd_mrgn);
+				}
+
+
+				/******************** begin Transaction and Lock User ******************/
+
+				i_trnsctn  = fn_begintran( c_ServiceName, c_err_msg );
+
+				if ( i_trnsctn == -1 )
+				{
+						fn_errlog( c_ServiceName, "S31070", LIBMSG, c_err_msg  );
+						fn_userlog( c_ServiceName, "Error in fn_begintran skiping Match A/c");
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						destroy_bat();
+				}
+
+				i_returncode = fn_lock_usr( c_ServiceName, c_cln_mtch_accnt );
+
+				if ( i_returncode != 0 )
+				{
+						fn_errlog(c_ServiceName, "S31075",LIBMSG,c_err_msg);
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+						destroy_bat();
+				}	
+
+				/********************* get all records from future table **********************/
+
+				EXEC SQL
+				DECLARE future_cursor CURSOR FOR
+				SELECT	NVL(FUP_UEXCTD_MRGN,0),
+				NVL(FUP_UTRD_MRGN ,0),
+				FUP_UNDRLYNG,
+				FUP_TRD_DT,
+				FUP_INDSTK,
+				FUP_XCHNG_CD,
+				FUP_CNTRCT_TAG,
+				FUP_UOPNPSTN_FLW
+				FROM   	FUP_FUT_UNDRLYNG_PSTN
+				WHERE  	FUP_CLM_MTCH_ACCNT =:c_cln_mtch_accnt
+				AND 		NVL(FUP_UEXCTD_MRGN,0) >0; 
+
+				EXEC SQL OPEN future_cursor;
+
+				if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+						fn_errlog( c_ServiceName, "S31080", SQLMSG, c_err_msg  );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						EXEC SQL CLOSE future_cursor;
+						fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+						continue;
+				}	
+
+				l_no_of =0;
+				EXEC SQL
+				SELECT count(*)
+				INTO   :l_no_of
+				FROM    FUP_FUT_UNDRLYNG_PSTN
+				WHERE   FUP_CLM_MTCH_ACCNT =:c_cln_mtch_accnt
+				AND     NVL(FUP_UEXCTD_MRGN,0) >0;
+
+				if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+				{
+						fn_errlog( c_ServiceName, "S31085", SQLMSG, c_err_msg  );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						EXEC SQL CLOSE future_cursor;
+						fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+						continue;
+				}	
+
+				if(DEBUG_MSG_LVL_3)		/* ver 1.1 */
+				{
+					fn_userlog(c_ServiceName,"no of recodrs in Furutre Table  :%ld:",l_no_of);
+				}	
+
+				/*********** For Each Future Positon Loop **************/	
+
+				d_tot_reduce =0 ;
+				flag = 0;/* to find is there any  error in loop */ 
+
+				for(l=1 ; l <=l_no_of ; l++)
+				{
+						d_fut_trd_mrgn = 0;
+						d_utrd_mrgn    = 0;
+						NULLCHAR(c_unlyng);
+						NULLCHAR(c_trd_dt);
+						NULLCHAR(c_xchng_cd);
+						c_indstk = '\0';
+						c_cntrct_tag ='\0';
+						c_uopnpstn_flw = '\0';
+
+						EXEC SQL FETCH future_cursor
+						INTO 	 :d_fut_trd_mrgn,
+									 :d_utrd_mrgn,
+									 :c_unlyng,
+									 :c_trd_dt,
+									 :c_indstk,
+									 :c_xchng_cd,
+									 :c_cntrct_tag,
+									 :c_uopnpstn_flw;
+
+						if ( SQLCODE != 0 )
+						{
+								EXEC SQL CLOSE future_cursor;
+								fn_errlog( c_ServiceName, "S31090", SQLMSG, c_err_msg  );
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag =1;
+								break;
+						}
+
+						fn_userlog( c_ServiceName, "Stock Code :%s:",c_unlyng);
+						fn_userlog( c_ServiceName, "d_fut_trd_mrgn :%lf:",d_fut_trd_mrgn);
+						fn_userlog( c_ServiceName, "d_utrd_mrgn :%lf:",d_utrd_mrgn);
+						fn_userlog( c_ServiceName, "Trade Date :%s:",c_trd_dt);
+						fn_userlog( c_ServiceName, "c_cntrct_tag :%c:",c_cntrct_tag);
+						fn_userlog( c_ServiceName, "Buy/Sell :%c:",c_uopnpstn_flw);
+
+						d_update_mrgn = 0;
+						d_update_mrgn = find_appropriation(c_ServiceName, 
+																					 d_fut_trd_mrgn,
+																					 d_totl_trd_mrgn,
+																					 d_ngtv_lmt);
+						if(d_update_mrgn < 0 )
+						{
+								sprintf( c_msg,"ERROR :Fail To Calculate Margin for :%s:",c_cln_mtch_accnt);
+								fn_userlog( c_ServiceName,c_msg );
+								fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+								EXEC SQL CLOSE future_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn,c_err_msg );
+								flag =1;
+								break;
+						}
+
+						fn_userlog(c_ServiceName,"d_update_mrgn :%lf:",d_update_mrgn);
+
+						d_update_mrgn =  round_off(d_update_mrgn );
+
+						/**************************************************************************
+
+						Option Flag =0 means there is no enty in option table. future flag 1   
+						means there are records in future table.So  last record in future table is 
+						last record for this match account hence adjust all round off amount into
+						this last record. Amt to be updated for this record is 
+
+						Amt to be reduce  = Total Amt to be deducted - amount reduce uptil now;	  
+
+						**************************************************************************/
+
+						if(furure_flag == 1 && option_flag == 0)
+						{
+								if((l == l_no_of) && (d_totl_trd_mrgn > d_ngtv_lmt))
+								{
+										d_amt_tobe_reduce = 0;
+										d_amt_tobe_reduce = d_ngtv_lmt - d_tot_reduce;	
+										d_update_mrgn     = d_fut_trd_mrgn - d_amt_tobe_reduce ;
+								}
+						}
+
+						/**************** Total Amount reduced uptil now ***************/
+
+						if(d_totl_trd_mrgn > d_ngtv_lmt)
+						{
+								d_uexctd_mrgn_cng = 0;	
+								d_uexctd_mrgn_cng = d_fut_trd_mrgn - d_update_mrgn;
+								d_utrd_mrgn       = d_utrd_mrgn - d_uexctd_mrgn_cng;
+								d_tot_reduce 			= d_tot_reduce + d_uexctd_mrgn_cng ;		
+						}
+						else
+						{
+								d_uexctd_mrgn_cng = d_fut_trd_mrgn;
+								d_utrd_mrgn 			= d_utrd_mrgn - d_uexctd_mrgn_cng;
+								d_tot_reduce 			= d_tot_reduce + d_uexctd_mrgn_cng;
+						}
+
+						fn_userlog(c_ServiceName,"Change in Margin :%lf:",d_uexctd_mrgn_cng);
+						fn_userlog(c_ServiceName,"d_tot_reduce :%lf:",d_tot_reduce);
+						fn_userlog(c_ServiceName,"round off d_update_mrgn :%lf:",d_update_mrgn);
+						fn_userlog(c_ServiceName,"Changed Trade Margin :%lf:",d_utrd_mrgn);
+
+
+						/*********************  Update Future Table **********************/
+
+						EXEC SQL
+						UPDATE FUP_FUT_UNDRLYNG_PSTN
+						SET    FUP_UEXCTD_MRGN    = :d_update_mrgn,
+							 		 FUP_UTRD_MRGN      = :d_utrd_mrgn 
+						WHERE  FUP_CLM_MTCH_ACCNT = :c_cln_mtch_accnt
+						AND    FUP_UNDRLYNG       = :c_unlyng
+						AND    FUP_TRD_DT         = :c_trd_dt
+						AND    FUP_INDSTK         = :c_indstk
+						AND    FUP_XCHNG_CD       = :c_xchng_cd
+						AND    FUP_CNTRCT_TAG     = :c_cntrct_tag
+						AND    FUP_UOPNPSTN_FLW   = :c_uopnpstn_flw;
+
+						if (SQLCODE != 0 )
+						{
+								fn_errlog( c_ServiceName, "S31095", SQLMSG, c_err_msg  );
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								EXEC SQL CLOSE future_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag=1;
+								break;
+						}
+
+
+						/****************** Add entry to Log Table ***********************/
+
+						NULLCHAR(ch_tm);	
+						EXEC SQL
+						SELECT to_char(sysdate , 'dd-mm-yyyy hh24:mi:ss')
+						INTO   :ch_tm
+						FROM   dual;
+
+						if (  SQLCODE != 0  )
+						{
+								fn_errlog( c_ServiceName, "S31100", SQLMSG, c_err_msg  );
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								EXEC SQL CLOSE future_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag = 1;
+								break ;
+						}	
+
+						EXEC SQL	
+						INSERT INTO AFL_APP_FNO_LOG
+						(
+									AFL_UEXCTD_MRGN_CNG,
+									AFL_CLM_MTCH_ACCNT,
+									AFL_UNDRLYNG,
+									AFL_TRD_DT,
+									AFL_XCHNG_CD,
+									AFL_INDSTK,
+									AFL_CNTRCT_TAG,
+									AFL_UOPNPSTN_FLW,
+									AFL_ORDR_TYP,
+									AFL_LOG_TM
+						)
+						VALUES
+						(
+									:d_uexctd_mrgn_cng,
+									:c_cln_mtch_accnt,
+									:c_unlyng,
+									:c_trd_dt,
+									:c_xchng_cd,
+									:c_indstk,
+									:c_cntrct_tag,
+									:c_uopnpstn_flw,
+									'F',
+									 to_date(:ch_tm, 'dd-mm-yyyy hh24:mi:ss')
+						);
+
+						if (  SQLCODE != 0  )
+						{
+								fn_errlog( c_ServiceName, "S31105", SQLMSG, c_err_msg  );
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								EXEC SQL CLOSE future_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag = 1; 
+								break ;
+						}
+				} /* End Of Future Positon Loop */ 
+
+				if (flag == 1)
+				{
+						sprintf(c_msg,"ERROR :Got Error Skipping Match A/c :%s:",c_cln_mtch_accnt);
+						fn_userlog(c_ServiceName,c_msg);
+						fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+						flag =0;
+						continue; 
+				}	
+
+				/**************** Get all Positons of Client from option table ********************/
+
+				EXEC SQL
+				DECLARE  option_cursor CURSOR FOR
+				SELECT 	 NVL(FOP_UEXCTD_MRGN,0),
+								 FOP_UNDRLYNG,
+								 FOP_TRD_DT,
+								 FOP_XCHNG_CD,
+								 FOP_INDSTK,
+								 FOP_OPT_TYP,
+								 TO_CHAR(FOP_EXPRY_DT,'DD-Mon-YYYY'),
+								 FOP_STRK_PRC,
+								 FOP_EXER_TYP
+				FROM 		 FOP_FO_OPTIONS_PSTN
+				WHERE 	 FOP_CLM_MTCH_ACCNT =:c_cln_mtch_accnt
+				AND 		 NVL(FOP_UEXCTD_MRGN,0) > 0;
+
+				EXEC SQL OPEN option_cursor;
+
+				if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+				{
+						fn_errlog( c_ServiceName, "S31110", SQLMSG, c_err_msg  );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						EXEC SQL CLOSE option_cursor;
+						fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+						continue ;
+				}
+
+				l_no_of =0;	
+
+				EXEC SQL	
+				SELECT	count(*)
+				INTO		:l_no_of
+				FROM 		FOP_FO_OPTIONS_PSTN
+				WHERE 	FOP_CLM_MTCH_ACCNT =:c_cln_mtch_accnt
+				AND 		NVL(FOP_UEXCTD_MRGN,0) > 0;
+
+				if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+				{
+						fn_errlog( c_ServiceName, "S31115", SQLMSG, c_err_msg  );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						EXEC SQL CLOSE option_cursor;
+						fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+						continue ;
+				}
+
+				fn_userlog(c_ServiceName,"no of recodrs in Option  Table  :%ld:",l_no_of);
+
+				/**************** For each position in Option Loop  ********************/
+
+				flag1 = 0;
+				d_update_mrgn = 0;
+
+				for(l=1; l <= l_no_of ; l++)
+				{
+
+						d_opt_trd_mrgn = 0;
+						d_strk_prc     = 0;
+						NULLCHAR(c_unlyng);
+						NULLCHAR(c_trd_dt);
+						NULLCHAR(c_xchng_cd);
+						NULLCHAR(c_expry_dt);
+						c_indstk		= '\0';
+						c_opt_typ 	= '\0';
+						c_exer_typ 	= '\0';
+
+
+						EXEC SQL FETCH option_cursor
+						INTO :d_opt_trd_mrgn,
+								 :c_unlyng,
+								 :c_trd_dt,
+								 :c_xchng_cd,
+								 :c_indstk,
+								 :c_opt_typ,
+								 :c_expry_dt,
+								 :d_strk_prc,
+								 :c_exer_typ;
+
+						if ( SQLCODE != 0 )
+						{
+								EXEC SQL CLOSE option_cursor;
+								fn_errlog( c_ServiceName, "S31120", SQLMSG, c_err_msg  );
+								fn_userlog( c_ServiceName, "Got Erro while Fetching Option Details ");
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag1 = 1;	
+								break ;
+						}
+
+						fn_userlog( c_ServiceName, "d_opt_trd_mrgn :%lf:",d_opt_trd_mrgn);
+						fn_userlog( c_ServiceName, "Stock Code :%s:",c_unlyng);
+						fn_userlog( c_ServiceName, "Trade Date :%s:",c_trd_dt);
+						fn_userlog( c_ServiceName, "Option Type :%c:",c_opt_typ);
+						fn_userlog( c_ServiceName, "c_expry_dt       :%s:",c_expry_dt);
+						fn_userlog( c_ServiceName, "d_strk_prc       :%lf:",d_strk_prc);
+						fn_userlog( c_ServiceName, "c_exer_typ       :%c:",c_exer_typ);
+
+						d_update_mrgn = 0;
+						d_update_mrgn = find_appropriation(c_ServiceName, d_opt_trd_mrgn ,
+																					 d_totl_trd_mrgn, d_ngtv_lmt);
+								
+						fn_userlog(c_ServiceName,"d_update_mrgn :%lf:",d_update_mrgn);
+
+						if(d_update_mrgn < 0  )
+						{
+								strcpy(c_msg,"ERROR : Fail To Calculate Margin ");
+								fn_userlog( c_ServiceName,c_msg);
+								fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+								EXEC SQL CLOSE option_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn,"Fail To Calculate Margin" );
+								flag1 = 1;
+								break;
+						}
+
+
+						d_update_mrgn =  round_off(d_update_mrgn );
+
+
+						/************************************************************************		
+						Option Flag 1 means There are records to be updated in Option Table.
+						Last Record in Option Table is last record to be updated for this
+						match account. So adjust all round off amount into this last record.
+
+						margin deducted = amt to be deducted - amt has been reduced    
+
+						************************************************************************/
+
+						if(option_flag == 1)
+						{
+								if((l == l_no_of) && (d_totl_trd_mrgn > d_ngtv_lmt))
+								{
+									d_amt_tobe_reduce = 0;
+									d_amt_tobe_reduce = d_ngtv_lmt - d_tot_reduce;
+									d_update_mrgn     = d_opt_trd_mrgn - d_amt_tobe_reduce ;
+								}
+						}
+
+						fn_userlog(c_ServiceName,"round off d_update_mrgn :%lf:",d_update_mrgn);
+
+						/**************  Update Margin in Option Table *********************/
+
+						EXEC SQL
+						UPDATE	FOP_FO_OPTIONS_PSTN
+						SET 		FOP_UEXCTD_MRGN      = :d_update_mrgn
+						WHERE 	FOP_UNDRLYNG         = :c_unlyng
+						AND   	FOP_CLM_MTCH_ACCNT   = :c_cln_mtch_accnt
+						AND   	FOP_TRD_DT           = :c_trd_dt
+						AND   	FOP_XCHNG_CD         = :c_xchng_cd
+						AND   	FOP_INDSTK           = :c_indstk
+						AND   	FOP_OPT_TYP          = :c_opt_typ
+						AND   	FOP_EXPRY_DT         = :c_expry_dt
+						AND   	FOP_STRK_PRC         = :d_strk_prc
+						AND   	FOP_EXER_TYP         = :c_exer_typ;
+
+						if ( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+						{
+								fn_errlog( c_ServiceName, "S31125", SQLMSG, c_err_msg  );
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								EXEC SQL CLOSE option_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag1 = 1;
+								break;
+						}
+
+						/**************** Total Amount  reduced uptil now ***************/ 
+
+						if(	d_totl_trd_mrgn > d_ngtv_lmt	)
+						{
+								d_uexctd_mrgn_cng = 0;
+								d_uexctd_mrgn_cng = d_opt_trd_mrgn - d_update_mrgn;
+								d_tot_reduce = d_tot_reduce + d_uexctd_mrgn_cng ; 
+						}
+						else
+						{
+								d_uexctd_mrgn_cng = d_opt_trd_mrgn;
+								d_tot_reduce 			= d_tot_reduce + d_uexctd_mrgn_cng;
+						}
+
+
+						/**************** Add Entry tO Log Table ************************/
+
+						NULLCHAR(ch_tm);
+						EXEC SQL
+						SELECT to_char(sysdate , 'dd-mm-yyyy hh24:mi:ss')
+						INTO   :ch_tm
+						FROM   dual;
+
+						if (  SQLCODE != 0  )
+						{
+								fn_errlog( c_ServiceName, "S31130", SQLMSG, c_err_msg  );
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								EXEC SQL CLOSE option_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag = 1;
+								break ;
+						}
+
+						EXEC SQL
+						INSERT INTO AFL_APP_FNO_LOG
+						(
+								AFL_UEXCTD_MRGN_CNG,
+								AFL_CLM_MTCH_ACCNT,
+								AFL_UNDRLYNG,
+								AFL_TRD_DT,
+								AFL_XCHNG_CD,
+								AFL_INDSTK,
+								AFL_OPT_TYP,
+								AFL_EXPRY_DT,
+								AFL_STRK_PRC,
+								AFL_EXER_TYP,
+								AFL_ORDR_TYP,	
+								AFL_LOG_TM	
+						)
+						VALUES
+						(
+								:d_uexctd_mrgn_cng,
+								:c_cln_mtch_accnt,
+								:c_unlyng,
+								:c_trd_dt,
+								:c_xchng_cd,
+								:c_indstk,
+								:c_opt_typ,
+								:c_expry_dt,
+								:d_strk_prc,
+								:c_exer_typ,
+								'O',
+								to_date(:ch_tm,'dd-mm-yyyy hh24:mi:ss')
+						);
+
+						if (  SQLCODE != 0  )
+						{
+								fn_errlog( c_ServiceName, "S31135", SQLMSG, c_err_msg  );
+								fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+								EXEC SQL CLOSE option_cursor;
+								fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+								flag1 = 1;
+								break;
+						}
+				} /* END Of Option Loop  */
+
+				if(flag1 == 1)
+				{
+						sprintf(c_msg,"Skiping Match A/c :%s: as got error in Option Loop",
+						c_cln_mtch_accnt);
+						fn_userlog( c_ServiceName,c_msg);
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						continue;
+				}
+
+				/*************  Check all records updated *********************/
+
+				fn_userlog(c_ServiceName,"Total Amount Reduce :%lf:",d_tot_reduce);
+				fn_userlog(c_ServiceName,"Total Negative Limit :%lf:",d_ngtv_lmt);
+
+				if ( (d_tot_reduce != d_ngtv_lmt) && (d_ngtv_lmt < d_totl_trd_mrgn) )
+				{
+						strcpy(c_msg,"Total Amount Reduce is not ==  Amt to be Reduce ");
+						fn_userlog(c_ServiceName,c_msg);
+						fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						continue;
+				}
+
+				if((d_ngtv_lmt > d_totl_trd_mrgn) && (d_totl_trd_mrgn != d_tot_reduce))
+				{
+						strcpy(c_msg," Amount Reduce is not ==  d_totl_trd_mrgn ");
+						fn_userlog(c_ServiceName,c_msg);
+						fn_bat_pst_msg(c_ServiceName,c_msg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						continue;
+				}
+
+				/*************  Allocating  Views for update limits **********************/	
+        /**** Ver 1.3 ************************************************************
+				ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32", "vw_err_msg",
+																				sizeof ( struct vw_err_msg ) );
+        ***** Ver 1.3 Ends Here **************************************************/
+
+        /*** Ver 1.3 Starts Here *****/
+        ptr_st_err_msg = malloc(sizeof(struct vw_err_msg));
+        /*** Ver 1.3 Ends Here ******/
+ 
+				if ( ptr_st_err_msg ==  NULL )
+				{
+						fn_errlog ( c_ServiceName, "S31140", TPMSG, c_err_msg );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+						destroy_bat();
+				}
+
+				memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) );
+        /**** Ver 1.3 Comment starts*****************************************
+				ptr_st_pstn_actn = ( struct vw_pstn_actn * ) tpalloc ( "VIEW32",
+																						 "vw_pstn_actn",
+																				sizeof ( struct vw_pstn_actn ) );
+        **************** Ver 1.3 Comment Ends *******************************/
+
+        /*** Ver 1.3 Starts Here *****/
+        ptr_st_pstn_actn  = malloc(sizeof(struct vw_pstn_actn ));
+        /*** Ver 1.3 Ends Here ******/
+
+				if ( ptr_st_pstn_actn ==  NULL )
+				{
+						fn_errlog ( c_ServiceName, "S31145", TPMSG, c_err_msg );
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						fn_aborttran(c_ServiceName, i_trnsctn, c_err_msg );
+						tpfree((char*) ptr_st_err_msg );
+						destroy_bat();
+				}
+
+				memset ( ptr_st_pstn_actn, 0, sizeof ( struct vw_pstn_actn ) );	
+				NULLCHAR(c_narration_id);	
+
+				/*************  Prepare Data for update limits **********************/	
+
+				strcpy(ptr_st_pstn_actn->c_cln_mtch_accnt,c_cln_mtch_accnt );
+				strcpy(ptr_st_pstn_actn->c_xchng_cd, c_xchng_cd);
+				strcpy(ptr_st_pstn_actn->c_ref_rmrks,c_remark );
+
+				strcpy(c_narration_id,MARGIN_ADJ_APPROPRIATION);
+				c_dr_without_lmt_flg = 'C';
+
+				if(DEBUG_MSG_LVL_3)		/* ver 1.1 */
+				{	
+						fn_userlog(c_ServiceName,"c_cln_mtch_accnt :%s:",c_cln_mtch_accnt);
+						fn_userlog(c_ServiceName,"c_xchng_cd :%s:",c_xchng_cd);
+						fn_userlog(c_ServiceName,"c_remark :%s:",	c_remark);
+				}	
+
+				fn_init_ddr_val ( ptr_st_pstn_actn->c_rout_crt );
+
+
+				/***************  Call Service fn_upd_limits  **********************/	
+
+				i_returncode = fn_upd_limits( c_ServiceName,
+														ptr_st_pstn_actn,
+														ptr_st_err_msg,
+														c_narration_id,
+														c_dr_without_lmt_flg,
+														d_tot_reduce,
+														&d_balance_amt);	
+
+				if ( i_returncode != 0 )
+				{
+						strcpy(c_err_msg,"Error fn_upd_limits Fail");
+						fn_userlog(c_ServiceName,c_err_msg);
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						tpfree((char*) ptr_st_err_msg );
+						tpfree((char*) ptr_st_pstn_actn );
+						continue;
+				}
+
+				fn_userlog(c_ServiceName,"Balance Amount :%lf:", d_balance_amt);
+
+				if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+				{
+						fn_errlog( c_ServiceName, "S31150",LIBMSG,c_err_msg);
+						fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						tpfree((char*) ptr_st_err_msg );
+						tpfree((char*) ptr_st_pstn_actn );
+						destroy_bat();
+				}
+
+				tpfree((char*) ptr_st_err_msg );
+				tpfree((char*) ptr_st_pstn_actn );
+
+		} /* Match Account Loop */					
+
+		fn_userlog(c_ServiceName,"ALL DONE");
+		fn_bat_pst_msg(c_ServiceName,"ALL DONE ",c_tag);
+		destroy_bat();
+}
+
+double find_appropriation(char* c_ServiceName , double d_fut_trd_mrgn,double d_totl_trd_mrgn,
+                          double d_ngtv_lmt)
+{
+		double d_update_mrgn = -1;
+		double d_weight_unlying =0;
+		double d_deduction =0;
+
+		if (d_totl_trd_mrgn <=  d_ngtv_lmt)
+		{
+				d_update_mrgn = 0;
+				return d_update_mrgn;
+		}
+
+		if(d_fut_trd_mrgn >0 &&  d_totl_trd_mrgn > 0 && d_ngtv_lmt > 0 )
+		{
+				d_weight_unlying = d_fut_trd_mrgn / d_totl_trd_mrgn ;
+				d_deduction = d_weight_unlying * d_ngtv_lmt;
+				d_update_mrgn = d_fut_trd_mrgn - d_deduction;
+		}
+		else
+		{
+				fn_userlog( c_ServiceName, "ERROR : division by Zero or negative");
+		}
+
+		fn_userlog( c_ServiceName, "d_weight_unlying :%lf:",d_weight_unlying);
+		fn_userlog( c_ServiceName, "d_deduction      :%lf:",d_deduction);
+
+		return d_update_mrgn ;
+}
+
+double round_off(double d_update_mrgn )
+{
+	if((int)d_update_mrgn <= 0)
+			return d_update_mrgn;
+
+/*	d_update_mrgn	= d_update_mrgn/100;  Convert to RS ********/
+
+ 	d_update_mrgn = ceil(d_update_mrgn);
+
+/*	d_update_mrgn = d_update_mrgn *100; */
+
+	return d_update_mrgn ; 
+}

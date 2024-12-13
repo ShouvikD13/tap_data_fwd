@@ -3,7 +3,6 @@ package ESR_Packing
 import (
 	"bytes"
 	"crypto/md5"
-	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"reflect"
@@ -43,7 +42,7 @@ type LogOnToTapManager struct {
 	Opm_loginStatus    int
 	Opm_userID         int32
 	Opm_existingPasswd string
-	Opm_newPasswd      sql.NullString
+	Opm_newPasswd      string
 	Opm_LstPswdChgDt   string
 	Opm_XchngCd        string
 	Opm_TrdrID         string
@@ -68,7 +67,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		 ** If these values are not found the refer to the Service .
 	*/
 
-	//	Step 1: Check the ESR Status.
+	//	Step 1: Check the ESR Status. (I have disscussed with girish sir . not to use this status . i am going to a global variable which will indicate that which type of request is going to send (order / Logon))
 	//	Step 2: Check password expiration and prompt for a password change if required.
 	//	Step 3: Fetch the login status, user ID, password, and new password from the database and validate them.
 	//	Step 4: Fetch four fields from opm_ord_pipe_mstr (XchngCd, LstPswdChgDt, TrdrID, BrnchID) and four fields from exg_xchng_mstr (exg_brkr_id, exg_nxt_trd_dt, exg_brkr_name, exg_brkr_stts).
@@ -113,9 +112,10 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		FROM opm_ord_pipe_mstr, exg_xchng_mstr
 		WHERE opm_pipe_id = ?
 		AND opm_xchng_cd = exg_xchng_cd
-		AND exg_max_pswd_vld_days > (current_date - opm_lst_pswd_chg_dt);
+		AND exg_max_pswd_vld_days > (current_date - opm_lst_pswd_chg_dt)::integer;
 
 	`
+	// in above querry we are trying to get the total days (when last password change date till now) and comparing them to all alvilabele days before the password should be change.
 	errForExgMaxPswdVldDays := LOTTM.DB.Raw(queryForExgMaxPswdVldDays, LOTTM.C_pipe_id).Scan(&exgMaxPswdVldDays).Error
 
 	if errForExgMaxPswdVldDays != nil {
@@ -206,7 +206,7 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 		return -1
 	}
 
-	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Fetched new password: %s", LOTTM.Opm_newPasswd.String)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Fetched new password: %s", LOTTM.Opm_newPasswd)
 
 	if LOTTM.UserID != LOTTM.Opm_userID {
 		errorMsg := fmt.Sprintf("Incorrect User ID for Pipe ID: %s, expected: %d, got: %d", LOTTM.C_pipe_id, LOTTM.Opm_userID, LOTTM.UserID)
@@ -221,17 +221,13 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	}
 
 	LOTTM.Opm_existingPasswd = strings.TrimSpace(LOTTM.Opm_existingPasswd)
-	if LOTTM.Opm_newPasswd.Valid {
-		LOTTM.Opm_newPasswd.String = strings.TrimSpace(LOTTM.Opm_newPasswd.String)
-	}
+	LOTTM.Opm_newPasswd = strings.TrimSpace(LOTTM.Opm_newPasswd)
 
 	decryptedExistingPasswd := LOTTM.PUM.Fndecrypt(LOTTM.Opm_existingPasswd)
 	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Decrypted existing password: %s", decryptedExistingPasswd)
 
-	if LOTTM.Opm_newPasswd.Valid {
-		decryptedNewPasswd := LOTTM.PUM.Fndecrypt(LOTTM.Opm_newPasswd.String)
-		LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Decrypted new password: %s", decryptedNewPasswd)
-	}
+	decryptedNewPasswd := LOTTM.PUM.Fndecrypt(LOTTM.Opm_newPasswd)
+	LOTTM.LoggerManager.LogInfo(LOTTM.ServiceName, "Decrypted new password: %s", decryptedNewPasswd)
 
 	// Step4: we are fetching 4 feilds from `opm_ord_pipe_mstr` (XchngCd, LstPswdChgDt, TrdrID, BrnchID)
 	//	and 4 fields from `exg_xchng_mstr` (exg_brkr_id, exg_nxt_trd_dt, exg_brkr_name, exg_brkr_stts)
@@ -303,16 +299,16 @@ func (LOTTM *LogOnToTapManager) LogOnToTap() int {
 	/********************** Header Done ********************/
 
 	/********************** Body Starts ********************/
-	LOTTM.St_sign_on_req.Li_user_id = LOTTM.Opm_userID                                                                     // 1 BDY
-	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_1[:], 8, " ")                                           // 2 BDY
-	LOTTM.PUM.CopyAndFormatPassword(LOTTM.St_sign_on_req.C_password[:], util.LEN_PASSWORD, LOTTM.Opm_existingPasswd)       // 3 BDY
-	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_2[:], 8, " ")                                           // 4 BDY
-	LOTTM.PUM.CopyAndFormatPassword(LOTTM.St_sign_on_req.C_new_password[:], util.LEN_PASSWORD, LOTTM.Opm_newPasswd.String) // 5 BDY
-	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_trader_name[:], util.LEN_TRADER_NAME, LOTTM.Opm_TrdrID)          // 6 BDY
-	LOTTM.St_sign_on_req.Li_last_password_change_date = 0                                                                  // 7 BDY
-	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_broker_id[:], util.LEN_BROKER_ID, LOTTM.Exg_BrkrID)              // 8 BDY
-	LOTTM.St_sign_on_req.C_filler_1 = ' '                                                                                  // 9 BDY
-	LOTTM.St_sign_on_req.Si_branch_id = int16(LOTTM.Opm_BrnchID)                                                           // 10 BDY
+	LOTTM.St_sign_on_req.Li_user_id = LOTTM.Opm_userID                                                               // 1 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_1[:], 8, " ")                                     // 2 BDY
+	LOTTM.PUM.CopyAndFormatPassword(LOTTM.St_sign_on_req.C_password[:], util.LEN_PASSWORD, LOTTM.Opm_existingPasswd) // 3 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_reserved_2[:], 8, " ")                                     // 4 BDY
+	LOTTM.PUM.CopyAndFormatPassword(LOTTM.St_sign_on_req.C_new_password[:], util.LEN_PASSWORD, LOTTM.Opm_newPasswd)  // 5 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_trader_name[:], util.LEN_TRADER_NAME, LOTTM.Opm_TrdrID)    // 6 BDY
+	LOTTM.St_sign_on_req.Li_last_password_change_date = 0                                                            // 7 BDY
+	LOTTM.TCUM.CopyAndFormatSymbol(LOTTM.St_sign_on_req.C_broker_id[:], util.LEN_BROKER_ID, LOTTM.Exg_BrkrID)        // 8 BDY
+	LOTTM.St_sign_on_req.C_filler_1 = ' '                                                                            // 9 BDY
+	LOTTM.St_sign_on_req.Si_branch_id = int16(LOTTM.Opm_BrnchID)                                                     // 10 BDY
 
 	versionStr := LOTTM.EM.GetProcessSpaceValue("version", "VERSION_NUMBER")
 	if versionStr == "" {

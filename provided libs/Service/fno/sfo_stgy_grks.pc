@@ -1,0 +1,2454 @@
+/***********************************************************************************/
+/* Program           : SFO_STGY_GRKS																							 */
+/*                                                                                 */
+/* Input             :                                                             */
+/*                                                                                 */
+/* Output            :  																													 */
+/*                      																													 */
+/*                                                                                 */
+/* Description       : This service will fetch contarcts as input and compute 		 */
+/*                     their greeks, span and other values as required on 				 */ 
+/*										 strategy builder page 															         */
+/*                                                                                 */
+/* Log               : 1.0   Ravindra Panda | ISEC | 23-May-2022                   */
+/*									 : 1.1	 Ravindra Panda | ISEC | 18-Aug-2022									 */
+/*									 : 1.2   Ravindra Panda | ISEC | 22-Aug-2022									 */
+/***********************************************************************************/
+/* 1.0    -  New Release ( Strategy Builder )																			 */
+/* 1.1		-  Minor Changes																												 */
+/* 1.2    -  Minor Changes																												 */
+/* 1.3    -  MIS report changes and Non-Logged in section handling								 */
+/***********************************************************************************/
+
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <sqlca.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fo_view_def.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_session.h>
+#include <fn_pos.h>
+#include <fn_ddr.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fn_cal_greek_lib.h>        /*** Used for GREEK calculating function ***/
+
+#define CAL_PRC 'P'
+#define CAL_IV 'V'
+#define max_val(x,y) (((x) >= (y)) ? (x) : (y))
+
+/**** Function used for computing spot strike difference, bid and offer price, quantities for a contract ****/
+
+struct st_contract_desc; /* VER TOL : TUX on LINUX (Ravindra) */
+
+int fn_bidoffer(	struct st_contract_desc *ptr_st_cntct,
+									struct vw_usr_prfl	*ptr_st_usr_prfl,  /*** Added in VER 1.3 ***/
+									char *c_ServiceName,
+                	char *c_err_msg
+               );
+
+/*********** Function used for span computation of contract ***********/
+
+struct st_contract_desc; /* VER TOL : TUX on LINUX (Ravindra) */
+
+int fn_span(  struct st_contract_desc *ptr_st_cntct,
+              struct vw_usr_prfl *st_usr_prfl,
+							long  l_lot_size,
+              char *c_ServiceName,
+              char *c_err_msg
+           );
+
+/********** Function for computing Implied Volatility **********/
+
+struct st_contract_desc; /* VER TOL : TUX on LINUX (Ravindra) */
+
+int fn_calc_implied_volatility( char  *c_ServiceName,
+                                char c_opr_typ,
+                                double  d_spot_price,
+                                struct st_contract_desc *ptr_st_cntct,
+																char *c_err_msg 
+															);
+
+/********* Function for computing Payoff values *************/
+
+struct st_contract_desc; /* VER TOL : TUX on LINUX (Ravindra) */
+
+int fn_get_payoff( char *c_ServiceName,
+                   long  l_lot_size,
+                   double  d_spot_price,
+                   struct st_contract_desc *ptr_st_cntct,
+		  						 char *c_err_msg
+									);
+
+/************ Structure used for storing contract description ****************/
+  struct st_contract_desc
+  {
+    char  c_xchng_cd[4];
+    char  c_prd_typ;
+    char  c_undrlyng[8];
+    char  c_expry_dt[22];
+    char  c_ordr_flw;
+    char  c_opt_typ;
+    char  c_indx_stck;
+    long  l_strike_prc;
+    long  l_ord_tot_qty;
+    long  l_bst_offr_prc;
+    long  l_bst_offr_qty;
+    long  l_bst_bid_prc;
+    long  l_bst_bid_qty;
+		long  l_lst_trd_prc;
+    double  d_imp_vol;
+    double  d_delta;
+    double  d_gamma;
+    double  d_theta;
+		double  d_vega;
+		double  d_payoff_today;
+		double	d_payoff_exp;
+    double  d_mrgn_amnt;
+		double  d_ltp;               /** To be used to store price returned by sfo_cal_greeks service for a give value of IV **/
+    double  d_spot_strk_diff;
+    double  d_spt_Strk_diff_per;
+  }; 
+
+void SFO_STGY_GRKS( TPSVCINFO *rqst )
+{
+	
+	char  c_ServiceName[33];
+  char  c_err_msg[256];
+	char	c_rqst_type = '\0'; /** B : For basic greek values of contracts and S : For greek and projection values for analysis 																					E : For edintig saved strategy **/
+	char  c_strtgy_id[10];
+	char  c_strtgy_name[30];
+	char  c_src_typ = 'N'; /*** Added in VEr 1.3 : L - Logged in section, N - Non-logged in section ***/
+
+	int  i_updtd_cnt = 0;
+	int  i_srvc_cnt = 0;
+	int  i_err[22];
+  int  i_ferr[22];
+	int	 i_rec_count = 0;
+	int	 i_ch_val = 0;
+	int  i_cntrct_cnt = 0;
+	int	 i_loop_cnt = 0;
+	int	 i_exist = 0;
+	int  i_retcode_bidoffr = 0;
+	int  i_retcode_span = 0;
+	int  i_retcode_greeks = 0;
+	int  i_tot_cntrct = 0;
+	int  i_trnsctn = 0;
+	int  i_returncode = 0;
+	int	 i_counter = 0;
+	int	 i_count = 0;
+	int	 i_range = 0;
+	int	 i = 0;
+	int	 i_cnt = 0;
+	int	 i_retcode_volatility = 0;
+	
+	double  d_total_vals[5] = {0}; /**** Indexing 0:total quantuty, 1:total delta, 2:total gamma, 3:total theta, 4:total span *****/
+	double  d_tot_qty_tmp = 0.0;
+	double  d_tot_dlt_tmp = 0.0;
+	double  d_tot_gam_tmp = 0.0;
+	double  d_tot_tht_tmp = 0.0;
+	double  d_tot_spn_tmp = 0.0;
+	double	d_brk_evn = 0.0;
+	double	d_ord_tot_qty = 0.0;
+	double	d_quantity = 0.0;
+	double	d_min_lot_sz = 0.0;
+	double	d_undrlyn_spot_prc = 0.0;
+	
+	/**** Variables used specific to S request type ****/
+
+  double  d_delta[21] = {0.0};
+  double  d_vega[21] = {0.0};
+  double  d_theta[21] = {0.0};
+  double  d_gamma[21] = {0.0};
+  double  d_spot_price_arr[21] = {0.0};
+  double  d_payoff_tday[21] = {0.0};
+  double  d_payoff_exp[21] = {0.0};
+  double  d_spot_prc_tmp = 0.0;
+  double  d_increment = 0.0;
+  double  d_range = 0.0;
+
+  int i_spt_prc_inc = 0;
+
+  long  l_range = 0.0;
+
+  /**** Variable decelaration ends here ****/
+
+	struct vw_usr_prfl st_usr_prfl;
+  struct vw_err_msg st_err_msg;
+  MEMSET(c_err_msg);
+
+	/************ Structure used for storing contract description ****************/
+	struct st_contract_desc st_cntrct;
+
+	MEMSET(st_cntrct);
+
+ 	char  c_xchng_cd[4] = {'\0'};
+ 	char  c_prd_typ = '\0';
+ 	char  c_undrlyng[6] = {'\0'};
+ 	char  c_expry_dt[11] = {'\0'};
+	char  c_ordr_flw = '\0';
+ 	char  c_opt_typ = '\0';
+	char  c_exst_ordr_flw = '\0';
+	char	c_upd_ordr_flw = '\0';
+
+ 	long  l_strike_prc = 0.0;
+ 	long  l_ord_tot_qty = 0.0;
+	long  l_exst_tot_qty = 0.0;
+	long	l_min_lot_sz = 0.0;
+	long  l_upd_tot_qty = 0.0;
+	long	l_spot_prc = 0.0;
+	long  l_brk_evn = 0.0;
+	long  l_ordr_qty = 0.0;
+	long	l_spt_prc = 0.0;
+
+ 	double  d_imp_vol = 0.0;
+	double  d_lst_trd_prc = 0.0;  
+	double  d_bst_offr_prc = 0.0;
+	double  d_bst_offr_qty = 0.0;
+	double  d_bst_buy_qty = 0.0;
+	double  d_spot_prc = 0.0;
+	double	d_pyoff = 0.0;
+	
+	/* tuxedo variables */
+  FBFR32 *ptr_fml_Ibuf; /* pointer to FML input */
+	FBFR32 *ptr_fml_Obuf; /* pointer to FML output */
+
+  ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+  fn_userlog(c_ServiceName, "*********** Working on service :%s: ***********", c_ServiceName);
+
+	/* Fetching total number of contracts */
+  i_tot_cntrct = Foccur32((FBFR32 * ) ptr_fml_Ibuf, FFO_EXPRY_DT);
+
+	if( DEBUG_MSG_LVL_1 )
+  	fn_userlog(c_ServiceName, "Total number of contracts is :%d", i_tot_cntrct);
+
+	/*** ADDED in Ver 1.1 : Check to not allow more than 20 contracts in a strategy ***/
+
+	if ( i_tot_cntrct > 20 )
+	{
+		fn_userlog(c_ServiceName, " More then 20 contracts added to same strategy. ");
+    fn_errlog( c_ServiceName, "S31005", "Maximum 20 Legs are allowed..", c_err_msg  );
+    strcpy(c_err_msg,"Maximum 20 Legs are allowed.");
+    fn_userlog(c_ServiceName, "ERROR MESSAGE IS :%s:", c_err_msg); /*** Error print ***/
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );	
+	}
+
+	/*************** User and Session Authentication starts here ********************/
+
+	i_ch_val = fn_unpack_fmltovar_dflt ( c_ServiceName,
+                                      c_err_msg,
+                                      ptr_fml_Ibuf,
+                                      3,              /*** Changed to 3 in VER 1.3 ***/
+                                      FFO_USR_ID, (char*)st_usr_prfl.c_user_id, "NULL",
+                                      FFO_SSSN_ID, (char*)&st_usr_prfl.l_session_id, "0",
+																			FFO_ROUT_CRT, (char *)st_usr_prfl.c_rout_crt,"*");
+  if ( i_ch_val != 0  )
+  {
+    fn_errlog( c_ServiceName, "S31010", FMLMSG, c_err_msg  );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	if( DEBUG_MSG_LVL_3 )
+	{
+		fn_userlog(c_ServiceName, "User ID is :%s:",st_usr_prfl.c_user_id);
+		fn_userlog(c_ServiceName, "Session ID is :%ld:",st_usr_prfl.l_session_id);
+	}
+
+	if ( strcmp(st_usr_prfl.c_user_id,"system") != 0 && st_usr_prfl.l_session_id != 0)
+  {
+		/*** Added in Ver 1.3 ***/
+		
+		c_src_typ = 'L'; /*** Signifies call to service from logged in section ***/
+
+		i_err[0] = Fget32(ptr_fml_Ibuf, FFO_EBA_MTCH_ACT_NO, 0, (char *)st_usr_prfl.c_cln_mtch_accnt, 0);
+  	i_ferr[0] = Ferror32;
+
+		if( DEBUG_MSG_LVL_3 )
+  	{
+    	fn_userlog(c_ServiceName, "VER 1.3 : Client Match ID is :%s:",st_usr_prfl.c_cln_mtch_accnt);
+			fn_userlog(c_ServiceName, "VER 1.3 : Source type is :%c:", c_src_typ);
+  	}
+
+		/*** VER 1.3 ends here ***/
+
+    i_ch_val = fn_chk_sssn( c_ServiceName, &st_usr_prfl, &st_err_msg );
+
+    if ( i_ch_val == -1 )
+    {
+      fn_errlog( c_ServiceName,"S31015", LIBMSG, st_err_msg.c_err_msg );
+			fn_userlog( c_ServiceName," Failed to Authenticate the user and user session");
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }
+
+ 	/****************************** uthentication ends here *************************/
+
+	/***************************** Fetching request type for deciding operation and spot price *******************************/
+
+	i_err[0]    = Fget32( ptr_fml_Ibuf,FFO_RQST_TYP, 0,  (char *)&c_rqst_type, 0 );
+  i_ferr[0]  = Ferror32;
+
+  if(i_ferr[0] == -1 )
+  {
+    fn_userlog( c_ServiceName, "Error while fetching request type from input." );
+    fn_errlog( c_ServiceName, "S31020", Fstrerror32( i_ferr[i_loop_cnt] ),c_err_msg);
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/*** VER 1.3 : Adding entry to table to maintain count of call and request type for report ***/
+
+  EXEC SQL
+  SELECT FSB_COUNT 
+	INTO  i_srvc_cnt
+  FROM  FSB_STRTGY_BLDR_COUNT
+  WHERE  FSB_MATCH_ACNT = :st_usr_prfl.c_cln_mtch_accnt
+  AND  FSB_SRVC_NM = :c_ServiceName
+  AND  FSB_SRC_TYP = :c_src_typ
+  AND  FSB_TM_STMP = TRUNC(SYSDATE)
+	AND  FSB_USR_ID = :st_usr_prfl.c_user_id;
+
+	if(SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  {
+    fn_errlog( c_ServiceName, "S31025", SQLMSG,c_err_msg);
+    fn_userlog(c_ServiceName,"VER 1.3 : Error while checking existance of service with req type.");
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog(c_ServiceName, "VER 1.3 : Existing count is :%d:", i_srvc_cnt);
+	}
+
+	i_trnsctn = fn_begintran(c_ServiceName, c_err_msg);
+
+  if (i_trnsctn == -1)
+  {
+    fn_userlog(c_ServiceName, "Failed in initialiaze transaction");
+    fn_errlog(c_ServiceName, "S31030", TPMSG, c_err_msg);
+    tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+  }
+
+	if(i_srvc_cnt == 0)
+	{
+	
+		EXEC SQL
+		INSERT INTO FSB_STRTGY_BLDR_COUNT
+		(
+			FSB_MATCH_ACNT,
+			FSB_USR_ID,
+			FSB_SRVC_NM,
+			FSB_SRC_TYP,
+			FSB_COUNT,
+			FSB_TM_STMP		
+		)
+		VALUES
+		(
+			:st_usr_prfl.c_cln_mtch_accnt,
+			:st_usr_prfl.c_user_id,
+			:c_ServiceName,
+			:c_src_typ,
+			1,
+			TRUNC(sysdate)
+		);
+
+		if(SQLCODE != 0 )
+  	{
+    	fn_errlog( c_ServiceName, "S31035", SQLMSG,c_err_msg);
+    	fn_userlog(c_ServiceName,"VER 1.3 : Error while INSERTING record into table FSB_STRTGY_BLDR_COUNT .");
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+	}
+	else
+	{
+		i_updtd_cnt = i_srvc_cnt + 1;
+
+		EXEC SQL
+		UPDATE FSB_STRTGY_BLDR_COUNT
+		SET FSB_COUNT = :i_updtd_cnt 
+		WHERE  FSB_MATCH_ACNT = :st_usr_prfl.c_cln_mtch_accnt
+  	AND  FSB_SRVC_NM = :c_ServiceName
+ 		AND  FSB_SRC_TYP = :c_src_typ
+  	AND  FSB_TM_STMP = TRUNC(SYSDATE)
+		AND  FSB_USR_ID = :st_usr_prfl.c_user_id;
+
+		if(SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31040", SQLMSG,c_err_msg);
+      fn_userlog(c_ServiceName,"VER 1.3 : Error while UPDATING record in FSB_STRTGY_BLDR_COUNT .");
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }	
+
+	}
+
+	i_trnsctn = fn_committran(c_ServiceName, i_trnsctn, c_err_msg);
+  if (i_trnsctn == -1)
+  {
+    fn_userlog(c_ServiceName, "Failed in committing transaction");
+    fn_errlog(c_ServiceName, "S31045", TPMSG, c_err_msg);
+    tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+  }
+
+  /*** VER 1.3 ends here ***/
+
+	if ( c_rqst_type == 'B' || c_rqst_type == 'S')
+  {
+    i_err[1]    = Fget32( ptr_fml_Ibuf,FFO_CLS_PRC, 0, (char *)&l_spot_prc, 0);
+    i_ferr[1]  = Ferror32;
+  }
+
+	if(i_ferr[1] == -1 )
+  {
+    fn_userlog( c_ServiceName, "Error while fetching spot price vslue for request type B or S." );
+    fn_errlog( c_ServiceName, "S31050", Fstrerror32( i_ferr[i_loop_cnt] ),c_err_msg);
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/*** Spot Price returned from input is in Paises, so converting it rupess ***/
+	
+	d_spot_prc = (double)l_spot_prc/100;
+
+	if( DEBUG_MSG_LVL_3 )
+	{
+		fn_userlog( c_ServiceName, "Request type provided as input is :%c:",c_rqst_type);
+		fn_userlog( c_ServiceName, "Spot price received as input is :%lf:",d_spot_prc);
+	}
+
+
+	 /************ Deleting records from temporary table *************/
+
+	 EXEC SQL
+   TRUNCATE TABLE FSB_CNTRCT_DTLS_GBT;
+
+   if(SQLCODE != 0 )
+   {
+     fn_errlog( c_ServiceName, "S31055", SQLMSG,c_err_msg);
+     fn_userlog(c_ServiceName,"Error while checking existance of contract in FSB_CNTRCT_DTLS_GBT table.");
+     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   } 
+
+	/******** Allocating memory to output buffer for later use ********/
+
+  ptr_fml_Obuf = ( FBFR32 *)NULL;
+  ptr_fml_Obuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+  if ( ptr_fml_Obuf  == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31060", TPMSG, c_err_msg);
+    fn_userlog( c_ServiceName, "Error while allocating memory to Buffer.");
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  if( DEBUG_MSG_LVL_5 )
+    fn_userlog( c_ServiceName, "Memory allocated successfully to output buffer.");
+
+	if ( c_rqst_type == 'B' )  /*** Request type to return greeks values ***/
+	{
+
+		/******* Initializing transaction on temporary table *******/
+
+    i_trnsctn = fn_begintran(c_ServiceName, c_err_msg);
+    if (i_trnsctn == -1)
+    {
+      fn_userlog(c_ServiceName, "Failed in initialize transaction");
+      fn_errlog(c_ServiceName, "S31065", TPMSG, c_err_msg);
+      tpfree((char * ) ptr_fml_Obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *) ptr_fml_Ibuf, 0, 0);
+    }
+
+		if( DEBUG_MSG_LVL_3 )
+			fn_userlog( c_ServiceName, " Working on Request type :%c:",c_rqst_type);
+
+		for ( i_cntrct_cnt = 0; i_cntrct_cnt < i_tot_cntrct; i_cntrct_cnt++ )  /**** FOR loop for FETCHING contracts starts here ****/
+		{
+
+			MEMSET (st_cntrct);
+	
+			i_err[1] = Fget32( ptr_fml_Ibuf ,FFO_XCHNG_CD,i_cntrct_cnt,(char *)st_cntrct.c_xchng_cd,0);
+      i_ferr[1] = Ferror32;
+      i_err[2] = Fget32( ptr_fml_Ibuf ,FFO_PRDCT_TYP,i_cntrct_cnt,(char *) &st_cntrct.c_prd_typ,0);
+      i_err[2] = Ferror32;
+      i_err[3] = Fget32( ptr_fml_Ibuf ,FFO_UNDRLYNG,i_cntrct_cnt,(char *)st_cntrct.c_undrlyng,0);
+      i_ferr[3] = Ferror32;
+      i_err[4] = Fget32( ptr_fml_Ibuf ,FFO_EXPRY_DT,i_cntrct_cnt,(char *)st_cntrct.c_expry_dt,0);
+      i_ferr[4] = Ferror32;
+      i_err[5] = Fget32( ptr_fml_Ibuf ,FFO_OPT_TYP,i_cntrct_cnt,(char *) &st_cntrct.c_opt_typ,0);
+      i_ferr[5] = Ferror32;
+      i_err[6] = Fget32( ptr_fml_Ibuf ,FFO_STRK_PRC,i_cntrct_cnt,(char *) &st_cntrct.l_strike_prc,0);
+      i_ferr[6] = Ferror32;
+      i_err[7] = Fget32( ptr_fml_Ibuf ,FFO_ORD_TOT_QTY,i_cntrct_cnt,(char *) &st_cntrct.l_ord_tot_qty,0);
+      i_ferr[7] = Ferror32;
+      i_err[8] = Fget32( ptr_fml_Ibuf ,FFO_AMOUNT,i_cntrct_cnt,(char *) &st_cntrct.d_imp_vol,0);
+      i_ferr[8] = Ferror32;
+      i_err[9] = Fget32( ptr_fml_Ibuf ,FFO_ORDR_FLW,i_cntrct_cnt,(char *) &st_cntrct.c_ordr_flw,0);
+      i_ferr[9] = Ferror32;
+      i_err[10] = Fget32( ptr_fml_Ibuf ,FFO_LST_TRD_PRC ,i_cntrct_cnt,(char *) &st_cntrct.l_lst_trd_prc,0);
+      i_ferr[10] = Ferror32;
+      i_err[11] = Fget32( ptr_fml_Ibuf ,FFO_BST_OFFR_PRC ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_offr_prc,0);
+      i_ferr[11] = Ferror32;
+      i_err[12] = Fget32( ptr_fml_Ibuf ,FFO_BST_BID_PRC ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_bid_prc,0);
+      i_ferr[12] = Ferror32;
+      i_err[13] = Fget32( ptr_fml_Ibuf ,FFO_BST_OFFR_QTY ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_offr_qty,0);
+      i_ferr[13] = Ferror32;
+      i_err[14] = Fget32( ptr_fml_Ibuf ,FFO_BST_BID_QTY ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_bid_qty,0);
+      i_ferr[14] = Ferror32;
+			i_err[15] = Fget32( ptr_fml_Ibuf ,FFO_CTGRY_INDSTK,i_cntrct_cnt,(char *) &st_cntrct.c_indx_stck,0);
+      i_ferr[15] = Ferror32;
+
+			for( i_loop_cnt=1 ; i_loop_cnt < 16 ; i_loop_cnt ++)
+      {
+        if(i_ferr[i_loop_cnt] == -1 )
+        {
+        	fn_userlog( c_ServiceName, "Error in Case B for  Fget  :%d:",i_loop_cnt );
+        	fn_errlog( c_ServiceName, "S31070", Fstrerror32( i_ferr[i_loop_cnt] ),c_err_msg);
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+					tpfree((char * ) ptr_fml_Obuf);
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+      }
+
+			rtrim(st_cntrct.c_expry_dt);
+
+			if(DEBUG_MSG_LVL_3)
+      {
+				fn_userlog(c_ServiceName,"******** Details of contract number :%d: ********",i_cntrct_cnt+1);
+        fn_userlog(c_ServiceName,"Case B c_xchng_cd=:%s:",st_cntrct.c_xchng_cd);
+        fn_userlog(c_ServiceName,"Case B c_prd_typ=:%c:",st_cntrct.c_prd_typ);
+        fn_userlog(c_ServiceName,"Case B c_undrlyng=:%s:",st_cntrct.c_undrlyng);
+        fn_userlog(c_ServiceName,"Case B c_expry_dt=:%s:",st_cntrct.c_expry_dt);
+        fn_userlog(c_ServiceName,"Case B l_strike_prc=:%ld:",st_cntrct.l_strike_prc);
+        fn_userlog(c_ServiceName,"Case B l_ord_tot_qty=:%ld:",st_cntrct.l_ord_tot_qty);
+        fn_userlog(c_ServiceName,"Case B c_opt_typ=:%c:",st_cntrct.c_opt_typ);
+        fn_userlog(c_ServiceName,"Case B d_imp_vol=:%lf:",st_cntrct.d_imp_vol);
+        fn_userlog(c_ServiceName,"Case B Order Flow=:%c:",st_cntrct.c_ordr_flw);
+        fn_userlog(c_ServiceName,"Case B l_lst_trd_prc=:%ld:",st_cntrct.l_lst_trd_prc);
+        fn_userlog(c_ServiceName,"Case B l_bst_offr_prc=:%ld:",st_cntrct.l_bst_offr_prc);
+        fn_userlog(c_ServiceName,"Case B l_bst_buy_prc=:%ld:",st_cntrct.l_bst_bid_prc);
+        fn_userlog(c_ServiceName,"Case B l_bst_offr_qty=:%ld:",st_cntrct.l_bst_offr_qty);
+        fn_userlog(c_ServiceName,"Case B l_bst_buy_qty=:%ld:",st_cntrct.l_bst_bid_qty);
+				fn_userlog(c_ServiceName,"Case B c_indx_stck=:%c:",st_cntrct.c_indx_stck);
+				fn_userlog(c_ServiceName,"*************************************************");
+      }
+
+			if(DEBUG_MSG_LVL_2)
+        fn_userlog(c_ServiceName,"Contract :%d: out of :%d: contracts, fetched from input.",i_cntrct_cnt+1,i_tot_cntrct);
+
+			i_exist = 0;
+
+			/*************** Checking if the contract fetched already passed earlier *******************/
+
+			EXEC SQL
+			SELECT COUNT(*)
+			INTO  :i_exist
+			FROM	FSB_CNTRCT_DTLS_GBT
+			WHERE	FSB_XCHNG_CD = :st_cntrct.c_xchng_cd
+			AND		FSB_PRD_TYP = :st_cntrct.c_prd_typ
+			AND		FSB_UNDRLYNG = :st_cntrct.c_undrlyng
+			AND		FSB_EXPRY_DT = :st_cntrct.c_expry_dt
+			AND		FSB_OPT_TYP = :st_cntrct.c_opt_typ
+			AND		FSB_STRK_PRC = :st_cntrct.l_strike_prc
+			AND   FSB_INDX_STCK = :st_cntrct.c_indx_stck;
+
+			if(SQLCODE != 0 )
+      {
+        fn_errlog( c_ServiceName, "S31075", SQLMSG,c_err_msg);
+        fn_userlog(c_ServiceName,"Error while checking existance of contract in FSB_CNTRCT_DTLS_GBT table.");
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				tpfree((char * ) ptr_fml_Obuf);
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }		 
+
+			if(DEBUG_MSG_LVL_2)
+        fn_userlog(c_ServiceName,"Contract number :%d: have i_exist value of :%d:",i_cntrct_cnt+1,i_exist);
+
+			/***** If contract exist, then adjust the total_buy_quantity as per the newly inputed contracts order_flow *****/
+
+			if ( i_exist != 0 ) /**** If condition to perform operations if contract exists in table ****/
+			{
+				 
+				l_exst_tot_qty = 0.0;
+				l_upd_tot_qty = 0.0;
+
+				c_exst_ordr_flw = '\0';
+				c_upd_ordr_flw = '\0';
+
+				EXEC SQL
+				SELECT	FSB_ACTION,
+								FSB_TOT_ORDR_QTY
+				INTO		:c_exst_ordr_flw,
+								:l_exst_tot_qty
+				FROM	FSB_CNTRCT_DTLS_GBT
+			  WHERE FSB_XCHNG_CD = :st_cntrct.c_xchng_cd
+      	AND   FSB_PRD_TYP = :st_cntrct.c_prd_typ
+      	AND   FSB_UNDRLYNG = :st_cntrct.c_undrlyng
+      	AND   FSB_EXPRY_DT = :st_cntrct.c_expry_dt
+      	AND   FSB_OPT_TYP = :st_cntrct.c_opt_typ
+      	AND   FSB_STRK_PRC = :st_cntrct.l_strike_prc
+				AND   FSB_INDX_STCK = :st_cntrct.c_indx_stck;
+
+      	if(SQLCODE != 0 )
+      	{
+        	fn_errlog( c_ServiceName, "S31080", SQLMSG,c_err_msg);
+        	fn_userlog(c_ServiceName,"Error while fetching total_buy_qty and order_flow values from FSB_CNTRCT_DTLS_GBT table.");
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+					tpfree((char * ) ptr_fml_Obuf);
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      	}		
+
+				if(DEBUG_MSG_LVL_5)
+				{
+        	fn_userlog(c_ServiceName,"Total order quantity of existing contract is :%ld:",l_exst_tot_qty);
+					fn_userlog(c_ServiceName,"Order flow of existing contract is :%c:",c_exst_ordr_flw);
+				}	
+
+				/***** If order flow of new and existing contract is same, add total quantity and update in table. else, take their difference
+							 and update total quantity as well as oredr flow accordingly *****/
+
+				if ( c_exst_ordr_flw == st_cntrct.c_ordr_flw ) /*** Condition for same order flow ***/
+				{
+
+					l_upd_tot_qty = st_cntrct.l_ord_tot_qty + l_exst_tot_qty;
+
+					if(DEBUG_MSG_LVL_5)
+        		fn_userlog(c_ServiceName,"Total order value that should be updated in table is :%ld:",l_upd_tot_qty);
+
+					st_cntrct.l_ord_tot_qty = abs(l_upd_tot_qty);
+
+					EXEC SQL
+					UPDATE	FSB_CNTRCT_DTLS_GBT
+					SET		FSB_TOT_ORDR_QTY = :st_cntrct.l_ord_tot_qty	
+        	WHERE FSB_XCHNG_CD = :st_cntrct.c_xchng_cd
+        	AND   FSB_PRD_TYP = :st_cntrct.c_prd_typ
+        	AND   FSB_UNDRLYNG = :st_cntrct.c_undrlyng
+        	AND   FSB_EXPRY_DT = :st_cntrct.c_expry_dt
+        	AND   FSB_OPT_TYP = :st_cntrct.c_opt_typ
+        	AND   FSB_STRK_PRC = :st_cntrct.l_strike_prc
+        	AND   FSB_INDX_STCK = :st_cntrct.c_indx_stck;			
+
+        	if(SQLCODE != 0 )
+        	{
+         	  fn_errlog( c_ServiceName, "S31085", SQLMSG,c_err_msg);
+          	fn_userlog(c_ServiceName,"Error while deleteing FSB_CNTRCT_DTLS_GBT table row for existing contract.");
+          	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+						tpfree((char * ) ptr_fml_Obuf);
+          	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        	} 			   
+				}  /*** If condition for same order flow ends here ***/
+
+				else  /*** Condition for different order flow starts here ***/
+				{
+					l_upd_tot_qty = st_cntrct.l_ord_tot_qty - l_exst_tot_qty;
+
+					if(DEBUG_MSG_LVL_5)
+            fn_userlog(c_ServiceName,"Total order value that should be updated in table is :%ld:",abs(l_upd_tot_qty));
+
+					/*** Decidng new updated order_flow based on update total_order quantity value ***/			
+	
+					if ( l_upd_tot_qty > 0 )
+						c_upd_ordr_flw = st_cntrct.c_ordr_flw;
+					else if ( l_upd_tot_qty <= 0 )
+						c_upd_ordr_flw = c_exst_ordr_flw;
+
+					if(DEBUG_MSG_LVL_5)
+            fn_userlog(c_ServiceName,"New order_flow that needs to be updated in the table is :%c:",c_upd_ordr_flw);
+
+					st_cntrct.l_ord_tot_qty = abs(l_upd_tot_qty);
+				  st_cntrct.c_ordr_flw = c_upd_ordr_flw;	
+
+					EXEC SQL
+					UPDATE	FSB_CNTRCT_DTLS_GBT
+					SET  	FSB_TOT_ORDR_QTY = :st_cntrct.l_ord_tot_qty,
+								FSB_ACTION = :st_cntrct.c_ordr_flw
+          WHERE FSB_XCHNG_CD = :st_cntrct.c_xchng_cd
+          AND   FSB_PRD_TYP = :st_cntrct.c_prd_typ
+          AND   FSB_UNDRLYNG = :st_cntrct.c_undrlyng
+          AND   FSB_EXPRY_DT = :st_cntrct.c_expry_dt
+          AND   FSB_OPT_TYP = :st_cntrct.c_opt_typ
+          AND   FSB_STRK_PRC = :st_cntrct.l_strike_prc
+					AND   FSB_INDX_STCK = :st_cntrct.c_indx_stck;
+
+          if(SQLCODE != 0 )
+          {
+            fn_errlog( c_ServiceName, "S31090", SQLMSG,c_err_msg);
+            fn_userlog(c_ServiceName,"Error while updating total_buy_qty and order_flow in FSB_CNTRCT_DTLS_GBT table for existing contract.");
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+						fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );	
+						tpfree((char * ) ptr_fml_Obuf);
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+				} /*** Condition for different order flow ends here ***/
+
+			} /**** If condition for existing contract ends here ****/
+
+			else  /**** Condition for contracts that doesn't exist in table starts here ****/
+			{
+				/************* Inserting the fetched contract details into GLOBAL TEMPORARY TABLE for later use **************/
+
+				EXEC SQL
+				INSERT INTO FSB_CNTRCT_DTLS_GBT
+				(
+					FSB_XCHNG_CD,
+					FSB_PRD_TYP,
+					FSB_UNDRLYNG,
+					FSB_EXPRY_DT,
+					FSB_OPT_TYP,
+					FSB_STRK_PRC,
+					FSB_TOT_ORDR_QTY,
+					FSB_IV,
+					FSB_ACTION,
+					FSB_LST_TRD_PRC,
+					FSB_BST_OFFR_PRC,
+					FSB_BST_BID_PRC,
+					FSB_BST_OFFR_QTY,
+					FSB_BST_BID_QTY,
+					FSB_INDX_STCK
+				)
+				VALUES
+				(
+					:st_cntrct.c_xchng_cd,
+					:st_cntrct.c_prd_typ,
+					:st_cntrct.c_undrlyng,
+					:st_cntrct.c_expry_dt,
+					:st_cntrct.c_opt_typ,
+					:st_cntrct.l_strike_prc,
+					:st_cntrct.l_ord_tot_qty,
+					:st_cntrct.d_imp_vol,
+					:st_cntrct.c_ordr_flw,
+					:st_cntrct.l_lst_trd_prc,
+					:st_cntrct.l_bst_offr_prc,
+					:st_cntrct.l_bst_bid_prc,
+					:st_cntrct.l_bst_offr_qty,
+					:st_cntrct.l_bst_bid_qty,
+					:st_cntrct.c_indx_stck	
+				);
+
+				if(SQLCODE != 0 )
+    		{
+        	fn_errlog( c_ServiceName, "S31095", SQLMSG,c_err_msg);
+					fn_userlog(c_ServiceName,"Error while inserting contract detail into FSB_CNTRCT_DTLS_GBT table."); 
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+					tpfree((char * ) ptr_fml_Obuf);
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    		}
+
+				if(DEBUG_MSG_LVL_2)
+        	fn_userlog(c_ServiceName,"Inserted contract number :%d: out of total :%d: contracts into FSB_CNTRCT_DTLS_GBT table.",i_cntrct_cnt+1,i_tot_cntrct);
+			} /**** Condition for contract not existing ends here ****/
+
+		}     /**** FOR loop used to FETCH contracts ends here ****/
+
+		/****** Commiting transaction ******/
+
+    i_trnsctn = fn_committran(c_ServiceName, i_trnsctn, c_err_msg);
+    if (i_trnsctn == -1)
+    {
+      fn_userlog(c_ServiceName, "Failed in committing transaction");
+      fn_errlog(c_ServiceName, "S31100", TPMSG, c_err_msg);
+      tpfree((char * ) ptr_fml_Obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+    }
+
+		/******************* Fetching contracts from temporary table into cursror for processing ************************/
+
+	  EXEC SQL
+    DECLARE cntrct_cursor CURSOR FOR
+    SELECT  FSB_XCHNG_CD,
+						FSB_PRD_TYP,
+						FSB_UNDRLYNG,
+						FSB_INDX_STCK,
+						FSB_EXPRY_DT,
+						FSB_OPT_TYP,
+						FSB_STRK_PRC,
+						FSB_TOT_ORDR_QTY,
+						FSB_IV,
+						FSB_ACTION,
+						FSB_LST_TRD_PRC,
+						FSB_BST_OFFR_PRC,
+						FSB_BST_BID_PRC,
+						FSB_BST_OFFR_QTY,
+						FSB_BST_BID_QTY
+		FROM  	FSB_CNTRCT_DTLS_GBT 
+		WHERE		FSB_TOT_ORDR_QTY != 0;
+
+		EXEC SQL
+  	OPEN	cntrct_cursor;
+	  if(SQLCODE != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31105", SQLMSG,c_err_msg);
+      fn_userlog(c_ServiceName,"Error while fetching contract details from FSB_CNTRCT_DTLS_GBT table into cursor.");
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+			tpfree((char * ) ptr_fml_Obuf);
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+		for ( ; ; )  /**** Infinite FOR loop to process contracts fetched  from temp table ****/
+    {
+			MEMSET(st_cntrct);		
+	
+			i_retcode_bidoffr = 0;
+			i_retcode_volatility = 0;
+  		i_retcode_span = 0;
+  		i_retcode_greeks = 0;
+			i_returncode = 0;
+
+			d_ord_tot_qty = 0.0;
+			d_min_lot_sz = 0.0;
+
+			l_min_lot_sz = 0.0;
+	
+			EXEC SQL
+    	FETCH	cntrct_cursor
+			INTO	:st_cntrct.c_xchng_cd,
+          	:st_cntrct.c_prd_typ,
+          	:st_cntrct.c_undrlyng,
+						:st_cntrct.c_indx_stck,
+          	:st_cntrct.c_expry_dt,
+          	:st_cntrct.c_opt_typ,
+          	:st_cntrct.l_strike_prc,
+          	:st_cntrct.l_ord_tot_qty,
+          	:st_cntrct.d_imp_vol,
+          	:st_cntrct.c_ordr_flw,
+          	:st_cntrct.l_lst_trd_prc,
+          	:st_cntrct.l_bst_offr_prc,
+          	:st_cntrct.l_bst_bid_prc,
+          	:st_cntrct.l_bst_offr_qty,
+          	:st_cntrct.l_bst_bid_qty;
+
+			if ( SQLCODE != 0 )
+    	{
+      	if ( SQLCODE == NO_DATA_FOUND )
+      	{
+        	fn_userlog(c_ServiceName,"NO DATA FOUND IN CURSOR cntrct_cursor");
+        	break;
+      	}
+      	else
+      	{
+        	fn_errlog( c_ServiceName, "S31110", SQLMSG, c_err_msg  );
+        	fn_userlog(c_ServiceName,"Error while fetching data from cursor cntrct_cursor");
+        	EXEC SQL CLOSE cntrct_cursor;
+					tpfree((char * ) ptr_fml_Obuf);
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      	}
+    	}
+
+			/***** fetching min lot quantity for fetched contract *****/
+
+			EXEC SQL
+			SELECT	NVL(FTQ_MIN_LOT_QTY,0),
+							NVL(FTQ_LST_TRD_PRC,0) /** Added in Ver 1.2 **/
+			INTO	:l_min_lot_sz,
+						:st_cntrct.l_lst_trd_prc  /** Added in Ver 1.2 **/
+			FROM  FTQ_FO_TRD_QT
+			WHERE	FTQ_XCHNG_CD = :st_cntrct.c_xchng_cd
+			AND		FTQ_PRDCT_TYP = :st_cntrct.c_prd_typ
+			AND   FTQ_UNDRLYNG = :st_cntrct.c_undrlyng
+			AND   FTQ_EXPRY_DT = :st_cntrct.c_expry_dt
+			AND   FTQ_OPT_TYP = :st_cntrct.c_opt_typ
+			AND		FTQ_STRK_PRC = :st_cntrct.l_strike_prc; /*** Multiply by 100 removed in Ver 1.1 ***/ 
+ 
+			if(SQLCODE != 0 )
+    	{
+      	fn_errlog( c_ServiceName, "S31115", SQLMSG,c_err_msg);
+      	fn_userlog(c_ServiceName,"Error while fetching minimum lot size value from FTQ table.");
+      	EXEC SQL CLOSE cntrct_cursor;
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+				tpfree((char * ) ptr_fml_Obuf);
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+			if(DEBUG_MSG_LVL_3)
+          fn_userlog(c_ServiceName,"Minimum lot size value is :%ld:",l_min_lot_sz);
+
+			/*********** Caling functions for computing desired values of contarcts and total matrix *************/
+
+			i_retcode_bidoffr = fn_bidoffer(	&st_cntrct,
+																				&st_usr_prfl, 
+																				c_ServiceName, 
+																				c_err_msg);
+		  if( i_retcode_bidoffr != 0)
+			{
+				fn_errlog( c_ServiceName, "S31120", LIBMSG, c_err_msg  );
+    		fn_userlog( c_ServiceName, "Error while using function fn_bidoffer.");
+				EXEC SQL CLOSE cntrct_cursor;
+				tpfree((char * ) ptr_fml_Obuf);
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  		}	
+
+			i_retcode_span = fn_span( &st_cntrct,
+																&st_usr_prfl,
+																l_min_lot_sz,
+																c_ServiceName,
+                                c_err_msg);
+			if( i_retcode_span != 0)
+      {
+        fn_errlog( c_ServiceName, "S31125", LIBMSG, c_err_msg  );
+        fn_userlog( c_ServiceName, "Error while using function fn_span.");
+        EXEC SQL CLOSE cntrct_cursor;
+				tpfree((char * ) ptr_fml_Obuf);	
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+
+			/*** Computing Volatility to be used for calculating greeks ***/
+
+			i_retcode_volatility = fn_calc_implied_volatility ( c_ServiceName,
+                                                          CAL_IV,
+                                                          d_spot_prc,
+                                                          &st_cntrct,
+                                                          c_err_msg);
+
+      if( i_retcode_volatility!= 0)
+      {
+        fn_errlog( c_ServiceName, "S31130", LIBMSG, c_err_msg  );
+        fn_userlog( c_ServiceName, "Error while using function fn_calc_implied_volatility for computing IV.");
+        EXEC SQL CLOSE cntrct_cursor;
+        tpfree((char * ) ptr_fml_Obuf);
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+
+			/****** Computing total span, quantity, theta, gamma and delta values ******/
+
+			d_ord_tot_qty = (double)st_cntrct.l_ord_tot_qty;
+			d_min_lot_sz = (double)l_min_lot_sz;
+
+			d_tot_qty_tmp = d_tot_qty_tmp + d_ord_tot_qty;
+			d_tot_dlt_tmp = d_tot_dlt_tmp + (d_ord_tot_qty*d_min_lot_sz) * st_cntrct.d_delta;
+			d_tot_gam_tmp = d_tot_gam_tmp + (d_ord_tot_qty * d_min_lot_sz) * st_cntrct.d_gamma;
+			d_tot_tht_tmp = d_tot_tht_tmp + (d_ord_tot_qty * d_min_lot_sz) * st_cntrct.d_theta;
+			d_tot_spn_tmp = d_tot_spn_tmp + st_cntrct.d_mrgn_amnt;
+
+			/*** Conract wise greeks are to shown as product of quantity and greek values ***/
+
+			st_cntrct.d_delta = st_cntrct.d_delta *(d_ord_tot_qty*d_min_lot_sz);
+      st_cntrct.d_gamma = st_cntrct.d_gamma *(d_ord_tot_qty * d_min_lot_sz);
+      st_cntrct.d_theta = st_cntrct.d_theta *(d_ord_tot_qty * d_min_lot_sz);
+
+			/*************** Passing contract details from structure to output ********************/
+
+			i_returncode = fn_pack_vartofml(c_ServiceName,
+                                    c_err_msg,
+                                    &ptr_fml_Obuf,
+                                    21,
+                                    FFO_XCHNG_CD, (char*)st_cntrct.c_xchng_cd,
+                                    FFO_UNDRLYNG, (char*)st_cntrct.c_undrlyng,
+																	  FFO_CTGRY_INDSTK,(char*)&st_cntrct.c_indx_stck,
+                                    FFO_PRDCT_TYP, (char*)&st_cntrct.c_prd_typ,
+                                    FFO_EXPRY_DT, (char*)st_cntrct.c_expry_dt,
+                                    FFO_OPT_TYP, (char*)&st_cntrct.c_opt_typ,
+                                    FFO_STRK_PRC, (char*)&st_cntrct.l_strike_prc,
+                                    FFO_LST_TRD_PRC, (char*)&st_cntrct.l_lst_trd_prc,
+                                    FFO_BST_OFFR_PRC, (char*)&st_cntrct.l_bst_offr_prc,
+                                    FFO_BST_BID_PRC, (char*)&st_cntrct.l_bst_bid_prc,
+                                    FFO_BST_OFFR_QTY, (char*)&st_cntrct.l_bst_offr_qty,
+			            									FFO_BST_BID_QTY,(char *) &st_cntrct.l_bst_bid_qty,
+                                    FFO_ORD_TOT_QTY, (char*)&st_cntrct.l_ord_tot_qty,
+                                    FFO_ORDR_FLW, (char*)&st_cntrct.c_ordr_flw,
+                                    FFO_AMOUNT, (char*)&st_cntrct.d_imp_vol,
+                                    FFO_PLG_AMT, (char*)&st_cntrct.d_spot_strk_diff,
+                                    FFO_ORD_AMT_BLKD , (char*)&st_cntrct.d_spt_Strk_diff_per,
+                                    FFO_TOT_BID_QTY, (char*)&st_cntrct.d_delta,
+                                    FFO_BO_AMT_BLKD, (char*)&st_cntrct.d_gamma,
+                                    FFO_TOT_OFFR_QTY, (char*)&st_cntrct.d_theta,
+                                    FFO_ADD_MRGN_AMT, (char*)&st_cntrct.d_mrgn_amnt
+                                   );
+
+				if ( i_returncode != 0 )
+      	{
+         	fn_errlog( c_ServiceName, "S31135", LIBMSG, c_err_msg);
+         	fn_userlog( c_ServiceName, "st_cntrct : Error while packing variable to fml.");
+				 	EXEC SQL CLOSE cntrct_cursor;
+					tpfree((char * ) ptr_fml_Obuf);
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      	}
+
+				/************ Checking for output buffer size, alloting more space if needed or else continue **************/
+
+				if(Fneeded32(1,MIN_FML_BUF_LEN) > Funused32(ptr_fml_Obuf))  /** Checking available buffer size **/
+    		{
+      		i_counter ++;
+     	 		ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf, Fsizeof32(ptr_fml_Obuf) + i_counter * MIN_FML_BUF_LEN * 5 );
+      		if ( ptr_fml_Obuf == NULL )
+      		{
+        		fn_errlog( c_ServiceName, "S31140", TPMSG, c_err_msg  );
+        		tpfree ( ( char * ) ptr_fml_Obuf );
+						EXEC SQL CLOSE cntrct_cursor;
+        		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      		}
+    		}	
+
+		}  /***** Infinite FOR loop used for processing contracts ends here *****/
+
+		/**************** Passing array values to output ********************/
+		i_returncode = 0;
+
+		i_returncode = fn_pack_vartofml(c_ServiceName,
+                                    c_err_msg,
+                                    &ptr_fml_Obuf,
+                                    5,
+                                    FFO_MKT_CPTLTN, (char *)&d_tot_qty_tmp,
+                                    FFO_BAL_AMT, (char *)&d_tot_dlt_tmp ,
+                                    FFO_USER_INDEX, (char *)&d_tot_gam_tmp ,
+                                    FFO_INDEX, (char *)&d_tot_tht_tmp ,
+                                    FFO_U_EXCTD_MRGN, (char *)&d_tot_spn_tmp 
+                                    );
+		if ( i_returncode != 0 )
+    {
+      fn_errlog( c_ServiceName, "S31145", LIBMSG, c_err_msg);
+      fn_userlog( c_ServiceName, "total_vals : Error while packing variable to fml.");
+      EXEC SQL CLOSE cntrct_cursor;
+			tpfree((char * ) ptr_fml_Obuf);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+	  EXEC SQL
+  	CLOSE cntrct_cursor;
+
+	}/**** Request type B ends here ****/
+
+	if ( c_rqst_type == 'S' )  /**** If condition for strategy analysis request type ****/
+	{
+
+		fn_userlog( c_ServiceName," Working on request type :%c:",c_rqst_type);
+
+    i_err[0]    = Fget32( ptr_fml_Ibuf,FFO_BIT_FLG, 0,(char *)&l_range, 0 );
+    i_ferr[0]  = Ferror32;
+
+    if(i_ferr[0] == -1 )
+    {
+      fn_userlog( c_ServiceName, "Error while fetching range value from input." );
+      fn_errlog( c_ServiceName, "S31150", Fstrerror32( i_ferr[0] ),c_err_msg);
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    d_range = (double)l_range;
+    d_increment = d_range/10; /*** Changed from 5 to 10 to include 21 spot price values ***/
+
+    if( DEBUG_MSG_LVL_3)
+    {
+      fn_userlog(c_ServiceName, " Increement value for spot price change is :%lf:",d_increment);
+      fn_userlog(c_ServiceName, " Range for analysis is :%ld:.", l_range);
+    }
+
+		/*** Creating array for storing range of spot price values for analysis purpose ***/
+
+    /* VER TOL : TUX on LINUX -- Removed '=' from iteration limit condition (Ravindra) */
+    for(i_spt_prc_inc  = 0; i_spt_prc_inc < 11; i_spt_prc_inc++) /*** Hardcoded as 11, as 21 spot levels were needed ***/
+    {
+      d_spot_price_arr[10 + i_spt_prc_inc] = d_spot_prc*( 1 + 0.01*(i_spt_prc_inc*d_increment));
+      d_spot_price_arr[10 - i_spt_prc_inc] = d_spot_prc*( 1 - 0.01*(i_spt_prc_inc*d_increment));
+    }
+
+		/**** ADDED in Ver 1.1 : TEMPORARY FIX TO WEIRD STARTING POINT ISSUE OF PAYOFF CHART ****/
+
+    for(i=0;i<21;i++)   
+    {
+      fn_userlog(c_ServiceName," Spot array is :%lf:",d_spot_price_arr[i]);
+		  d_payoff_tday[i] = 0.0;
+      d_payoff_exp[i] = 0.0;
+      d_delta[i] = 0.0;
+      d_vega[i] = 0.0;
+      d_theta[i] = 0.0;
+      d_gamma[i] = 0.0;
+    }
+
+		/*** fetching Contracts for computing strategy greeks and payoff values ***/
+ 
+    for ( i_cntrct_cnt = 0; i_cntrct_cnt < i_tot_cntrct; i_cntrct_cnt++ ) /*** FOR loop for FETCHING contracts starts here ***/
+    {
+
+      MEMSET (st_cntrct);
+
+      l_ordr_qty = 0.0;
+			l_min_lot_sz = 0.0;
+
+      i_err[1] = Fget32( ptr_fml_Ibuf ,FFO_XCHNG_CD,i_cntrct_cnt,(char *)st_cntrct.c_xchng_cd,0);
+      i_ferr[1] = Ferror32;
+      i_err[2] = Fget32( ptr_fml_Ibuf ,FFO_PRDCT_TYP,i_cntrct_cnt,(char *) &st_cntrct.c_prd_typ,0);
+      i_err[2] = Ferror32;
+      i_err[3] = Fget32( ptr_fml_Ibuf ,FFO_UNDRLYNG,i_cntrct_cnt,(char *)st_cntrct.c_undrlyng,0);
+      i_ferr[3] = Ferror32;
+      i_err[4] = Fget32( ptr_fml_Ibuf ,FFO_EXPRY_DT,i_cntrct_cnt,(char *)st_cntrct.c_expry_dt,0);
+      i_ferr[4] = Ferror32;
+      i_err[5] = Fget32( ptr_fml_Ibuf ,FFO_OPT_TYP,i_cntrct_cnt,(char *) &st_cntrct.c_opt_typ,0);
+      i_ferr[5] = Ferror32;
+      i_err[6] = Fget32( ptr_fml_Ibuf ,FFO_STRK_PRC,i_cntrct_cnt,(char *) &st_cntrct.l_strike_prc,0);
+      i_ferr[6] = Ferror32;
+      i_err[7] = Fget32( ptr_fml_Ibuf ,FFO_ORD_TOT_QTY,i_cntrct_cnt,(char *) &st_cntrct.l_ord_tot_qty,0);
+      i_ferr[7] = Ferror32;
+      i_err[8] = Fget32( ptr_fml_Ibuf ,FFO_AMOUNT,i_cntrct_cnt,(char *) &st_cntrct.d_imp_vol,0);
+      i_ferr[8] = Ferror32;
+      i_err[9] = Fget32( ptr_fml_Ibuf ,FFO_ORDR_FLW,i_cntrct_cnt,(char *) &st_cntrct.c_ordr_flw,0);
+      i_ferr[9] = Ferror32;
+      i_err[10] = Fget32( ptr_fml_Ibuf ,FFO_LST_TRD_PRC ,i_cntrct_cnt,(char *) &st_cntrct.l_lst_trd_prc,0);
+      i_ferr[10] = Ferror32;
+      i_err[11] = Fget32( ptr_fml_Ibuf ,FFO_BST_OFFR_PRC ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_offr_prc,0);
+      i_ferr[11] = Ferror32;
+      i_err[12] = Fget32( ptr_fml_Ibuf ,FFO_BST_BID_PRC ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_bid_prc,0);
+      i_ferr[12] = Ferror32;
+      i_err[13] = Fget32( ptr_fml_Ibuf ,FFO_BST_OFFR_QTY ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_offr_qty,0);
+      i_ferr[13] = Ferror32;
+      i_err[14] = Fget32( ptr_fml_Ibuf ,FFO_BST_BID_QTY ,i_cntrct_cnt,(char *) &st_cntrct.l_bst_bid_qty,0);
+      i_ferr[14] = Ferror32;
+      i_err[15] = Fget32( ptr_fml_Ibuf ,FFO_CTGRY_INDSTK,i_cntrct_cnt,(char *) &st_cntrct.c_indx_stck,0);
+      i_ferr[15] = Ferror32;
+
+      for( i_loop_cnt=1 ; i_loop_cnt < 16 ; i_loop_cnt ++)
+      {
+        if(i_ferr[i_loop_cnt] == -1 )
+        {
+          fn_userlog( c_ServiceName, "Error in Case S for  Fget  :%d:",i_loop_cnt );
+          fn_errlog( c_ServiceName, "S31155", Fstrerror32( i_ferr[i_loop_cnt] ),c_err_msg);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          tpfree((char * ) ptr_fml_Obuf);
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+      }
+
+      if(DEBUG_MSG_LVL_3)
+      {
+        fn_userlog(c_ServiceName,"******** Details of contract number :%d: ********",i_cntrct_cnt+1);
+        fn_userlog(c_ServiceName,"Case S c_xchng_cd=:%s:",st_cntrct.c_xchng_cd);
+        fn_userlog(c_ServiceName,"Case S c_prd_typ=:%c:",st_cntrct.c_prd_typ);
+        fn_userlog(c_ServiceName,"Case S c_undrlyng=:%s:",st_cntrct.c_undrlyng);
+        fn_userlog(c_ServiceName,"Case S c_expry_dt=:%s:",st_cntrct.c_expry_dt);
+        fn_userlog(c_ServiceName,"Case S l_strike_prc=:%ld:",st_cntrct.l_strike_prc);
+        fn_userlog(c_ServiceName,"Case S l_ord_tot_qty=:%ld:",st_cntrct.l_ord_tot_qty);
+        fn_userlog(c_ServiceName,"Case S c_opt_typ=:%c:",st_cntrct.c_opt_typ);
+        fn_userlog(c_ServiceName,"Case S d_imp_vol=:%lf:",st_cntrct.d_imp_vol);
+        fn_userlog(c_ServiceName,"Case S Order Flow=:%c:",st_cntrct.c_ordr_flw);
+        fn_userlog(c_ServiceName,"Case S l_lst_trd_prc=:%ld:",st_cntrct.l_lst_trd_prc);
+        fn_userlog(c_ServiceName,"Case S l_bst_offr_prc=:%ld:",st_cntrct.l_bst_offr_prc);
+        fn_userlog(c_ServiceName,"Case S l_bst_buy_prc=:%ld:",st_cntrct.l_bst_bid_prc);
+        fn_userlog(c_ServiceName,"Case S l_bst_offr_qty=:%ld:",st_cntrct.l_bst_offr_qty);
+        fn_userlog(c_ServiceName,"Case S l_bst_buy_qty=:%ld:",st_cntrct.l_bst_bid_qty);
+        fn_userlog(c_ServiceName,"Case S c_indx_stck=:%c:",st_cntrct.c_indx_stck);
+        fn_userlog(c_ServiceName,"*************************************************");
+      }
+
+
+      if(DEBUG_MSG_LVL_2)
+        fn_userlog(c_ServiceName,"Fetched details of contract number :%d: out of total :%d: contracts. ",i_cntrct_cnt+1,i_tot_cntrct);
+
+			/***** fetching min lot quantity for fetched contract *****/
+
+      EXEC SQL
+      SELECT  NVL(FTQ_MIN_LOT_QTY,0),
+							NVL(FTQ_LST_TRD_PRC,0) /** Added in Ver 1.2 **/
+      INTO  :l_min_lot_sz,
+						:st_cntrct.l_lst_trd_prc /** Added in Ver 1.2 **/
+      FROM  FTQ_FO_TRD_QT
+      WHERE FTQ_XCHNG_CD = :st_cntrct.c_xchng_cd
+      AND   FTQ_PRDCT_TYP = :st_cntrct.c_prd_typ
+      AND   FTQ_UNDRLYNG = :st_cntrct.c_undrlyng
+      AND   FTQ_EXPRY_DT = :st_cntrct.c_expry_dt
+      AND   FTQ_OPT_TYP = :st_cntrct.c_opt_typ
+      AND   FTQ_STRK_PRC = :st_cntrct.l_strike_prc; /*** Multiply by 100 removed in Ver 1.1 ***/
+
+      if(SQLCODE != 0 )
+      {
+        fn_errlog( c_ServiceName, "S31160", SQLMSG,c_err_msg);
+        fn_userlog(c_ServiceName,"Error while fetching minimum lot size value from FTQ table.");
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpfree((char * ) ptr_fml_Obuf);
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+
+      if(DEBUG_MSG_LVL_5)
+       fn_userlog(c_ServiceName,"Minimum lot size value for underlying :%s: is :%ld:",st_cntrct.c_undrlyng,l_min_lot_sz);
+			
+			/*** Computing IV value at current LTP, which will be used for computing price at different spot levels ***/
+
+			i_retcode_volatility = 0;
+
+      i_retcode_volatility = fn_calc_implied_volatility ( c_ServiceName,
+                                                          CAL_IV,
+                                                          d_spot_prc,
+                                                          &st_cntrct,
+                                                          c_err_msg);
+
+      if( i_retcode_volatility!= 0)
+      {
+        fn_errlog( c_ServiceName, "S31165", LIBMSG, c_err_msg  );
+        fn_userlog( c_ServiceName, "Error while using function fn_calc_implied_volatility for computing IV.");
+        tpfree((char * ) ptr_fml_Obuf);
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+
+			for ( i = 0; i<21; i++) /**** FOR loop used for greek and payoff computation at different spots starts here ****/
+      {
+        i_retcode_greeks = 0;
+
+				st_cntrct.d_payoff_today = 0.0;
+				st_cntrct.d_payoff_exp = 0.0;			
+
+        if(DEBUG_MSG_LVL_5)
+				{
+          fn_userlog(c_ServiceName," Computing greek and payoff values at spot price :%lf:",d_spot_price_arr[i]);
+					fn_userlog(c_ServiceName,"TESTING : Today's  Payoff value in structure is :%lf:.", st_cntrct.d_payoff_today);
+      		fn_userlog(c_ServiceName,"TESTING : Expiry Payoff value in structure is :%lf:.", st_cntrct.d_payoff_today);
+					fn_userlog(c_ServiceName,"TESTING : Payoff value from Payoff_today array is :%lf:",d_payoff_tday[i]);
+          fn_userlog(c_ServiceName,"TESTING : Payoff value from Payoff_exp array is :%lf:",d_payoff_exp[i]);			
+				}
+
+        d_spot_prc_tmp = d_spot_price_arr[i];
+
+        i_retcode_greeks = fn_get_payoff( c_ServiceName,
+                                          l_min_lot_sz,
+                                          d_spot_prc_tmp,
+                                          &st_cntrct,
+                                          c_err_msg);
+
+        if( i_retcode_greeks != 0)
+        {
+          fn_errlog( c_ServiceName, "S31170", LIBMSG, c_err_msg  );
+          fn_userlog( c_ServiceName, "Error while using function fn_get_payoff.");
+          tpfree((char * ) ptr_fml_Obuf);
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+
+				/*** Computating cummalative greek and payoff values for each spot price, which will be used later for computing the
+greeks for strategy ***/
+
+        if(DEBUG_MSG_LVL_5)
+        {
+          fn_userlog(c_ServiceName,"****Computed Greek and Payoff values at spot price level of :%lf:***",d_spot_price_arr[i]
+);
+          fn_userlog(c_ServiceName,"TEST : Payoff for today have value :%lf:",st_cntrct.d_payoff_today);
+          fn_userlog(c_ServiceName,"TEST : Payoff on expiry have value :%lf:",st_cntrct.d_payoff_exp);
+          fn_userlog(c_ServiceName,"Delta value :%lf:",st_cntrct.d_delta);
+          fn_userlog(c_ServiceName,"Vega value :%lf:", st_cntrct.d_vega);
+          fn_userlog(c_ServiceName,"Theta value :%lf:", st_cntrct.d_theta);
+          fn_userlog(c_ServiceName,"Gamma value :%lf:", st_cntrct.d_gamma);
+        }
+
+        d_quantity = (double)l_min_lot_sz * st_cntrct.l_ord_tot_qty;
+
+        d_payoff_tday[i] = d_payoff_tday[i] + st_cntrct.d_payoff_today;
+        d_payoff_exp[i] = d_payoff_exp[i] + st_cntrct.d_payoff_exp;
+        d_delta[i] = d_delta[i] + (st_cntrct.d_delta * d_quantity);
+        d_vega[i] = d_vega[i] + (st_cntrct.d_vega * d_quantity);
+        d_theta[i] = d_theta[i] + (st_cntrct.d_theta * d_quantity);
+        d_gamma[i] = d_gamma[i] +(st_cntrct.d_gamma * d_quantity);
+
+				if(DEBUG_MSG_LVL_3)
+        {
+          fn_userlog(c_ServiceName,"Payoff value from Payoff_today array is :%lf:",d_payoff_tday[i]);
+          fn_userlog(c_ServiceName,"Payoff value from Payoff_exp array is :%lf:",d_payoff_exp[i]);
+        }
+
+      } /**** FOR loop used for greek and payoff computation at different spots ends here ****/
+
+			if(DEBUG_MSG_LVL_2)
+        fn_userlog(c_ServiceName," Contract num :%d: out of total :%d: contracts processed.", i_cntrct_cnt+1,i_tot_cntrct);
+
+    }   /*** FOR loop for FETCHING contracts ends here ***/
+
+    /*** Passing Payoff and Greek values to output ***/
+
+    for ( i = 0; i < 21; i++ )  /*** FOR loop used to pack outputs to FMLs starts here ***/
+    {
+      /*** Commented in ver 1.1 *** l_spt_prc = 0.0;
+      l_spt_prc = (long)d_spot_price_arr[i]; *** Commented in ver 1.1 ***/
+
+			if(DEBUG_MSG_LVL_5)
+      {
+				fn_userlog(c_ServiceName,"PACKING : Spot price is :%lf:", d_spot_price_arr[i]);
+        fn_userlog(c_ServiceName,"PACKING : value from Payoff_today array is :%lf:",d_payoff_tday[i]);
+        fn_userlog(c_ServiceName,"PACKING : value from Payoff_exp array is :%lf:",d_payoff_exp[i]);
+      }
+
+      i_returncode = fn_pack_vartofml ( c_ServiceName,
+                                        c_err_msg,
+                                        &ptr_fml_Obuf,
+                                        7,
+                                        FFO_STCK_PRICE, (char *)&d_spot_price_arr[i],
+                                        FFO_OPT_PREMIUM, (char *)&d_payoff_tday[i],
+																				FFO_INTRST_RT, (char *)&d_payoff_exp[i],
+                                        FFO_TOT_BID_QTY, (char *)&d_delta[i],
+                                        FFO_OPNPSTN_VAL, (char *)&d_vega[i],
+                                        FFO_TOT_OFFR_QTY, (char *)&d_theta[i],
+                                        FFO_BO_AMT_BLKD, (char *)&d_gamma[i]
+                                       );
+
+      if ( i_returncode != 0 )
+      {
+        fn_userlog(c_ServiceName,"Error While packing variables.");
+        fn_errlog( c_ServiceName, "S31175", LIBMSG, c_err_msg );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+      }
+
+      /**** Checking memory available with OUTPUT Buffer ****/
+
+      if(Fneeded32(1,MIN_FML_BUF_LEN) > Funused32(ptr_fml_Obuf))  /** Checking available buffer size **/
+      {
+        ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf, Fsizeof32(ptr_fml_Obuf) + MIN_FML_BUF_LEN * 5 );
+        if ( ptr_fml_Obuf == NULL )
+        {
+          fn_errlog( c_ServiceName, "S31180", TPMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+      }
+    } /*** For loop used for packing output to FMLs ends here ***/
+
+	} /**** request type S : for strategy analysis ends here ****/
+
+	if ( c_rqst_type == 'E' )  /*** Request type E : to return upadted values of greeks and ltp for contracts of saved strategies  ***/
+	{
+  	MEMSET(c_strtgy_name);
+  	MEMSET(c_strtgy_id);
+
+  	if( DEBUG_MSG_LVL_0 )
+    	fn_userlog( c_ServiceName, " Working on Request type :%c:",c_rqst_type);
+
+  	i_err[1] = Fget32( ptr_fml_Ibuf ,FFO_QUEUE_NAME,i_cntrct_cnt,(char *)c_strtgy_name,0);
+  	i_ferr[1] = Ferror32;
+ 	  i_err[2] = Fget32( ptr_fml_Ibuf ,FFO_SERIES,i_cntrct_cnt,(char *)c_strtgy_id,0);
+  	i_err[2] = Ferror32;
+
+  	for( i_cnt = 1; i_cnt < 3; i_cnt++)
+  	{
+    	if (i_err[i_cnt] == -1)
+    	{
+      	fn_errlog(c_ServiceName, "S31185", Fstrerror32(i_ferr[0]),c_err_msg);
+      	fn_userlog(c_ServiceName, "Unable to fget Strategy name or strategy ID.");
+      	Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+      	tpreturn(TPFAIL, ERR_BFR, (char * ) ptr_fml_Ibuf, 0, 0);
+    	}
+  	}
+
+  	if( DEBUG_MSG_LVL_3 )
+  	{
+    	fn_userlog( c_ServiceName, " Strategy to be edited is :%s:",c_strtgy_name);
+    	fn_userlog( c_ServiceName, " Strategy to be edited have ID :%s:",c_strtgy_id);
+ 	  }
+
+  	/** fetching contracts of the strategy to be edited **/
+
+		EXEC SQL
+  	DECLARE strtgy_cursor CURSOR FOR
+  	SELECT  FSB_EXCHNG_CD,
+	  				FSB_ACTION,
+	  				FSB_INDX_STCK,
+          	FSB_UNDRLYNG,
+          	FSB_STRK_PRC,
+						FSB_PRD_TYP,
+          	FSB_OPT_TYP,
+          	FSB_EXPRY_DT,
+          	FSB_ORD_SIZE,
+          	FSB_LST_TRD_PRC,
+          	FSB_IV,
+          	FSB_BID_PRC,
+          	FSB_OFFR_PRC,
+          	FSB_BID_QTY,
+          	FSB_OFFR_QTY,
+          	FSB_DELTA,
+          	FSB_THETA,
+          	FSB_SPAN
+  	FROM  FSB_STRTGY_DTLS
+  	WHERE FSB_MATCH_ACCNT = :st_usr_prfl.c_cln_mtch_accnt
+  	AND  FSB_STRTGY_ID = :c_strtgy_id
+  	AND  FSB_STRTGY_NAME = :c_strtgy_name;
+
+  	EXEC SQL
+  	OPEN  strtgy_cursor;
+  	if(SQLCODE != 0 )
+  	{
+    	fn_errlog( c_ServiceName, "S31190", SQLMSG,c_err_msg);
+    	fn_userlog(c_ServiceName,"Error while fetching contract details from FSB_STRTGY_DTLS table into cursor.");
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    	tpfree((char * ) ptr_fml_Obuf);
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+
+  	for( ; ; )   /** Infinite for loop to fetch contracts from strtgy_cursor starts here **/
+  	{
+
+   	  MEMSET(st_cntrct);
+
+   	  i_retcode_bidoffr = 0;
+    	i_retcode_volatility = 0;
+    	i_retcode_span = 0;
+    	i_retcode_greeks = 0;
+    	i_returncode = 0;
+
+    	d_ord_tot_qty = 0.0;
+    	d_min_lot_sz = 0.0;
+			d_undrlyn_spot_prc = 0.0;
+
+    	l_min_lot_sz = 0.0;
+
+    	EXEC SQL
+    	FETCH	strtgy_cursor 
+    	INTO  :st_cntrct.c_xchng_cd,
+	  				:st_cntrct.c_ordr_flw,
+          	:st_cntrct.c_indx_stck,
+	  				:st_cntrct.c_undrlyng,
+	  				:st_cntrct.l_strike_prc,
+						:st_cntrct.c_prd_typ,
+	  				:st_cntrct.c_opt_typ,
+	  				:st_cntrct.c_expry_dt,
+	  				:st_cntrct.l_ord_tot_qty,
+	  				:st_cntrct.l_lst_trd_prc,
+	  				:st_cntrct.d_imp_vol,
+	  				:st_cntrct.l_bst_bid_prc,
+	  				:st_cntrct.l_bst_offr_prc,
+	  				:st_cntrct.l_bst_bid_qty,
+	  				:st_cntrct.l_bst_offr_qty,
+	  				:st_cntrct.d_delta,
+	  				:st_cntrct.d_theta,
+	  				:st_cntrct.d_mrgn_amnt;
+
+    	if ( SQLCODE != 0 )
+    	{
+      	if ( SQLCODE == NO_DATA_FOUND )
+      	{
+        	fn_userlog(c_ServiceName,"NO DATA FOUND IN CURSOR strtgy_cursor");
+        	break;
+      	}
+      	else
+      	{
+        	fn_errlog( c_ServiceName, "S31195", SQLMSG, c_err_msg  );
+        	fn_userlog(c_ServiceName,"Error while fetching data from cursor cntrct_cursor");
+        	EXEC SQL CLOSE strtgy_cursor;
+        	tpfree((char * ) ptr_fml_Obuf);
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      	}
+    	}
+
+			if(DEBUG_MSG_LVL_3)
+      {
+				fn_userlog(c_ServiceName,"******** Case E : Working on contract with details ********");
+  			fn_userlog(c_ServiceName,"Case E : c_xchng_cd=:%s:",st_cntrct.c_xchng_cd);
+        fn_userlog(c_ServiceName,"Case E : c_prd_typ=:%c:",st_cntrct.c_prd_typ);
+        fn_userlog(c_ServiceName,"Case E : c_undrlyng=:%s:",st_cntrct.c_undrlyng);
+        fn_userlog(c_ServiceName,"Case E : c_expry_dt=:%s:",st_cntrct.c_expry_dt);
+        fn_userlog(c_ServiceName,"Case E : l_strike_prc=:%ld:",st_cntrct.l_strike_prc);
+        fn_userlog(c_ServiceName,"Case E : l_ord_tot_qty=:%ld:",st_cntrct.l_ord_tot_qty);
+        fn_userlog(c_ServiceName,"Case E : c_opt_typ=:%c:",st_cntrct.c_opt_typ);
+        fn_userlog(c_ServiceName,"Case E : d_imp_vol=:%lf:",st_cntrct.d_imp_vol);
+        fn_userlog(c_ServiceName,"Case E : Order Flow=:%c:",st_cntrct.c_ordr_flw);
+        fn_userlog(c_ServiceName,"Case E : l_lst_trd_prc=:%ld:",st_cntrct.l_lst_trd_prc);
+        fn_userlog(c_ServiceName,"Case E : l_bst_offr_prc=:%ld:",st_cntrct.l_bst_offr_prc);
+        fn_userlog(c_ServiceName,"Case E : l_bst_buy_prc=:%ld:",st_cntrct.l_bst_bid_prc);
+        fn_userlog(c_ServiceName,"Case E : l_bst_offr_qty=:%ld:",st_cntrct.l_bst_offr_qty);
+        fn_userlog(c_ServiceName,"Case E : l_bst_buy_qty=:%ld:",st_cntrct.l_bst_bid_qty);
+        fn_userlog(c_ServiceName,"Case E : c_indx_stck=:%c:",st_cntrct.c_indx_stck);
+      }
+
+			rtrim(st_cntrct.c_undrlyng);
+			rtrim(st_cntrct.c_expry_dt);
+			rtrim(st_cntrct.c_expry_dt);
+
+			/** Fetching underlying spot price **/
+
+			EXEC SQL
+  		SELECT NVL(ltq_rt,0)
+  		into :d_undrlyn_spot_prc
+ 	 		FROM ltq_trd_qt
+  		WHERE LTQ_STCK_CD = :st_cntrct.c_undrlyng
+  		AND LTQ_XCHNG_CD = DECODE(:st_cntrct.c_xchng_cd,'NFO','NSE','BFO','BSE');
+
+  		if ( SQLCODE != 0 )
+  		{
+				fn_userlog(c_ServiceName, "Unable to fetch SPOT PRICE value.");
+    		fn_errlog( c_ServiceName, "S31200", SQLMSG, c_err_msg  );
+				EXEC SQL CLOSE strtgy_cursor;
+        tpfree((char * ) ptr_fml_Obuf);
+				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  		}
+
+    	/**** fetching min lot quantity for fetched contract ****/
+
+    	EXEC SQL
+    	SELECT  NVL(FTQ_MIN_LOT_QTY,0),
+							NVL(FTQ_LST_TRD_PRC,0) /** Added in Ver 1.2 **/
+    	INTO  :l_min_lot_sz,
+						:st_cntrct.l_lst_trd_prc /** Added in Ver 1.2 **/					
+    	FROM  FTQ_FO_TRD_QT
+    	WHERE FTQ_XCHNG_CD = :st_cntrct.c_xchng_cd
+    	AND   FTQ_PRDCT_TYP = :st_cntrct.c_prd_typ
+    	AND   FTQ_UNDRLYNG = :st_cntrct.c_undrlyng
+    	AND   FTQ_EXPRY_DT = :st_cntrct.c_expry_dt
+    	AND   FTQ_OPT_TYP = :st_cntrct.c_opt_typ
+    	AND   FTQ_STRK_PRC = :st_cntrct.l_strike_prc;
+
+    	if(SQLCODE != 0 )
+    	{
+      	fn_errlog( c_ServiceName, "S31205", SQLMSG,c_err_msg);
+      	fn_userlog(c_ServiceName,"Error while fetching minimum lot size value from FTQ table.");
+      	EXEC SQL CLOSE strtgy_cursor;
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpfree((char * ) ptr_fml_Obuf);
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+    	if(DEBUG_MSG_LVL_5)
+			{
+      	fn_userlog(c_ServiceName,"Minimum lot size value is :%ld:",l_min_lot_sz);
+				fn_userlog(c_ServiceName," Spot Price is :%lf:", d_undrlyn_spot_prc);
+			}
+ 
+    	/********** Calling functions for computing desired values of contarcts and total matrix ************/
+
+    	i_retcode_bidoffr = fn_bidoffer(  &st_cntrct,
+																				&st_usr_prfl,
+                                      c_ServiceName,
+                                      c_err_msg);
+    	if( i_retcode_bidoffr != 0)
+    	{
+      	fn_errlog( c_ServiceName, "S31210", LIBMSG, c_err_msg  );
+      	fn_userlog( c_ServiceName, "Error while using function fn_bidoffer.");
+      	EXEC SQL CLOSE strtgy_cursor;
+      	tpfree((char * ) ptr_fml_Obuf);
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+    	i_retcode_span = fn_span( &st_cntrct,
+        	                      &st_usr_prfl,
+          	                    l_min_lot_sz,
+            	                  c_ServiceName,
+              	                c_err_msg);
+    	if( i_retcode_span != 0)
+    	{
+      	fn_errlog( c_ServiceName, "S31215", LIBMSG, c_err_msg  );
+      	fn_userlog( c_ServiceName, "Error while using function fn_span.");
+      	EXEC SQL CLOSE strtgy_cursor;
+      	tpfree((char * ) ptr_fml_Obuf);
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+    	i_retcode_volatility = fn_calc_implied_volatility ( c_ServiceName,
+      	                                                  CAL_IV,
+        	                                                d_undrlyn_spot_prc,
+          	                                              &st_cntrct,
+            	                                            c_err_msg);
+
+    	if( i_retcode_volatility!= 0)
+    	{
+      	fn_errlog( c_ServiceName, "S31220", LIBMSG, c_err_msg  );
+      	fn_userlog( c_ServiceName, "Error while using function fn_calc_implied_volatility for computing IV.");
+      	EXEC SQL CLOSE strtgy_cursor;
+      	tpfree((char * ) ptr_fml_Obuf);
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+    	/***** Computing total span, quantity, theta, gamma and delta values *****/
+
+    	d_ord_tot_qty = (double)st_cntrct.l_ord_tot_qty;
+    	d_min_lot_sz = (double)l_min_lot_sz;
+
+    	d_tot_qty_tmp = d_tot_qty_tmp + d_ord_tot_qty;
+    	d_tot_dlt_tmp = d_tot_dlt_tmp + (d_ord_tot_qty*d_min_lot_sz) * st_cntrct.d_delta;
+    	d_tot_gam_tmp = d_tot_gam_tmp + (d_ord_tot_qty * d_min_lot_sz) * st_cntrct.d_gamma;
+    	d_tot_tht_tmp = d_tot_tht_tmp + (d_ord_tot_qty * d_min_lot_sz) * st_cntrct.d_theta;
+    	d_tot_spn_tmp = d_tot_spn_tmp + st_cntrct.d_mrgn_amnt;
+
+    	/** Contract wise greeks are to shown as product of quantity and greek values **/
+
+    	st_cntrct.d_delta = st_cntrct.d_delta *(d_ord_tot_qty*d_min_lot_sz);
+    	st_cntrct.d_gamma = st_cntrct.d_gamma *(d_ord_tot_qty * d_min_lot_sz);
+    	st_cntrct.d_theta = st_cntrct.d_theta *(d_ord_tot_qty * d_min_lot_sz);
+
+    	/************* Passing contract details from structure to output ******************/
+
+    	i_returncode = fn_pack_vartofml(c_ServiceName,
+      	                              c_err_msg,
+        	                            &ptr_fml_Obuf,
+          	                          22,                                         /** Changed to 22 in Ver 1.2 **/
+				    													FFO_XCHNG_CD, (char*)st_cntrct.c_xchng_cd,
+                                    	FFO_UNDRLYNG, (char*)st_cntrct.c_undrlyng,
+                                    	FFO_CTGRY_INDSTK,(char*)&st_cntrct.c_indx_stck,
+                                    	FFO_PRDCT_TYP, (char*)&st_cntrct.c_prd_typ,
+                                    	FFO_EXPRY_DT, (char*)st_cntrct.c_expry_dt,
+                                    	FFO_OPT_TYP, (char*)&st_cntrct.c_opt_typ,
+                                    	FFO_STRK_PRC, (char*)&st_cntrct.l_strike_prc,
+                                    	FFO_LST_TRD_PRC, (char*)&st_cntrct.l_lst_trd_prc,
+                                    	FFO_BST_OFFR_PRC, (char*)&st_cntrct.l_bst_offr_prc,
+                                    	FFO_BST_BID_PRC, (char*)&st_cntrct.l_bst_bid_prc,
+                                    	FFO_BST_OFFR_QTY, (char*)&st_cntrct.l_bst_offr_qty,
+                                    	FFO_BST_BID_QTY,(char *) &st_cntrct.l_bst_bid_qty,
+                                    	FFO_ORD_TOT_QTY, (char*)&st_cntrct.l_ord_tot_qty,
+                                    	FFO_ORDR_FLW, (char*)&st_cntrct.c_ordr_flw,
+                                    	FFO_AMOUNT, (char*)&st_cntrct.d_imp_vol,
+                                    	FFO_PLG_AMT, (char*)&st_cntrct.d_spot_strk_diff,
+                                    	FFO_ORD_AMT_BLKD , (char*)&st_cntrct.d_spt_Strk_diff_per,
+                                    	FFO_TOT_BID_QTY, (char*)&st_cntrct.d_delta,
+                                    	FFO_BO_AMT_BLKD, (char*)&st_cntrct.d_gamma,
+                                    	FFO_TOT_OFFR_QTY, (char*)&st_cntrct.d_theta,
+                                    	FFO_ADD_MRGN_AMT, (char*)&st_cntrct.d_mrgn_amnt,
+																			FFO_MIN_LOT_QTY, ( char*)&l_min_lot_sz     /** Added in Ver 1.2 **/
+                                   		);
+
+    	if ( i_returncode != 0 )
+    	{
+      	fn_errlog( c_ServiceName, "S31225", LIBMSG, c_err_msg);
+      	fn_userlog( c_ServiceName, "st_cntrct : Error while packing variable to fml.");
+      	EXEC SQL CLOSE strtgy_cursor;
+      	tpfree((char * ) ptr_fml_Obuf);
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   	  }
+
+    	/********** Checking for output buffer size, alloting more space if needed or else continue ************/
+
+    	if(Fneeded32(1,MIN_FML_BUF_LEN) > Funused32(ptr_fml_Obuf))  /** Checking available buffer size **/
+    	{
+      	i_counter ++;
+      	ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf, Fsizeof32(ptr_fml_Obuf) + i_counter * MIN_FML_BUF_LEN * 5);
+      	if ( ptr_fml_Obuf == NULL )
+      	{
+        	fn_errlog( c_ServiceName, "S31230", TPMSG, c_err_msg  );
+        	tpfree ( ( char * ) ptr_fml_Obuf );
+        	EXEC SQL CLOSE strtgy_cursor;
+        	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      	}
+    	}
+
+  	}  /**** Infinite FOR loop used for processing contracts ends here ****/
+
+  	/************** Passing array values to output ******************/
+  	i_returncode = 0;
+
+  	i_returncode = fn_pack_vartofml(c_ServiceName,
+     	                              c_err_msg,
+      	                            &ptr_fml_Obuf,
+        	                          5,
+           	                        FFO_MKT_CPTLTN, (char *)&d_tot_qty_tmp,
+             	                      FFO_BAL_AMT, (char *)&d_tot_dlt_tmp ,
+               	                    FFO_USER_INDEX, (char *)&d_tot_gam_tmp ,
+                  	                 FFO_INDEX, (char *)&d_tot_tht_tmp ,
+                                    FFO_U_EXCTD_MRGN, (char *)&d_tot_spn_tmp
+                                    );
+  	if ( i_returncode != 0 )
+  	{
+    	fn_errlog( c_ServiceName, "S31235", LIBMSG, c_err_msg);
+    	fn_userlog( c_ServiceName, "total_vals : Error while packing variable to fml.");
+    	EXEC SQL CLOSE strtgy_cursor;
+    	tpfree((char * ) ptr_fml_Obuf);
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+
+  	EXEC SQL
+  	CLOSE strtgy_cursor;
+
+	} /**** Request type E ends here ****/
+
+	tpreturn(TPSUCCESS, SUCC_BFR, (char *)ptr_fml_Obuf, 0, 0 );
+
+} /**** MAIN function ends here ****/
+
+
+/************ Function to fetch bid, ask quanties and spot, strike difference balue for the contract ************/
+
+int fn_bidoffer(struct st_contract_desc *ptr_st_cntct,
+								struct vw_usr_prfl	*ptr_st_usr_prfl, /*** Added in VER 1.3 ***/
+								char *c_ServiceName,
+                char *c_err_msg
+               )
+{
+  double  d_spot_price = 0.0;
+  double  d_spt_Strk_diff_per = 0.0;
+  double  d_spot_strk_diff = 0.0;
+	double	d_strk_prc[30] = {0.0};
+
+  long  l_recvbuf = 0;
+  long  l_spot_price = 0;
+	long  l_bst_bid_prc = 0;
+	long  l_bst_bid_qty = 0;
+	long  l_bst_offr_prc = 0;
+	long  l_bst_offr_qty = 0;
+	long	l_spt_Strk_diff_per = 0;
+	long	l_strk_prc_tmp = 0;
+
+  int  i_returncode = 0;
+  int  i_cnt = 0;
+  int  i_rec_count = 0;
+  int  i_spot_pos = 0;
+	int  i_ferr[10];
+  int  i_err[10];
+
+	/*** Added in VER 1.3 ***/
+	char  c_call_typ = 'I'; /*** To signify, call to service : SFO_OPT_CHAIN from another service ***/
+	char  c_cln_mtch_accnt_tmp[11];
+
+  /* tuxedo variables */
+  FBFR32 *ptr_fml_CIbuf; /* pointer to FML input */
+  FBFR32 *ptr_fml_CObuf; /* pointer to FML output */	
+
+  if( DEBUG_MSG_LVL_5)
+    fn_userlog(c_ServiceName, "Inside function ****** fn_bidoffer *****");
+
+	rtrim(ptr_st_cntct->c_xchng_cd);
+  rtrim(ptr_st_cntct->c_undrlyng);
+  rtrim(ptr_st_cntct->c_expry_dt);
+
+	/*** Added in VER 1.3 ***/
+
+	if ( strcmp(ptr_st_usr_prfl->c_user_id,"system") == 0 && ptr_st_usr_prfl->l_session_id == 0)
+		strcpy(c_cln_mtch_accnt_tmp,"0000000000");
+	else
+		strcpy(c_cln_mtch_accnt_tmp,ptr_st_usr_prfl->c_cln_mtch_accnt);
+
+	if( DEBUG_MSG_LVL_2)
+    fn_userlog(c_ServiceName, "fn_bidoffer : VER 1.3 - Match ID is :%s:", c_cln_mtch_accnt_tmp);
+	
+	/*** VER 1.3 ends here ***/
+
+  if( DEBUG_MSG_LVL_2)
+    fn_userlog(c_ServiceName, "fn_bidoffer : working on contract :%s:-:%s:-:%ld:_:%s:-:%c:_:%c:",ptr_st_cntct->c_undrlyng,ptr_st_cntct->c_expry_dt,ptr_st_cntct->l_strike_prc,ptr_st_cntct->c_xchng_cd,ptr_st_cntct->c_prd_typ,ptr_st_cntct->c_opt_typ);
+
+  /*************** Strike Spot difference and difference percentage calculation **************/
+
+  ptr_fml_CIbuf = ( FBFR32 *)NULL;
+  i_returncode = fn_pack_vartofml(c_ServiceName,
+                  											c_err_msg,
+                  											&ptr_fml_CIbuf,
+                  											7,
+		  																	FFO_UNDRLYNG, (char *)ptr_st_cntct->c_undrlyng,
+                  											FFO_EXPRY_DT, (char *)ptr_st_cntct->c_expry_dt,
+                  											FFO_XCHNG_CD, (char *)ptr_st_cntct->c_xchng_cd,
+																				/*** ADDED IN VER 1.3 ***/
+																				FFO_EBA_MTCH_ACT_NO, (char *)ptr_st_usr_prfl->c_cln_mtch_accnt,
+																				FFO_USR_ID, (char *)ptr_st_usr_prfl->c_user_id,
+																				FFO_SSSN_ID, (char *)&ptr_st_usr_prfl->l_session_id,
+																				FFO_RQST_TYP, (char *)&c_call_typ);
+																				/*** VER 1.3 ends here ***/
+
+  if ( i_returncode != 0 )
+  {
+     fn_errlog( c_ServiceName, "S31240", LIBMSG, c_err_msg);
+     fn_userlog( c_ServiceName, "fn_bidoffer : Error while packing variable to fml.");
+     return -1;
+  }
+
+  ptr_fml_CObuf = ( FBFR32 *)NULL;
+  ptr_fml_CObuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  
+  if ( ptr_fml_CObuf  == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31245", TPMSG, c_err_msg);
+    fn_userlog( c_ServiceName, "fn_bidoffer : Error while allocating memory to Buffer.");
+    return -1;
+  }
+
+  i_returncode = tpcall ( "SFO_OPT_CHAIN",
+                        ( char *)ptr_fml_CIbuf,
+                         0,
+                        ( char **)&ptr_fml_CObuf ,
+                        &l_recvbuf,
+                         0
+                        );
+  /**** COMMENTED FOR TESTING *** if ( i_returncode != SUCC_BFR)
+  {
+    fn_errlog( c_ServiceName, "S31250", LIBMSG, c_err_msg);
+    fn_userlog( c_ServiceName, "fn_bidoffer : Error while calling service SFO_OPT_CHAIN fro fetching option chain.");
+    tpfree( ( char * )ptr_fml_CIbuf);
+    tpfree( ( char * )ptr_fml_CObuf);
+    return -1;
+  } **** COMMENTED FOR TESTING ****/
+
+	if ( i_returncode == -1 )
+  {
+    if ( TPCODE != TPESVCFAIL )
+    {
+      fn_errlog( c_ServiceName, "S31255", TPMSG,c_err_msg ) ;
+    }
+    else
+    {
+      Fget32(ptr_fml_CObuf, FFO_ERR_MSG, 0, c_err_msg,0);
+    }
+		fn_errlog( c_ServiceName, "S31260", LIBMSG, c_err_msg);
+    fn_userlog( c_ServiceName, "fn_bidoffer : Error while calling service SFO_OPT_CHAIN fro fetching option chain.");
+		tpfree( ( char * )ptr_fml_CIbuf);
+    tpfree( ( char * )ptr_fml_CObuf);
+    return -1;
+  }
+ 
+	/*** Spot Price returned by servive SFO_OPT_CHAIN is in paises ***/
+ 
+  i_err [ 0 ] = Fget32(ptr_fml_CObuf, FFO_CLS_PRC, 0,(char *)&l_spot_price,0);
+  i_ferr[0] = Ferror32;
+  if(i_ferr[0] == -1 )
+  {
+    fn_userlog( c_ServiceName, "fn_bidoffer : Error while fetching spot price value returned by servive  SFO_OPT_CHAIN.");
+    fn_errlog( c_ServiceName, "S31265", "Error while fetching SPot price returned by SFO_OPT_CHAIN.",c_err_msg);
+    tpfree((char *)ptr_fml_CIbuf);
+    tpfree((char *)ptr_fml_CObuf);
+    return -1;
+  }
+
+  if( DEBUG_MSG_LVL_3)
+    fn_userlog(c_ServiceName, "fn_bidoffer : Spot price returned by SFO_OPT_CHAIN is :%ld:",l_spot_price);
+
+  /****** Fetching count of records returned by service SFO_OPT_CHAIN ******/
+  i_rec_count = Foccur32((FBFR32 * ) ptr_fml_CObuf, FFO_STRIKE_PRC);
+
+  i_spot_pos = i_rec_count/2;
+
+  if( DEBUG_MSG_LVL_5)
+  {
+    fn_userlog(c_ServiceName, "fn_bidoffer : Total number of records returned by servive SFO_OPT_CHAIN is :%d:",i_rec_count);
+    fn_userlog(c_ServiceName, "fn_bidoffer : Value of spot price position is :%d:",i_spot_pos);
+  }
+
+  for ( i_cnt = 1; i_cnt < i_rec_count+1; i_cnt++ )
+  {
+    i_err [ 1 ] = Fget32( ptr_fml_CObuf , FFO_STRIKE_PRC,i_cnt ,(char *)&d_strk_prc[i_cnt] ,0);
+    i_ferr[1] = Ferror32;
+    if(i_ferr[1] == -1 )
+    {
+      fn_userlog( c_ServiceName, "fn_bidoffer : Error while fetching :%d:th strike price value returned by service SFO_OPT_CHAIN.", i_cnt);
+      fn_errlog( c_ServiceName, "S31270", "Error while fetching strike price returned by SFO_OPT_CHAIN.",c_err_msg);
+      tpfree((char *)ptr_fml_CIbuf);
+      tpfree((char *)ptr_fml_CObuf);
+      return -1;
+    }
+  }
+
+	/*** Converting strike price value in paises for use in function fn_bidoffer ***/
+
+	l_strk_prc_tmp = ptr_st_cntct->l_strike_prc ; /*** Multiply by 100 removed in Ver 1.1 ***/
+
+	if( DEBUG_MSG_LVL_5)
+    fn_userlog(c_ServiceName, "fn_bidoffer : STRIKE price value used is :%ld:",l_strk_prc_tmp);
+
+  if ( l_spot_price == l_strk_prc_tmp)
+    d_spot_strk_diff = 0;
+  else
+  { 
+    for ( i_cnt = 1; i_cnt < i_rec_count+1; i_cnt++ )
+    {
+      if ( l_strk_prc_tmp == (long)d_strk_prc[i_cnt] )
+      {
+        if ( l_strk_prc_tmp > l_spot_price )
+          d_spot_strk_diff = (double)((i_cnt - i_spot_pos) + 1);
+				else
+          d_spot_strk_diff = (double)(i_cnt - i_spot_pos);
+      }
+    }
+  }
+
+	d_spt_Strk_diff_per = ((double)(l_strk_prc_tmp - l_spot_price)/(double)l_strk_prc_tmp)*100;
+	/** d_spt_Strk_diff_per = (double)l_spt_Strk_diff_per; **/
+
+	/**************** Updating values in contract structure passed as input *****************/
+
+	ptr_st_cntct->d_spot_strk_diff = d_spot_strk_diff;
+	ptr_st_cntct->d_spt_Strk_diff_per = d_spt_Strk_diff_per;
+
+  if( DEBUG_MSG_LVL_5)
+  {
+    fn_userlog(c_ServiceName, "fn_bidoffer : Value of spot strike position difference is :%lf:",d_spot_strk_diff);
+    fn_userlog(c_ServiceName, "fn_bidoffer :Value of spot strike position difference percentage is :%lf:",d_spt_Strk_diff_per);
+  }
+  
+  EXEC SQL
+  SELECT  NVL(FTQ_BST1_BID_PRC,0),
+          NVL(FTQ_BST1_BID_QTY,0),
+          NVL(FTQ_BST1_OFFR_PRC,0),
+          NVL(FTQ_BST1_OFFR_QTY,0)
+  INTO  :ptr_st_cntct->l_bst_bid_prc,
+        :ptr_st_cntct->l_bst_bid_qty,
+        :ptr_st_cntct->l_bst_offr_prc,
+        :ptr_st_cntct->l_bst_offr_qty
+  FROM  FTQ_FO_TRD_QT
+  WHERE FTQ_XCHNG_CD = :ptr_st_cntct->c_xchng_cd
+  AND   FTQ_PRDCT_TYP = :ptr_st_cntct->c_prd_typ
+  AND   FTQ_UNDRLYNG = :ptr_st_cntct->c_undrlyng
+  AND   FTQ_EXPRY_DT = :ptr_st_cntct->c_expry_dt
+  AND   FTQ_OPT_TYP = :ptr_st_cntct->c_opt_typ
+  AND   FTQ_STRK_PRC = :l_strk_prc_tmp;
+
+  if ( SQLCODE  !=  0 && SQLCODE  != NO_DATA_FOUND )
+  {
+    fn_errlog( c_ServiceName, "S31275", SQLMSG, c_err_msg  );
+    fn_userlog( c_ServiceName, "fn_bidoffer : Error while fetching bid and offer values for contract.");
+    tpfree((char *)ptr_fml_CIbuf);
+    tpfree((char *)ptr_fml_CObuf);
+    return -1;
+  }
+
+  if ( SQLCODE  == NO_DATA_FOUND )
+  {
+    fn_errlog( c_ServiceName, "S31280", SQLMSG, c_err_msg  );
+    fn_userlog( c_ServiceName, "fn_bidoffer : Contract details not present in FTQ table.");
+    tpfree((char *)ptr_fml_CIbuf);
+    tpfree((char *)ptr_fml_CObuf);
+    return -2;
+  }
+    
+  if( DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName, "fn_bidoffer : Best bid price is :%ld:", ptr_st_cntct->l_bst_bid_prc);
+    fn_userlog(c_ServiceName, "fn_bidoffer : Best bid quantity is :%ld:", ptr_st_cntct->l_bst_bid_qty);
+    fn_userlog(c_ServiceName, "fn_bidoffer : Best offer price is :%ld:", ptr_st_cntct->l_bst_offr_prc);
+    fn_userlog(c_ServiceName, "fn_bidoffer : Best offer quantity is :%ld:", ptr_st_cntct->l_bst_offr_qty);
+  }
+
+  tpfree((char *)ptr_fml_CIbuf);
+  tpfree((char *)ptr_fml_CObuf);
+
+  return 0;
+} 
+
+/************************** Function to obtain span margin value for contract ************************/
+
+int fn_span(  struct st_contract_desc *ptr_st_cntct,
+              struct vw_usr_prfl *st_usr_prfl,
+							long	l_lot_size,
+              char *c_ServiceName,
+              char *c_err_msg
+           )
+{
+  char  c_exer_type = 'E';
+  char  c_null = '\0';
+
+  double  d_null = 0.0;
+  double  d_span_margin = 0.0;
+	double	d_spot_price = 0.0;
+	double  d_lst_trd_prc = 0.0;
+ 
+  long  l_null = 0;
+  long  l_recvbuf = 0;
+	long	l_strk_prc_tmp = 0;
+	long	l_total_qty = 0;
+
+  int  i_returncode = 0;
+	int  i_ferr[10];
+  int	 i_err[10];
+ 
+ 
+  if( DEBUG_MSG_LVL_5)
+    fn_userlog(c_ServiceName, "Inside function ****** fn_span for match_id :%s: *****", st_usr_prfl->c_cln_mtch_accnt);
+
+  if( DEBUG_MSG_LVL_3)
+    fn_userlog(c_ServiceName, "fn_span :  working on contract :%s:-:%s:-:%ld:_:%s:-:%c:_:%c:",ptr_st_cntct->c_undrlyng,ptr_st_cntct->c_expry_dt,ptr_st_cntct->l_strike_prc,ptr_st_cntct->c_xchng_cd,ptr_st_cntct->c_prd_typ,ptr_st_cntct->c_opt_typ);
+        
+
+	l_total_qty = (double)(l_lot_size*ptr_st_cntct->l_ord_tot_qty); 
+
+	if( DEBUG_MSG_LVL_5)
+	{
+		fn_userlog(c_ServiceName, "fn_span : STRIKE Price fetched is :%ld:",ptr_st_cntct->l_strike_prc);
+		fn_userlog(c_ServiceName, "fn_span : LOT Size received as input is :%ld:",l_lot_size);
+		fn_userlog(c_ServiceName, "fn_span : Order placed is for :%ld: number of lots.", ptr_st_cntct->l_ord_tot_qty);
+		fn_userlog(c_ServiceName, "fn_span : TOTAL Quantity used is :%ld:",l_total_qty);
+	}
+
+	/***** Fetching spot price for the contract passed to the fucntion for span computation *****/
+
+	EXEC SQL
+	SELECT NVL(ltq_rt,0)*100
+	into   :d_spot_price
+	FROM ltq_trd_qt
+	WHERE LTQ_STCK_CD = :ptr_st_cntct->c_undrlyng	
+	AND LTQ_XCHNG_CD = DECODE(:ptr_st_cntct->c_xchng_cd,'NFO','NSE','BFO','BSE');
+
+	if ( SQLCODE  !=  0 && SQLCODE  != NO_DATA_FOUND )
+  {
+    fn_errlog( c_ServiceName, "S31285", SQLMSG, c_err_msg  );
+    fn_userlog( c_ServiceName, "fn_span : Error while fetching SPOT price of underlying.");
+    return -1;
+  }
+
+	/*** Converting strike price to paises, for use in function fn_span ***/
+
+	l_strk_prc_tmp = ptr_st_cntct->l_strike_prc ; /*** Multipy by 100 removed in Ver 1.1 ***/
+	d_lst_trd_prc = ptr_st_cntct->l_lst_trd_prc;
+
+	if( DEBUG_MSG_LVL_5)
+	{
+    fn_userlog(c_ServiceName, "fn_span : Fetched SPOT price value is :%lf:",d_spot_price);
+		fn_userlog(c_ServiceName, "fn_span : STRIKE Price used here is :%ld:",l_strk_prc_tmp);
+		fn_userlog(c_ServiceName, "fn_span : Last Traded Price used here is :%lf:",d_lst_trd_prc);
+	}
+
+  if ( ptr_st_cntct->c_ordr_flw == 'S' ) /*** Span calculation for SELL orders start here ***/ 
+  {
+
+		/* tuxedo variables */
+  	FBFR32 *ptr_fml_SIbuf; /* pointer to FML input */
+  	FBFR32 *ptr_fml_SObuf; /* pointer to FML output */
+
+		ptr_fml_SIbuf = NULL;
+
+    i_returncode = fn_pack_vartofml( c_ServiceName,
+                     c_err_msg,
+                     &ptr_fml_SIbuf,
+                     20,
+                     FFO_C_OPNPSTN_FLW,  (char *)&ptr_st_cntct->c_ordr_flw,
+                     FFO_PRDCT_TYP,      (char *)&ptr_st_cntct->c_prd_typ,
+                     FFO_UNDRLYNG,       (char *)ptr_st_cntct->c_undrlyng,
+                     FFO_EXPRY_DT,       (char *)ptr_st_cntct->c_expry_dt,
+                     FFO_EXER_TYP,       (char *)&c_exer_type,
+                     FFO_OPT_TYP,        (char *)&ptr_st_cntct->c_opt_typ,
+                     FFO_STRK_PRC,       (char *)&l_strk_prc_tmp,
+                     FFO_CTGRY_INDSTK,   (char *)&ptr_st_cntct->c_indx_stck,
+                     FFO_CI_BUY_QTY,     (char *)&l_null,
+                     FFO_CI_SELL_QTY,    (char *)&l_total_qty,
+                     FFO_CI_BUY_ORD_VL,  (char *)&d_null,
+                     FFO_CI_SELL_ORD_VL, (char *)&d_lst_trd_prc,
+                     FFO_C_OPNPSTN_QTY,  (char *)&l_total_qty,
+                     FFO_C_ORG_OPN_VAL,  (char *)&d_lst_trd_prc,
+                     FFO_ROUT_CRT,       (char *)st_usr_prfl->c_rout_crt,
+                     FFO_USR_ID,         (char *)st_usr_prfl->c_user_id,
+                     FFO_SSSN_ID,        (char *)&st_usr_prfl->l_session_id,
+                     FFO_XCHNG_CD,       (char *)ptr_st_cntct->c_xchng_cd,
+                     FFO_EBA_MTCH_ACT_NO,(char *)st_usr_prfl->c_cln_mtch_accnt,
+                     FFO_RQST_TYP,       (char *)&c_null 
+                     );
+
+  	ptr_fml_SObuf = ( FBFR32 *)NULL;
+  	ptr_fml_SObuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+
+  	if ( ptr_fml_SObuf == NULL )
+  	{
+    	fn_errlog( c_ServiceName, "S31290", TPMSG, c_err_msg);
+    	fn_userlog( c_ServiceName, "fn_span : Error while allocating memory to Buffer.");
+    	return -1;
+  	}
+
+  	i_returncode = tpcall ( "SFO_SPN_MRGCAL",
+                    			( char *)ptr_fml_SIbuf,
+                    			0,
+                    			( char **)&ptr_fml_SObuf,
+                    			&l_recvbuf,
+                    			0
+                    		);
+  	if ( i_returncode != SUCC_BFR)
+  	{
+    	fn_errlog( c_ServiceName, "S31295", LIBMSG, c_err_msg);
+    	fn_userlog( c_ServiceName, "fn_span : Error while calling service SFO_SPN_MRGCAL for fetching span margin.");
+    	tpfree( ( char * )ptr_fml_SIbuf);
+    	tpfree( ( char * )ptr_fml_SObuf);
+    	return -1;
+  	}
+
+  	/*** i_err [ 0 ] = Fget32( ptr_fml_SObuf ,FFO_INIT_MRGN_PRCNT,0,(char *)&d_span_margin ,0); ***/
+		i_err[0] = Fget32( ptr_fml_SObuf ,FFO_U_ORDR_MRGN,0,(char *)&d_span_margin ,0);
+  	i_ferr[0] = Ferror32;
+
+  	if(i_ferr[0] == -1 )
+  	{
+    	fn_userlog( c_ServiceName, "fn_span : Error while fetching span margin value returned by servive SFO_SPN_MRGCAL .");
+    	fn_errlog( c_ServiceName, "S31300", "Error while fetching span margin returned by SFO_SPN_MRGCA.",c_err_msg);
+    	tpfree((char *)ptr_fml_SIbuf);
+    	tpfree((char *)ptr_fml_SObuf);
+    	return -1;
+  	}
+
+		tpfree((char *)ptr_fml_SIbuf);
+  	tpfree((char *)ptr_fml_SObuf);
+
+	} /*** Span calculation for SELL order ends here  ***/
+	
+	/*** ADDED TO INCLUDE MARGIN CALCULATION FOR BUY OREDRS AS : LTP * ORDER QUANTITY ***/
+ 	else
+	{
+		
+		d_span_margin = (double)((d_lst_trd_prc * l_total_qty)); 
+	
+	} /*** Span computation for BUY order ends here ***/
+	      
+  if( DEBUG_MSG_LVL_2)
+    fn_userlog(c_ServiceName, "fn_span : Fetched span value for order flow of :%c: is :%lf:", ptr_st_cntct->c_ordr_flw, d_span_margin);
+
+	/***************** Inserting span margin value into contract structure ******************/
+  ptr_st_cntct->d_mrgn_amnt = d_span_margin;
+
+  return 0;
+} 
+
+
+/******** Function for computation of Implied Volatility *********/
+
+int fn_calc_implied_volatility( char  *c_ServiceName,
+                                char c_opr_typ,
+                                double  d_spt_prc,
+                                struct st_contract_desc *ptr_st_cntct,
+																char *c_err_msg )
+{
+  double d_days_to_exp=0.0;
+  double d_days_to_exp_temp=0.0;
+  double d_ltp = 0.00;
+  double d_imp_vol = 0.00;
+  double d_delta= 0.00;
+  double d_theta= 0.00;
+  double d_vega= 0.00;
+  double d_gamma= 0.00;
+  double d_strk_price = 0.00;
+  double d_dividend = 25.00;
+  double d_interest_rt = 10.00; /** Changed to 10 in ver 1.2 **/
+  double d_undrlyng_val= 0.00;
+  double d_undrlyng_val_rupee= 0.00;
+  double d_lst_trd_prc_rupee=0.00;
+	double  d_intrnsc_val = 0.0;
+	double  d_lst_trd_prc_temp = 0.0;
+
+  long l_spot_prc=0;
+  long l_bufferlength = 0;
+  long l_session_id_tmp=0;
+
+  int  i_err[10];
+  int  i_ferr[10];
+  int i_cnt = 0;
+  int i_date_diff=0;
+  int i_returncode=0;
+
+  char c_user_id_tmp[7]="\0"; 
+  char c_exer_typ = 'E';  
+
+  FBFR32 *ptr_Ibuf;
+  FBFR32 *ptr_Obuf;
+
+  /* Initializing input buffer */
+
+  ptr_Ibuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN*10 );
+
+  if ( ptr_Ibuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31305", TPMSG, c_err_msg  );
+    return -1;
+  }
+
+  /* Initializing output buffer */
+
+  ptr_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN*10 );
+
+  if ( ptr_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31310", TPMSG, c_err_msg  );
+    tpfree ( ( char * )ptr_Ibuf);   
+    return -1;
+  }
+
+  /*** Using "system" and "0" as user id and session id respectively ***/
+  
+  strcpy(c_user_id_tmp,"system");
+  l_session_id_tmp=0;
+
+  EXEC SQL
+  SELECT NVL((to_date(:ptr_st_cntct->c_expry_dt,'dd-Mon-YYYY') - to_date(sysdate,'dd-Mon-YYYY') + 1 ),1),
+         NVL(to_date(:ptr_st_cntct->c_expry_dt,'dd-Mon-YYYY') - to_date(sysdate,'dd-Mon-YYYY') ,0),
+         NVL(to_date(:ptr_st_cntct->c_expry_dt,'dd-Mon-YYYY') - to_date(sysdate,'dd-Mon-YYYY'),0)
+  INTO   :d_days_to_exp ,
+         :d_days_to_exp_temp ,
+         :i_date_diff
+  FROM   DUAL;
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : error while computing days to expiry.");
+    fn_errlog( c_ServiceName, "S31315", SQLMSG, c_err_msg );
+    tpfree ( ( char * )ptr_Ibuf);
+    tpfree ( ( char * )ptr_Obuf);
+    return -1;
+  }
+
+  if(DEBUG_MSG_LVL_5)
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : date_diff is :%d:",i_date_diff);
+
+  if(i_date_diff != 0 )
+     d_days_to_exp = d_days_to_exp_temp;
+
+  d_strk_price = (double)ptr_st_cntct->l_strike_prc/100; /*** Divided by 100 in Ver 1.1 ***/
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : c_user_id :%s:", c_user_id_tmp);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : l_session_id :%ld:", l_session_id_tmp);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : d_strk_price :%lf:",  d_strk_price);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : d_dividend :%lf:",    d_dividend);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : d_interest_rt :%lf:", d_interest_rt);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : d_days_to_exp :%lf:", d_days_to_exp);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : c_opt_typ :%c:",      ptr_st_cntct->c_opt_typ);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : c_exrc_typ :%c:",     c_exer_typ);
+  }
+
+  d_undrlyng_val_rupee = d_spt_prc;
+
+	/*** Added in Ver 1.2 : Compting INTRINSIC value and using MAX of LTP and INTRINSIC Value for IV calculations *** 
+
+	if (ptr_st_cntct->c_opt_typ == 'C')
+  	d_intrnsc_val = d_undrlyng_val_rupee - d_strk_price;
+	else
+  	d_intrnsc_val = d_strk_price - d_undrlyng_val_rupee;
+
+	*** COMMENTED FOR CUG MOVEMENT ***/
+
+	d_lst_trd_prc_temp = (double)ptr_st_cntct->l_lst_trd_prc/100;
+	/*** d_lst_trd_prc_rupee = max_val(d_lst_trd_prc_temp, d_intrnsc_val); ***/
+	d_lst_trd_prc_rupee = d_lst_trd_prc_temp;	
+
+  if( DEBUG_MSG_LVL_3 ) 
+  {
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Last Trade Price used is :%lf:",  d_lst_trd_prc_rupee);
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Spot Price used is :%lf:",d_undrlyng_val_rupee);
+  }
+
+  i_err[0] = Fadd32(ptr_Ibuf, FFO_USR_ID,        (char *)c_user_id_tmp, 0 );
+  i_err[1] = Fadd32(ptr_Ibuf, FFO_SSSN_ID,       (char *)&l_session_id_tmp, 0 );
+  
+  if(c_opr_typ == CAL_PRC)
+  {
+    i_err[2] = Fadd32(ptr_Ibuf, FFO_EFF_LMT_RT,(char *)&ptr_st_cntct->d_imp_vol, 0);
+  } 
+  else if (c_opr_typ == CAL_IV)
+  {
+    i_err[2] = Fadd32(ptr_Ibuf, FFO_EFF_LTP,(char *)&d_lst_trd_prc_rupee, 0);
+  }
+
+  i_err[3] = Fadd32(ptr_Ibuf, FFO_STCK_PRICE,    (char *)&d_undrlyng_val_rupee, 0);
+  i_err[4] = Fadd32(ptr_Ibuf, FFO_STRIKE_PRC,    (char *)&d_strk_price, 0);
+  i_err[5] = Fadd32(ptr_Ibuf, FFO_OPT_TYP,       (char *)&ptr_st_cntct->c_opt_typ, 0);  
+  i_err[6] = Fadd32(ptr_Ibuf, FFO_EXER_TYP,      (char *)&c_exer_typ, 0);
+  i_err[7] = Fadd32(ptr_Ibuf, FFO_INTRST_RT,     (char *)&d_interest_rt, 0 );
+  i_err[8] = Fadd32(ptr_Ibuf, FFO_PLG_RT,        (char *)&d_dividend, 0 );
+  i_err[9] = Fadd32(ptr_Ibuf, FFO_DAY_TO_EXP,    (char *)&d_days_to_exp, 0 );
+
+  for( i_cnt = 0; i_cnt < 10; i_cnt++ )
+  {
+     if( i_err[i_cnt] == -1 )
+     {
+       fn_userlog(c_ServiceName,"fn_calc_implied_volatility : error whicking variable at position :%d:",i_cnt);
+       fn_errlog( c_ServiceName, "S31320",FMLMSG, c_err_msg);
+       tpfree ( ( char * )ptr_Ibuf);
+       tpfree ( ( char * )ptr_Obuf);
+       return -1;
+     }
+  }
+
+  l_bufferlength = Fsizeof32(ptr_Obuf) + MIN_FML_BUF_LEN * 10;
+
+  if(DEBUG_MSG_LVL_3)
+    fn_userlog( c_ServiceName,"Calling SFO_CAL_GREEKS");
+
+  i_returncode=tpcall("SFO_CAL_GREEKS",(char*)ptr_Ibuf,0,(char **)&ptr_Obuf,&l_bufferlength,0);
+
+  if( i_returncode== -1 )
+  {
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Error while calling service sfo_cal_greeks.");
+    fn_userlog( c_ServiceName," Call to service for fetching implied volatility failed " );
+    tpfree ( ( char * )ptr_Ibuf);   
+    tpfree ( ( char * )ptr_Obuf);   
+    return -1;
+  }
+
+  /*** Fetching values returned by service : SFO_CAL_GREEKS ***/
+
+  i_err[0] = Fget32( ptr_Obuf, FFO_EFF_LMT_RT,0,          (char *)&d_imp_vol,0) ;
+  i_err[1] = Fget32( ptr_Obuf, FFO_EFF_LTP,0,             (char *)&d_ltp, 0);
+  i_err[2] = Fget32( ptr_Obuf, FFO_INIT_MRGN_PRCNT,0,     (char *)&d_delta, 0);
+  i_err[3] = Fget32( ptr_Obuf, FFO_MIN_MRGN_PRCNT,0,      (char *)&d_theta, 0);
+  i_err[4] = Fget32( ptr_Obuf, FFO_SOMC_PRCNT,0,          (char *)&d_vega, 0);
+  i_err[5] = Fget32( ptr_Obuf, FFO_AVM_PRCNT,0,           (char *)&d_gamma, 0);
+
+  for(i_cnt=0;i_cnt<=5;i_cnt++)
+  {
+    if(i_err[i_cnt]==-1)
+    {
+      fn_userlog( c_ServiceName, "Error in Fadd for i_cnt=%d", i_cnt);
+      fn_errlog( c_ServiceName, "S31325", FMLMSG, c_err_msg  );
+      tpfree ( ( char * )ptr_Ibuf);
+      tpfree ( ( char * )ptr_Obuf);
+      return -1;
+    }
+  }
+      
+  ptr_st_cntct->d_imp_vol = d_imp_vol;
+  ptr_st_cntct->d_ltp = d_ltp;
+
+	/*** Added to handel sign dependency of greeks on order flow ****/
+
+	if ( ptr_st_cntct->c_ordr_flw == 'S')
+  {
+    ptr_st_cntct->d_delta = (-1)*d_delta;
+    ptr_st_cntct->d_theta = (-1)*d_theta;
+    ptr_st_cntct->d_vega = (-1)*d_vega;
+    ptr_st_cntct->d_gamma = (-1)*d_gamma;
+  }
+  else
+  {
+    ptr_st_cntct->d_delta= d_delta;
+    ptr_st_cntct->d_theta= d_theta;
+    ptr_st_cntct->d_vega = d_vega;
+    ptr_st_cntct->d_gamma = d_gamma;
+  }
+
+  if( DEBUG_MSG_LVL_2 ) 
+    fn_userlog(c_ServiceName,"fn_calc_implied_volatility : Greeks:delta:%lf:Gamma:%lf:Theta:%lf:Vega:%lf:Vols:%lf:prc:%lf",d_delta,d_gamma,d_theta,d_vega,d_imp_vol,d_ltp);
+      
+
+  tpfree ( ( char * )ptr_Ibuf);
+  tpfree ( ( char * )ptr_Obuf);
+
+  return 0;
+}
+
+
+/******** Function for computation of Payoff value ******/
+
+int fn_get_payoff(char *c_ServiceName,
+                  long  l_lot_size,
+                  double  d_spt_prc,
+                  struct st_contract_desc *ptr_st_cntct,
+		  						char *c_err_msg)
+{
+  int i_returncode= 0;
+  int i=0;
+  
+  double d_intrinsic_val=0.0;
+  double d_lst_trd_prc_rupee = 0.0;
+  double d_strike_price = 0.0;
+  double d_total_qty = 0.0;
+  double d_spot_prc = 0.0;
+	double d_lst_trd_prc = 0.0;
+
+  d_spot_prc = d_spt_prc;
+
+  i_returncode = fn_calc_implied_volatility ( c_ServiceName,
+                                              CAL_PRC,
+                                              d_spt_prc,
+                                              ptr_st_cntct,
+                                              c_err_msg);
+  
+  if(i_returncode!=0)
+  {
+    fn_userlog(c_ServiceName,"fn_get_payoff : error while computing orice using function fn_calc_implied_volatility.");
+    fn_userlog(c_ServiceName,"Error computing Price");
+    return -1;
+  }
+
+  if( DEBUG_MSG_LVL_5 )
+    fn_userlog(c_ServiceName, "fn_get_payoff : Computed LTP is :%lf:", ptr_st_cntct->d_ltp);
+
+  d_strike_price = (double)ptr_st_cntct->l_strike_prc/100; /*** Divide by 100 in Ver 1.1 ***/
+
+  /*** Computing intrinsic value, which is used for computation of expiry date Payoff value ***/
+  
+  if(ptr_st_cntct->c_opt_typ == 'C')
+  {
+    if(d_spt_prc> d_strike_price)
+      d_intrinsic_val = d_spt_prc - d_strike_price;
+    else
+      d_intrinsic_val = 0;
+  }
+  else if(ptr_st_cntct->c_opt_typ =='P')
+  {
+    if(d_spt_prc < d_strike_price)
+      d_intrinsic_val = d_strike_price - d_spt_prc;
+    else
+      d_intrinsic_val = 0;
+  }
+  
+  if( DEBUG_MSG_LVL_5 )
+    fn_userlog(c_ServiceName, "fn_get_payoff : Computed intrinsic value is :%lf:", d_intrinsic_val);
+
+	d_lst_trd_prc_rupee = (double)ptr_st_cntct->l_lst_trd_prc/100;
+
+  if ( ptr_st_cntct->c_ordr_flw == 'S' )
+    d_lst_trd_prc = ( (d_lst_trd_prc_rupee) * (-1) );
+  else if ( ptr_st_cntct->c_ordr_flw == 'B' )
+    d_lst_trd_prc = (d_lst_trd_prc_rupee);
+
+  d_total_qty = (double)(l_lot_size * ptr_st_cntct->l_ord_tot_qty);
+ 
+  if( DEBUG_MSG_LVL_3 )
+  {
+    fn_userlog(c_ServiceName, "fn_get_payoff : **** CONTRACT BEING PROCESSED HAVE FOLLOWING VALUES ****");
+    fn_userlog(c_ServiceName, "fn_get_payoff : Strike Price :%lf:", d_strike_price);
+    fn_userlog(c_ServiceName, "fn_get_payoff : Spot Price :%lf:", d_spt_prc);
+    fn_userlog(c_ServiceName, "fn_get_payoff : Option Type :%c:", ptr_st_cntct->c_opt_typ);
+    fn_userlog(c_ServiceName, "fn_get_payoff : Order Flow :%c:", ptr_st_cntct->c_ordr_flw);
+    fn_userlog(c_ServiceName, "fn_get_payoff : Last Trade Price :%lf:", d_lst_trd_prc);
+    fn_userlog(c_ServiceName, "fn_get_payoff : Total quantity :%lf:",  d_total_qty);
+  }
+
+  /*** Computation of todays Payoff ***/
+
+  if(ptr_st_cntct->c_ordr_flw == 'B')
+  {
+    ptr_st_cntct->d_payoff_today = d_total_qty * (ptr_st_cntct->d_ltp - d_lst_trd_prc);  
+  }
+  else if (ptr_st_cntct->c_ordr_flw == 'S')
+  {
+    ptr_st_cntct->d_payoff_today = (d_total_qty * ((-1) * d_lst_trd_prc - ptr_st_cntct->d_ltp));
+  }
+
+  /*** Computation of Expiry day Payoff ***/
+
+  if(d_intrinsic_val == 0)
+  {
+    if(ptr_st_cntct->c_ordr_flw == 'B')
+    {
+      ptr_st_cntct->d_payoff_exp = ((-1)*(d_total_qty * d_lst_trd_prc));
+    }
+    else if (ptr_st_cntct->c_ordr_flw == 'S')
+    {
+      ptr_st_cntct->d_payoff_exp = (d_total_qty * (-1) * d_lst_trd_prc);
+    }
+  }
+ 
+  else
+  {
+    if(ptr_st_cntct->c_ordr_flw == 'B')
+    {
+      ptr_st_cntct->d_payoff_exp = (d_total_qty * (d_intrinsic_val - d_lst_trd_prc));
+    }
+    else if (ptr_st_cntct->c_ordr_flw == 'S')
+    {
+      ptr_st_cntct->d_payoff_exp = (d_total_qty * ((-1)*d_lst_trd_prc - d_intrinsic_val));
+    }
+  }
+
+  if( DEBUG_MSG_LVL_5 )
+  {
+    fn_userlog(c_ServiceName, "fn_get_payoff : Payoff for today is :%lf:", ptr_st_cntct->d_payoff_today);
+    fn_userlog(c_ServiceName, "fn_get_payoff : Payoff value on expirty day is :%lf:", ptr_st_cntct->d_payoff_exp);
+  }
+
+  return 0;
+}

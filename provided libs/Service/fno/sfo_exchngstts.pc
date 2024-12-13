@@ -1,0 +1,783 @@
+/******************************************************************************/
+/*  Program           : SFO_EXCHNGSTTS                                        */
+/*                                                                            */
+/*  Input             : FFO_USR_ID                                            */
+/*                      FFO_SSSN_ID                                           */
+/*                      FFO_ROUT_CRT                                          */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                                                                            */
+/*  Output            : FFO_XCHNG_CD                                          */
+/*                      FFO_OPN_TM                                            */
+/*                      FFO_NXT_TRD_DT                                        */
+/*                      FFO_CRRNT_STTS                                        */
+/*                      FFO_CLS_TM                                            */
+/*                      FFO_EXRC_RQ_OPN_TM                                    */
+/*                      FFO_EXRC_RQ_CLS_TM                                    */
+/*                      FFO_EXRC_MKT_STTS                                     */
+/*                      FFO_MKT_TYP                                           */
+/*                      FFO_OFLN_NXT_TRD_DT                                   */
+/*                      FFO_OFLN_STTS                                         */
+/*                      FFO_PIPE_ID                                           */
+/*                                                                            */ 
+/*  Description       : To fetch the Exchange details for Derivative Market   */
+/*                                                                            */
+/*  Log               : 1.0   19-OCT-2001   Sridhar.T.N                       */
+/*  Log               : 1.1   17-Jul-2003   sangeet|Infotech									*/
+/*                    : 1.2   28-Feb-2006   Firoz| Infotech                   */
+/*                    : 1.3   17-May-2006   Dinesh| Infotech                  */
+/*										:	1.4		19-Jun-2007		Diwakar|Infotech 									*/
+/*									 												(PCM Updation -	CRCSN06303)				*/
+/*										: 1.5		20-Dec-2007		Ranjit	IBM Migration							*/
+/*										: 1.6		02-Jan-2009		Shailesh(NNF Extended Mkt change) */
+/*										: 1.7		08-Jan-2009		Sandeep(Risk Exposure & P/L)			*/
+/*                    : 1.8   31-Oct-2011   Sachin( FNO BSE Changes )         */
+/*										:	1.9		27-Jun-2012		Sandeep (Order By Clause Added )	*/  
+/*										:	2.0		30-Oct-2012		Swati A.B (CR-Overnight Orders)	  */ 
+/*                    : 2.1   29-May-2014   Anand D / Ritesh D                */ 
+/******************************************************************************/
+/*  1.0  -  New release                                                       */
+/*  2.1  -  New flag is introduced to fetch sequence number only when request */ 
+/*					comes from risk analyzer link. 																		*/			
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h>		/*  ver 1.5 */
+#include <fml_rout.h>	/*  ver 1.5 */
+#include <fn_read_debug_lvl.h>	/* ver 1.5*/
+
+int fn_ins_pcm( char * c_match_accnt_nmbr, char *c_xchng_cd, char *c_err_msg ,int i_index);		/* ver 1.5 */ 
+                                                                                              /* Ver 1.8 i_index added */
+char c_exchng_cd[2][3+1] = { "NFO", "BFO" }; /** Ver 1.8 **/
+
+
+void SFO_EXCHNGSTTS ( TPSVCINFO *rqst )
+{
+  FBFR32 *ptr_fml_Ibuf;
+  FBFR32 *ptr_fml_Obuf;
+
+  char c_ServiceName[33]; 
+	char c_err_msg[256];  
+  char c_pcm_crnt_pipe_id[3];
+	int i_returncode;
+  int i_counter = 1;
+  int i_err[10];
+  int i_index=0;   /** Ver 1.8 **/
+
+	long	li_run_num;			/***	Ver 1.7	***/
+
+  char c_cln_mtch_accnt[20];
+  char c_cln_mtch_accnt1[11];
+	char c_exg_ovrnght_stts;    			/***  Ver 2.0 ***/
+  char c_exg_ovrnght_trd_dt[23];    /***  Ver 2.0 ***/
+	char c_req_type = 'N';						/***  Ver 2.1 ***/
+	
+
+
+	EXEC SQL BEGIN DECLARE SECTION;
+    struct vw_xchngstts *ptr_st_xchngstts;
+		varchar		c_ofln_nxt_trd_dt [ LEN_DATE ];
+		char			c_ofln_stts;
+  EXEC SQL END DECLARE SECTION;
+
+  struct vw_usr_prfl *ptr_st_usr_prfl;
+  struct vw_err_msg *ptr_st_err_msg;
+
+	ptr_fml_Ibuf = (FBFR32 *)rqst->data; 
+	strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);	/* ver 1.5 */
+
+	ptr_st_xchngstts = (struct vw_xchngstts *) tpalloc( "VIEW32",
+																							"vw_xchngstts",
+																				sizeof(struct vw_xchngstts) );
+	if(ptr_st_xchngstts == NULL)
+	{
+		fn_errlog(c_ServiceName, "S31005", TPMSG, c_err_msg);
+		Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0);
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0);
+	}
+	memset(ptr_st_xchngstts, 0, sizeof(struct vw_xchngstts));
+
+	ptr_st_usr_prfl = (struct vw_usr_prfl *) tpalloc( "VIEW32",
+																									"vw_usr_prfl",
+																						sizeof(struct vw_usr_prfl) );
+	if(ptr_st_usr_prfl == NULL)
+	{
+		fn_errlog(c_ServiceName, "S31010", TPMSG, c_err_msg);
+		tpfree( (char *) ptr_st_xchngstts);
+		Fadd32(ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpreturn(TPFAIL, ERR_BFR, (char *) ptr_fml_Ibuf, 0, 0);
+	}
+
+	i_returncode = Fvftos32( ptr_fml_Ibuf,
+                           (char *) ptr_st_usr_prfl,
+                           "vw_usr_dtls" );
+  if ( i_returncode == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31015", FMLMSG, c_err_msg  );
+    tpfree ( ( char * ) ptr_st_xchngstts );
+    tpfree ( ( char * ) ptr_st_usr_prfl );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	/*** 1.2 starts here ***/ 
+
+
+  memset(c_cln_mtch_accnt,'\0',sizeof(c_cln_mtch_accnt));
+  
+	/*******************************************/
+	/**Changed to resolve some strange problem**/
+	/*******************************************/
+
+	if (Fget32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO,0,(char *)c_cln_mtch_accnt1,0)==-1 )
+  {
+		if(Ferror32 != FNOTPRES)
+		{
+      fn_errlog( c_ServiceName, "S31020", FMLMSG, c_err_msg  );
+      tpfree ( ( char * ) ptr_st_xchngstts );
+      tpfree ( ( char * ) ptr_st_usr_prfl );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+		else
+  	{
+			fn_userlog(c_ServiceName,"THIS IS MATCH NOT FOUND");
+      strcpy (c_cln_mtch_accnt1,"*");
+  	}
+  }
+
+	strcpy(c_cln_mtch_accnt,c_cln_mtch_accnt1);
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog(c_ServiceName,"MATCH1 :%s:",c_cln_mtch_accnt1);
+		fn_userlog(c_ServiceName,"MATCH :%s:",c_cln_mtch_accnt);
+	}
+
+	/************************************************/
+	/**Changed to resolve some strange problem OVER**/
+	/************************************************/
+
+  /*** 1.2 Ends Here ***/
+
+	/*** 2.1 starts here ***/
+
+  /*******************************************/
+  /***     FFO_REQ_TYP fml handling        ***/ 
+  /*******************************************/
+
+  if (Fget32(ptr_fml_Ibuf,FFO_REQ_TYP,0,&c_req_type,0)==-1 )
+  {
+		if(Ferror32 == FNOTPRES)
+		{
+			c_req_type = 'N';
+		}
+    else
+    {
+      fn_errlog( c_ServiceName, "S31025", FMLMSG, c_err_msg  );
+      tpfree ( ( char * ) ptr_st_xchngstts );
+      tpfree ( ( char * ) ptr_st_usr_prfl );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+  }
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"REQUEST :%c:",c_req_type);
+  }
+
+  /*** 2.1 Ends Here ***/
+
+ 	if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog( c_ServiceName, "User Id :%s:",
+                                  ptr_st_usr_prfl->c_user_id );
+    fn_userlog( c_ServiceName, "Session Id  :%ld",
+                                  ptr_st_usr_prfl->l_session_id );
+   /* fn_userlog( c_ServiceName, "c_cln_mtch_accnt  :%s",
+                                  c_cln_mtch_accnt ); */
+  }	
+ 	
+
+  ptr_st_err_msg = ( struct vw_err_msg * ) tpalloc ( "VIEW32",
+                                                    "vw_err_msg",
+                                               sizeof ( struct vw_err_msg ) );
+  if ( ptr_st_err_msg ==  NULL )
+  {
+    fn_errlog( c_ServiceName, "S31030", TPMSG, c_err_msg  );
+    tpfree ( ( char * ) ptr_st_xchngstts );
+    tpfree ( ( char * ) ptr_st_usr_prfl );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+  
+  memset ( ptr_st_err_msg, 0, sizeof ( struct vw_err_msg ) ); 
+
+	/*** Added for Order Routing ***/
+	fn_init_ddr_val ( ptr_st_usr_prfl->c_rout_crt );
+
+  if (strcmp (c_cln_mtch_accnt,"")==0)
+  {
+      strcpy ( ptr_st_usr_prfl->c_cln_mtch_accnt, "*" );  
+  }
+  else
+  {
+     strcpy ( ptr_st_usr_prfl->c_cln_mtch_accnt, c_cln_mtch_accnt );
+  }
+  
+	i_returncode = fn_chk_sssn( c_ServiceName, ptr_st_usr_prfl,
+                                             ptr_st_err_msg ) ;
+
+  if ( i_returncode == -1 )
+  {
+    tpfree ( ( char * ) ptr_st_xchngstts );
+	  tpfree ( ( char * ) ptr_st_usr_prfl );
+	  Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, ptr_st_err_msg->c_err_msg, 0 );
+	  tpfree ( ( char * ) ptr_st_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+  tpfree ( ( char * ) ptr_st_err_msg );
+  tpfree ( ( char * ) ptr_st_usr_prfl );	
+
+  
+  
+  /*** 1.2 Starts Here ***/ 
+  
+  ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL,3* MIN_FML_BUF_LEN );
+  
+  if ( ptr_fml_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31035", TPMSG, c_err_msg  );    
+    tpfree ( ( char * ) ptr_st_xchngstts );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  for(i_index = 0 ; i_index < 2 ; i_index++) /** Ver 1.8 introduction of for loop **/
+  {  
+   memset(c_pcm_crnt_pipe_id,'\0',sizeof(c_pcm_crnt_pipe_id));
+
+   EXEC SQL SELECT	pcm_crnt_pipe_id				
+	  			   INTO   :c_pcm_crnt_pipe_id
+            FROM		PCM_PIPE_CLM_MAP
+            WHERE	pcm_clm_mtch_accnt  = :c_cln_mtch_accnt
+           /** AND    PCM_XCHNG_CD        = 'NFO';  Commented in Ver 1.8 ***/
+            AND    PCM_XCHNG_CD        = :c_exchng_cd[i_index];  /** Ver 1.8 **/
+
+   if (SQLCODE !=0 && SQLCODE!= NO_DATA_FOUND )
+   {
+      fn_errlog( c_ServiceName, "S31040", SQLMSG, c_err_msg  );      
+      tpfree ( ( char * ) ptr_st_xchngstts );
+      tpfree ( ( char * ) ptr_fml_Obuf );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   } 
+
+   if (SQLCODE==0)
+   {
+      fn_userlog( c_ServiceName, "c_pcm_crnt_pipe_id := %s",
+                                  c_pcm_crnt_pipe_id );       
+      
+      if (Fadd32 (ptr_fml_Obuf, FFO_PIPE_ID, (char * )c_pcm_crnt_pipe_id, 0)==-1)
+      {
+          fn_errlog( c_ServiceName, "S31045", FMLMSG, c_err_msg  );           tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      } 
+           
+   }
+	 /*** 1.2 Ends Here ***/
+
+   /* ver 1.3 start ***********/
+
+   if((SQLCODE == NO_DATA_FOUND) && ((strcmp (c_cln_mtch_accnt,"")!=0) && (strcmp ( c_cln_mtch_accnt, "*" ) != 0)))
+   {
+     if(fn_ins_pcm (c_ServiceName, c_cln_mtch_accnt,  c_err_msg ,i_index) == -1) /** Ver 1.8 added i_index **/
+     {
+       fn_errlog( c_ServiceName, "S31050", DEFMSG, c_err_msg  );      
+       tpfree ( ( char * ) ptr_st_xchngstts );
+       tpfree ( ( char * ) ptr_fml_Obuf );
+       Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+     }
+   }
+
+   /* ver 1.3 end ***********/
+  } /** Ver 1.8 End of FOR Loop **/
+	
+	/***	Ver 1.7 Starts	***/
+	li_run_num = 0;	/* ver 2.1 */
+
+	if(c_req_type == 'R')    /*** Ver 2.1 if condition introduced  ****/
+	{
+		if(DEBUG_MSG_LVL_0)
+		{
+			fn_userlog(c_ServiceName,"Inside 'R' condition");
+		}
+		 
+		EXEC SQL
+			SELECT	 (LAST_NUMBER-1)
+			INTO		:li_run_num
+			FROM		all_sequences
+			WHERE		SEQUENCE_NAME = 'CMP_PLEXP_SEQ'; /** Ver 2.1 LIKE replaced by '=' **/
+
+   	if (SQLCODE !=0 && SQLCODE!= NO_DATA_FOUND )
+  	 {
+ 	     fn_errlog( c_ServiceName, "S31055", SQLMSG, c_err_msg  );
+ 	     tpfree ( ( char * ) ptr_st_xchngstts );
+ 	     tpfree ( ( char * ) ptr_fml_Obuf );
+ 	     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+ 	     tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 		 }
+
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"Run Number Is :%ld:",li_run_num);
+		}
+	}
+
+	EXEC SQL DECLARE exg_xchng_lst CURSOR
+						FOR
+						SELECT 
+										EXG_XCHNG_CD,
+										EXG_OPN_TM,
+										to_char(EXG_NXT_TRD_DT,'dd-Mon-yyyy' ),
+									/*EXG_CRRNT_STTS,*/
+										decode(EXG_EXTND_MRKT_STTS,'O',EXG_EXTND_MRKT_STTS,EXG_CRRNT_STTS), /*Added in Ver 1.6 */
+										EXG_CLS_TM,
+										EXG_EXRC_RQ_OPN_TM,
+										EXG_EXRC_RQ_CLS_TM,
+										EXG_EXRC_MKT_STTS,
+										to_char(EXG_OFLN_NXT_TRD_DT,'dd-Mon-yyyy' ),
+										EXG_OFLN_STTS
+						FROM
+										EXG_XCHNG_MSTR
+						WHERE 
+								/**		EXG_XCHNG_CD	= 'NFO'	Ver 1.8 commented **/		/*1.1 Temp. Hardcoded by sangeet for Index use*/
+						  			EXG_MKT_TYP = 'D'
+						ORDER BY EXG_XCHNG_CD	DESC;			/***	Ver	1.9	***/	
+
+	EXEC SQL OPEN exg_xchng_lst;
+
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg  );
+    EXEC SQL CLOSE exg_xchng_lst;
+    tpfree ( ( char * ) ptr_st_xchngstts);
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+/*  ptr_fml_Obuf = (FBFR32 *)tpalloc( "FML32", NULL, MIN_FML_BUF_LEN ); 
+
+  if ( ptr_fml_Obuf == NULL )
+  {
+    fn_errlog( c_ServiceName, "S31065", TPMSG, c_err_msg  );
+    EXEC SQL CLOSE exg_xchng_lst;
+    tpfree ( ( char * ) ptr_st_xchngstts );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  } */
+
+	while(1)
+	{
+		EXEC SQL FETCH exg_xchng_lst
+					INTO	:ptr_st_xchngstts->c_xchng_cd,
+								:ptr_st_xchngstts->l_opn_tm,
+								:ptr_st_xchngstts->c_nxt_trd_dt,
+								:ptr_st_xchngstts->c_crrnt_stts,
+								:ptr_st_xchngstts->l_cls_tm,
+								:ptr_st_xchngstts->l_exrc_rq_opn_tm,
+								:ptr_st_xchngstts->l_exrc_rq_cls_tm,
+								:ptr_st_xchngstts->c_exrc_mkt_stts,
+								:c_ofln_nxt_trd_dt,
+								:c_ofln_stts;
+		if ( SQLCODE != 0 )
+    {
+      if ( SQLCODE == NO_DATA_FOUND )
+      {
+        break;
+      }
+      fn_errlog( c_ServiceName, "S31070", SQLMSG, c_err_msg  );
+      EXEC SQL CLOSE exg_xchng_lst;
+      tpfree ( ( char * ) ptr_st_xchngstts );
+      tpfree ( ( char * ) ptr_fml_Obuf );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+
+    SETNULL ( c_ofln_nxt_trd_dt );
+		ptr_st_xchngstts->c_mkt_typ = 'D';
+
+		/*** Ver 2.0 Starts ***/
+		/**  If the Normal Market is under Expiry then the Overnight market stts will be checked and sent ***/
+		
+		if (DEBUG_MSG_LVL_3)
+ 		{
+    	fn_userlog ( c_ServiceName,"--------------1----------------");
+    	fn_userlog ( c_ServiceName," ptr_st_xchngstts->c_crrnt_stts Is :%c:",ptr_st_xchngstts->c_crrnt_stts);
+		}
+
+		if ( ptr_st_xchngstts->c_crrnt_stts == 'X')
+		{
+		 	EXEC SQL
+    		SELECT to_char( exg_tmp_trd_dt,'dd-Mon-yyyy'), 
+           		 exg_tmp_mkt_stts 
+    		INTO   :c_exg_ovrnght_trd_dt,
+           		 :c_exg_ovrnght_stts
+    		FROM   exg_xchng_mstr
+    		WHERE  exg_xchng_cd = :ptr_st_xchngstts->c_xchng_cd
+    		AND    exg_mkt_typ  = 'D';
+
+			if ( SQLCODE != 0 )
+    	{
+      	fn_errlog( c_ServiceName, "S31075", SQLMSG, c_err_msg  );
+      	EXEC SQL CLOSE exg_xchng_lst;
+      	tpfree ( ( char * ) ptr_st_xchngstts );
+      	tpfree ( ( char * ) ptr_fml_Obuf );
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+
+			if(c_exg_ovrnght_stts == 'O')
+			{
+			
+				strcpy(ptr_st_xchngstts->c_nxt_trd_dt,c_exg_ovrnght_trd_dt);
+					ptr_st_xchngstts->c_crrnt_stts = 'C';   /*** Sending it as Close ***/
+
+					if (DEBUG_MSG_LVL_3)
+ 					{
+    				fn_userlog ( c_ServiceName,"Inside Normal Market Under Expiry and Overnight Order Market Is Open");
+    				fn_userlog ( c_ServiceName," ptr_st_xchngstts->c_nxt_trd_dt Is :%s:",ptr_st_xchngstts->c_nxt_trd_dt );
+    				fn_userlog ( c_ServiceName," c_exg_ovrnght_stts Is :%c: ",c_exg_ovrnght_stts );
+					}
+			}
+
+		}
+		if (DEBUG_MSG_LVL_5)
+  	{
+    	fn_userlog ( c_ServiceName,"--------------2----------------");
+		}
+
+		/*** Ver 2.0 Ends   ***/
+
+
+		i_returncode = Fvstof32( ptr_fml_Obuf, (char *) ptr_st_xchngstts,
+                              FCONCAT, "vw_xchngstts" );
+
+    if ( i_returncode == -1 )
+    {
+      if( Ferror32 == FNOSPACE )
+      {
+        i_counter++;
+        ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf,
+                            i_counter * MIN_FML_BUF_LEN );
+
+        if ( ptr_fml_Obuf == NULL )
+        {
+          fn_errlog( c_ServiceName, "S31080", TPMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        } 
+				i_returncode = Fvstof32( ptr_fml_Obuf, (char *) ptr_st_xchngstts,
+                                 FCONCAT, "vw_xchngstts" );
+
+        if ( i_returncode == -1 )
+        {
+          fn_errlog( c_ServiceName, "S31085", FMLMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+      }
+      else
+      {
+          fn_errlog( c_ServiceName, "S31090", FMLMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }    
+		}
+
+		/** code addded on 14-jun-2002 for displaying offline status **/
+		/** and offline next trade date used in temp orders          **/
+
+    if ( Fadd32( ptr_fml_Obuf, FFO_OFLN_NXT_TRD_DT, 
+																	( char *)c_ofln_nxt_trd_dt.arr, 0 ) == -1 )
+    {
+      if( Ferror32 == FNOSPACE )
+      {
+        i_counter++;
+        ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf,
+                            ( i_counter * MIN_FML_BUF_LEN ) );
+        if ( ptr_fml_Obuf == NULL )
+        {
+          fn_errlog( c_ServiceName, "S31095", TPMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        } 
+
+        if ( Fadd32( ptr_fml_Obuf, FFO_OFLN_NXT_TRD_DT, 
+																( char *)c_ofln_nxt_trd_dt.arr, 0 ) == -1 )
+        if ( ptr_fml_Obuf == NULL )
+        {
+          fn_errlog( c_ServiceName, "S31100", FMLMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        } 
+      }
+      else
+      {
+      	fn_errlog( c_ServiceName, "S31105", FMLMSG, c_err_msg  );
+        tpfree ( ( char * ) ptr_st_xchngstts );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    }
+
+    if ( Fadd32( ptr_fml_Obuf, FFO_OFLN_STTS, 
+																	( char *)&c_ofln_stts, 0 ) == -1 )
+    {
+      if( Ferror32 == FNOSPACE )
+      {
+        i_counter++;
+        ptr_fml_Obuf = (FBFR32 *)tprealloc( (char *)ptr_fml_Obuf,
+                            ( i_counter * MIN_FML_BUF_LEN ) );
+        if ( ptr_fml_Obuf == NULL )
+        {
+          fn_errlog( c_ServiceName, "S31110", TPMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        } 
+
+        if ( Fadd32( ptr_fml_Obuf, FFO_OFLN_STTS, 
+																( char *)&c_ofln_stts, 0 ) == -1 )
+        if ( ptr_fml_Obuf == NULL )
+        {
+          fn_errlog( c_ServiceName, "S31115", TPMSG, c_err_msg  );
+          tpfree ( ( char * ) ptr_st_xchngstts );
+          tpfree ( ( char * ) ptr_fml_Obuf );
+          Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        } 
+      }
+      else
+      {
+      	fn_errlog( c_ServiceName, "S31120", FMLMSG, c_err_msg  );
+        tpfree ( ( char * ) ptr_st_xchngstts );
+        tpfree ( ( char * ) ptr_fml_Obuf );
+        Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    }
+
+	}
+
+	if( c_req_type == 'R' ) /** If condition Added in Ver 2.1 **/
+	{	
+		if ( Fadd32(ptr_fml_Obuf,FFO_RUN_NUM,(char *) &li_run_num,0) == -1)			/***	Ver 1.7	***/
+		{
+	  	fn_errlog( c_ServiceName, "S31125", TPMSG, c_err_msg  );
+    	tpfree ( ( char * ) ptr_st_xchngstts );
+    	tpfree ( ( char * ) ptr_fml_Obuf );
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+		}
+	}
+
+	tpfree ( ( char * ) ptr_st_xchngstts );
+  tpreturn( TPSUCCESS, SUCC_BFR, (char *)ptr_fml_Obuf, 0 , 0 );
+}
+
+  /* ver 1.3 start ***********/
+
+int fn_ins_pcm( char * c_ServiceName,char *c_match_accnt_nmbr,  char *c_err_msg, int i_index  )
+{
+  EXEC SQL INCLUDE "table/opm_ord_pipe_mstr.h";
+  EXEC SQL INCLUDE "table/cam_cln_acc_map.h";
+  char c_pipe_flag;
+  char c_pipe[ 2 + 1 ];
+  int  i_pipe_cnt=0;
+  int  i_pipe_cnt_min;
+
+  strcpy( sql_cam_clm_mtch_accnt, c_match_accnt_nmbr );
+
+	if(DEBUG_MSG_LVL_3)
+	{
+  	fn_userlog ( c_ServiceName,"|%s|", sql_cam_clm_mtch_accnt);
+		fn_userlog ( c_ServiceName,"Exchange Code Is ;%s:",c_exchng_cd[i_index]);
+	}
+
+  EXEC SQL
+      SELECT    cam_pipe_ctgry_id,
+                cam_cln_grp_id
+        INTO    :sql_cam_pipe_ctgry_id,
+                :sql_cam_cln_grp_id
+        FROM    cam_cln_acc_map
+       WHERE    cam_clm_mtch_accnt = :sql_cam_clm_mtch_accnt
+        /** AND    cam_xchng_cd       = 'NFO'; Ver 1.8 commented **/
+       AND      cam_xchng_cd = :c_exchng_cd[i_index]; /** Ver 1.8 **/
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31130", SQLMSG, c_err_msg);
+    return (-1);
+  }
+
+	if(DEBUG_MSG_LVL_3)
+	{
+		fn_userlog ( c_ServiceName,"sql_cam_pipe_ctgry_id	Is ;%s:",sql_cam_pipe_ctgry_id);
+		fn_userlog ( c_ServiceName,"sql_cam_cln_grp_id Is ;%s:",sql_cam_cln_grp_id);
+	}
+
+  EXEC SQL
+      DECLARE  pipe_list_cur CURSOR FOR
+       SELECT  opm_pipe_id
+         FROM  opm_ord_pipe_mstr
+      /**  WHERE  opm_xchng_cd       = 'NFO'  Ver 1.8 COmmented **/
+         WHERE opm_xchng_cd       = :c_exchng_cd[i_index] /** Ver 1.8 **/
+          AND  opm_pipe_ctgry_id  = :sql_cam_pipe_ctgry_id;
+
+  EXEC SQL
+      OPEN    pipe_list_cur;
+
+  if ( SQLCODE != 0 ) 
+  {
+    fn_errlog(c_ServiceName,"S31135", SQLMSG, c_err_msg);
+    return (-1);
+  }
+
+  c_pipe_flag = 1;
+  strcpy ( c_pipe, "*" );
+
+  while (1)
+  {
+    EXEC SQL
+        FETCH   pipe_list_cur
+         INTO   :sql_opm_pipe_id;
+
+    if ( SQLCODE != 0 )
+    {
+      if ( SQLCODE == NO_DATA_FOUND )
+      {
+				fn_userlog ( c_ServiceName,"Inside NO_DATA_FOUND");
+        break;
+      }
+      else
+      {
+        fn_errlog(c_ServiceName,"S31140", SQLMSG, c_err_msg);
+        EXEC SQL
+            CLOSE pipe_list_cur;
+        return (-1);
+      }
+    }
+
+    EXEC SQL
+        SELECT    count(pcm_mkd_pipe_id)
+          INTO    :i_pipe_cnt
+          FROM    pcm_pipe_clm_map
+         WHERE    pcm_mkd_pipe_id = :sql_opm_pipe_id
+         /**  AND    pcm_xchng_cd    = 'NFO';  Ver 1.8 Commented ***/
+         AND      pcm_xchng_cd = :c_exchng_cd[i_index]; /** Ver 1.8 **/
+
+    if ( SQLCODE != 0 )
+    {
+        fn_errlog(c_ServiceName,"S31145", SQLMSG, c_err_msg);
+        EXEC SQL
+            CLOSE pipe_list_cur;
+        return (-1);
+    }
+
+    if ( c_pipe_flag == 1 )
+    {
+      i_pipe_cnt_min = i_pipe_cnt;
+      strcpy(c_pipe, sql_opm_pipe_id );
+      c_pipe_flag = 0;
+    }
+    else if ( i_pipe_cnt <= i_pipe_cnt_min )
+    {
+      i_pipe_cnt_min = i_pipe_cnt;
+      strcpy(c_pipe, sql_opm_pipe_id );
+    }
+  }
+
+  EXEC SQL
+      CLOSE pipe_list_cur;
+
+  if ( strcmp ( c_pipe, "*" ) == 0 )
+  {
+    /*fn_userlog ("Fatal error : Pipe id mismatch" );	  ** ver 1.5 */
+		fn_userlog (c_ServiceName, "Fatal error : Pipe id mismatch" );	/* ver 1.5 */
+    fn_errlog(c_ServiceName,"S31150", DEFMSG, c_err_msg);
+    return (-1);
+  }
+  if( tpbegin(TRAN_TIMEOUT,0) == -1)
+  {
+		/*fn_userlog ("Fatal error : Pipe id mismatch" ); ** ver 1.5 */
+    fn_userlog ( c_ServiceName ,"Fatal error : Pipe id mismatch" );	/* ver 1.5 */
+    fn_errlog(c_ServiceName,"S31155", TPMSG, c_err_msg);
+    return (-1);
+  }
+
+  EXEC SQL
+      INSERT INTO   pcm_pipe_clm_map
+                    ( pcm_clm_mtch_accnt,
+                      pcm_xchng_cd,
+                      pcm_mkd_pipe_id,
+                      pcm_crnt_pipe_id,
+											pcm_mrng_pipe_id,				/* Ver 1.4 PCM Updation	*/
+											pcm_day_pipe_id,				/* Ver 1.4 PCM Updation */
+                      pcm_cln_grp_id
+                    )
+                    VALUES
+                    ( :sql_cam_clm_mtch_accnt,
+                     /* 'NFO', ** Ver 1.8 Commented **/
+                      :c_exchng_cd[i_index], /** Ver 1.8 **/ 
+                      :c_pipe,
+                      :c_pipe,
+											:c_pipe,								/* Ver 1.4 PCM Updation */
+											:c_pipe,								/* Ver 1.4 PCM Updation */
+                      :sql_cam_cln_grp_id
+                    );
+
+  if ( SQLCODE != 0 )
+  {
+    fn_userlog("Unable to insert record with pipe id [%s]",c_pipe);
+    fn_errlog(c_ServiceName,"S31160", SQLMSG, c_err_msg);
+    tpabort(0);
+    return (-1);
+  }
+  if(tpcommit(0)== -1)
+  {
+    fn_userlog("Unable to commit record with pipe id [%s]",c_pipe);
+    fn_errlog(c_ServiceName,"S31165", TPMSG, c_err_msg);
+    tpabort(0);
+    return (-1);
+  }
+
+  return (1);
+}
+  /* ver 1.3 end ***********/

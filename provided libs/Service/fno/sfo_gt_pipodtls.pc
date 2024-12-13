@@ -1,0 +1,247 @@
+/**********************************************************************************/
+/*	Program	    			:	SFO_GT_PIPODTLS                                           */
+/*                                                                                */
+/*  Input             : FFO_XCHNG_CD                                              */
+/*                      FFO_TRD_DT                                                */
+/*                                                                                */
+/*  Output            : FFO_EBA_MTCH_ACT_NO                                       */
+/*                      FFO_XCHNG_CD                                              */
+/*                      FFO_TRD_DT                                                */
+/*                                                                                */
+/*  Description       : This program fetches the list of match accounts for       */
+/*										  whom the internal adjustment/payin/payout can be          */
+/*										  performed for the given run date.                         */
+/*                                                                                */
+/*  Log               :                                                           */
+/*                                                                                */
+/**********************************************************************************/
+/*        18-Dec-2001     Ver 1.0        P.Senthil Kumar    Release 1.0           */
+/*        11-Dec-2003     Ver 1.1        Sangeet Sinha    	Revamp for Rerun      */
+/*				03-Mar-2008			Ver 1.2				 Sandeep Patil			IBM CHANGES				    */
+/*        27-May-2011     Ver 1.3        Sachin Birje       ADM Changes           */
+/*				04-Aug-2011			Ver 1.4				 Shamili Dalvi			PIPO ordering			    */
+/*        19-Mar-2012     Ver 1.5        Sachin Birje       FNO BSE Changes       */
+/*        02-Nov-2012     Ver 1.6        Sachin Birje       PIPO for Top X        */
+/*                                                          clients               */
+/*        19-Mar-2015     Ver 1.7        Samip M			      Hint used  			    	*/
+/*        25-Mar-2019     Ver 1.8        Akash B            Deposit Model changes */
+/*        27-Sep-2021     Ver 1.9        Abhinav Kumbhar    IDFC Changes          */ 
+/*        06-Oct-2022     Ver 2.0        Sachin Birje       SpiraRequest 257       */ 
+/**********************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+/*Add header files here */
+
+#include <fo.h>
+#include <fo_fml_def.h>
+#include <fml_def.h>
+#include <fn_battmpt.h>
+#include <fn_tuxlib.h>
+#include <fn_log.h>			/*** Ver1.2 ***/
+#include <fn_read_debug_lvl.h>			/*** Ver1.2 ***/
+
+
+void SFO_GT_PIPODTLS( TPSVCINFO *rqst )
+{
+
+	FBFR32 *ptr_fml_Ibuf;
+	FBFR32 *ptr_fml_Obuf;
+
+	char c_ServiceName [ 33 ];
+	char c_err_msg [ 256 ];
+
+
+	int i_returncode;
+	int i_reccount;
+  long int li_number_of_clients=0;  /*** Ver 1.6 ***/
+  long int li_count;              /*** Ver 1.6 ***/
+
+	char c_tag [ 256 ];
+	char c_msg [ 256 ];
+  char c_model_flag='\0';    /***** Ver 1.8 *****/
+  long int li_rec_no;
+	double d_outstnding_amnt =0.0;  /**1.4 **/
+	char c_rqst_typ;
+
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		char c_cln_mtch_accnt [ 11 ];
+		char c_xchng_cd [ 4 ];
+    char c_bank_nm [ 11 ];          /*** Ver 1.9 ***/
+		char c_trd_dt [ LEN_DATE ];
+	EXEC SQL END DECLARE SECTION;
+
+	ptr_fml_Ibuf = ( FBFR32 * )rqst->data;
+	strcpy( c_ServiceName, "SFO_GT_PIPODTLS" );
+
+	INITDBGLVL(c_ServiceName);			/*** Ver1.2 ***/
+  MEMSET(c_bank_nm);  /*** Ver 1.9 ***/
+
+ 	i_returncode = fn_unpack_fmltovar ( c_ServiceName,
+   	  	                            c_err_msg,
+   	                                ptr_fml_Ibuf,
+                                    4,              /*** Ver 1.9 ***/
+         											  		FFO_XCHNG_CD, ( char * )c_xchng_cd, NULL,
+         											  		FFO_TRD_DT, (char * )c_trd_dt, NULL,
+                                    FFO_SETLMNT_NO, (char *)&li_number_of_clients, NULL, /** Ver 1.6 ***/
+                                    FFO_QUEUE_NAME, ( char * )c_bank_nm,NULL);             /*** Ver 1.9 ***/
+	
+	if( i_returncode != 0 )
+	{
+ 	  fn_errlog( c_ServiceName, "S31005", LIBMSG , c_err_msg );
+  	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+  	tpreturn( TPFAIL, ERR_BFR, ( char * )ptr_fml_Ibuf, 0, 0 );
+	}	
+ 
+	if (DEBUG_MSG_LVL_3)			/*** Ver1.2 ***/
+	{
+		fn_userlog( c_ServiceName, "c_xchng_cd :%s:", c_xchng_cd );
+		fn_userlog( c_ServiceName, "c_trd_dt   :%s:", c_trd_dt );
+		fn_userlog( c_ServiceName, "c_bank_nm  :%s:", c_bank_nm); /** Ver 1.9 **/
+    fn_userlog( c_ServiceName, "Number of Clients :%ld:", li_number_of_clients);  /*** Ver 1.6 ***/
+	}
+
+  ptr_fml_Obuf = NULL;
+
+
+		/*********** Commemted in Ver 1.4 ************************
+
+  	EXEC SQL
+  		DECLARE cur_pipo CURSOR FOR
+  		SELECT	DISTINCT FBD_CLM_MTCH_ACCNT
+  		FROM	 	FBD_FO_BNK_DRCR
+  		WHERE		FBD_XCHNG_CD = :c_xchng_cd
+  		AND			FBD_DC_AMT != 0
+  		AND			FBD_DC_AMT != FBD_PI_PO_AMT + FBD_INT_ADJ_AMT
+  		AND			decode(FBD_DC_FLG,'D',FBD_PAYIN_DT,FBD_PAYOUT_DT ) <= :c_trd_dt 
+			MINUS																																			
+			SELECT  DISTINCT FBM_CLM_MTCH_ACCNT
+			FROM		FBM_FO_BNK_FLR_MSG
+			WHERE		FBM_STTS = 'N'	
+      AND     FBM_PRDCT_CD is null ;          *** Ver 1.3 ***
+
+
+		***********************************************************/
+
+
+	  /********************* Ver 1.4 Starts *********************/
+		/*** Ver 1.7 adds hint ***/
+
+		EXEC SQL
+		DECLARE	cur_pipo CURSOR FOR
+		SELECT  /*+ index(FBD_FO_BNK_DRCR) */ FBD_CLM_MTCH_ACCNT, 
+						sum(FBD_DC_AMT -( FBD_PI_PO_AMT + FBD_INT_ADJ_AMT)),
+            NVL(USR_FUND_MODEL_FLG,'N')   /*** Ver 1.8 ***/
+    FROM    FBD_FO_BNK_DRCR A,USR_USER_MASTER,UAC_USR_ACCNTS,CLB_BNK_ACCTS  /** Ver 1.9 CLB_BNK_ACCTS added **/
+    WHERE   FBD_XCHNG_CD = :c_xchng_cd 
+    AND     FBD_DC_AMT != 0
+    AND     FBD_DC_AMT != FBD_PI_PO_AMT + FBD_INT_ADJ_AMT
+    AND     decode(FBD_DC_FLG,'D',FBD_PAYIN_DT,FBD_PAYOUT_DT ) <= :c_trd_dt 
+    AND 		FBD_CLM_MTCH_ACCNT not in
+            (
+                        SELECT  DISTINCT FBM_CLM_MTCH_ACCNT
+												FROM    FBM_FO_BNK_FLR_MSG,CLB_BNK_ACCTS    /** Ver 1.9 CLB_BNK_ACCTS added **/
+												WHERE   FBM_STTS = 'N'
+												AND     FBM_PRDCT_CD is null
+                        AND     FBM_XCHNG_CD = :c_xchng_cd          /**** Ver 1.5 ***/
+                        AND     fbm_trace is not null               /** Ver 2.0 **/
+                        AND     FBM_CLM_MTCH_ACCNT = CLB_CLM_MTCH_ACCNT    /** Ver 2.0 **/
+                        AND     NVL(CLB_BNK_NM,'ICICI')   = :c_bank_nm    /** Ver 2.0 **/
+             )
+    AND USR_USR_ID=UAC_USR_ID                      /*** Ver 1.8 ****/
+   AND UAC_CLM_MTCH_ACCNT=A.FBD_CLM_MTCH_ACCNT
+   AND CLB_CLM_MTCH_ACCNT = A.FBD_CLM_MTCH_ACCNT    /** Ver 1.9 **/
+   AND NVL(CLB_BNK_NM,'ICICI') = :c_bank_nm  /** Ver 1.9 **/
+	 GROUP BY FBD_CLM_MTCH_ACCNT,
+   NVL(USR_FUND_MODEL_FLG,'N')
+	 ORDER BY sum(FBD_DC_AMT -( FBD_PI_PO_AMT + FBD_INT_ADJ_AMT));
+
+
+	/********************* Ver 1.4 Ends   *********************/
+			
+  
+  	EXEC SQL
+  		OPEN cur_pipo;
+
+    if( SQLCODE != 0 ) 
+    {
+       fn_errlog( c_ServiceName, "S31010", SQLMSG, c_err_msg );
+       EXEC SQL CLOSE cur_pipo;
+	     Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+       tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+    i_reccount = 0;
+    li_count = 0; /*** Ver 1.6 ***/ 
+  	while(1)
+  	{
+      c_model_flag='\0';  /*** Ver 1.8 *****/ 
+  		
+        EXEC SQL
+  			FETCH cur_pipo
+  			INTO	:c_cln_mtch_accnt,
+							:d_outstnding_amnt,       /**1.4**/
+              :c_model_flag;           /*** Ver 1.8 ***/
+  
+        if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+        {
+          fn_errlog( c_ServiceName, "S31015", SQLMSG, c_err_msg );
+          EXEC SQL CLOSE cur_pipo;
+          tpfree ( ( char * ) ptr_fml_Obuf );
+					Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+        }
+  
+        if( SQLCODE == NO_DATA_FOUND )
+        {
+          break;
+        }
+        
+        /*** Ver 1.6 starts Here ***/
+        /*** If PIPO is to be done for n number of clients then pack n number of match ides in buffer and break ***/
+        if( li_number_of_clients > 0 )  /** for n number of clients ***/
+        {
+         if( li_count == li_number_of_clients )
+          {
+            break;
+          }
+        }
+        /*** Ver 1.6 Ends here ***/
+
+        i_reccount = i_reccount ++;
+  			i_returncode = fn_pack_vartofml( c_ServiceName,
+  																			 c_err_msg,
+  																			 &ptr_fml_Obuf,
+  																			 4,
+  														 FFO_XCHNG_CD, ( char * )c_xchng_cd,
+  														 FFO_TRD_DT, ( char * )c_trd_dt,
+  														 FFO_EBA_MTCH_ACT_NO, ( char * )c_cln_mtch_accnt,
+                               FFO_UPLD_MTCH_FLG,(char *)&c_model_flag );   /*** Ver 1.8 ****/
+  
+  			if( i_returncode == -1 )
+  			{
+          fn_errlog( c_ServiceName, "S31020", LIBMSG, c_err_msg );
+          EXEC SQL CLOSE cur_pipo;
+					Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+          tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  			}
+       
+        /*** Ver 1.6 Starts Here ***/
+        /*** If PIPO is to be done for n number of clients then pack n number of match ides in buffer and break ***/
+ 
+        if( li_number_of_clients > 0 )
+        {
+          li_count = li_count + 1 ;
+        }
+
+        /*** Ver 1.6 Ends Here ***/ 
+  	 }
+  	EXEC SQL
+  		CLOSE cur_pipo;
+	tpreturn(TPSUCCESS, SUCC_BFR, ( char * )ptr_fml_Obuf, 0, 0 );		
+		
+}
+

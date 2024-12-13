@@ -1,0 +1,1494 @@
+/****************************************************************************************
+    Service Name          : bat_upld_corp
+
+    Description           : Get the position of future and option and square or create
+														new positions depending upon the INPUT.
+													
+
+		Input									:	<bat_upld_corp> <exchange><exchange><pipe><A/B><date DD_Mon_YYYY><undrlyng>
+		Output								:	None
+
+    Log                   : 22/06/2004      1.0 SANGEET|INFOTECH
+														13/06/2005			1.1	KRISHNAN|INFOTECH
+														27/10/2006			2.0	ABHISHEK|INFOTECH
+                            09/10/2007      2.1 VIKASH|INFOTECH
+														23/01/2008      2.2 RANJIT|INFOTECH
+														12/12/2012      2.3 SWATI A.B|INFOTECH
+														09/01/2012      2.4 SWATI A.B|INFOTECH
+														13/07/2012      2.5 SWATI A.B|INFOTECH
+														15/02/2012      2.6 SWATI A.B|INFOTECH
+														10/07/2013      2.7 SH|INFOTECH
+														17/01/2014      2.8 Sachin Birje|INFOTECH
+														12/02/2014      2.9 Navina D.|INFOTECH
+														09/09/2014      3.0 Sachin B.|INFOTECH
+														09/05/2016			3.1	Ritesh D.|INFOTECH
+******************************************************************************************/
+/*****************************************************************************************/
+/*	Ver 1.1 	Look up the new strike prices from CCM table 															 */
+/*						Also changed the date used in FCO and FCT from sysdate to next trade date	 */
+/*	Ver 2.0 	Changes for rerun ,with new Quantity from CCQ						 									 */
+/*						and square off price from CCM for both futures and options								 */
+/*  Ver 2.1   Changes for NNF808 increase in size of trade no. and order no.             */
+/*	Ver 2.2   IBM Migration																														   */	
+/*	Ver 2.3   SPAN Changes                                                               */	
+/*	Ver 2.4   BSE-ORS Changes                                                            */	
+/*	Ver 2.5   Changes to correct BSE span flag handling 																 */	
+/*	Ver 2.6   Removal of Limit Alloc/Dealloc in Corp Action Changes											 */	
+/*	Ver 2.7   BSE ORS Fix																																 */	
+/*	Ver 2.8   Exchange code Bug Fix 																										 */	
+/*	Ver 2.9   BSE Ack changes                                                            */	
+/*	Ver 3.0   View to FML Changes                                                        */	
+/*	Ver 3.1		Changes for duplicate token no issue 																			 */
+/*****************************************************************************************/
+
+
+#include <sqlca.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fml_def.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <eba_to_ors.h>
+#include <fn_ddr.h>
+
+/** #include <fo_view_def.h> ** Ver 3.0 **/
+
+#include <fn_env.h>
+#include <rcv_cln_srvr.h>
+#include <fn_fil_log.h>
+#include <string.h>       /* ver 2.2 */
+#include <fml_rout.h>     /* ver 2.2 */
+#include <fn_read_debug_lvl.h>	/*ver 2.2 */
+
+
+
+
+#define CORP_SQUARE_OFF	'A'
+#define	CREATE_NEW_POSITION	'B'
+#define SQLROWCOUNT  sqlca.sqlerrd[2]  /** Added in Ver 3.1 **/
+
+EXEC SQL INCLUDE "table/exg_xchng_mstr.h";
+EXEC SQL INCLUDE "table/fco_fo_corp_orders.h";
+EXEC SQL INCLUDE "table/fct_fo_corp_trades.h";
+EXEC SQL INCLUDE "table/fcm_fo_corp_mstr.h";
+EXEC SQL INCLUDE "table/fop_fo_options_pstn.h";
+EXEC SQL INCLUDE "table/ffp_fo_futures_pstn.h";
+EXEC SQL INCLUDE "table/ccq_corp_cntrct_qty.h";
+EXEC SQL INCLUDE "table/ccm_corp_cntrct_mstr.h";
+
+void fn_msg( char *c_ServiceName, char* c_err_msg, char c_mem_flg );
+/*** int fn_prcs_corp_ordr(char c_oprn_typ); commented In Ver 2.5 ***/
+int fn_prcs_corp_ordr(char c_oprn_typ ,char* c_exng_cd);
+char c_pipe_id[4];
+char c_undrlyng[7];
+char ord_ack_err[256];
+char c_ServiceName [ 33 ];
+char c_err_msg [ 256 ];
+long l_success = 0;
+long l_failure = 0;
+
+EXEC SQL BEGIN DECLARE SECTION;
+	varchar c_trd_dt[11 + 1];
+	varchar	c_trd_ref[10];	
+	long sql_fco_new_strike_prc;
+EXEC SQL END DECLARE SECTION;
+
+void bat_upld_corp ( int argc, char *argv[] ) 
+{ 
+	char upl_typ;
+	char c_date[12];
+	int rec_cnt=0;
+	int match_exist;
+	int	 i_count=0;
+	int	 i_counter=0;
+	int	 i_cntr=0;
+	int trd_cnt=0;
+	int trade_cnt=0;
+	int ord_cnt=0;
+	long tot_trd_qty=0;
+	int i_trnsctn=0;
+	char con_msg[256];
+	int i_cnt=0;
+  /** char c_xchng_ack[16]; commented in ver 2.1 **/
+  /** char c_xchng_ack[ LEN_XCHNG_ACK ]; ** Added in ver 2.1 ** Commented in Ver 2.9 ***/
+	char c_xchng_ack[ 16+1 ];	/*** Ver 2.9 ***/
+
+  int i_ch_val;
+	char c_msg[256];
+
+	char c_xchng_cd [ 4 ];
+  
+	strcpy ( c_ServiceName, argv[0] );
+
+	INITBATDBGLVL(argv[0]);		/* ver 2.2 */
+	fn_userlog(c_ServiceName,"agrc = [%d]",argc);
+	sprintf ( c_msg, "Batch process %s for FNO corp Upload started......", argv[0] );
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	if( argc != 7 )
+	{
+		fn_userlog(c_ServiceName,"USE Argument list bat_upld_corp|exchange|exchange|pipe|A/B/C|date|undrlyng>");
+		fn_bat_pst_msg ( c_ServiceName, "Invalid Number of Arguments", c_tag );
+		return;
+	}
+
+	strcpy(sql_exg_xchng_cd,argv[2]);
+	strcpy(c_pipe_id,argv[3]);
+	upl_typ = argv[4][0];
+	strcpy( c_date, argv[5] );
+	strcpy( c_undrlyng, argv[6] );
+
+	fn_userlog( c_ServiceName, "Inputs to the batch program.... ");
+	fn_userlog( c_ServiceName, "upl_typ = [%c]",upl_typ); 
+	fn_userlog( c_ServiceName, "date = [%s]",c_date);
+	fn_userlog( c_ServiceName, "sql_exg_xchng_cd = [%s]",sql_exg_xchng_cd);
+	fn_userlog( c_ServiceName, "c_undrlyng = [%s]",c_undrlyng);
+	fn_userlog( c_ServiceName, "c_pipe_id = [%s]",c_pipe_id);
+
+	EXEC SQL
+  SELECT to_char ( exg_nxt_trd_dt, 'yyyymmdd' ),
+         to_char ( exg_nxt_trd_dt, 'DD-Mon-yyyy' ),
+         opm_xchng_cd
+  INTO   :c_trd_ref,
+         :c_trd_dt,
+         :c_xchng_cd
+  FROM   exg_xchng_mstr, opm_ord_pipe_mstr
+  WHERE  opm_pipe_id  =  :c_pipe_id
+  AND    exg_xchng_cd =  :sql_exg_xchng_cd              /*** Ver 2.4 ***/ 
+  AND    exg_xchng_cd =  opm_xchng_cd;
+
+	if ( SQLCODE != 0 )
+ 	{	
+  	fn_errlog(c_ServiceName,"S31005", SQLMSG, c_err_msg);
+   	fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);	
+		return;
+ 	}
+ 	
+	SETNULL ( c_trd_ref );
+ 	SETNULL ( c_trd_dt );
+
+	fn_userlog( c_ServiceName, "c_trd_ref = [%s]",c_trd_ref.arr);
+	fn_userlog( c_ServiceName, "c_trd_dt = [%s]",c_trd_dt.arr);
+
+	fn_bat_pst_msg ( c_ServiceName, "Request for Bulk  ORDER_AND_TRADE_UPLOAD..",c_tag);
+
+	EXEC SQL 
+	SELECT 	FCM_ADJ_FCTR,
+					FCM_RUN_STTS
+	INTO		:sql_fcm_adj_fctr,
+					:sql_fcm_run_stts
+	FROM 		FCM_FO_CORP_MSTR
+	WHERE		FCM_UNDRLYNG = :c_undrlyng
+	AND			FCM_XCHNG_CD = :sql_exg_xchng_cd              /*** Ver 2.4 ***/
+	AND			FCM_ACTN_DT  = :c_trd_dt;
+
+	if( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31010", SQLMSG, c_err_msg);
+    fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);
+    return;
+  }
+	
+	fn_userlog( c_ServiceName,"sql_fcm_run_stts IS |%c|",sql_fcm_run_stts);
+
+	/*****V 2.0*****************/
+	/*** Insert records in FCO and FCT from FFP and FOP if not uploaded ****************/
+	if ( sql_fcm_run_stts == 'N' && upl_typ == CORP_SQUARE_OFF )
+	{
+  	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg);
+  	if(i_trnsctn == -1)
+  	{
+      fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+      fn_errlog( c_ServiceName, "S31015", LIBMSG, c_err_msg );
+      return;
+  	}
+
+
+		fn_userlog( c_ServiceName, "IN 'sql_fcm_run_stts == 'N' && upl_typ == CORP_SQUARE_OFF'  ");
+
+	  EXEC SQL
+    DECLARE cur_corp_actn CURSOR FOR
+    SELECT  trim(FFP_CLM_MTCH_ACCNT),
+            trim(FFP_XCHNG_CD),
+            FFP_PRDCT_TYP,
+            FFP_INDSTK,
+            rtrim(FFP_UNDRLYNG),
+            FFP_EXPRY_DT,
+            FFP_EXER_TYP,
+            '*',
+            0,
+            DECODE(FFP_OPNPSTN_FLW,'B','S','S','B'),
+            DECODE(FFP_OPNPSTN_FLW,'B',FFP_OPNPSTN_QTY,'S',-1*FFP_OPNPSTN_QTY)
+    FROM    FFP_FO_FUTURES_PSTN
+    WHERE   FFP_OPNPSTN_FLW <> 'N'
+    AND     FFP_OPNPSTN_QTY <> 0
+    AND     FFP_UNDRLYNG    =  :c_undrlyng
+		AND			FFP_XCHNG_CD    =  :sql_exg_xchng_cd              /*** Ver 2.4 ***/
+    UNION
+    SELECT  trim(FOP_CLM_MTCH_ACCNT),
+            trim(FOP_XCHNG_CD),
+            FOP_PRDCT_TYP,
+            FOP_INDSTK,
+            rtrim(FOP_UNDRLYNG),
+            FOP_EXPRY_DT,
+            FOP_EXER_TYP,
+            FOP_OPT_TYP,
+            FOP_STRK_PRC,
+            DECODE(FOP_OPNPSTN_FLW,'B','S','S','B'),
+            DECODE(FOP_OPNPSTN_FLW,'B',FOP_OPNPSTN_QTY,'S',-1*FOP_OPNPSTN_QTY)
+    FROM    FOP_FO_OPTIONS_PSTN
+    WHERE   FOP_OPNPSTN_FLW <> 'N'
+    AND     FOP_OPNPSTN_QTY <> 0
+		AND			FOP_XCHNG_CD    =  :sql_exg_xchng_cd              /*** Ver 2.4 ***/
+    AND     FOP_UNDRLYNG    =  :c_undrlyng
+		UNION 																					/*** Ver 2.3 ***/ 
+		SELECT  trim(FCP_CLM_MTCH_ACCNT),
+            trim(FCP_XCHNG_CD),
+            FCP_PRDCT_TYP,
+            FCP_INDSTK,
+            rtrim(FCP_UNDRLYNG),
+            FCP_EXPRY_DT,
+            FCP_EXER_TYP,
+            FCP_OPT_TYP,
+            FCP_STRK_PRC,
+            DECODE(FCP_OPNPSTN_FLW,'B','S','S','B'),
+            DECODE(FCP_OPNPSTN_FLW,'B',FCP_OPNPSTN_QTY,'S',-1*FCP_OPNPSTN_QTY)
+    FROM    FCP_FO_SPN_CNTRCT_PSTN
+    WHERE   FCP_OPNPSTN_FLW <> 'N'
+    AND     FCP_OPNPSTN_QTY <> 0
+		AND			FCP_XCHNG_CD    =  :sql_exg_xchng_cd              /*** Ver 2.4 ***/
+    AND     FCP_UNDRLYNG    =  :c_undrlyng  ;
+
+	
+    EXEC SQL OPEN cur_corp_actn ;
+    
+		if( SQLCODE != 0 )
+    {
+      EXEC SQL CLOSE cur_corp_actn;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog ( c_ServiceName, "S31020", SQLMSG, c_err_msg );
+      fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+      return;
+    }
+
+		
+		/*** Following Commented In Ver 2.4 	
+
+  	EXEC SQL
+  	INSERT INTO FCO_FO_CORP_ORDERS_HSTRY (SELECT * FROM FCO_FO_CORP_ORDERS);
+		
+		Commented Ends For Ver 2.4 ***/
+		
+		EXEC SQL					/*** Ver 2.4 ***/
+    INSERT INTO FCO_FO_CORP_ORDERS_HSTRY ( SELECT * FROM FCO_FO_CORP_ORDERS
+		 																			 WHERE FCO_XCHNG_CD = :sql_exg_xchng_cd); 
+
+  	if ( SQLCODE != 0 )
+ 	 	{
+      EXEC SQL CLOSE cur_corp_actn;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    	fn_errlog(c_ServiceName,"S31025", SQLMSG, c_err_msg);
+    	fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);
+    	return;
+  	}
+
+		/*** Following Commented In Ver 2.4
+
+  	EXEC SQL
+  	INSERT INTO FCT_FO_CORP_TRADES_HSTRY (SELECT * FROM FCT_FO_CORP_TRADES);
+
+		Commented Ends For Ver 2.4 ***/
+	
+		EXEC SQL					/*** Ver 2.4 ***/
+    INSERT INTO FCT_FO_CORP_TRADES_HSTRY (SELECT * FROM FCT_FO_CORP_TRADES 
+																					WHERE FCT_XCHNG_CD = :sql_exg_xchng_cd);
+
+  	if ( SQLCODE != 0 )
+  	{
+      EXEC SQL CLOSE cur_corp_actn;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    	fn_errlog(c_ServiceName,"S31030", SQLMSG, c_err_msg);
+    	fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);
+    	return;
+  	}
+
+		/*** Following Commented In Ver 2.4
+
+  	EXEC SQL
+  	DELETE FROM FCO_FO_CORP_ORDERS;
+		
+		Commented Ends For Ver 2.4 ***/
+
+		EXEC SQL				/*** Ver 2.4 ***/
+    DELETE FROM FCO_FO_CORP_ORDERS WHERE FCO_XCHNG_CD = :sql_exg_xchng_cd ;
+
+  	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  	{
+      EXEC SQL CLOSE cur_corp_actn;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    	fn_errlog(c_ServiceName,"S31035", SQLMSG, c_err_msg);
+    	fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);
+    	return;
+  	}
+
+		/*** Following Commented In Ver 2.4  
+	
+		EXEC SQL
+  	DELETE FROM FCT_FO_CORP_TRADES;
+	
+		Commented Ends For Ver 2.4 ***/
+
+		EXEC SQL      /*** Ver 2.4 ***/
+    DELETE FROM FCT_FO_CORP_TRADES WHERE FCT_XCHNG_CD = :sql_exg_xchng_cd ;
+
+  	if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+  	{
+      EXEC SQL CLOSE cur_corp_actn;
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    	fn_errlog(c_ServiceName,"S31040", SQLMSG, c_err_msg);
+    	fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);
+    	return;
+  	}
+		
+
+	
+		while( 1 )
+		{
+      EXEC SQL
+          FETCH cur_corp_actn
+      INTO  :sql_ffp_clm_mtch_accnt,
+            :sql_ffp_xchng_cd,
+            :sql_ffp_prdct_typ,
+            :sql_ffp_indstk,
+            :sql_ffp_undrlyng,
+            :sql_ffp_expry_dt,
+            :sql_fop_exer_typ,
+            :sql_fop_opt_typ,
+            :sql_fop_strk_prc,
+            :sql_ffp_opnpstn_flw,
+            :sql_ffp_opnpstn_qty ;
+			
+			if( SQLCODE == NO_DATA_FOUND )
+      {
+          EXEC SQL CLOSE cur_corp_actn;
+					fn_userlog( c_ServiceName, "In No Data Found");
+          break;
+      }
+        
+			if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+          EXEC SQL CLOSE cur_corp_actn;
+        	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+          fn_errlog(c_ServiceName,"S31045",SQLMSG,c_err_msg);
+          fn_bat_pst_msg ( c_ServiceName, "Error in selecting record from corp table ",c_tag);
+          return;
+      }
+
+			rtrim(sql_ffp_undrlyng);															/* Ver 2.1 added later for less character symbol fixing*/
+
+		fn_userlog( c_ServiceName, "In insert for mtch id [%s],prdct_typ[%c]",sql_ffp_clm_mtch_accnt,sql_ffp_prdct_typ );
+    fn_userlog( c_ServiceName, "insert in fco for match accnt[%s],prdct_typ[%c],expry_dt[%s],opt_typ[%c], strike_prc[%d], indstk[%c],undrlyng[%s],exer_typ[%c]",sql_ffp_clm_mtch_accnt,sql_ffp_prdct_typ ,sql_ffp_expry_dt.arr,sql_fop_opt_typ, sql_fop_strk_prc,sql_ffp_indstk,sql_ffp_undrlyng, sql_fop_exer_typ); 
+
+			EXEC SQL
+      SELECT  CCM_SQUARE_OFF_PRICE
+      INTO    :sql_fco_exec_rate
+      FROM    CCM_CORP_CNTRCT_MSTR
+      WHERE   CCM_PRDCT_TYP_OLD 				= :sql_ffp_prdct_typ
+      AND     trim(CCM_INS_TYP_OLD)   	= :sql_ffp_indstk 
+      AND     TRIM(CCM_SYMBOL_OLD) 			= :sql_ffp_undrlyng 
+      AND     CCM_EXPRY_DT_OLD 					= :sql_ffp_expry_dt 
+      AND     CCM_EXER_TYP_OLD 					= :sql_fop_exer_typ 
+      AND     CCM_STRIKE_PRC_OLD 				= :sql_fop_strk_prc 
+      AND     CCM_XCHNG_CD       				= :sql_ffp_xchng_cd         /*** Ver 2.4 ***/
+      AND     trim(CCM_OPTION_TYP_OLD)	= :sql_fop_opt_typ ; 
+ 
+      if ( SQLCODE != 0 )
+      {
+        EXEC SQL CLOSE cur_corp_actn;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog ( c_ServiceName, "S31050", SQLMSG, c_err_msg );
+        fn_bat_pst_msg ( c_ServiceName, "Error in selecting record from corp table ",c_tag);
+        return;
+      }
+			fn_userlog( c_ServiceName,"AFTER SELECTING FROM CCM sql_fco_exec_rate IS:%ld",sql_fco_exec_rate);
+      
+			EXEC SQL
+			SELECT to_char(sysdate,'yymmdd')||LPAD(CORP_ACTN_SEQ.NEXTVAL,10,0)  			/**Ver 2.1 added later **/
+      INTO   :c_xchng_ack
+      FROM   DUAL ;
+      if ( (SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+      {
+        EXEC SQL CLOSE cur_corp_actn;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog ( c_ServiceName, "S31055", SQLMSG, c_err_msg );  
+        fn_bat_pst_msg ( c_ServiceName, "Error in generating c_xchng_ack ",c_tag);
+        return;
+      }
+
+      EXEC SQL
+      INSERT INTO FCO_FO_CORP_ORDERS
+      (
+        FCO_XCHNG_CD,
+        FCO_XCHNG_ACK,
+        FCO_ORDR_RFRNC,
+        FCO_CLM_MTCH_ACCNT,
+        FCO_UNDRLYNG,
+        FCO_PRDCT_TYP,
+        FCO_STRIKE_PRC,
+        FCO_EXER_TYP,
+        FCO_OPT_TYP,
+        FCO_EXPRY_DT,
+        FCO_INDSTK,
+        FCO_ORDR_FLW,
+        FCO_EXEC_QTY,
+        FCO_EXEC_RATE,
+        FCO_ORDR_DT,
+        FCO_PLCD_STTS,
+        FCO_LST_MDFD_TM,
+        FCO_EXCHNG_ACK_TM,
+        FCO_XCHNG_REMARKS,
+        FCO_REMARKS
+      )
+      values
+      (
+        :sql_ffp_xchng_cd,
+        :c_xchng_ack,
+        null,
+        :sql_ffp_clm_mtch_accnt,
+        :sql_ffp_undrlyng,
+        :sql_ffp_prdct_typ,
+        :sql_fop_strk_prc,
+        :sql_fop_exer_typ,
+        :sql_fop_opt_typ,
+        :sql_ffp_expry_dt,
+        :sql_ffp_indstk,
+        :sql_ffp_opnpstn_flw,
+        :sql_ffp_opnpstn_qty,
+        :sql_fco_exec_rate,
+        :c_trd_dt, /*1.1*/
+        'R',
+        sysdate,
+        sysdate,
+        'CORP ACTN',
+        'CORP ACTN' ) ;
+      
+			if(SQLCODE != 0)
+      {
+        EXEC SQL CLOSE cur_corp_actn;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog( c_ServiceName, "S31060", SQLMSG, c_err_msg );
+        fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+        return;
+      }
+
+      EXEC SQL
+			INSERT INTO FCT_FO_CORP_TRADES
+      (
+				FCT_XCHNG_CD ,							/*** Ver 2.4 ***/
+        FCT_XCHNG_TRD_RFRNC,
+        FCT_XCHNG_ACK,
+        FCT_ORDR_RFRNC,
+        FCT_EBA_TRD_REF,
+        FCT_CLM_MTCH_ACCNT,
+        FCT_UNDRLYNG,
+        FCT_PRDCT_TYP,
+        FCT_STRIKE_PRC,
+        FCT_EXER_TYP,
+        FCT_OPT_TYP,
+        FCT_EXPRY_DT,
+        FCT_INDSTK,
+        FCT_ORDR_FLW,
+        FCT_EXCTD_RT,
+        FCT_EXCTD_QTY,
+        FCT_TRD_DT,
+        FCT_PLCD_STTS,
+        FCT_REMARKS
+      )
+      values
+      (
+				:sql_ffp_xchng_cd, 					/*** Ver 2.4 ***/
+/**        to_number(substr(:c_xchng_ack,7,15),9999999999), commented in ver 2.1 **/
+        to_number(substr(:c_xchng_ack,7,16),9999999999),
+        :c_xchng_ack,
+        null,
+        null,
+        :sql_ffp_clm_mtch_accnt,
+        :sql_ffp_undrlyng,
+        :sql_ffp_prdct_typ,
+        :sql_fop_strk_prc,
+        :sql_fop_exer_typ,
+        :sql_fop_opt_typ,
+        :sql_ffp_expry_dt,
+        :sql_ffp_indstk,
+        :sql_ffp_opnpstn_flw,
+        :sql_fco_exec_rate,     
+        :sql_ffp_opnpstn_qty,
+        :c_trd_dt, 
+        'R',
+        'CORP ACTN'
+       ) ;
+      
+			if(SQLCODE != 0)
+      {
+        EXEC SQL CLOSE cur_corp_actn;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog( c_ServiceName, "S31065", SQLMSG, c_err_msg );
+        fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+        return;
+      }
+		}
+  
+		/*****V 2.0*****************/
+    EXEC SQL
+    UPDATE FCM_FO_CORP_MSTR
+    SET    FCM_RUN_STTS = 'B'
+    WHERE  FCM_UNDRLYNG = :c_undrlyng
+		AND    FCM_XCHNG_CD = :sql_exg_xchng_cd  /*** Ver 2.4 ***/
+    AND    FCM_ACTN_DT  = :c_trd_dt;
+
+    if ( SQLCODE != 0 )
+    {
+			 fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       fn_errlog(c_ServiceName,"S31070",SQLMSG,c_err_msg);
+       fn_bat_pst_msg ( c_ServiceName, "Error in updating Corporate Master Table for Square Off ",c_tag);
+       return;
+    }
+	
+		if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg) == -1 )
+    {
+			 fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       fn_errlog( c_ServiceName, "S31075", LIBMSG, c_err_msg );
+       fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+       return;
+    }
+	}
+	
+	EXEC SQL
+  SELECT 	count(*)
+  INTO   	:ord_cnt
+  FROM		FCO_FO_CORP_ORDERS
+  WHERE		trunc(FCO_ORDR_DT) = to_date(:c_trd_dt,'dd-mon-yyyy') /*1.1*/
+  AND     FCO_XCHNG_CD       = :sql_exg_xchng_cd 								/*** Ver 2.4 ***/
+  AND     FCO_UNDRLYNG       = :c_undrlyng;
+  
+	if ( SQLCODE != 0 )
+  {
+    fn_errlog(c_ServiceName,"S31080",SQLMSG,c_err_msg);
+    fn_bat_pst_msg ( c_ServiceName, "System Error.Contact system support",c_tag);
+    return;
+  }
+	
+	sprintf(con_msg,"Number of corp orders to be uploaded into EBA is [%ld]",ord_cnt);
+	fn_userlog(c_ServiceName,"Number of corp orders to be uploaded into EBA is [%ld]",ord_cnt);
+	fn_userlog(c_ServiceName,"New exchange code is [%s]",sql_exg_xchng_cd);
+	fn_bat_pst_msg ( c_ServiceName, con_msg,c_tag);
+
+	if( ord_cnt == 0 )
+	{
+		fn_userlog( c_ServiceName, "No orders in FCO to upload");
+		sprintf(con_msg,"No orders to upload into EBA for Order date [%s]..exiting..",c_trd_dt.arr);
+		fn_bat_pst_msg(c_ServiceName,con_msg,c_tag);
+		return;
+	}
+
+	/**** If Square off requested then get orders from fco and trades from fct to square off all positions ***/
+	if ( upl_typ == CORP_SQUARE_OFF && (sql_fcm_run_stts == 'N' || sql_fcm_run_stts == 'B' ) ) 
+  {
+			EXEC SQL
+			DECLARE cur_ord 
+			CURSOR FOR
+			SELECT 		FCO_XCHNG_CD,
+								FCO_XCHNG_ACK,
+								FCO_CLM_MTCH_ACCNT,
+								FCO_PRDCT_TYP,
+								FCO_UNDRLYNG,
+								FCO_STRIKE_PRC,
+								FCO_EXPRY_DT,
+								FCO_EXER_TYP,
+								FCO_OPT_TYP,
+								FCO_INDSTK,
+								FCO_ORDR_FLW,
+								FCO_EXEC_QTY,
+								FCO_EXEC_RATE,
+								to_char(FCO_ORDR_DT,'dd-Mon-yyyy'),
+								to_char(FCO_LST_MDFD_TM,'dd-Mon-yyyy hh24:mi:ss'),
+								to_char(FCO_EXCHNG_ACK_TM,'dd-Mon-yyyy hh24:mi:ss'),
+								FCO_PLCD_STTS,
+								nvl(FCO_XCHNG_REMARKS,'CORP ACTN')
+		  FROM 			FCO_FO_CORP_ORDERS
+		  WHERE 	  trunc(FCO_ORDR_DT) = to_date(:c_trd_dt,'dd-Mon-yyyy') 
+			AND 			FCO_PLCD_STTS <> 'U'	
+
+		/**Commented in Ver 2.7
+			AND 			FCO_XCHNG_CD  = :sql_ffp_xchng_cd        *** Ver 2.4 ***/ 	
+
+			AND 			FCO_XCHNG_CD  = :sql_exg_xchng_cd				 /**Added in Ver 2.7 ***/
+			AND 			FCO_UNDRLYNG	= :c_undrlyng ;
+
+			i_cnt = 0;
+			EXEC SQL OPEN cur_ord;
+			if( SQLCODE != 0 )
+			{
+				fn_errlog( c_ServiceName, "S31085", SQLMSG, c_err_msg);
+				fn_bat_pst_msg( c_ServiceName, "ERROS occured while starting square off", c_tag);
+				return;
+			}
+			
+			for( ; ; )
+			{
+					EXEC SQL
+					FETCH cur_ord
+					INTO
+		  				:sql_fco_xchng_cd,
+		  				:sql_fco_xchng_ack,
+		  				:sql_fco_clm_mtch_accnt,
+		  				:sql_fco_prdct_typ,
+		  				:sql_fco_undrlyng,
+		  				:sql_fco_strike_prc,
+							:sql_fco_expry_dt,
+							:sql_fco_exer_typ,
+							:sql_fco_opt_typ,
+							:sql_fco_indstk,
+							:sql_fco_ordr_flw,
+							:sql_fco_exec_qty,
+							:sql_fco_exec_rate,
+							:sql_fco_ordr_dt,
+							:sql_fco_lst_mdfd_tm,
+							:sql_fco_exchng_ack_tm,
+							:sql_fco_plcd_stts,
+							:sql_fco_xchng_remarks;
+
+					if( SQLCODE == NO_DATA_FOUND )
+					{
+							fn_userlog( c_ServiceName, "In no data found");
+							EXEC SQL CLOSE cur_ord;
+		  				break;
+					}
+
+					if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+					{
+							EXEC SQL CLOSE cur_ord;
+							fn_errlog(c_ServiceName,"S31090",SQLMSG,c_err_msg);
+							fn_bat_pst_msg ( c_ServiceName, "Error in fetching records from corp table ",c_tag);
+							return;
+					}
+
+					sprintf(con_msg,"Processing record no = [%ld] for sql_fco_xchng_ack=[%s]....",i_cnt,sql_fco_xchng_ack);
+					fn_bat_pst_msg ( c_ServiceName, con_msg,c_tag);
+
+					if(sql_fco_prdct_typ == 'F')
+					sprintf(con_msg,"Exg Order ack [%s], Match Account [%s] Contract [FUT-%s-%s]",sql_fco_xchng_ack,sql_fco_clm_mtch_accnt,sql_fco_undrlyng,sql_fco_expry_dt.arr);
+
+					if(sql_fco_prdct_typ == 'O')
+					sprintf(con_msg,"Exg Order ack [%s], Match Account [%s] Contract [OPT-%s-%s-%ld-%c%c]",sql_fco_xchng_ack,sql_fco_clm_mtch_accnt,sql_fco_undrlyng,sql_fco_expry_dt.arr,sql_fco_strike_prc/100,sql_fco_opt_typ,sql_fco_exer_typ);
+
+					fn_bat_pst_msg ( c_ServiceName, con_msg,c_tag);
+					rtrim(sql_fco_undrlyng);      /*** Ver 2.1 added for less character underlyng ***/
+
+					SETNULL(sql_fco_expry_dt);
+					SETNULL(sql_fco_ordr_dt);
+					SETNULL(sql_fco_lst_mdfd_tm);
+					SETNULL(sql_fco_exchng_ack_tm);
+					SETNULL(sql_fco_xchng_remarks);
+
+					/*** i_ch_val = fn_prcs_corp_ordr( CORP_SQUARE_OFF ); commented in Ver 2.5 ***/
+					i_ch_val = fn_prcs_corp_ordr( CORP_SQUARE_OFF ,sql_fco_xchng_cd);   /*** Ver 2.5 ***/
+					if( i_ch_val == -1 )
+					{
+						 EXEC SQL CLOSE cur_ord;
+						 fn_errlog(c_ServiceName,"S31095",SQLMSG,c_err_msg);
+						 fn_bat_pst_msg( c_ServiceName, "SQUARE OFF FAILED ... Contact System Support ", c_tag );
+						 return ;
+					}
+					i_cnt++;
+			}
+
+			fn_userlog( c_ServiceName, "Total records successfull[%ld],failure[%ld],processed[%ld]",l_success,l_failure,i_cnt ); 
+
+			sprintf(con_msg,"Total number of corp orders processed - [%ld]",i_cnt);
+			fn_bat_pst_msg(c_ServiceName,con_msg,c_tag);
+
+			if( l_failure == 0 )
+			{
+    		i_trnsctn = fn_begintran( c_ServiceName, c_err_msg);
+    		if(i_trnsctn == -1)
+    		{
+      		fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+      		fn_errlog( c_ServiceName, "S31100", LIBMSG, c_err_msg );
+      		return;
+    		}				
+				
+				/**********v 2.0************/
+				EXEC SQL
+				UPDATE FCM_FO_CORP_MSTR
+				SET    FCM_RUN_STTS = 'S'
+				WHERE  FCM_UNDRLYNG = :c_undrlyng
+				AND    FCM_XCHNG_CD = :sql_exg_xchng_cd  /*** Ver 2.4 ***/
+				AND    FCM_ACTN_DT  = :c_trd_dt;
+
+				if ( SQLCODE != 0 )
+				{
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+					fn_errlog(c_ServiceName,"S31105",SQLMSG,c_err_msg);
+					fn_bat_pst_msg ( c_ServiceName, "Error in updating Corporate Master Table for Square Off ",c_tag);
+					return; 
+      	}
+    
+				if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg) == -1 )
+    		{
+					fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       		fn_errlog( c_ServiceName, "S31110", LIBMSG, c_err_msg );
+       		fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+       		return;
+    		}
+			}
+			else
+			{
+					fn_errlog(c_ServiceName,"S31115","Some of the position cannot be squared off",c_err_msg);
+					fn_bat_pst_msg ( c_ServiceName, "Square Off not completed",c_tag);
+					return; 
+			}
+   }
+   else if ( upl_typ == CREATE_NEW_POSITION )
+   {
+    if( sql_fcm_run_stts != 'S' && sql_fcm_run_stts != 'X' )
+		{
+			fn_errlog(c_ServiceName,"S31120","new position can be create only after square off is done",c_err_msg);
+			fn_bat_pst_msg ( c_ServiceName, "new position can be create only after square off is done",c_tag);
+			return;
+		}
+
+		if( sql_fcm_run_stts != 'X' )
+		{
+
+			/*** get the new price quantity and new contract rates for the new position creation if not there ***/
+    	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg);
+    	if(i_trnsctn == -1)
+    	{
+      	fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag );
+      	fn_errlog( c_ServiceName, "S31125", LIBMSG, c_err_msg );
+      	return ;
+    	}
+
+		/*** Following Commented In Ver 2.4
+		EXEC SQL
+    INSERT INTO FCO_FO_CORP_ORDERS_HSTRY (SELECT * FROM FCO_FO_CORP_ORDERS );
+		Commented Ends For Ver 2.4 ***/ 
+
+
+		EXEC SQL        /*** Ver 2.4 ***/
+    INSERT INTO FCO_FO_CORP_ORDERS_HSTRY (SELECT * FROM FCO_FO_CORP_ORDERS 
+																					WHERE FCO_XCHNG_CD = :sql_exg_xchng_cd );
+
+    if ( SQLCODE != 0 )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog(c_ServiceName,"S31130", SQLMSG, c_err_msg);
+      fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);
+      return;
+    }
+
+    /*** Following Commented In Ver 2.4
+    EXEC SQL
+    INSERT INTO FCT_FO_CORP_TRADES_HSTRY (SELECT * FROM FCT_FO_CORP_TRADES );
+    Commented Ends For Ver 2.4 ***/
+
+    EXEC SQL
+    INSERT INTO FCT_FO_CORP_TRADES_HSTRY (SELECT * FROM FCT_FO_CORP_TRADES
+																					WHERE  FCT_XCHNG_CD = :sql_exg_xchng_cd );
+
+    if ( SQLCODE != 0 )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      fn_errlog(c_ServiceName,"S31135", SQLMSG, c_err_msg);
+      fn_bat_pst_msg(c_ServiceName,"System Error..contact system support",c_tag);
+      return;
+    }
+
+		fn_userlog( c_ServiceName, " Inside CREATE NEW POS ");
+		EXEC SQL
+		DECLARE cur_ord1 CURSOR FOR
+		SELECT 	FCT_XCHNG_CD,				/*** Ver 2.4 ***/	
+						FCT_XCHNG_ACK,
+						FCT_PRDCT_TYP,
+						FCT_STRIKE_PRC,
+						FCT_EXER_TYP,
+						FCT_OPT_TYP,
+						FCT_EXPRY_DT,
+						FCT_EXCTD_QTY
+		FROM 		FCT_FO_CORP_TRADES
+		WHERE 	FCT_TRD_DT = to_date(:c_trd_dt,'dd-Mon-yyyy')
+		AND			FCT_UNDRLYNG = :c_undrlyng
+		AND     FCT_XCHNG_CD = :sql_exg_xchng_cd    /*** Ver 2.4 ***/
+		AND			FCT_PLCD_STTS = 'U';
+
+		EXEC SQL OPEN cur_ord1;
+
+		if( SQLCODE != 0 )
+		{
+			fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+			fn_errlog( c_ServiceName, "S31140", SQLMSG, c_err_msg );
+			fn_bat_pst_msg( c_ServiceName, "System Error..contact system support", c_tag);
+			return;
+		}
+
+		while( 1 )
+		{
+			EXEC SQL
+			FETCH cur_ord1
+			INTO	:sql_fco_xchng_cd,    /*** Ver 2.4 ***/	
+						:sql_fco_xchng_ack,
+						:sql_fco_prdct_typ,
+						:sql_fco_strike_prc,
+						:sql_fco_exer_typ,
+						:sql_fco_opt_typ,
+						:sql_fco_expry_dt,
+						:sql_fco_exec_qty;
+
+			if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+			{
+        EXEC SQL CLOSE cur_ord1;
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_errlog( c_ServiceName, "S31145", SQLMSG, c_err_msg );
+				fn_bat_pst_msg( c_ServiceName, "System Error..contact system support", c_tag);
+				return;
+			}
+			
+			fn_userlog( c_ServiceName, "Process order and trade with xchange ack:%s:",sql_fco_xchng_ack);
+			if( SQLCODE == NO_DATA_FOUND )
+			{
+				fn_userlog( c_ServiceName, "In NDF for cursor cur_ord1");
+				break;
+			}
+			fn_userlog( c_ServiceName, " c_trd_dt Is :%s:",c_trd_dt.arr);
+			fn_userlog( c_ServiceName, " sql_fco_exec_qty Is :%ld:",sql_fco_exec_qty);
+			fn_userlog( c_ServiceName, " sql_fco_xchng_cd Is :%s:",sql_fco_xchng_cd);
+			
+			EXEC SQL
+			SELECT 	CCQ_NEW_QTY
+			INTO		:sql_ccq_new_qty
+			FROM		CCQ_CORP_CNTRCT_QTY
+			WHERE		CCQ_UNDRLYNG = :c_undrlyng
+			AND			CCQ_DATE = to_date(:c_trd_dt, 'dd-Mon-yyyy')
+			AND			CCQ_OLD_QTY = :sql_fco_exec_qty
+			AND     CCQ_XCHNG_CD = :sql_fco_xchng_cd;             /*** Ver 2.4 ***/
+			if ( SQLCODE != 0 )
+			{
+        EXEC SQL CLOSE cur_ord1;
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_errlog( c_ServiceName, "S31150", SQLMSG, c_err_msg );
+				fn_bat_pst_msg( c_ServiceName, "System Error..contact system support", c_tag);
+				return ;
+			}
+			
+			EXEC SQL
+			SELECT 	CCM_EXEC_RT_NEW,
+							CCM_STRIKE_PRC_NEW
+			INTO		:sql_ccm_exec_rt_new,
+							:sql_ccm_strike_prc_new
+			FROM		CCM_CORP_CNTRCT_MSTR
+			WHERE		trim(CCM_SYMBOL_OLD) = :c_undrlyng
+			AND 		trim(CCM_EXPRY_DT_OLD) = :sql_fco_expry_dt
+			AND			trim(CCM_OPTION_TYP_OLD) = :sql_fco_opt_typ
+			AND			trim(CCM_STRIKE_PRC_OLD) = :sql_fco_strike_prc
+			AND			trim(CCM_PRDCT_TYP_OLD)  = :sql_fco_prdct_typ
+			AND			trim(CCM_EXER_TYP_OLD)   = :sql_fco_exer_typ
+			AND     CCM_XCHNG_CD = :sql_fco_xchng_cd;             /*** Ver 2.4 ***/
+			if( SQLCODE != 0 )
+			{
+        EXEC SQL CLOSE cur_ord1;
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_errlog( c_ServiceName, "S31155", SQLMSG, c_err_msg );
+				fn_bat_pst_msg( c_ServiceName, "System Error..contact system support", c_tag);
+				return;
+			}
+      
+			EXEC SQL
+      SELECT to_char(sysdate,'yymmdd')||LPAD(CORP_ACTN_SEQ.NEXTVAL,10,0)   /*Ver 2.1 Added Later */
+      INTO   :c_xchng_ack
+      FROM   DUAL ;
+      if ( (SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+      {
+        EXEC SQL CLOSE cur_ord1;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_bat_pst_msg( c_ServiceName, "System Error..contact system support", c_tag);
+        fn_errlog ( c_ServiceName, "S31160", SQLMSG, c_err_msg );
+        return;
+      }
+
+			EXEC SQL
+			UPDATE 	FCT_FO_CORP_TRADES
+			SET			FCT_PLCD_STTS = 'R',
+							FCT_XCHNG_ACK = :c_xchng_ack,
+							FCT_EXCTD_QTY = :sql_ccq_new_qty,
+							FCT_EXCTD_RT = :sql_ccm_exec_rt_new,
+							FCT_STRIKE_PRC = :sql_ccm_strike_prc_new
+			WHERE		FCT_TRD_DT = to_date(:c_trd_dt, 'dd-Mon-yyyy')
+			AND			FCT_UNDRLYNG = :c_undrlyng
+			AND			FCT_PLCD_STTS = 'U'
+			AND			FCT_XCHNG_ACK = :sql_fco_xchng_ack
+			AND     FCT_XCHNG_CD  = :sql_fco_xchng_cd;             /*** Ver 2.4 ***/
+			if( SQLCODE != 0 )
+			{
+        EXEC SQL CLOSE cur_ord1;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_bat_pst_msg( c_ServiceName, "System Error..contact system support", c_tag);
+        fn_errlog ( c_ServiceName, "S31165", SQLMSG, c_err_msg );
+				return;
+			}
+
+			EXEC SQL
+			UPDATE FCO_FO_CORP_ORDERS
+			SET		FCO_PLCD_STTS = 'R',
+						FCO_XCHNG_ACK = :c_xchng_ack,
+						FCO_EXEC_RATE = :sql_ccm_exec_rt_new,
+						FCO_STRIKE_PRC = :sql_ccm_strike_prc_new,
+						FCO_EXEC_QTY = :sql_ccq_new_qty
+			WHERE	FCO_UNDRLYNG = :c_undrlyng
+			AND		FCO_ORDR_DT = to_date(:c_trd_dt, 'dd-Mon-yyyy' )
+			AND		FCO_PLCD_STTS = 'U'
+			AND		FCO_XCHNG_ACK = :sql_fco_xchng_ack
+			AND   FCO_XCHNG_CD  = :sql_fco_xchng_cd;             /*** Ver 2.4 ***/
+
+			if( SQLCODE != 0 )
+			{
+        EXEC SQL CLOSE cur_ord1;
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_bat_pst_msg( c_ServiceName, "System Error..contact system support", c_tag);
+        fn_errlog ( c_ServiceName, "S31170", SQLMSG, c_err_msg );
+				return;
+			}
+		}
+
+		EXEC SQL CLOSE cur_ord1;
+
+			fn_userlog ( c_ServiceName, " c_undrlyng Is :%s:",c_undrlyng );
+			fn_userlog ( c_ServiceName, " sql_fco_xchng_cd Is :%s:",sql_fco_xchng_cd);
+			fn_userlog ( c_ServiceName, " c_trd_dt Is :%s:",c_trd_dt.arr);
+			EXEC SQL
+      UPDATE FCM_FO_CORP_MSTR
+      SET    FCM_RUN_STTS = 'X'
+      WHERE  FCM_UNDRLYNG = :c_undrlyng
+			AND    FCM_XCHNG_CD = :sql_fco_xchng_cd /*** Ver 2.4 ***/
+      AND    FCM_ACTN_DT  = :c_trd_dt;
+
+      if ( SQLCODE != 0 )
+			{
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_errlog(c_ServiceName,"S31175",SQLMSG,c_err_msg);
+				fn_bat_pst_msg ( c_ServiceName, "Error in updating Corporate Master Table for Square Off ",c_tag);
+				return;
+			}
+
+      if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg) == -1 )
+      {
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        fn_errlog( c_ServiceName, "S31180", LIBMSG, c_err_msg );
+        fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+        return ;
+      }
+		}
+		else
+		{
+			fn_userlog ( c_ServiceName, "orders and trade table update for new quantity and price" );
+		}
+
+      EXEC SQL
+      DECLARE cur_ord2
+      CURSOR FOR
+      SELECT   FCO_XCHNG_CD,
+					FCO_XCHNG_ACK,
+					FCO_CLM_MTCH_ACCNT,
+					FCO_PRDCT_TYP,
+					FCO_UNDRLYNG,
+					FCO_STRIKE_PRC,
+					FCO_EXPRY_DT,
+					FCO_EXER_TYP,
+					FCO_OPT_TYP,
+					FCO_INDSTK,
+          DECODE(FCO_ORDR_FLW,'B','S','S','B'),
+          FCO_EXEC_QTY,
+					FCO_EXEC_RATE,
+					to_char(FCO_ORDR_DT,'dd-Mon-yyyy'),
+					to_char(FCO_LST_MDFD_TM,'dd-Mon-yyyy hh24:mi:ss'),
+					to_char(FCO_EXCHNG_ACK_TM,'dd-Mon-yyyy hh24:mi:ss'),
+					FCO_PLCD_STTS,
+					nvl(FCO_XCHNG_REMARKS,'CORP ACTN')
+			 FROM     FCO_FO_CORP_ORDERS
+			 WHERE    trunc(FCO_ORDR_DT) = to_date(:c_trd_dt,'dd-Mon-yyyy')
+			 AND      FCO_PLCD_STTS <> 'U'
+			 /** AND      FCO_XCHNG_CD  = :sql_fco_xchng_cd *** Ver 2.4 **** Ver 2.8 Commented/ 
+			 AND      FCO_XCHNG_CD  = :sql_exg_xchng_cd /*** Ver 2.8 ***/ 
+			 AND      FCO_UNDRLYNG  = :c_undrlyng ;
+
+       i_cnt = 0;
+       EXEC SQL OPEN cur_ord2;
+
+			 if( SQLCODE != 0)
+			 {
+			 		fn_errlog( c_ServiceName,"S31185",SQLMSG,c_err_msg );
+					fn_bat_pst_msg( c_ServiceName, "Error in starting New position creation", c_tag);
+					return;
+			 }
+
+			 for( ; ; )			
+			 {
+					EXEC SQL
+					FETCH cur_ord2
+					INTO
+		  				:sql_fco_xchng_cd,
+		  				:sql_fco_xchng_ack,
+		  				:sql_fco_clm_mtch_accnt,
+		  				:sql_fco_prdct_typ,
+		  				:sql_fco_undrlyng,
+		  				:sql_fco_strike_prc,
+							:sql_fco_expry_dt,
+							:sql_fco_exer_typ,
+							:sql_fco_opt_typ,
+							:sql_fco_indstk,
+							:sql_fco_ordr_flw,
+							:sql_fco_exec_qty,
+							:sql_fco_exec_rate,
+							:sql_fco_ordr_dt,
+							:sql_fco_lst_mdfd_tm,
+							:sql_fco_exchng_ack_tm,
+							:sql_fco_plcd_stts,
+							:sql_fco_xchng_remarks;
+
+					if( SQLCODE == NO_DATA_FOUND )
+					{
+							fn_userlog( c_ServiceName, "In no Data found" );
+							EXEC SQL CLOSE cur_ord2;
+		  				break;
+					}	
+
+					if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+					{
+							EXEC SQL CLOSE cur_ord2;
+							fn_errlog(c_ServiceName,"S31190",SQLMSG,c_err_msg);
+							fn_bat_pst_msg ( c_ServiceName, "Error in selecting record from corp table ",c_tag);
+							return;
+					}
+					
+			sprintf(con_msg,"Processing record no = [%ld] for sql_fco_xchng_ack=[%s]....",i_cnt,sql_fco_xchng_ack);
+			fn_bat_pst_msg ( c_ServiceName, con_msg,c_tag);
+
+			if(sql_fco_prdct_typ == 'F')
+					sprintf(con_msg,"Exg Order ack [%s], Match Account [%s] Contract [FUT-%s-%s]",sql_fco_xchng_ack,sql_fco_clm_mtch_accnt,sql_fco_undrlyng,sql_fco_expry_dt.arr);
+
+			if(sql_fco_prdct_typ == 'O')
+					sprintf(con_msg,"Exg Order ack [%s], Match Account [%s] Contract [OPT-%s-%s-%ld-%c%c]",sql_fco_xchng_ack,sql_fco_clm_mtch_accnt,sql_fco_undrlyng,sql_fco_expry_dt.arr,sql_fco_strike_prc/100,sql_fco_opt_typ,sql_fco_exer_typ);
+
+			fn_bat_pst_msg ( c_ServiceName, con_msg,c_tag);
+
+			SETNULL(sql_fco_expry_dt);
+			SETNULL(sql_fco_ordr_dt);
+			SETNULL(sql_fco_lst_mdfd_tm);
+			SETNULL(sql_fco_exchng_ack_tm);
+			SETNULL(sql_fco_xchng_remarks);
+
+			/*** i_ch_val = fn_prcs_corp_ordr( CREATE_NEW_POSITION ); Commented In Ver 2.5 ***/
+			i_ch_val = fn_prcs_corp_ordr( CREATE_NEW_POSITION , sql_fco_xchng_cd );     /*** Ver 2.5 ***/
+			if( i_ch_val == -1 )
+			{
+				EXEC SQL CLOSE cur_ord2;
+				fn_errlog(c_ServiceName,"S31195",LIBMSG,c_err_msg);
+				fn_bat_pst_msg( c_ServiceName, "CREATION NEW POSITION FAILED ... Contact System Support ",c_tag );
+				return ;
+			}
+			i_cnt++;
+		}
+    fn_userlog( c_ServiceName, "Total Records successfull[%ld],failed[%ld],processed[%ld]",l_success,l_failure,i_cnt);
+
+    sprintf(con_msg,"Total number of corp orders processed - [%ld]",i_cnt);
+
+    fn_bat_pst_msg(c_ServiceName,con_msg,c_tag);
+
+    if (l_failure == 0 )
+		{
+      i_trnsctn = fn_begintran( c_ServiceName, c_err_msg);
+      if(i_trnsctn == -1)
+      {
+         EXEC SQL CLOSE cur_corp_actn;
+         fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+         fn_errlog( c_ServiceName, "S31200", LIBMSG, c_err_msg );
+         return;
+      }
+				
+			EXEC SQL
+      UPDATE FCM_FO_CORP_MSTR
+      SET    FCM_RUN_STTS = 'P'
+      WHERE  FCM_UNDRLYNG = :c_undrlyng
+			AND    FCM_XCHNG_CD = :sql_fco_xchng_cd /*** Ver 2.4 ***/
+      AND    FCM_ACTN_DT  = :c_trd_dt;
+
+      if ( SQLCODE != 0 )
+			{
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_errlog(c_ServiceName,"S31205",SQLMSG,c_err_msg);
+				fn_bat_pst_msg ( c_ServiceName, "Error in updating Corporate Master Table for Square Off ",c_tag);
+				return;
+			}
+			if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg) == -1 )
+			{
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				fn_errlog( c_ServiceName, "S31210", LIBMSG, c_err_msg );
+				fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+				return;
+			}
+
+			/*** Ver 3.1 Started ***/
+
+      i_trnsctn = fn_begintran( c_ServiceName, c_err_msg);
+      if(i_trnsctn == -1)
+      {
+        fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+        fn_errlog( c_ServiceName, "S31215", LIBMSG, c_err_msg );
+        return;
+      }
+
+			if(DEBUG_MSG_LVL_0)
+			{
+				fn_userlog ( c_ServiceName, " Before update c_undrlyng Is :%s:",c_undrlyng );
+      	fn_userlog ( c_ServiceName, " Before update sql_exg_xchng_cd Is :%s:",sql_exg_xchng_cd);
+			}
+
+			EXEC SQL	
+				UPDATE FTQ_FO_TRD_QT SET FTQ_TOKEN_NO = 0 
+				WHERE ( 
+								FTQ_UNDRLYNG,
+								FTQ_PRDCT_TYP,
+								FTQ_EXPRY_DT,
+								NVL(FTQ_STRK_PRC,0),
+								FTQ_OPT_TYP,
+								FTQ_EXER_TYP,
+								FTQ_XCHNG_CD 
+							)
+				IN    ( 
+								SELECT  FTQ_UNDRLYNG ,
+												FTQ_PRDCT_TYP,
+												FTQ_EXPRY_DT,
+												NVL(FTQ_STRK_PRC,0),
+												FTQ_OPT_TYP,
+												FTQ_EXER_TYP,
+												FTQ_XCHNG_CD
+								FROM    FTQ_FO_TRD_QT
+								WHERE   TRIM(FTQ_UNDRLYNG) 	= :c_undrlyng
+								AND			FTQ_XCHNG_CD 				= :sql_exg_xchng_cd 
+								MINUS
+								SELECT  CCM_SYMBOL_OLD,
+												CCM_PRDCT_TYP_OLD,
+												CCM_EXPRY_DT_OLD,
+												CCM_STRIKE_PRC_NEW,
+												CCM_OPTION_TYP_OLD,
+												CCM_EXER_TYP_OLD,
+												CCM_XCHNG_CD
+								FROM    CCM_CORP_CNTRCT_MSTR
+								WHERE   TRIM(CCM_SYMBOL_OLD) 	= :c_undrlyng
+								AND 		CCM_XCHNG_CD 		=	:sql_exg_xchng_cd 
+							);
+
+			if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+      {
+				fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       	fn_errlog(c_ServiceName,"S31220",SQLMSG,c_err_msg);
+       	fn_bat_pst_msg ( c_ServiceName, "Error in updating Trade Quote Table for for invalid contrct ",c_tag);
+       	return;
+      }
+
+			if( fn_committran( c_ServiceName, i_trnsctn, c_err_msg) == -1 )
+      {
+       	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+       	fn_errlog( c_ServiceName, "S31225", LIBMSG, c_err_msg );
+        fn_bat_pst_msg ( c_ServiceName, "System error ocured..exiting..",c_tag);
+        return;
+      } 
+
+			if(DEBUG_MSG_LVL_0)
+			{
+				fn_userlog (c_ServiceName," No of recods updated in trade quote table are :%ld: ",SQLROWCOUNT);	
+			}
+
+		/*** Ver 3.1 Ends ***/
+
+		}
+		else
+		{
+			fn_errlog(c_ServiceName,"S31230","Some of the position cannot be created.",c_err_msg);
+			fn_bat_pst_msg ( c_ServiceName, "All position cannot be created",c_tag);
+			return;
+		
+		}
+	}
+	else
+	{
+	 	fn_errlog( c_ServiceName, "S31235","Invalid upload type", c_err_msg); 
+		fn_bat_pst_msg( c_ServiceName, "Invalid Upload Type specified",c_tag);
+		return;
+	}
+	return;
+}
+
+/********add the values in FML and calls SFO_CORP to process orders **********/
+/*** int fn_prcs_corp_ordr(char c_oprn_typ)  Commented In Ver 2.5 ***/
+int fn_prcs_corp_ordr(char c_oprn_typ ,char* c_exng_cd ) /*** Ver 2.5 ***/
+{
+	char succ_msg[256];
+	char err_msg[256];
+	char c_channel[4];
+	char lm_mkt_flg;
+	int rate = 0;
+	int ord_val,ret_val,trd_val;
+	char ordr_ref[20];
+	FBFR32* ptr_fml_Ibuf;
+	FBFR32* ptr_fml_Obuf;
+	long session_id=0;
+	char c_user_id[10];
+	char svc_name[20];
+	char c_ddr[4];
+  long li_len_tobuf;
+	int i;
+  long disclosed_qty = 0L;
+  long stop_loss_trp_prc = 0L;
+  char ord_typ = 'T';
+	/*int i_err[25];	commented in ver 2.2 */
+	/** int i_err [27];    * Ver 2.3  - subscript changed from 26 to 27 commented In Ver 2.6  */
+	int i_err [28];     /* Ver 2.6  - subscript changed from 27 to 28 */
+	long l_fco_old_qty;
+	int i_trnsctn=0;
+	char c_spn_flg = 'N';  /*** Ver 2.3 ***/
+	char c_bse_flg = 'N';  /*** Ver 2.4 ***/
+	char c_svc_call_flg = 'N';  /*** Ver 2.5 ***/
+	
+	ptr_fml_Ibuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+	ptr_fml_Obuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  
+	if(ptr_fml_Ibuf == NULL)
+  {
+		fn_errlog( c_ServiceName, "S31240", TPMSG, c_err_msg  );
+		fn_bat_pst_msg(c_ServiceName,"System error ..exiting",c_tag);
+		return -1;
+	}
+
+	if(ptr_fml_Obuf == NULL)
+	{
+		tpfree( (char *)ptr_fml_Ibuf );
+		fn_errlog( c_ServiceName, "S31245", TPMSG, c_err_msg  );
+		fn_bat_pst_msg(c_ServiceName,"System error ..exiting",c_tag);
+		return -1;
+	}
+	
+	fn_userlog(c_ServiceName," Getting SPAN Allowed Flag For Match Id :%s: ",sql_fco_clm_mtch_accnt);
+	fn_userlog(c_ServiceName," c_oprn_typ Is :%c: ",c_oprn_typ);  /*** Ver 2.6 ***/
+	
+	 EXEC SQL                          /*** Ver 2.3 ***/
+    SELECT  NVL(CLM_SPAN_ALLWD,'N'),
+						NVL(CLM_BSESPAN_ALLWD,'N')  /*** Ver 2.4 ***/
+    INTO    :c_spn_flg,
+						:c_bse_flg                  /*** Ver 2.4 ***/
+    FROM    CLM_CLNT_MSTR
+    WHERE   CLM_MTCH_ACCNT  = :sql_fco_clm_mtch_accnt;
+
+   if ( SQLCODE != 0 )
+   {
+			tpfree( (char *)ptr_fml_Ibuf );
+      tpfree( (char *)ptr_fml_Obuf );
+      fn_errlog( c_ServiceName, "S31250", FMLMSG, c_err_msg  );
+      sprintf(c_err_msg,"Unable to Get The SPAN FLAG for Match Acnt :[%s] ..,Please Contact Customer Support",sql_fco_clm_mtch_accnt);
+      fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+      return -1;
+   }	
+
+	fn_userlog(c_ServiceName," The SPAN Allowed Flag For Match Id Is:%c: ",c_spn_flg);
+	
+	strcpy(c_user_id,"system");
+	
+	session_id = 0L;
+	
+	if(sql_fco_exec_rate == 0)
+		lm_mkt_flg = 'M';
+	else
+		lm_mkt_flg = 'L';
+
+	/*** Following COmmented In Ver 2.3  	
+	if(sql_fco_prdct_typ == 'F')
+		strcpy(svc_name,"SFO_FUT_PLC_ORD");
+	else
+		strcpy(svc_name,"SFO_OPT_PLC_ORD");
+	
+	strcpy(c_channel,"OFF");
+	COmmented In Ver 2.3 Ends ***/
+
+
+	/*** Ver 2.3 Starts ***/
+	/*** FOllowing Commented In Ver 2.5 
+	*** if ( c_spn_flg == 'N' ) commented For Ver 2.4 ***
+	if ( (c_spn_flg == 'N' && c_bse_flg == 'Y') || ( c_spn_flg == 'N' && c_bse_flg == 'N') )  *** Ver 2.4 ***
+	{
+	  if(sql_fco_prdct_typ == 'F')
+    strcpy(svc_name,"SFO_FUT_PLC_ORD");
+  	else
+    strcpy(svc_name,"SFO_OPT_PLC_ORD");
+	}
+	else if ( (c_spn_flg == 'N' && c_bse_flg == 'Y') || ( c_spn_flg == 'N' && c_bse_flg == 'N') ) ** Ver 2.4 **
+	{
+		strcpy(svc_name,"SFO_SPN_PLC_ORD");
+	}
+	 Commented In Ver 2.5 Ends ***/
+
+	/*** Ver 2.5 Starts ***/
+	rtrim ( c_exng_cd );
+
+	if( ( c_spn_flg == 'N' && strcmp(c_exng_cd,"NFO")==0 ) ||( c_bse_flg == 'N'  && strcmp(c_exng_cd,"BFO")==0 ))
+	{
+		if(sql_fco_prdct_typ == 'F')
+    strcpy(svc_name,"SFO_FUT_PLC_ORD");
+    else
+    strcpy(svc_name,"SFO_OPT_PLC_ORD");
+		c_svc_call_flg = 'N' ;
+	}
+	else if( ( ( c_spn_flg == 'Y')  && strcmp(c_exng_cd,"NFO")==0 ) || ( c_bse_flg == 'Y' && strcmp(c_exng_cd,"BFO")==0 ))
+	{
+		strcpy(svc_name,"SFO_SPN_PLC_ORD");
+		c_svc_call_flg = 'Y' ;
+	}
+
+	/*** Ver 2.5 Ends   ***/
+
+	/*** Ver 2.3 Ends ***/
+
+  strcpy(c_channel,"OFF");
+	fn_userlog( c_ServiceName,"sql_fco_exec_rate :%ld",sql_fco_exec_rate);
+	fn_userlog( c_ServiceName, "c_svc_call_flg Is :%c",c_svc_call_flg);   /*** Ver 2.5 ***/
+	
+	fn_cpy_ddr(c_ddr);
+  i_err[0] = Fadd32(ptr_fml_Ibuf,FFO_USR_ID,(char *)c_user_id,0) ;
+  i_err[1] = Fadd32(ptr_fml_Ibuf,FFO_SSSN_ID,(char *)&session_id,0) ;
+  i_err[2] = Fadd32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO,(char *)sql_fco_clm_mtch_accnt,0) ;
+  i_err[3] = Fadd32(ptr_fml_Ibuf,FFO_XCHNG_CD,(char *)sql_fco_xchng_cd,0) ;
+  i_err[4] = Fadd32(ptr_fml_Ibuf,FFO_PRDCT_TYP,(char *)&sql_fco_prdct_typ,0) ;
+  i_err[5] = Fadd32(ptr_fml_Ibuf,FFO_UNDRLYNG,(char *)sql_fco_undrlyng,0) ;
+  i_err[6] = Fadd32(ptr_fml_Ibuf,FFO_EXPRY_DT,(char *)sql_fco_expry_dt.arr,0) ;
+  i_err[7] = Fadd32(ptr_fml_Ibuf,FFO_EXER_TYP,(char *)&sql_fco_exer_typ,0) ;
+  i_err[8] = Fadd32(ptr_fml_Ibuf,FFO_OPT_TYP,(char *)&sql_fco_opt_typ,0) ;
+  i_err[9] = Fadd32(ptr_fml_Ibuf,FFO_STRK_PRC,(char *)&sql_fco_strike_prc,0) ;
+  i_err[10] = Fadd32(ptr_fml_Ibuf,FFO_CTGRY_INDSTK,(char *)&sql_fco_indstk,0) ;
+  i_err[11] = Fadd32(ptr_fml_Ibuf,FFO_ORDR_FLW,(char *)&sql_fco_ordr_flw,0) ;
+  i_err[12] = Fadd32(ptr_fml_Ibuf,FFO_LMT_MKT_SL_FLG,(char *)&lm_mkt_flg,0) ;
+  i_err[13] = Fadd32(ptr_fml_Ibuf,FFO_LMT_RT,(char *)&sql_fco_exec_rate,0) ;
+  i_err[14] = Fadd32(ptr_fml_Ibuf,FFO_ORD_TYP,(char *)&ord_typ,0) ;
+  i_err[15] = Fadd32(ptr_fml_Ibuf,FFO_ORD_TOT_QTY,(char *)&sql_fco_exec_qty,0) ;
+  i_err[16] = Fadd32(ptr_fml_Ibuf,FFO_ORD_VALID_DT,(char *)sql_fco_ordr_dt.arr,0) ;
+  i_err[17] = Fadd32(ptr_fml_Ibuf,FFO_SVC_NAME,(char *)svc_name,0) ;
+  i_err[18] = Fadd32(ptr_fml_Ibuf,FFO_CHANNEL,(char *)c_channel,0) ;
+  i_err[19] = Fadd32(ptr_fml_Ibuf,FFO_STP_LSS_TGR,(char *)&stop_loss_trp_prc,0) ;
+  i_err[20] = Fadd32(ptr_fml_Ibuf,FFO_DSCLSD_QTY,(char *)&disclosed_qty,0) ;
+  i_err[21] = Fadd32(ptr_fml_Ibuf,FFO_ACK_NMBR,(char *)sql_fco_xchng_ack,0) ;
+  i_err[22] = Fadd32(ptr_fml_Ibuf,FFO_REMARKS,(char *)sql_fco_xchng_remarks.arr,0) ;
+  i_err[22] = Fadd32(ptr_fml_Ibuf,FFO_XCHNG_RMRKS,(char *)sql_fco_xchng_remarks.arr,0) ;
+  i_err[23] = Fadd32(ptr_fml_Ibuf,FFO_ACK_TM,(char *)sql_fco_exchng_ack_tm.arr,0) ;
+  i_err[24] = Fadd32(ptr_fml_Ibuf,FFO_PIPE_ID,(char *)c_pipe_id,0) ;
+  i_err[25] = Fadd32(ptr_fml_Ibuf,FFO_DPID,(char *)c_ddr,0) ;
+  /*** i_err[26] = Fadd32(ptr_fml_Ibuf,FFO_SOURCE_FLG,(char *)&c_spn_flg,0) ;     *** Ver 2.3 *** commented In Ver 2.5 ***/
+  i_err[26] = Fadd32(ptr_fml_Ibuf,FFO_SOURCE_FLG,(char *)&c_svc_call_flg,0) ;      /*** Ver 2.5 ***/
+  i_err[27] = Fadd32(ptr_fml_Ibuf,FFO_USR_FLG,(char *)&c_oprn_typ,0) ;      /*** Ver 2.6 ***/
+
+  /*** for(i=0;i<27;i++)       *** Ver 2.3  - subscript changed from 26 to 27 *** Commented In Ver 2.5 ***/
+  for(i=0;i<28;i++)       /*** Ver 2.6  - subscript changed from 27 to 28 ***/
+  {
+  	if(i_err[i] == -1)
+  	{
+			tpfree( (char *)ptr_fml_Ibuf );
+			tpfree( (char *)ptr_fml_Obuf );
+  		fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i);
+		  fn_errlog( c_ServiceName, "S31255", FMLMSG, c_err_msg  );
+		  fn_bat_pst_msg(c_ServiceName,"system error occured..exiting",c_tag);
+		  return -1;
+	  }
+  }
+	
+	fn_userlog(c_ServiceName,"Before call of SFO_CORP. exchange remarks[%s]",sql_fco_xchng_remarks.arr);
+
+	ret_val = tpcall("SFO_CORP",(char*)ptr_fml_Ibuf,0,(char **)&ptr_fml_Obuf,&li_len_tobuf,0);
+	
+	if(ret_val == -1)
+	{
+		l_failure++;
+		fn_errlog( c_ServiceName, "S31260", TPMSG, c_err_msg );
+		
+		if(Fget32(ptr_fml_Obuf,FFO_ERR_MSG,0,(char *)err_msg,0) == -1)
+		{
+			tpfree( (char *)ptr_fml_Ibuf );
+			tpfree( (char *)ptr_fml_Obuf );
+			fn_errlog( c_ServiceName, "S31265", FMLMSG, c_err_msg  );
+			sprintf(c_err_msg,"Order Upload for Exc_ack:[%s] failed..,Please Contact Customer Support",sql_fco_xchng_ack);
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+		}
+		else
+		{
+			tpfree( (char *)ptr_fml_Ibuf );
+			tpfree( (char *)ptr_fml_Obuf );
+			sprintf(c_err_msg,"Upload for Exc_ack:[%s] failed..ERR MSG:[%s]",sql_fco_xchng_ack,err_msg);
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+			fn_userlog(c_ServiceName,"Order Upload for Exc_ack:[%s]  failed [%s].",sql_fco_xchng_ack,err_msg);
+		}
+		return -1;
+	}
+	else
+	{
+		l_success++;
+		if(Fget32(ptr_fml_Obuf,FFO_ORDR_RFRNC,0,(char *)ordr_ref,0) == -1)
+		{
+			tpfree( (char *)ptr_fml_Ibuf );
+			tpfree( (char *)ptr_fml_Obuf );
+			fn_errlog( c_ServiceName, "S31270", FMLMSG, c_err_msg  );
+			sprintf(c_err_msg,"Unable to get order ref..Exc_ack:[%s] failed..,Please Contact Customer Support",sql_fco_xchng_ack);
+			fn_bat_pst_msg(c_ServiceName,c_err_msg,c_tag);
+			return -1;
+		}
+		else
+		{
+			fn_userlog(c_ServiceName,"Order upload success..ordr ref from EBA recd...[%s]",ordr_ref);
+			sprintf(succ_msg,"Order and trade success for Exc_ack [%s]..EBA Ordr Ref [%s]",sql_fco_xchng_ack,ordr_ref);
+			fn_bat_pst_msg(c_ServiceName,succ_msg,c_tag);
+		}
+	}
+	tpfree( (char *)ptr_fml_Ibuf );
+	tpfree( (char *)ptr_fml_Obuf );
+	return 0;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+  fn_init_ddr_pop ( argv[3],
+                    TRADING_SECTION,
+                    COMMON);
+
+	fn_var = bat_upld_corp;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+	return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+	return 0;
+}
+
+void fn_msg( char *c_ServiceName, char* c_err_msg, char c_mem_flg )
+{
+    /*fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+    if( c_mem_flg == 'Y' )
+    {
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    }
+		*/
+    return;
+}

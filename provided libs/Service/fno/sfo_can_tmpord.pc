@@ -1,0 +1,351 @@
+/******************************************************************************/
+/*	Program	    			:	SFO_CAN_TMPORD                                        */
+/*                                                                            */
+/*  Input             : FFO_USR_ID                                            */
+/*                      FFO_SSSN_ID                                           */
+/*                      FFO_EBA_MTCH_ACT_NO                                   */
+/*                      FFO_SPRD_ORD_REF                                      */
+/*                      FFO_XCHNG_CD                                          */
+/*                                                                            */
+/*  Output            : FFO_ERR_MSG                                           */
+/*                                                                            */
+/*  Description       : To cancel a Temporary F & O order                     */
+/*                                                                            */
+/*  Log               : 1.0   28-May-2002    Vinod Banjan                     */
+/*  Log               : 1.1   18-Jul-2002    Infotec|Sangeet                  */
+/*                    : 1.2   03-Jan-2008    Infotech|Sushil                  */
+/*  Log               : 1.3   02-Jan-2009    Infotech|Shailesh & Prakash      */
+/*	log								:	1.5		01-Jul-2016		 Infotech|Navina D.      					*/
+/*  Log               : 1.6   23-Oct-2019    Infotech|Tanmay Patel            */
+/*                                                                            */
+/******************************************************************************/
+/*  1.0    -   New Release                                                    */
+/*  1.1    -   BP Changes                                                     */
+/*  1.2    -   AIX Migration                                                  */
+/*  1.3    -   NNF Changes For Extended Market Hours                          */
+/*  1.5    -   Check Session ip common function changes                       */
+/*  1.6    -   Ipv6 Format                                                    */
+/******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fo.h>
+#include <fml_def.h>
+#include <fo_fml_def.h>
+#include <fo_view_def.h>
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>         		/*  Ver 1.2 : Added */
+#include <fn_log.h>         		/*  Ver 1.2 : Added */
+#include <fn_val_ord.h>     		/*  Ver 1.2 : Added */
+#include <fn_read_debug_lvl.h>  /*  Ver 1.2 : Added */
+
+int fn_check_ord_cantmp( 	char *c_ServiceName,
+                  				struct vw_orderbook *ptr_o_st_ordbook,
+                  				struct vw_err_msg *ptr_st_err_msg );
+
+void SFO_CAN_TMPORD( TPSVCINFO *rqst )
+{
+	FBFR32 *ptr_fml_Ibuf;
+
+	char c_ServiceName[33];
+	char c_err_msg[256];
+  char c_channel[4];/*1.1 BP*/
+  char c_bp_id[9];/*1.1 BP*/
+  char c_alias[9];/*1.1 BP*/
+  int i_level_exists =0; /*1.1*/
+
+	int i_returncode;
+	int i_trnsctn;
+	int i_err[16];
+	int i_ferr[16];
+	int i_ip_len;
+	int i_op_len;
+  char c_psswd_req_flg;
+	char c_ip_address[45+1]="\0";	/** Changed from 15 to 45 in Ver 1.6 **/		/*** Ver 1.5 ***/
+  char c_txn_flg='Y';               /*** Ver 1.5 ***/
+
+	EXEC SQL BEGIN DECLARE SECTION;
+		struct vw_usr_prfl st_usr_prfl;
+		struct vw_orderbook st_ordbook;
+		struct vw_orderbook st_o_ordbook;
+		varchar c_usr_usr_psswrd[50];
+    varchar c_sys_dt[LEN_DATE];
+	EXEC SQL END DECLARE SECTION;
+
+	struct vw_err_msg st_err_msg;
+
+	ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+	strcpy( c_ServiceName, rqst->name );
+	INITDBGLVL(c_ServiceName);            /*  Ver 1.2 : Added  */
+
+	MEMSET(st_err_msg);			/** Ver 1.5 **/
+
+	i_returncode = Fvftos32( ptr_fml_Ibuf,
+                           (char *) &st_usr_prfl,
+                           "vw_usr_prfl" );
+	if ( i_returncode == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31005", FMLMSG, c_err_msg  );
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+
+	i_returncode = Fvftos32( ptr_fml_Ibuf,
+                           (char *) &st_ordbook,
+                           "vw_orderbook" );
+	if ( i_returncode == -1 )
+	{
+		fn_errlog( c_ServiceName, "S31010", FMLMSG, c_err_msg  );
+		Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+	}
+ /***1.1 start ***/
+
+    if(st_usr_prfl.c_user_id[0] == BPID)
+    {
+      if(Fget32(ptr_fml_Ibuf,FFO_ALIAS,0,(char *)c_alias,0) == -1)
+      {
+            fn_errlog( c_ServiceName, "S31015", FMLMSG, c_err_msg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+    fn_userlog( c_ServiceName, "Alias Name       :%s:",
+                                  c_alias );
+      EXEC SQL
+        SELECT 1
+        INTO   :i_level_exists
+        FROM   clm_clnt_mstr
+        WHERE  clm_mtch_accnt = :st_usr_prfl.c_cln_mtch_accnt and
+               clm_bp_id      = :st_usr_prfl.c_user_id and
+               clm_alias_name = :c_alias ;
+
+      if(i_level_exists != 1 )
+      {
+            fn_errlog( c_ServiceName, "B55006", "", c_err_msg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+      }
+      strcpy(c_bp_id,st_usr_prfl.c_user_id);
+    }
+    else
+    {
+      strcpy(c_bp_id,"*");
+    }
+
+  /***1.1 End  ***/
+
+
+  fn_init_ddr_val ( st_ordbook.c_rout_crt );
+
+	if( DEBUG_MSG_LVL_3 ) {									/* Ver 1.2 : Debug level Change */
+    fn_userlog( c_ServiceName, "User id       :%s:",
+                                  st_usr_prfl.c_user_id );
+    fn_userlog( c_ServiceName, "Session id    :%ld:",
+                                  st_usr_prfl.l_session_id );
+    fn_userlog( c_ServiceName, "Match Account :%s:",
+                                  st_usr_prfl.c_cln_mtch_accnt );
+    fn_userlog( c_ServiceName, "Temporary Order Reference :%s:",
+                                  st_ordbook.c_sprd_ord_rfrnc );
+  }
+
+  c_psswd_req_flg = NO;
+
+	/*** Commented in Ver 1.5 ***
+	i_returncode =  fn_check_user ( c_ServiceName,
+                                  &st_usr_prfl ,
+                                  c_usr_usr_psswrd.arr,   * Ver 1.2 : Extention .arr added *
+                                  c_psswd_req_flg,
+                                  &st_err_msg );
+	*** Ver 1.5 ***/
+	/*** Ver 1.5 starts ***/
+	i_returncode =  fn_check_user_ip ( c_ServiceName,
+																		 &st_usr_prfl ,
+																		 c_usr_usr_psswrd.arr, 
+																		 c_psswd_req_flg,
+																		 c_ip_address,
+																		 c_txn_flg,
+																		 &st_err_msg );
+	/*** Ver 1.5 ends ***/
+
+	if ( i_returncode == -1 )
+  {
+		fn_errlog( c_ServiceName, "S31020", LIBMSG, c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		fn_errlog( c_ServiceName, "S31025", LIBMSG, c_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+/***** check the operation type ******/
+/*************************************
+	st_i_ordbook.c_oprn_typ = FOR_UPDATE;
+*************************************/
+
+	i_ip_len = sizeof ( struct vw_orderbook );
+  i_op_len = sizeof ( struct vw_orderbook );
+
+  fn_cpy_ddr ( st_ordbook.c_rout_crt );
+  i_returncode = fn_call_svc( c_ServiceName,
+                              c_err_msg,
+                              &st_ordbook,
+                              &st_o_ordbook,
+                              "vw_orderbook",
+                              "vw_orderbook",
+                              i_ip_len,
+                              i_op_len,
+                              0,
+                              "SFO_TMPORD_DTLS" );
+
+  if ( i_returncode != SUCC_BFR )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		fn_errlog( c_ServiceName, "S31030", LIBMSG, c_err_msg );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  /** To be decided whether the lock is requiered for it ****/
+
+/************************************************************
+  i_returncode = fn_lock_usr( c_ServiceName,
+															st_usr_prfl.c_cln_mtch_accnt );
+  if ( i_returncode == -1 )
+  {
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+		fn_errlog( c_ServiceName, "S31035", LIBMSG, c_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+************************************************************/
+
+	i_returncode = fn_check_ord_cantmp( c_ServiceName,
+                               		    &st_o_ordbook, 
+                               		    &st_err_msg );
+  if ( i_returncode == -1 )
+  {
+    fn_aborttran( c_ServiceName, i_trnsctn, st_err_msg.c_err_msg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, st_err_msg.c_err_msg, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+
+  EXEC SQL
+  	SELECT to_char(SYSDATE,'DD-Mon-YYYY hh24:mi:ss')
+   	INTO   :c_sys_dt
+   	FROM   exg_xchng_mstr
+   	WHERE  exg_xchng_cd = :st_ordbook.c_xchng_cd
+   	AND    exg_mkt_typ  = 'D';
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31040",SQLMSG,c_err_msg);
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  SETNULL ( c_sys_dt );
+
+	st_o_ordbook.c_ordr_stts = CANCELLED;
+  st_o_ordbook.l_mdfctn_cntr = st_o_ordbook.l_mdfctn_cntr + 1;
+
+  /*** c_ack_tm refers to the request time of the order cancellation ***/
+  strcpy ( st_o_ordbook.c_ack_tm , (char *)c_sys_dt.arr );
+  strcpy ( st_o_ordbook.c_bp_id , (char *)c_bp_id );
+
+	st_o_ordbook.c_oprn_typ = UPDATE_ORDER_CANCELATION;
+
+ 	i_ip_len = sizeof ( struct vw_orderbook );
+ 	i_op_len = sizeof ( struct vw_orderbook );
+
+  fn_cpy_ddr ( st_o_ordbook.c_rout_crt );
+ 	i_returncode = fn_call_svc( c_ServiceName,
+                             	c_err_msg,
+                             	&st_o_ordbook,
+                             	&st_o_ordbook,
+                             	"vw_orderbook",
+                             	"vw_orderbook",
+                             	i_ip_len,
+                             	i_op_len,
+                             	0,
+                             	"SFO_UPD_TMPOBK" );
+
+ 	if ( i_returncode != SUCC_BFR )
+ 	{
+   	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   	fn_errlog( c_ServiceName, "S31045",LIBMSG,c_err_msg);
+   	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 	}
+
+	if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_err_msg, 0 );
+   	fn_errlog( c_ServiceName, "S31050",LIBMSG,c_err_msg);
+   	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+	tpreturn( TPSUCCESS, 0, ( char * )NULL, 0 , 0 );
+}
+
+int fn_check_ord_cantmp( 	char *c_ServiceName,
+                  				struct vw_orderbook *ptr_o_st_ordbook,
+                  				struct vw_err_msg *ptr_st_err_msg ) 
+{
+
+	char c_err_msg[256];
+  char c_exg_crrnt_stts;
+  char c_exg_extnd_stts;                            /* Ver 1.3 */
+  char c_exg_ofln_stts;
+
+  EXEC SQL
+     SELECT exg_crrnt_stts,
+            exg_extnd_mrkt_stts,                   /* Ver 1.3 */
+            EXG_OFLN_STTS
+     INTO   :c_exg_crrnt_stts,
+            :c_exg_extnd_stts,                     /* Ver 1.3 */
+            :c_exg_ofln_stts
+     FROM   exg_xchng_mstr
+     where  exg_xchng_cd = :ptr_o_st_ordbook->c_xchng_cd;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31055",SQLMSG,ptr_st_err_msg->c_err_msg);
+    return FAILURE;
+  }
+
+  /** Temporary Orders can be cancelled only when the Exchange is in Expiry **/
+  if ( c_exg_crrnt_stts != EXCHANGE_UNDER_EXPIRY || c_exg_extnd_stts != EXCHANGE_UNDER_EXPIRY ) /* or added in Ver 1.3 */
+  {
+    fn_errlog( c_ServiceName, "B28564",DEFMSG,ptr_st_err_msg->c_err_msg);
+    return FAILURE;
+  }
+
+  /** Temporary Orders can be cancelled only when the Exchange  **/
+  /** Offline status is OPEN                                    **/
+  if ( c_exg_ofln_stts != EXCHANGE_OPEN )
+  {
+    fn_errlog( c_ServiceName, "B28565",DEFMSG,ptr_st_err_msg->c_err_msg);
+    return FAILURE;
+  }
+
+  /** Cancellation of order is possible only in UNDER_PROCESS state      **/
+  if ( ptr_o_st_ordbook->c_ordr_stts != UNDER_PROCESS )
+  {
+    fn_errlog( c_ServiceName, "B28533", DEFMSG, ptr_st_err_msg->c_err_msg );
+    return FAILURE;
+  }
+
+	return SUCCESS;
+}

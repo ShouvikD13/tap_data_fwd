@@ -1,0 +1,871 @@
+/*************************************************************************************************/
+/*  File            : bat_upd_haircut.pc                                                         */
+/*                                                                                               */
+/*                                                                                               */
+/*  Description     : This program will calculate the haircut percentages of all underlying      */
+/*                    which can be accepted as shares as collateral for margin purpose based on  */
+/*                    a VAR file downloaded from exchange.                                       */
+/*                                                                                               */
+/*                                                                                               */
+/*  Calling Programs: None                                                                       */
+/*                                                                                               */
+/*                                                                                               */
+/*  Called From     : Backoffice front end                                                       */
+/*                                                                                               */
+/*                                                                                               */
+/*  Author          : Vidyayini Krish                                                            */
+/*                                                                                               */
+/*  Created on      : 04-Aug-2009                                                                */
+/*                                                                                               */
+/*                                                                                               */
+/*  Modification History:                                                                        */
+/*                                                                                               */
+/*  Date   				 Version No.    Modified by    Modification Description                        */
+/*																																															 */
+/*	19-Aug-2010		 Ver 1.1				Sandeep Patil	 SEM Mapping Changes                             */
+/*	09-Sep-2013		 Ver 1.2				Swati A.B      CR-ISEC04-25334 Haircut percentage storage Chng */
+/*	29-Apr-2014		 Ver 1.3				Samip M      	 CR-ISEC04-48772 Haircut upload logic change 		 */
+/*  05-Mar-2019    Ver 1.4        Tanmay Patel   Apply different haircut for different stocks    */
+/*  26-Aug-2019    Ver 1.5        Akash B        ESOP CHANGES                                    */
+/*  21-Jan-2020    Ver 1.6        Tanmay Patel   NON-EQ series                                   */
+/*  26-Mar-2021    Ver 1.7        Saurabh Patil  CR-ISEC04-150804 Change in SAM Revaluation      */
+/*                                               logic to exclude Adhoc Margin                   */  
+/*  07-Jul-2021    Ver 1.8        Tanmay Patel   CR-ISEC03-1564 Change in SAM revaluation formula*/
+/*************************************************************************************************/
+
+/* Standards include files*/
+
+#include<stdio.h>           /* C Header File */
+#include<stdlib.h>          /* C Header File */
+#include<sqlca.h>           /* Oracle header file */
+#include <atmi.h>           /* TUXEDO Header File */
+#include <userlog.h>        /* TUXEDO Header File */
+#include <fml32.h>          /* TUXEDO Header File */
+#include <fml_def.h>
+#include <string.h>
+#include <fml_rout.h>
+#include <fn_read_debug_lvl.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_collateral.h>
+#include <fn_battmpt.h>
+#include <time.h>
+
+#define TOTAL_ELEMENTS_IN_FILE 14
+#define LEN_ROW_ID  25
+
+void trim(char *str);
+int fn_upd_chm_status(char *str);
+
+void BAT_UPD_HAIRCUT ( int argc, char *argv[] )
+{
+
+  char c_err_msg [ 256 ];
+	char c_errmsg [256 ];
+  char c_event_msg[256];
+  char c_xchng_cd [ 4 ];
+  char c_msg[256];
+  char c_date [ LEN_DATE ];
+  char c_file_nm [ LEN_DATE ];
+  char c_dir[10];
+  char c_FilePath[256];
+  char c_FullPath[256];
+  char c_ServiceName[33];
+  char c_file_data[TOTAL_ELEMENTS_IN_FILE][100];
+	char c_stock_name[20];
+	char c_stck_cd[7];
+	char c_data[500];
+	char c_temp[500];
+	char c_series[6];   /** Ver 1.6  Change from 5 to 6 **/
+	char c_percent[10];
+	char c_portfolio[20];
+	char c_upld_mode ;     /*** Ver 1.2  V- VAR file / M - Manual Mode ***/ 
+	char c_cmd_str[100];   /*** Ver 1.2 ***/
+	char c_pipe_id[3];     /*** Ver 1.2 ***/ 
+	char c_run_mode = '\0' ;      /*** Ver 1.2 ***/
+	char c_opncls_flg = '\0' ;      /*** Ver 1.2 ***/
+	char c_exg_crrnt_stts;      /*** Ver 1.2 ***/
+	char c_pgm_name[33];      /*** Ver 1.2 ***/
+  char c_mode_flg='\0';    /*** Ver 1.5 ****/
+  char c_ini[4];          /***  Ver 1.5 ***/
+
+  int  i_trnsctn;
+  int  i_ch_val;
+  int  i;
+	int  i_count;
+	int  i_chm_count=0;
+	int  i_return_val=0;
+  int  i_prc_run_check=0; /** Ver 1.6 **/
+
+	double d_percent = 0.0;
+	double d_haircut = 0.0;
+	double d_stk_haircut = 0.0;
+	double d_appl_mrgn = 0.0;
+
+  long l_run_no=0;
+
+	EXEC SQL BEGIN DECLARE SECTION;
+  varchar sql_rowid[LEN_ROW_ID];
+  EXEC SQL END DECLARE SECTION;
+
+  time_t time_stmp;
+  FILE   *fpfile;
+
+  struct vw_err_msg *ptr_st_err_msg;
+  ptr_st_err_msg = (struct vw_err_msg *)tpalloc ("VIEW32","vw_err_msg",
+                                                         sizeof ( struct vw_err_msg ) );
+
+  if ( ptr_st_err_msg ==  NULL )
+  {
+    fn_errlog ( c_ServiceName, "S31005", TPMSG, c_event_msg );
+    tpreturn ( TPFAIL, NO_BFR, NULL, 0, 0 );
+  }
+
+  INITBATDBGLVL(argv[0]);
+
+  strcpy ( c_ServiceName, argv[0] );
+
+  sprintf ( c_msg, "Batch process %s started", argv[0] );
+  /*** fn_userlog( c_ServiceName,"Usage is :NFO NFO NA Date RunNo" ); Commented In Ver 1.2 ***/
+  fn_userlog( c_ServiceName,"Usage is :NFO NFO NA Date RunNo UploadMode " );  /*** Ver 1.2 Upload Mode Added ***/
+  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+  strcpy( c_xchng_cd, argv[2] );
+  strcpy( c_date, argv[4] );
+  sscanf( argv[5] ,"%ld", &l_run_no );	
+  sscanf( argv[6] ,"%c", &c_upld_mode); /*** Ver 1.2 ***/	
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    sprintf ( c_msg, "upload date |%s|", argv[4]);
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+  }
+
+	if(DEBUG_MSG_LVL_0) /*** Ver 1.2 Debug added ***/
+  {	
+		fn_userlog( c_ServiceName," Exchange Code is :%s:",c_xchng_cd );
+		fn_userlog( c_ServiceName," Date is :%s:", c_date );
+		fn_userlog( c_ServiceName," Run number is :%ld:", l_run_no );
+		fn_userlog( c_ServiceName," Upload mode is :%c:", c_upld_mode);
+	}
+
+	/*** Ver 1.2 Starts ***/
+	
+	if( argc != 7 )
+  {
+    fn_userlog(c_ServiceName," Argument list bat_upd_haircut|exchange|exchange|pipe|date|run_no|upload_mode>");
+    fn_bat_pst_msg ( c_ServiceName, "Invalid Number of Arguments", c_tag );
+		return;
+	}
+
+
+	if ( c_upld_mode != 'V' && c_upld_mode != 'M')
+	{
+		fn_userlog( c_ServiceName,"Invalid Upload type" );
+    sprintf ( c_msg , "Invalid Upload type" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return;
+	}
+
+	EXEC SQL
+       SELECT ppp_plg_opncls_flg
+       INTO   :c_opncls_flg
+       FROM   ppp_par_plg_prmtr; 
+
+  if( SQLCODE != 0 )
+  {
+    fn_userlog( c_ServiceName,"Unable to select PPP open close flag.." );
+    sprintf ( c_msg , "Unable to select PPP open close flag.." );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		return;
+  }
+	
+	if ( c_opncls_flg != 'Y')
+	{
+		fn_userlog( c_ServiceName,"Parameter Table is locked.." );
+    sprintf ( c_msg , "Kindly run the process after sometime.. " );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+    return;
+	}
+
+
+  /*** Ver 1.6 Starts ***/
+  if (strcmp(c_xchng_cd,"BFO") == 0)
+  { 
+
+    EXEC SQL 
+    SELECT COUNT(*)
+    INTO   :i_prc_run_check
+    FROM   PRD_PGM_RUN_DTLS
+    WHERE  PRD_PGM_NAME ='bat_upd_haircut'
+    AND    PRD_TRD_DT   = :c_date
+    AND    PRD_PGM_STATUS ='P'
+    AND    PRD_16PER_SQROFF_FLG ='V'
+    AND    PRD_XCHNG_CD   ='NFO';
+
+    if( SQLCODE != 0 )
+    {
+      fn_userlog( c_ServiceName,"Could not get count of records NFO " );
+      sprintf ( c_msg , "Could not get count of records NFO " );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      return;
+    }
+
+    if ( i_prc_run_check == 0 )
+    { 
+ 
+      i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+      if(i_trnsctn == -1)
+      {
+        sprintf ( c_msg, "  Error beginning a transaction");
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_errlog( c_ServiceName, "S31010", TPMSG, c_event_msg);
+        return;
+      } 
+   
+      EXEC SQL
+      UPDATE CHM_COLL_HAIRCUT_MSTR
+      SET    CHM_PRCSD_FLG = 'F'
+      WHERE  CHM_XCHNG_CD  = :c_xchng_cd 
+      AND    CHM_RUN_NO    = :l_run_no
+      AND    trunc(CHM_TRD_DATE) = :c_date; 
+
+      if ( SQLCODE != 0 )
+      {
+        fn_errlog( c_ServiceName, "S31015",SQLMSG,c_err_msg);
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        return;
+      }
+
+      if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+      {
+        sprintf ( c_msg, "  Error commiting transaction");
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_errlog( c_ServiceName, "S31020", TPMSG, c_event_msg);
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        return;
+      }
+
+      fn_userlog( c_ServiceName,"First Run for NFO..." );
+      sprintf ( c_msg , "First Run for NFO..." );
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      return;
+
+    } 
+  }
+  /*** Ver 1.6 Ends ***/
+
+	/*** Ver 1.2 Ends ***/
+
+  EXEC SQL
+       SELECT COUNT(*)
+       INTO   :i_chm_count
+       FROM   chm_coll_haircut_mstr
+       WHERE  chm_run_no = :l_run_no
+       AND    trunc(chm_trd_date) =  to_date(:c_date,'dd-Mon-YYYY')
+       AND    chm_xchng_cd = :c_xchng_cd;   /** Ver 1.6 **/
+
+/**			 AND    trim(chm_series) in ('EQ','BE')
+			 AND    chm_xchng_cd = 'NFO'; ** Commented in Ver 1.6 **/
+
+	if( SQLCODE != 0 )
+  {
+    fn_userlog( c_ServiceName,"Could not get count of records in CHM" );
+    sprintf ( c_msg , "Could not get count of records in CHM" );
+    fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+  }		
+
+	for( i_count = 0; i_count < i_chm_count; i_count++ )
+	{
+
+			MEMSET(sql_rowid);
+
+			EXEC SQL
+			     SELECT  chm_stck_cd,
+					/**		   chm_applcbl_mrgn, Commented in Ver 1.7 **/
+                   decode(:c_upld_mode,'M',chm_applcbl_mrgn,(chm_var_margin + chm_extrm_loss_rt)), /** Ver 1.7 **/
+                   trim(chm_series),  /** Ver 1.6 **/
+									 chm_coll_haircut_mstr.ROWID	
+					 INTO    :c_portfolio,
+									 :d_percent,
+                   :c_series,         /** Ver 1.6 **/
+									 :sql_rowid
+					 FROM    chm_coll_haircut_mstr
+					 WHERE   chm_run_no = :l_run_no
+					 AND     trunc(chm_trd_date) =  :c_date
+           AND     chm_xchng_cd = :c_xchng_cd     /** Ver 1.6 **/
+  	/**		 AND     trim(chm_series) in ('EQ','BE') 
+					 AND     chm_xchng_cd = 'NFO'  ** Commented in Ver 1.6 **/
+					 /*** AND     chm_prcsd_flg NOT IN  ('P','F') Commented In Ver 1.2 ***/
+					 AND     chm_prcsd_flg NOT IN  ('P','F','I') /*** Ver 1.2 ***/
+					 AND     ROWNUM < 2
+					 ORDER BY chm_stck_cd;
+
+
+      if( ( SQLCODE != 0 ) && ( SQLCODE != NO_DATA_FOUND ) )
+      {
+             fn_userlog( c_ServiceName,"Unable to get Risk Master details" );
+             sprintf ( c_msg , "Unable to get Risk Master details" );
+             fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );	
+						 fn_errlog(c_ServiceName,  "S31025", SQLMSG, c_errmsg);
+             break;
+      }
+
+      if( SQLCODE == NO_DATA_FOUND )
+      {
+				if(DEBUG_MSG_LVL_0) /*** Ver 1.2 ***/
+    		{
+      		fn_userlog( c_ServiceName,"Inside NO_DATA_FOUND");
+    		}
+        break;
+      }	
+
+		SETNULL(sql_rowid);
+    trim(c_portfolio);	
+	
+		if(DEBUG_MSG_LVL_0) /*** Ver 1.2 Debug added ***/
+  	{	
+			fn_userlog( c_ServiceName,"Portfolio is :%s:", c_portfolio );
+			fn_userlog( c_ServiceName,"ROWID IS :%s:", sql_rowid.arr );
+		}
+
+		if ( c_upld_mode == 'V') /*** Ver 1.2 if condition added ***/
+		{
+			
+			if(DEBUG_MSG_LVL_0) /*** Ver 1.2 ***/
+    	{
+      	fn_userlog( c_ServiceName," Inside VAR File Upload Mode");
+    	}
+/*** Commented part of Ver 1.2 Uncommented  in Ver 1.4 ****  Starts *****/
+			/*** Commented In Ver 1.2 ***/ 
+
+    /***       Ver 1.6     *****	
+			EXEC SQL
+         SELECT trim(sem_stck_cd)			***	Ver	1.1	trim added	***
+         INTO   :c_stock_name
+         FROM   sem_stck_map
+         WHERE  sem_map_vl = :c_portfolio
+				 AND    sem_entty = DECODE(:c_xchng_cd,'NFO',1,2);  * Entty is 1 for NSE *     ***  Ver 1.1  sem_entty Changed From 1 To 3  ***
+     **** Commented in Ver 1.6 ****/
+
+     /*** Ver 1.6 Starts ***/
+
+      if( strcmp(c_xchng_cd,"NFO") == 0 )
+      {
+        EXEC SQL
+        SELECT TRIM(SEM_STCK_CD) 
+        INTO   :c_stock_name
+        FROM   ESS_SGMNT_STCK,SEM_STCK_MAP
+        WHERE  SEM_MAP_VL = :c_portfolio 
+        AND    ESS_XCHNG_SUB_SERIES = :c_series 
+        AND    ESS_STCK_CD = SEM_STCK_CD
+        AND    SEM_ENTTY   = 1
+        AND    ESS_XCHNG_CD = 'NSE';
+      }
+      else if( strcmp(c_xchng_cd,"BFO") == 0 )
+      {
+         EXEC SQL
+         SELECT TRIM(SEM_STCK_CD)
+         INTO   :c_stock_name
+         FROM   SEM_STCK_MAP
+         WHERE  SEM_MAP_VL = :c_portfolio
+         AND    SEM_ENTTY  = 2;
+      }
+
+    /*** Ver 1.6 Ends ***/
+
+    	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    	{
+      	fn_userlog( c_ServiceName,"Could not select stock code" );
+      	sprintf ( c_msg , "Could not select from SEM table" );
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+      	continue;
+    	}
+    	if( SQLCODE == NO_DATA_FOUND )
+    	{
+      	fn_userlog( c_ServiceName,"No data for NSE stockcode" );
+      	sprintf ( c_msg , "No data in SEM table" );
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+      	continue;
+    	}
+
+			trim(c_stock_name);
+    	fn_userlog( c_ServiceName,"STOCK is :%s:", c_stock_name );
+	/****		Commented In Ver 1.2 Ends ***/
+/***  Commented part of Ver 1.2 Uncommented in Ver 1.4 ****  Ends ****/
+
+   /**** Commented in Ver 1.4 ****
+
+			if( d_percent <= 15.0 )
+			{
+				d_haircut = 15;
+			}
+			if( d_percent > 15.0 )
+			{
+				d_haircut = d_percent + 2.5; 
+
+      if(DEBUG_MSG_LVL_0)
+      {
+				fn_userlog( c_ServiceName,"d_haircut is :%lf:",d_haircut );
+			}
+
+        EXEC SQL
+             SELECT CEIL(:d_haircut)
+             INTO   :d_haircut
+             FROM   DUAL;
+
+        if( SQLCODE != 0 )
+        {
+          fn_userlog( c_ServiceName,"Could not select from SEM table" );
+          sprintf ( c_msg , "Could not select from SEM table" );
+          fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          i_return_val = fn_upd_chm_status(sql_rowid.arr);
+          continue;
+        }
+        if( d_haircut > 100.0 )
+        {
+          d_haircut = 100;
+        }
+        if(DEBUG_MSG_LVL_0)
+        {
+         fn_userlog( c_ServiceName,"d_haircut is :%lf:",d_haircut );
+        }
+      }
+  ***** Ver 1.4 Ends ************/
+
+  /**** Ver 1.4 Starts ****/
+
+     EXEC SQL
+     SELECT NVL(STK_MIN_HAIRCUT,0) 
+     INTO   :d_stk_haircut
+     FROM   STK_STK_MSTR
+     WHERE  STK_STCK_CD = :c_stock_name;
+
+
+     if( SQLCODE != 0 )
+     {
+        fn_userlog( c_ServiceName,"Could not Find in Stock Master." );
+        sprintf ( c_msg , "Could not Find in Stock Master." );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        i_return_val = fn_upd_chm_status(sql_rowid.arr);
+        continue;
+     }
+     
+     if (d_stk_haircut >=  d_percent)
+     {
+       d_haircut = d_stk_haircut;  
+     }
+     else
+     {
+       /** d_haircut = d_percent + 2.5;  ** Commented in Ver 1.8 **/
+       d_haircut = d_percent;  /** Ver 1.8 **/
+     } 
+
+        EXEC SQL
+             SELECT CEIL(:d_haircut)
+             INTO   :d_haircut
+             FROM   DUAL;
+
+        if( SQLCODE != 0 )
+        {
+          fn_userlog( c_ServiceName,"Error in Roundup the Value." );
+          sprintf ( c_msg , "Error in Roundup the Value." );
+          fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+          i_return_val = fn_upd_chm_status(sql_rowid.arr);
+          continue;
+        }
+        if( d_haircut > 100.0 )
+        {
+          d_haircut = 100;
+        }
+        if(DEBUG_MSG_LVL_0)
+        {
+         fn_userlog( c_ServiceName,"d_haircut is :%lf:",d_haircut );
+        }
+/******* Ver 1.4 Ends ******/
+		}
+		else if ( c_upld_mode == 'M') /*** Ver 1.2 ***/ 
+		{
+			if(DEBUG_MSG_LVL_0)
+      {
+        fn_userlog( c_ServiceName," Inside MANUAL File Upload Mode");
+      }
+			d_haircut = d_percent ;
+			if(DEBUG_MSG_LVL_0) 
+      {
+				fn_userlog( c_ServiceName,"d_haircut is :%lf:",d_haircut );
+				fn_userlog( c_ServiceName,"c_portfolio is :%s:",c_portfolio);
+			}
+		}
+
+			i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+    	if(i_trnsctn == -1)
+    	{
+      	sprintf ( c_msg, "  Error beginning a transaction");
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_errlog( c_ServiceName, "S31030", TPMSG, c_event_msg);
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+      	return;
+    	}
+
+			/*** Commented In Ver 1.2 as following shall be done in revaluation process 
+
+
+			EXEC SQL
+					 SELECT stk_plg_haircut
+					 INTO   :d_stk_haircut
+					 FROM   stk_stk_mstr
+					 WHERE  stk_stck_cd = :c_stock_name;
+
+			if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_userlog( c_ServiceName,"Updating margin values failed" );
+        sprintf ( c_msg , "Updating margin values failed" );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+        continue;
+      }
+      if( SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog( c_ServiceName,"No data for updating in master" );
+        sprintf ( c_msg , "No data for updating in master" );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+        continue;
+      }	
+
+			EXEC SQL
+					 INSERT INTO shl_stk_haircut_log
+											 (
+													shl_stck_cd,
+												  shl_xchng_cd,
+													shl_haircut,
+												  shl_date,
+													shl_run_no
+											 )
+											 VALUES
+											 (
+													:c_stock_name,
+                          'NFO', 
+													:d_stk_haircut,
+													sysdate,
+													:l_run_no
+											 ); 
+
+			if( SQLCODE != 0 )
+    	{
+      	fn_userlog( c_ServiceName,"Insert into Audit trail failed" );
+      	sprintf ( c_msg , "Insert into Audit trail failed" );
+				fn_errlog(c_ServiceName,  "S31035", SQLMSG, c_errmsg);
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+      	continue;
+    	}
+
+			EXEC SQL
+					 UPDATE stk_stk_mstr
+					 SET    stk_plg_haircut = :d_haircut
+					 WHERE  stk_stck_cd = :c_stock_name
+					 AND    stk_plg_allwd in ('R','Y');
+
+			if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    	{
+      	fn_userlog( c_ServiceName,"Updating margin values failed" );
+      	sprintf ( c_msg , "Updating margin values failed" );
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+      	continue;
+    	}
+    	if( SQLCODE == NO_DATA_FOUND )
+   	 	{
+      	fn_userlog( c_ServiceName,"Pledge is not allowed for this stock" );
+      	sprintf ( c_msg , "Pledge is not allowed for this stock" );
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+      	continue;
+    	} 
+			Commented In Ver 1.2 Ends ***/
+		
+			/*** Ver 1.2 Starts ***/
+
+			if(DEBUG_MSG_LVL_3) 
+      {
+				fn_userlog( c_ServiceName,"Before updating to CHM...");
+				fn_userlog( c_ServiceName,"d_haircut is :%lf:",d_haircut );
+        fn_userlog( c_ServiceName,"c_portfolio is :%s:",c_portfolio);
+			}
+
+			EXEC SQL
+           UPDATE chm_coll_haircut_mstr 
+           SET    chm_new_haircut = :d_haircut
+           WHERE  chm_stck_cd = :c_portfolio
+					 AND		ROWID = :sql_rowid; 
+
+      if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_userlog( c_ServiceName,"Updating haircut values failed" );
+        sprintf ( c_msg , "Updating haircut values failed" );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        i_return_val = fn_upd_chm_status(sql_rowid.arr);
+        continue;
+      }
+      if( SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog( c_ServiceName,"No entry present for the stock :%s:" ,c_portfolio);
+        sprintf ( c_msg , "Pledge is not allowed for this stock" );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+        i_return_val = fn_upd_chm_status(sql_rowid.arr);
+        continue;
+      }
+		
+			/*** Ver 1.2 Ends   ***/
+
+
+			EXEC SQL
+					 UPDATE chm_coll_haircut_mstr
+					 /*** SET    chm_prcsd_flg = 'P' Commented In Ver 1.2 ***/
+					 SET    chm_prcsd_flg = 'I'      /*** Ver 1.2 updating to Intermediate stage ***/
+					 WHERE  ROWID = :sql_rowid;
+
+			if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+      {
+        fn_userlog( c_ServiceName,"Updating margin values failed" );
+        sprintf ( c_msg , "Updating margin values failed" );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+        continue;
+      }
+      if( SQLCODE == NO_DATA_FOUND )
+      {
+        fn_userlog( c_ServiceName,"No data for updating in haircut master" );
+        sprintf ( c_msg , "No data for updating in haircut master" );
+        fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+        fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+        continue;
+      }
+
+			if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    	{
+      	sprintf ( c_msg, "  Error commiting transaction");
+      	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      	fn_errlog( c_ServiceName, "S31040", TPMSG, c_event_msg);
+      	fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+				i_return_val = fn_upd_chm_status(sql_rowid.arr);
+      	return;
+    	}
+
+	}/* End of for loop */
+
+
+
+   /** Ver 1.6 Starts **/
+
+   i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+
+   if(i_trnsctn == -1)
+   {
+      sprintf ( c_msg, "  Error beginning a transaction");
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_errlog( c_ServiceName, "S31045", TPMSG, c_event_msg);
+      return;
+   }
+
+   EXEC SQL
+   INSERT INTO PRD_PGM_RUN_DTLS
+          (
+            PRD_PGM_NAME,
+            PRD_INS_DT,
+            PRD_PGM_STATUS,
+            PRD_TRD_DT,
+            PRD_XCHNG_CD,
+            PRD_16PER_SQROFF_FLG
+           )
+    VALUES (
+            :c_ServiceName,
+             sysdate,
+            'P',
+            :c_date,
+            :c_xchng_cd,
+            :c_upld_mode
+           );
+
+    if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+    {
+      sprintf ( c_msg, "  Error commiting transaction");
+      fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+      fn_errlog( c_ServiceName, "S31050", TPMSG, c_event_msg);
+      fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+      return;
+    }
+
+    /** Ver 1.6 Ends **/
+
+	/*** Ver 1.2 Starts ***/
+	fn_userlog( c_ServiceName,"bat_upd_haircut Ended...");	
+	
+	if ( i_chm_count > 0 )
+	{
+
+		if(DEBUG_MSG_LVL_0)
+    {
+			fn_userlog( c_ServiceName,"Calling bat_revaluation ...");	
+		}
+
+		EXEC SQL
+    	 SELECT exg_crrnt_stts
+     	 INTO   :c_exg_crrnt_stts
+       FROM   exg_xchng_mstr
+       WHERE  exg_xchng_cd in (:c_xchng_cd,'NSE','BSE')
+       AND exg_crrnt_stts = 'O'
+       AND    rownum <= 1;
+
+	  if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND)
+	  {
+		  fn_userlog( c_ServiceName,"Error while selecting exchange status " );
+		  sprintf ( c_msg , "Error while selecting exchange status" );
+		  fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+		  return;
+	  }
+	
+
+		if(SQLCODE == NO_DATA_FOUND)
+	  {
+		 c_exg_crrnt_stts ='C' ;
+	  }
+	
+	  if ( c_exg_crrnt_stts == 'O' )
+	  {
+		 c_run_mode = 'M';
+	  }
+	  else 
+	  {	
+		 c_run_mode = 'E';
+	  }
+
+	  strcpy( c_pgm_name,"bat_revaluation" );
+	  strcpy( c_pipe_id ,"BO" );
+/**	  sprintf( c_cmd_str, "nohup %s %s NA %s %c %c &", c_pgm_name, c_xchng_cd, c_pipe_id,c_run_mode, c_upld_mode); ** Commnted in Ver 1.6 **/ /*** c_upld_mode added for Ver 1.3 ***/
+
+      sprintf( c_cmd_str, "nohup %s %s %s %s %c %c &", c_pgm_name, c_xchng_cd,c_xchng_cd,c_pipe_id,c_run_mode, c_upld_mode);
+
+	  fn_userlog( c_ServiceName,"Calling :%s:", c_cmd_str );
+    system( c_cmd_str );
+ 
+    /***** Ver 1.5 Starts ******/
+ 
+    if( c_upld_mode =='V' )
+    {
+     MEMSET(c_pgm_name);
+     MEMSET(c_pipe_id);
+     MEMSET(c_xchng_cd);
+     MEMSET(c_cmd_str);
+ 
+     strcpy(c_pgm_name,"bat_esop_mtmrpt");
+     strcpy(c_pipe_id,"NA");
+     strcpy(c_xchng_cd,"NFO");
+     strcpy(c_ini,c_xchng_cd);
+     c_mode_flg='C';
+   
+     sprintf( c_cmd_str, "nohup %s %s %s  %s  %c %ld &", c_pgm_name, c_xchng_cd,c_ini, c_pipe_id,c_mode_flg,l_run_no); 
+     fn_userlog( c_ServiceName,"Calling :%s:", c_cmd_str );
+     system( c_cmd_str );
+    }
+   
+    /***** Ver 1.5 Ends ****/
+
+	  tpclose();
+    tpterm();
+ 	  return; 
+	}
+
+	/*** Ver 1.2 Ends   ***/
+
+}
+int fn_bat_init ( int argc, char *argv[] )
+{
+  fn_var = BAT_UPD_HAIRCUT;
+  return 0;
+}
+void fn_bat_term ( int argc, char *argv[] )
+{
+  return;
+}
+int fn_prcs_trg ( char *c_pgm_nm,
+                  int i_trg_typ )
+{
+  return 0;
+}
+
+void trim(char *str)
+{
+  int i=0;
+  char *ptr;
+  ptr = str;
+  while ( *str != '\0' )
+  {
+    if (*str != ' ' && *str != '\t')
+    {
+      i=i+1;
+      *ptr++=*str;
+    }
+    str++;
+  }
+  *ptr='\0';
+  while( i != 0 )
+  {
+    ptr--;
+    i=i-1;
+  }
+  str = ptr;
+}
+int fn_upd_chm_status(char *sql_rowid)
+{
+
+  int i_trnsctn ;
+  char c_err_msg[256];
+  char c_ServiceName[33];
+
+  strcpy(c_ServiceName,"bat_upd_haircut");
+
+	fn_userlog ( c_ServiceName,"ROWID IS :%s:",sql_rowid );
+
+  i_trnsctn = fn_begintran( c_ServiceName, c_err_msg );
+  if ( i_trnsctn == -1 )
+  {
+    fn_errlog(c_ServiceName, "S31055",LIBMSG,c_err_msg);
+  }
+
+  EXEC SQL
+       UPDATE chm_coll_haircut_mstr
+       SET    chm_prcsd_flg = 'F'
+       WHERE  ROWID = :sql_rowid;
+
+  if ( SQLCODE != 0 )
+  {
+    fn_errlog( c_ServiceName, "S31060",SQLMSG,c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return(FAILURE);
+  }
+
+  if ( fn_committran( c_ServiceName, i_trnsctn, c_err_msg ) == -1 )
+  {
+    fn_errlog( c_ServiceName, "S31065",LIBMSG,c_err_msg);
+    fn_aborttran( c_ServiceName, i_trnsctn, c_err_msg );
+    return(FAILURE);
+  }
+  return( SUCCESS);
+}

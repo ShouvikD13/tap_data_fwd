@@ -1,0 +1,3153 @@
+/***************************************************************************
+ Service Name      : SFO_LMT_PRC_CAL
+
+ Description       : This service calculates the limit price for the stock
+
+ Input Parameters  :		
+											FFO_USR_ID
+											FFO_SSSN_ID
+											FFO_XCHNG_CD
+											FFO_UNDRLYNG
+											FFO_ORDR_FLW
+											FFO_EBA_MTCH_ACT_NO
+											FFO_STP_LSS_TGR
+											FFO_EFF_LMT_RT			*** User input amount ***
+											FFO_EXPRY_DT
+											FFO_LIMIT						*** Total Available Limit ***
+											FFO_MIN_LOT_QTY
+											FFO_RQST_TYP
+
+ Output Parameter  :
+                    	FFO_LMT_RT  
+											FFO_AVL_QTY         
+
+ Called By         : Limit Price Calculator button in SLTP F+ Order page
+
+ Author            :	Bhushan Sonwane 
+
+ Created Date      : 18-12-2012
+
+ Version           : 1.0
+									 : 1.1				24-Sep-2013   Changes for OptionPlus (Bhushan)
+									 : 1.2				19-Jun-2014   Changes for OptionPlus in DL.net  (Swati A.B)
+ 									 : 1.3				01-Dec-2014   CR-ISEC14-55799 OptionPLUS Stop Loss Modification Error when LTP less than cut off Premium  (Navina/Bhushan)
+									 : 1.6			  28-Jul-2015		Changes related to CR_ISEC14_64402 Limit_Order_Type_in_FP_SLTP(Kishor)
+                   : 1.7        12-Aug-2015   Contract Master and Trade Quote Merger Changes (Anand Dhopte)	
+									 : 1.8				05-Oct-2015		Changes related to Limit_Order_Type_in_OPLUS(Kishor)	
+									 : 1.9				28-Oct-2015		Changes related View Margin for sltpfp(Kishor)
+									 : 2.0				04-Jul-2016		Log Maintenance(Kishor)			
+                   : 2.1        16-Jul-2016   Order Quantity check introduced in case of View Margin (Anand Dhopte)
+                   : 2.2        01-Sep-2016   Trail Future (Kishor)
+									 : 2.3				30-Oct-2017		Changes to reduce Hard Parsing (Sandeep)
+									 : 2.4        17-Mar-2020   FPSL margin change CR-ISEC14-133200 (Navina D.)
+ 									 : 2.5        28-Oct-2020   OPLUS margin change CR-ISEC14-139243(Navina D.)
+                   : 2.6        11-Dec-2020   Different ELM% for Deep OTM Option for SPAN and Non SPAN CR-ISEC14-141383  ( Anuj Pancholi )
+                   : 2.7        21-Jan-2021   Minor Change for Deep OTM option strikes  (Anuj Pancholi) 
+									 : 2.8 			  03-Aug-2021	  View margin validation skip for basket order ( Shlok Ghan )	
+									 : 2.9				25-Nov-2021	  CR-ISEC14-150750_Introduction of Profit Order in FPSL ( Ravindra Panda )	
+									 : 3.0        16-Jul-2022   CR-ISEC14-170021 Revision of Margin logic of FPSL, Oplus & Opt (Naveena R.)
+									 : 3.1        01-Feb-2023   RQ:3117 GTT in FNO
+									 : TOL        07-Aug-2023   Tux on Linux (Agam)
+*******************************************************************************/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <atmi.h>
+#include <fml32.h>
+#include <sqlca.h>
+#include <fo.h>
+#include <eba_to_ors.h>
+#include <fo_fml_def.h>
+/* #include <fo_view_def.h> Commented in Ver TOL */
+#include <fo_view_def.h>   /* Added in Ver TOL */
+#include <fn_session.h>
+#include <fn_tuxlib.h>
+#include <fn_ddr.h>
+#include <fn_log.h> 
+#include <fml_rout.h> 
+#include <fn_read_debug_lvl.h>
+#include <fn_span_lib.h>
+#include <math.h>
+#include <fn_val_ord.h>
+#include <fn_pos.h>									/*** Ver 1.8 ***/
+
+long fn_cal_price(char*,long,double,int,char*,int);
+long fn_cal_price_optplus(char *,long,double,int,char *,int);        /*** Ver 1.1 ***/
+long fn_max(char *, long, long);																		 /*** Ver 1.1 ***/
+
+#define CAL_UPPER 1
+#define CAL_LOWER 2
+#define COVER_ORDER_LIMIT_PRICE_CALCULATION       'L'
+#define SLTPFPLUS_QUANTITY_CALCULATOR             'Q'
+#define COVER_ORDER_LIMIT_PRICE_CALCULATION_OPTIONPLUS		'S'       /*** Ver 1.1 ***/
+#define VIEW_MARGIN							'M'	/*** Ver 1.1***//*** Changes from VIEW_MARGIN_OPTIONPLUS to VIEW_MARGIN in Ver 1.9  ***/
+#define OPTIONPLUS_QUANTITY_CALCULATOR					'C'									/*** Ver 1.1 ***/
+#define LIMIT_PRICE_TRAIL_SLTP_CALCULATION_FUTURE      'T'   /*** Ver 2.2 ***/
+#define PROFIT_ORDER_LIMIT_PRICE_CALCULATION       'P'       /*** Ver 2.9 ***/
+#define GTT_FNO_LIMIT_PRICE_CALCULATION            'G'       /*** ver 3.1 ***/
+
+void SFO_LMT_PRC_CAL( TPSVCINFO *rqst )
+{
+	/* Tuxedo specific variables                        */
+  FBFR32  *ptr_fml_Ibuf;     /* Pointer to FML input buffer   */
+  FBFR32  *ptr_fml_Obuf;     /* Pointer to FML output buffer   */
+
+	char c_ServiceName[33];
+	char c_errmsg[256];
+
+	int  i_cnt;
+  int i_arr[4]={0};		 							/*** ver 3.1 ***/
+	long d_lst_trd_pr=0;							/*** ver 3.1 ***/
+	double d_trgt_sltp_min_diff =0;		/*** ver 3.1 ***/
+	double d_ltp_trgt_min_diff =0;		/*** ver 3.1 ***/
+	double d_ltp_sltp_min_diff =0;		/*** ver 3.1 ***/
+	long l_sl_lmt_pc =0;							/*** ver 3.1 ***/
+	long l_trgt_lmt_pc =0;            /*** ver 3.1 ***/
+  char c_prdct_type ='\0' ;					/*** ver 3.1 ***/
+  long l_sl_trgr =0;                /*** ver 3.1 ***/
+  long l_trgt_trgr =0;              /*** ver 3.1 ***/
+  double d_sl_prct =0;              /*** ver 3.1 ***/
+  double d_trgt_prct =0;            /*** ver 3.1 ***/
+  char c_gtt_rqst_typ = '\0';            /*** ver 3.1 ***/
+	char c_gtt_tgt_stts = '\0';            /*** ver 3.1 ***/
+	char c_gtt_sl_stts = '\0';            /*** ver 3.1 ***/
+	int i_err[9] = {0};														/*** Initialised in Ver 1.8 ***/				 
+  int i_ferr[9] = {0};													 /*** Initialised in Ver 1.8 ***/
+	int i_actn_id=-1;
+	int i_min_lot_qty = 0;
+	int i_qty = 0;
+	int	i_tick_sz = 0;
+  int i_returncode = 0;    /*** Ver 1.8 ***/
+  int i_cal_on_wrst_prc = 0;  /*** Ver 1.9 ***/
+
+	double 	d_fmm_sltp_diff_prcnt = 0.0;
+	double 	d_fmm_sltp_prcnt			= 0.0;
+	double  d_usr_lmt							= 0.0;
+  double  d_limit_pr  					= 0.0;
+  double  d_trigger_pr  				= 0.0;
+  double 	d_tot_avl_limit  			= 0.0;	
+	double  d_ltp 								= 0.0;
+	double  d_bst_offr_prc  			= 0.0;
+	double  d_bst_bid_prc 				= 0.0;
+	double  d_99_lmt 							= 0.0;
+	double  d_mrgn_pr_share  			= 0.0;
+	double  d_invest_amt 					= 0.0;
+	double  d_lmt_rt_pr						= 0.0;		/*** Ver 1.6 ***/
+	double  d_lmt									=	0.0;		/*** Ver 1.6 ***/
+  double d_fmm_sltptrail_diff_prcnt = 0.0;      /*** Ver 2.2 ***/
+  double d_sltp_upd_cnd         = 0.0;          /*** Ver 2.2 ***/
+	double d_xchng_prcnt =0.0 ;  /*** Ver 2.4 ***/ 
+
+  double d_prev_und_quote = 0.0; /*** Ver 3.0 ***/ 	
+	
+	/*** Ver 1.1 ** Starts ***/
+
+  char  	c_prd_typ 						= '\0'; 
+  char 		c_opt_typ 						= '\0'; 
+	char		c_exrc_typ						= '\0';
+  char    c_call_from						= 'M';	/*** Default M i.e view margin called from Modification page ***/
+	char    c_ordr_rfrnc[19]			= "\0";
+  char		c_frsh_ordr_rfrnc[19] = "\0";	/*** Ver 1.8 ***/
+  char		c_rng_err[256]        = "\0";
+	char    c_slm_flg							= 'M';		/*** Ver 1.6 ***/
+	char    c_mkt_type						= 'M';	/*** Ver 1.8 ***/
+	char    c_frsh_ordr_stts			=	'\0';  /*** Ver 1.8 ***/
+	char    c_cvr_ordr_stts				=	'\0';  /*** Ver 1.8 ***/
+	char    c_fut_prd_typ					=	'F';			/***	Ver 2.3	***/
+	char    c_opt_prd_typ					=	'O';			/***	Ver 2.3	***/
+	char 		c_exercs_typ					=	'E';			/***  Ver 2.3 ***/
+	char 	  c_baskt_typ						= '\0'; 		/** Ver 2.8 **/
+
+  double  d_limit_diff					= 0.0;
+	double  d_tot_bid_qty 		= 0.0;
+  double  d_tot_offr_qty 		= 0.0;
+	double  d_avg_prc 				= 0.0;
+	double  d_frm_diffrnc_mrgn  = 0.0;
+	double  d_mrgn_amt 				= 0.0;
+  double  d_lss_amt 				= 0.0;
+	double	d_tot_margin			= 0.0;
+	double  d_frsh_exe_val		= 0.0;
+	double	d_frm_rng					= 0.0;
+	double  d_to_rng   	      = 0.0;
+
+  long 		l_minimum_sltp				= 0;
+  long		l_frm_cutoff_premium	= 0;
+	long 		l_strike_prc       		= 0;     
+	long    l_sltp_lmt_diff				= 0;
+	long		l_lmt_diff						= 0;
+	long		l_max_limit_diff			= 0;
+	long		l_ord_tot_qty         = 0;
+	long		l_lmt_price						= 0;
+	long		li_tot_exec_qty				= 0;			
+	long    l_min_lot_qty 				= 0;  /*** Ver 1.2 ***/
+	long    l_lst_trd_prc					= 0;  /*** Ver 1.2 ***/
+	long    l_limit_rt						=	0;	/*** Ver 1.6 ***/
+	long    l_frsh_lmt_rt					= 0;  /*** Ver 1.8 ***/
+  long    l_max_allw_qty 				= 0;  /*** Ver 1.9 ***/
+	
+	long    l_bst_bid_prc[5] = {0,0,0,0,0};
+  long    l_bst_bid_qty[5] = {0,0,0,0,0};
+  long    l_bst_offr_qty[5] = {0,0,0,0,0};
+  long    l_bst_offr_prc[5] = {0,0,0,0,0};
+
+
+	/*** Ver 1.1 ** Ends 	***/	
+	
+	long li_stp_lss_tgr_prc = 0;
+	long l_lmt_rt 					= 0;
+	long l_limit_pr_temp		=	0;
+	long l_trigger_pr_temp	=	0;
+
+	char c_source_flg = '\0';		/*** Ver 1.3 ***/
+  char c_otm_flg  = 'N';      /*** Ver 2.6 ***/
+		char c_sub_req = '\0';      /*** Ver 2.9 ***/
+
+	char c_ref_rmrks[133] = "\0"; /*** Ver 2.4 ***//** size 100 to 133 in ver 2.5 **/
+	char	c_tmp_rmrks [ 133 ] = "\0";	 /*** Ver 2.4 ***//** size 100 to 133 in ver 2.5 **/
+	
+	double d_comp1_mrgn = 0.0;	/*** Ver 2.4 ***/
+	double d_comp1_pl = 0.0;		/*** Ver 2.4 ***/
+	double d_xchng_amt = 0.0;		/*** Ver 2.4 ***/
+
+  double d_op_flat_rt = 0.0;		 /*** Ver 2.5 ***/
+	double d_bop_sebi_prcnt = 0.0; /*** Ver 2.5 ***/
+	double d_sop_sebi_prcnt = 0.0; /*** Ver 2.5 ***/
+	double d_spn_per_lot = 0.0;    /*** Ver 2.5 ***/
+	double d_spot = 0.0;           /*** Ver 2.5 ***/
+	double d_expr_prcnt = 0.0;     /*** Ver 2.5 ***/
+	long  l_lot_sz =0;						 /*** Ver 2.5 ***/
+	double d_prem_amt = 0.0;			 /*** Ver 2.5 ***/
+	double d_spn_mrgn = 0.0;       /*** Ver 2.5 ***/
+	double d_expr_mrgn = 0.0;			 /*** Ver 2.5 ***/
+	double d_prft_percntg = 0.0;     /*** Ver 2.9 ***/
+  double  d_prft_sltp_prcnt = 0.0; /*** Ver 2.9 ***/
+
+	double d_spn_per_lot_B = 0.0;    /*** Ver 3.0 ***/
+	double d_spnperlot_T= 0.0;    /*** Ver 3.0 ***/
+
+	EXEC SQL BEGIN DECLARE SECTION;
+    struct st_usr_prfl st_user_profile;
+		char c_xchng_cd[4];
+		char c_cvr_ordr_flw = '\0';							/*** Default set as NULL in Ver 1.1 ***/
+		char c_undrlyng[7];											
+		char c_mtch_accnt_no[11];
+		varchar c_exp_date [ 19 ];
+		char c_rqst_typ = '\0';            			/*** Default set as NULL in Ver 1.1 ***/
+		int   i_lot = 0;
+		int   i_lot1 = 0; /*** Ver 2.4 ***/
+	EXEC SQL END DECLARE SECTION;
+	
+	/* Retrieve the FML buffer from the input request. */
+
+  ptr_fml_Ibuf = (FBFR32 *)rqst->data;
+  strcpy( c_ServiceName, rqst->name );
+  INITDBGLVL(c_ServiceName);
+  ptr_fml_Obuf = (FBFR32 *)NULL;
+
+	MEMSET(c_exp_date);
+/*** 	MEMSET(i_err);          ** Ver 1.6 **
+  MEMSET(i_ferr);         ** Ver 1.6 **   Commented in Ver 1.8 ***/
+
+  if(DEBUG_MSG_LVL_3)	/*** Ver 2.0 ***/
+  {
+		fn_userlog(c_ServiceName,"Service SFO_LMT_PRC_CAL started.........");
+	}
+	
+	i_err[0]   = Fget32( ptr_fml_Ibuf, FFO_USR_ID, 0,(char *)st_user_profile.c_user_id, 0 );
+  i_ferr [0] = Ferror32;
+  i_err[1]   = Fget32( ptr_fml_Ibuf, FFO_SSSN_ID, 0,(char *)&st_user_profile.l_session_id, 0 );
+  i_ferr [1] = Ferror32;
+  i_err[2]   = Fget32( ptr_fml_Ibuf, FFO_XCHNG_CD, 0, (char *)c_xchng_cd, 0 );
+  i_ferr [2] = Ferror32;
+  i_err[3]   = Fget32( ptr_fml_Ibuf, FFO_ORDR_FLW, 0, (char *)&c_cvr_ordr_flw, 0 );
+  i_ferr [3] = Ferror32;
+  i_err[4]   = Fget32( ptr_fml_Ibuf, FFO_UNDRLYNG, 0, (char *)c_undrlyng, 0 );
+  i_ferr [4] = Ferror32;
+	i_err[5]   = Fget32( ptr_fml_Ibuf, FFO_EBA_MTCH_ACT_NO, 0,(char *)st_user_profile.c_cln_mtch_accnt, 0 );
+  i_ferr [5] = Ferror32;
+	i_err[6]   = Fget32(ptr_fml_Ibuf,FFO_RQST_TYP,0,(char *)&c_rqst_typ,0);
+	i_ferr [6] = Ferror32;
+	i_err[7]   = Fget32(ptr_fml_Ibuf,FFO_PLCD_STTS,0,(char *)&c_baskt_typ,0);  /** ver2.8 **/ 
+  i_ferr [7] = Ferror32;		/** ver 2.8 **/
+	
+
+
+	for(i_cnt =0; i_cnt <=7; i_cnt++) 		/** change 6 to 7 ver 2.8 **/ 
+  {
+    if ( (i_err[ i_cnt ] == -1 ) )  
+    {
+			if( (i_cnt == 7) && ( i_ferr[i_cnt]  == FNOTPRES ))				/** ver 2.8 Handling of FNOTPRES for FFO_PLCD_STTS FML **/
+			{
+          if(DEBUG_MSG_LVL_4)
+          {
+				  	fn_userlog( c_ServiceName,"NOT FOR BASKET Erro in field no 7");
+          } 
+			}
+			else
+			{	
+      	fn_userlog( c_ServiceName, "Error in field no. [%d] ",i_cnt);
+      	fn_errlog( c_ServiceName, "S31005", Fstrerror32(i_ferr[i_cnt]),c_errmsg);
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+  	}
+	}
+
+
+  /*** Ver 1.1 ** Starts  ***/
+
+	if( c_rqst_typ == COVER_ORDER_LIMIT_PRICE_CALCULATION || c_rqst_typ == SLTPFPLUS_QUANTITY_CALCULATOR || c_rqst_typ == PROFIT_ORDER_LIMIT_PRICE_CALCULATION) 
+  /*** PROFIT_ORDER_LIMIT_PRICE_CALCULATION added in Ver 2.9  ***/
+	{
+		c_prd_typ	=	'U';          /*** SLTP FUTUREPLUS ***/
+		c_opt_typ = '*';
+		l_strike_prc = 0;
+	}
+	else if( c_rqst_typ == COVER_ORDER_LIMIT_PRICE_CALCULATION_OPTIONPLUS ||  c_rqst_typ == OPTIONPLUS_QUANTITY_CALCULATOR ||   c_rqst_typ == VIEW_MARGIN)
+	{ 
+    if(Fget32(ptr_fml_Ibuf, FFO_PRDCT_TYP,0,(char *)&c_prd_typ,0) == -1)
+    {
+      fn_userlog(c_ServiceName,"Error while getting input FFO_PRDCT_TYP.");
+      fn_errlog( c_ServiceName, "S31010", FMLMSG, c_errmsg  );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+      Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+		if(c_prd_typ == 'I' || c_prd_typ == 'U')															/*** if() added in Ver 1.9 ***/
+		{
+			if(Fget32(ptr_fml_Ibuf, FFO_OPT_TYP,0,(char *)&c_opt_typ,0) == -1)
+    	{
+      	fn_userlog(c_ServiceName,"Error while getting input FFO_OPT_TYP.");
+      	fn_errlog( c_ServiceName, "S31015", FMLMSG, c_errmsg  );
+      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+      	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+      	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    	}
+		}
+
+    if(Fget32(ptr_fml_Ibuf, FFO_STRK_PRC,0,(char *)&l_strike_prc,0) == -1)
+    {
+      fn_userlog(c_ServiceName,"Error while getting input FFO_STRK_PRC.");
+      fn_errlog( c_ServiceName, "S31020", FMLMSG, c_errmsg  );
+      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+      Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+      tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    }
+	}
+  else if( c_rqst_typ == LIMIT_PRICE_TRAIL_SLTP_CALCULATION_FUTURE )        /** Ver 2.2 **/
+  {
+    c_prd_typ = 'F';
+    c_opt_typ = '*';
+    l_strike_prc = 0;
+  }
+	/*** Ver 1.1 ** Ends ***/
+
+	strcpy ( ( char * )c_mtch_accnt_no, st_user_profile.c_cln_mtch_accnt );
+
+  if(DEBUG_MSG_LVL_0)		/**** Ver 2.0 ****/
+  {
+    fn_userlog(c_ServiceName,"Match Accnt       =   :%s:",c_mtch_accnt_no);     
+    fn_userlog( c_ServiceName,"Stock code       =   :%s:",c_undrlyng);
+    fn_userlog(c_ServiceName,"Product Type      =   :%c:",c_prd_typ) ;           
+	}
+
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog( c_ServiceName,"User Id          =   :%s:",st_user_profile.c_user_id);
+    fn_userlog( c_ServiceName,"Stock code       =   :%s:",c_undrlyng);
+    fn_userlog( c_ServiceName,"Cover Order Flow =   :%c:",c_cvr_ordr_flw);
+    fn_userlog( c_ServiceName,"Exchange code    =   :%s:",c_xchng_cd);
+		fn_userlog( c_ServiceName,"Request Type     =   :%c:",c_rqst_typ);
+		fn_userlog(c_ServiceName,"Product Type			= 	:%c:",c_prd_typ) ;             /*** Ver 1.1 ***/
+		fn_userlog(c_ServiceName,"Option Type				=		:%c:",c_opt_typ);							/*** Ver 1.1 ***/
+		fn_userlog(c_ServiceName,"Strike Price			=		:%ld:",l_strike_prc);					/*** Ver 1.1 ***/
+		fn_userlog(c_ServiceName,"Match Accnt 			=		:%s:",c_mtch_accnt_no);				/*** Ver 1.1 ***/
+	}
+
+/*** ver 2.6 starts ***/
+  
+ if ( c_rqst_typ == OPTIONPLUS_QUANTITY_CALCULATOR || c_rqst_typ == SLTPFPLUS_QUANTITY_CALCULATOR  || c_rqst_typ == VIEW_MARGIN )  
+ {
+
+  MEMSET(c_exp_date);
+  
+  if(Fget32(ptr_fml_Ibuf,FFO_EXPRY_DT,0,(char *)c_exp_date.arr,0) == -1)
+  {
+   fn_userlog(c_ServiceName,"Error while getting input FFO_EXPRY_DT.");
+   fn_errlog( c_ServiceName, "S31025", FMLMSG, c_errmsg  );
+   Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+   Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+   tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  }
+
+  SETLEN(c_exp_date);
+  
+  if(DEBUG_MSG_LVL_3)
+  {
+   fn_userlog( c_ServiceName,"Inside OTM/OTH block fetching Expiry Date :%s:",c_exp_date.arr);
+  } 
+
+  EXEC SQL
+   SELECT  NVL(FTQ_OTM_FLG,'N')
+   INTO    :c_otm_flg
+   FROM   FTQ_FO_TRD_QT
+   WHERE  FTQ_XCHNG_CD = :c_xchng_cd
+   AND    FTQ_UNDRLYNG = :c_undrlyng
+   AND    FTQ_PRDCT_TYP = decode(:c_prd_typ,'I','O','U','F','P','F',:c_prd_typ)
+   AND    FTQ_EXPRY_DT = :c_exp_date
+   AND    FTQ_STRK_PRC = :l_strike_prc
+   AND    FTQ_OPT_TYP =  :c_opt_typ;
+  
+   if( SQLCODE != 0 && SQLCODE !=  NO_DATA_FOUND )   /** ver 2.7 No Data Found handled **/
+   {
+    fn_userlog(c_ServiceName,"****** Unable to fetch OTM/OTH Flag *******");
+    fn_errlog( c_ServiceName, "S31030", SQLMSG, c_errmsg );
+    Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+    tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+   }
+
+   /** ver 2.7 starts **/
+   if ( SQLCODE == NO_DATA_FOUND )
+   {
+    c_otm_flg = 'N';
+    fn_userlog(c_ServiceName,"OTM/OTH Flag Set To Default for Contract :%s:%s:%c:%s:%ld:%c:",c_xchng_cd,c_undrlyng,c_prd_typ,c_exp_date.arr,l_strike_prc,c_opt_typ);
+   }
+   /** ver 2.7 Ends **/
+   
+
+   if(DEBUG_MSG_LVL_3)
+   {
+    fn_userlog( c_ServiceName,"Inside OTM/OTH FLag fetched is :%c",c_otm_flg);
+   }
+  
+ } 
+  
+/*** ver 2.6 ends ***/
+
+	/*Get the current margin percentage and sltp % diff. from the database */
+ 	EXEC SQL
+   	SELECT NVL(FMM_SLTP_DIFF_PRCNT,0),								/***	Ver 2.3 nvl changed to NVL ***/
+         	 NVL(FMM_SLTP_PRCNT,0),
+           NVL(FMM_SLTPTRAIL_DIFF_PRCNT,0),           /** Ver 2.2 **/
+           NVL(FMM_SLTP_UPD_CND,0)*100,                /** Ver 2.2 **/
+					 NVL(FMM_SLTP_SEBI_PRCNT,0),									 /** Ver 2.4 **/
+					 NVL(FMM_OPLUS_FLAT_RT,0),       /*** Ver 2.5 ***/
+					 NVL(FMM_OPLUS_SEBI_PRCNT_B,0),  /*** Ver 2.5 ***/
+					 NVL(FMM_OPLUS_SEBI_PRCNT_S,0),  /*** Ver 2.5 ***/
+					 /** NVL(FMM_EXPSR,0)                *** Ver 2.5 *** commented in ver 2.6 **/
+					 NVL(FMM_SLTP_PRFT_DIFF_PRCNT,0),   /*** Ver 2.9 ***/
+           decode(:c_otm_flg,'Y',NVL(FMM_DEEP_OTM_EXPSR,0),NVL(FMM_EXPSR,0))
+   	INTO   :d_fmm_sltp_diff_prcnt,
+         	 :d_fmm_sltp_prcnt,
+           :d_fmm_sltptrail_diff_prcnt,               /** Ver 2.2 **/
+           :d_sltp_upd_cnd,                            /** Ver 2.2 **/
+					 :d_xchng_prcnt,															/** Ver 2.4 **/
+					 :d_op_flat_rt,                /*** Ver 2.5 ***/
+					 :d_bop_sebi_prcnt,            /*** Ver 2.5 ***/
+					 :d_sop_sebi_prcnt,            /*** Ver 2.5 ***/
+					 :d_prft_sltp_prcnt,           /*** Ver 2.8 ***/
+					 :d_expr_prcnt                 /*** Ver 2.5 ***/
+   	FROM   FMM_FO_MRGN_MSTR
+   	/*** WHERE  FMM_PRDCT_TYP	= 'F'   ** Commented in Ver 1.1 ***/ 
+		WHERE  FMM_PRDCT_TYP  = decode(:c_prd_typ,'I','O','F')     /*** Ver 1.1 ***/ 
+   	AND    FMM_UNDRLYNG 	= :c_undrlyng
+   	AND    FMM_XCHNG_CD 	= :c_xchng_cd
+  	AND    FMM_UNDRLYNG_BSKT_ID 	= (SELECT  FCB_UNDRLYNG_BSKT_ID
+       	                           	 FROM    FCB_FO_CLN_BSKT_ALLTD
+     	                             	 WHERE   FCB_CLN_LVL =(SELECT CLM_CLNT_LVL
+           	                        	                     FROM    CLM_CLNT_MSTR
+             	                        	                   WHERE   CLM_MTCH_ACCNT = :c_mtch_accnt_no));
+   
+	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+ 	{
+   	fn_userlog(c_ServiceName,"******Invalid Stock Code*******");
+   	fn_errlog( c_ServiceName, "S31035", SQLMSG, c_errmsg );
+   	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+   	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 	}
+ 	else if(SQLCODE != 0)
+ 	{
+   	fn_errlog( c_ServiceName, "S31040", SQLMSG, c_errmsg );
+   	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+   	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+   	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+ 	}
+
+ 	if(DEBUG_MSG_LVL_3)
+ 	{
+   	fn_userlog(c_ServiceName,"SLTP Percentage   :%lf:", d_fmm_sltp_prcnt);
+   	fn_userlog(c_ServiceName,"SLTP diff. Percentage   :%lf:", d_fmm_sltp_diff_prcnt);
+    fn_userlog(c_ServiceName,"SLTP TRAIL diff. Percentage   :%lf:", d_fmm_sltptrail_diff_prcnt); /** Ver 2.2 **/
+    fn_userlog(c_ServiceName,"SLTP TRAIL Update condition :%lf:", d_sltp_upd_cnd);               /** Ver 2.2 **/
+		fn_userlog(c_ServiceName,"SEBI Percentage   :%lf:", d_xchng_prcnt);	/*** Ver 2.4 ***/
+ 	}
+	
+	if( c_rqst_typ == COVER_ORDER_LIMIT_PRICE_CALCULATION || c_rqst_typ == COVER_ORDER_LIMIT_PRICE_CALCULATION_OPTIONPLUS || c_rqst_typ == LIMIT_PRICE_TRAIL_SLTP_CALCULATION_FUTURE || c_rqst_typ == PROFIT_ORDER_LIMIT_PRICE_CALCULATION) /*** Check for OPTIONPLUS added in Ver 1.1 ***  Check for FUTURE added in Ver 2.2 ***/   /** check for profit order added in Ver 2.9 **/
+	{
+		/*Get the current Tick Size from the database */
+	  
+    /*** Commented in Ver 1.7 ***
+
+  	EXEC SQL
+			SELECT DISTINCT (FCM_TCK_SZ)
+			INTO	:i_tick_sz
+			FROM	FCM_FO_CNTRCT_MSTR 
+			WHERE FCM_XCHNG_CD	= :c_xchng_cd
+			AND 	FCM_PRDCT_TYP	=	decode(:c_prd_typ,'I','O','F')										*** Ver 1.1 ***
+			AND		FCM_UNDRLYNG	=	:c_undrlyng ;		
+
+    ***/
+
+    /*** Ver 1.7 Starts ***/
+
+    EXEC SQL
+      SELECT DISTINCT (FTQ_TCK_SZ)
+      INTO  :i_tick_sz
+      FROM  FTQ_FO_TRD_QT     
+      WHERE FTQ_XCHNG_CD  = :c_xchng_cd
+      AND   FTQ_PRDCT_TYP = decode(:c_prd_typ,'I','O','F')                    
+      AND   FTQ_UNDRLYNG  = :c_undrlyng ;
+
+    /*** Ver 1.7 Ends   ***/
+
+  	if( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  	{
+    	fn_userlog(c_ServiceName,"******Invalid Stock Code*******");
+    	fn_errlog( c_ServiceName, "S31045", SQLMSG, c_errmsg );
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+  	else if(SQLCODE != 0)
+  	{
+    	fn_errlog( c_ServiceName, "S31050", SQLMSG, c_errmsg );
+    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+    	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  	}
+
+		if(DEBUG_MSG_LVL_3)
+  	{
+			fn_userlog(c_ServiceName,"Tick size :%d:",i_tick_sz);	
+  	}
+	}
+
+  switch(c_rqst_typ)
+  {
+    case  COVER_ORDER_LIMIT_PRICE_CALCULATION :
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"Inside COVER_ORDER_LIMIT_PRICE_CALCULATION");
+          }
+
+					if(Fget32(ptr_fml_Ibuf, FFO_STP_LSS_TGR,0,(char *)&li_stp_lss_tgr_prc,0) == -1)
+  				{
+						fn_userlog(c_ServiceName,"Error while getting input FFO_STP_LSS_TGR.");
+    				fn_errlog( c_ServiceName, "S31055", FMLMSG, c_errmsg  );
+    				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 ); 
+    				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  				}
+
+	 				/** Calculate cover order limit price. **/
+  				
+					if(c_cvr_ordr_flw == BUY ) /** Cover Order is BUY Order. **/
+  				{
+    				l_lmt_rt=fn_cal_price(c_ServiceName,li_stp_lss_tgr_prc,d_fmm_sltp_diff_prcnt,CAL_UPPER,c_xchng_cd,i_tick_sz);
+  				}
+  				else if(c_cvr_ordr_flw == SELL ) /** Cover Order is SELL Order. **/
+  				{
+    				l_lmt_rt=fn_cal_price(c_ServiceName,li_stp_lss_tgr_prc,d_fmm_sltp_diff_prcnt,CAL_LOWER,c_xchng_cd,i_tick_sz);
+  				}
+
+					if(DEBUG_MSG_LVL_3)
+  				{
+    				fn_userlog(c_ServiceName,"Input SLTP :%ld: Calculated Limit Price :%ld:",li_stp_lss_tgr_prc,l_lmt_rt);
+  				}
+	
+					/** Add to the o/p buffer.**/
+  
+					if((Fadd32(ptr_fml_Ibuf,FFO_LMT_RT, (char *)&l_lmt_rt, 0))==-1)
+  				{
+    				fn_userlog(c_ServiceName,"Error while adding Limit price to o/p buffer.");
+  					fn_errlog( c_ServiceName, "S31060", FMLMSG, c_errmsg  );
+    				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+    				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+					}
+		break;
+
+		/** Ver 2.9 starts here **/
+	
+	  case PROFIT_ORDER_LIMIT_PRICE_CALCULATION :
+
+         if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"Inside PROFIT_ORDER_LIMIT_PRICE_CALCULATION");
+          }
+
+          if(Fget32(ptr_fml_Ibuf,FFO_ORDR_RFRNC,0,(char *)&c_ordr_rfrnc,0) == -1 && Ferror32 != FNOTPRES )
+          {
+            fn_userlog( c_ServiceName," Fresh Order ref:%s:",c_ordr_rfrnc);
+            fn_userlog(c_ServiceName,"Error while getting input FFO_ORDR_RFRNC.");
+            fn_errlog( c_ServiceName, "S31065", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+           }
+
+          if(Fget32(ptr_fml_Ibuf, FFO_STP_LSS_TGR,0,(char *)&li_stp_lss_tgr_prc,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input FFO_STP_LSS_TGR.");
+            fn_errlog( c_ServiceName, "S31070", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }	
+
+					if(Fget32(ptr_fml_Ibuf,FFO_DLVRY_ALLWD,0,(char *)&c_sub_req,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input c_sub_req.");
+            fn_errlog( c_ServiceName, "S31075", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+          if(Fget32(ptr_fml_Ibuf,FFO_CHNG_OI,0,(char *)&d_prft_percntg,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input c_sub_req.");
+            fn_errlog( c_ServiceName, "S31080", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+              fn_userlog(c_ServiceName,"Stop loss triger price :%ld:",li_stp_lss_tgr_prc);
+              fn_userlog(c_ServiceName,"profit Sub request :%c:%lf: ",c_sub_req,d_prft_percntg);
+              fn_userlog(c_ServiceName,"Fresh order :%s: ",c_ordr_rfrnc);
+          }
+
+          /** Calculate Profit order limit price. **/
+			
+					if(c_sub_req == 'A')
+          {
+              if(c_cvr_ordr_flw == BUY ) /** Profit Order is BUY Order. **/
+              {
+                l_lmt_rt=fn_cal_price(c_ServiceName,li_stp_lss_tgr_prc,d_prft_sltp_prcnt,CAL_LOWER,c_xchng_cd,i_tick_sz);
+              }
+              else if(c_cvr_ordr_flw == SELL ) /** Profit Order is SELL Order. **/
+              {
+                l_lmt_rt=fn_cal_price(c_ServiceName,li_stp_lss_tgr_prc,d_prft_sltp_prcnt,CAL_UPPER,c_xchng_cd,i_tick_sz);
+              }
+          }
+          else if(c_sub_req == 'S' || c_sub_req == 'I')
+          {
+
+            EXEC SQL
+              SELECT  NVL(SUM(FTD_EXCTD_QTY * FTD_EXCTD_RT),0),
+                      NVL(SUM(FTD_EXCTD_QTY),0)
+              INTO    :d_frsh_exe_val,
+                      :li_tot_exec_qty
+              FROM    FTD_FO_TRD_DTLS
+              WHERE   FTD_ORDR_RFRNC = :c_ordr_rfrnc;
+							
+							 if( SQLCODE != 0 )
+             {
+              fn_errlog( c_ServiceName, "S31085",SQLMSG,c_errmsg);
+              Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+             }
+             d_avg_prc  = (double) (d_frsh_exe_val / li_tot_exec_qty);
+              fn_userlog(c_ServiceName,"d_avg_prc:%lf:",d_avg_prc);
+
+              if(c_cvr_ordr_flw == BUY ) /** Profit Order is BUY Order. **/
+              {
+                l_lmt_rt=fn_cal_price(c_ServiceName,d_avg_prc,d_prft_percntg,CAL_LOWER,c_xchng_cd,i_tick_sz);
+              }
+              else if(c_cvr_ordr_flw == SELL ) /** Profit Order is SELL Order. **/
+              {
+                l_lmt_rt=fn_cal_price(c_ServiceName,d_avg_prc,d_prft_percntg,CAL_UPPER,c_xchng_cd,i_tick_sz);
+              }
+          }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"Input SLTP :%ld: AVG :%lf: Calculated Limit Price of Profit Order :%ld:",li_stp_lss_tgr_prc,d_avg_prc
+,l_lmt_rt);
+          }
+
+          /** Add to the o/p buffer.**/
+				
+				if((Fadd32(ptr_fml_Ibuf,FFO_LMT_RT, (char *)&l_lmt_rt, 0))==-1)
+          {
+            fn_userlog(c_ServiceName,"Error while adding Limit price to o/p buffer.");
+            fn_errlog( c_ServiceName, "S31090", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+
+        break;
+
+    /*** Ver 2.9  Ends   ***/	
+
+
+		case	SLTPFPLUS_QUANTITY_CALCULATOR : 
+	  case	OPTIONPLUS_QUANTITY_CALCULATOR :                     /*** Added in Ver 1.1 ***/	
+				
+					i_lot = 0; /*** Ver 1.1 ***/
+					i_lot1 = 0; /*** Ver 2.4 ***/
+
+				  /** Get the Cover Order limit price, User Entered Limit from i/p buffer.**/
+					
+					if( c_rqst_typ == SLTPFPLUS_QUANTITY_CALCULATOR )    /*** Check added in Ver 1.1 ***/ 
+					{
+						if(DEBUG_MSG_LVL_3)
+          	{			
+							fn_userlog(c_ServiceName,"Inside SLTPFPLUS_QUANTITY_CALCULATOR");
+						}
+					}
+					else
+					{
+						if(DEBUG_MSG_LVL_3)
+            {
+              fn_userlog(c_ServiceName,"Inside OPTIONPLUS_QUANTITY_CALCULATOR");
+            }
+					}
+			
+					MEMSET(c_exp_date);
+				 /*** MEMSET(i_err);          ** Ver 1.6 **
+  				MEMSET(i_ferr);         ** Ver 1.6 ** Commented in Ver 1.8 ***/ 
+				
+					i_min_lot_qty = 0; /*** Ver 1.1 ***/
+		
+				  i_err[0]  = Fget32(ptr_fml_Ibuf,FFO_EFF_LMT_RT,0,(char *)&d_usr_lmt,0);/**User Entered Limit**/
+          i_ferr[0] = Ferror32;
+          i_err[1]  = Fget32(ptr_fml_Ibuf,FFO_LMT_RT,0,(char *)&l_limit_pr_temp,0);
+          i_ferr[1] = Ferror32;
+          i_err[2]  = Fget32(ptr_fml_Ibuf,FFO_STP_LSS_TGR,0,(char *)&l_trigger_pr_temp,0);
+          i_ferr[2] = Ferror32;
+          i_err[3]  = Fget32(ptr_fml_Ibuf,FFO_LIMIT,0,(char *)&d_tot_avl_limit,0);
+          i_ferr[3] = Ferror32;
+          i_err[4]  = Fget32(ptr_fml_Ibuf,FFO_EXPRY_DT,0,(char *)c_exp_date.arr,0);
+          i_ferr[4] = Ferror32;
+					i_err[5]  =Fget32(ptr_fml_Ibuf,FFO_MIN_LOT_QTY,0,(char *)&i_min_lot_qty,0);
+					i_ferr[5] = Ferror32;
+				  
+					for(i_cnt =0; i_cnt <=5; i_cnt++) 
+  				{
+    				if ( (i_err[ i_cnt ] == -1 ) )
+    				{
+      				fn_userlog( c_ServiceName, "Error in field no. [%d] ",i_cnt);
+      				fn_errlog( c_ServiceName, "S31095", Fstrerror32(i_ferr[i_cnt]),c_errmsg);
+      				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+      				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    				}
+  				}
+	
+					/** Ver 1.6 starts Here **/
+		
+					i_err[6]  =Fget32(ptr_fml_Ibuf,FFO_LMT_MKT_SL_FLG,0,(char *)&c_slm_flg,0);          
+          i_ferr[6] = Ferror32;
+
+  				if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  				{
+						fn_userlog( c_ServiceName, "c_slm_flg ...........................[%c] ",c_slm_flg);
+					}
+
+					if( (i_err[ 6 ] == -1 ) && i_ferr[6] != FNOTPRES )
+					{
+						fn_userlog( c_ServiceName, "Error in field no. [%d] ",i_cnt);
+            fn_errlog( c_ServiceName, "S31100", Fstrerror32(i_ferr[i_cnt]),c_errmsg);
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+					}	
+			
+					if(c_slm_flg == 'L')
+					{
+						i_err[7]  =Fget32(ptr_fml_Ibuf,FFO_OPNPSTN_RT,0,(char *)&l_limit_rt,0);               
+          	i_ferr[7] = Ferror32;
+					  if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{	
+							fn_userlog( c_ServiceName, "l_limit_rt................... [%ld] ",l_limit_rt);	
+						}
+
+						if ( (i_err[ 7 ] == -1 ) )
+            {
+              fn_userlog( c_ServiceName, "Error in field no. [%d] ",i_cnt);
+              fn_errlog( c_ServiceName, "S31105", Fstrerror32(i_ferr[i_cnt]),c_errmsg);
+              Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            }			
+					}
+
+				/** Ver 1.6 Ends Here **/	
+						
+					SETLEN(c_exp_date);
+				
+					d_limit_pr = (double) l_limit_pr_temp / 100;
+
+					d_trigger_pr = (double) l_trigger_pr_temp / 100;			
+	
+					d_lmt_rt_pr = (double) l_limit_rt / 100;                                                /** Ver 1.6 **/				
+
+					if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog( c_ServiceName,"Input from front-end:");
+            fn_userlog( c_ServiceName,"User entered limit amount :%lf:",d_usr_lmt);
+            fn_userlog( c_ServiceName,"Cover order limit price :%lf:",d_limit_pr);
+            fn_userlog( c_ServiceName,"Cover order trigger price :%lf:",d_trigger_pr);
+            fn_userlog( c_ServiceName,"Match Account :%s:",c_mtch_accnt_no);
+            fn_userlog( c_ServiceName,"Expiry Date :%s",c_exp_date.arr);
+						fn_userlog(c_ServiceName,"Min Lot Qty [%d]",i_min_lot_qty) ;
+						fn_userlog(c_ServiceName,"SLM flag	:%c:",c_slm_flg);
+						fn_userlog(c_ServiceName,"Fresh order Limit rate :%lf:",d_lmt_rt_pr);
+          }
+						
+					if( d_limit_pr == 0 && d_trigger_pr == 0)
+          {
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{	
+							fn_userlog( c_ServiceName,"Limit and SLTP Price can not be ZERO.");
+						}
+						fn_errlog( c_ServiceName, "S31110", SQLMSG, c_errmsg );
+						Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+						tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+	
+					 if(c_slm_flg == 'L' && d_lmt_rt_pr == 0)                      /** Ver 1.6 **/
+          {
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{
+            	fn_userlog( c_ServiceName,"Limit price can not be zero for fresh order if request type is 'LIMIT'.");
+            }
+
+						fn_errlog( c_ServiceName, "S31115", SQLMSG, c_errmsg );
+            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+					}		
+			
+          /** Get LTP for the given exchange and stock. **/
+          EXEC SQL
+					  		SELECT  FTQ_LST_TRD_PRC,
+												FTQ_BST1_OFFR_PRC,
+												FTQ_BST1_BID_PRC,
+												NVL(FTQ_SPN_PER_LOT,0), /*** Ver 2.5 ***/
+											  NVL(FTQ_SPN_PER_LOT_B,0) /*** Ver 3.0 ***/
+         				INTO    :d_ltp,
+												:d_bst_offr_prc,
+												:d_bst_bid_prc,
+									      :d_spn_per_lot,	 /*** Ver 2.5 ***/
+												:d_spn_per_lot_B  /*** Ver 3.0 ***/
+         				FROM    FTQ_FO_TRD_QT
+         				WHERE   FTQ_XCHNG_CD = :c_xchng_cd
+         				/*** AND     FTQ_PRDCT_TYP = 'F'  ** Commented in Ver 1.1 ***/
+								AND 		FTQ_PRDCT_TYP = decode(:c_prd_typ,'I','O','F')                    /*** Ver 1.1 ***/
+         				AND     FTQ_UNDRLYNG  = :c_undrlyng
+         				AND     FTQ_EXPRY_DT  = :c_exp_date
+        		/**	AND     FTQ_EXER_TYP  = 'E'							Commented In Ver 2.3	***/
+         				AND     FTQ_EXER_TYP  = :c_exercs_typ		/***	Ver 2.3	***/
+         				/*** AND     FTQ_OPT_TYP   = '*'
+         				** AND     FTQ_STRK_PRC  = '0'          *** Commented in Ver 1.1 ***/
+								AND     FTQ_OPT_TYP   = :c_opt_typ								/*** Ver 1.1 ***/
+								AND     FTQ_STRK_PRC  = :l_strike_prc;						/*** Ver 1.1 ***/
+				
+					
+          if(SQLCODE != 0)
+          {
+            fn_userlog( c_ServiceName,"Error while getting LTP.");
+						fn_errlog( c_ServiceName, "S31120", SQLMSG, c_errmsg );
+						Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+						tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+					
+					/* Converting LTP in Rs */
+
+          d_ltp = d_ltp /100;
+					d_bst_offr_prc = d_bst_offr_prc / 100;
+					d_bst_bid_prc  = d_bst_bid_prc  / 100;
+			
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog( c_ServiceName,"Last Traded Price(LTP) :%lf:",d_ltp);
+          }
+					
+          /** Check the LTP-SLTP and Limt price-SLTP relation. **/
+          if(c_cvr_ordr_flw == BUY)
+          {
+            if( d_trigger_pr > d_limit_pr )
+            {
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+              	fn_userlog( c_ServiceName,"BUY order - Trigger price > Limit price.");
+              }
+
+							fn_errlog(c_ServiceName, "B28524", DEFMSG, c_errmsg ); 
+							Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+            }
+            if( d_trigger_pr < d_ltp )
+            {
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+              	fn_userlog( c_ServiceName,"BUY order - Trigger price < LTP.");
+              }
+
+							fn_errlog(c_ServiceName, "B22009", DEFMSG, c_errmsg ); 
+							Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            	tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+            }
+          }
+          else if (c_cvr_ordr_flw == SELL )
+          {
+            if( d_trigger_pr < d_limit_pr )
+            {
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+              	fn_userlog( c_ServiceName,"SELL order - Trigger price < Limit price.");
+              }
+
+							fn_errlog(c_ServiceName, "B28525", DEFMSG, c_errmsg ); 
+							Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+            }
+            if( d_trigger_pr > d_ltp )
+            {
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+ 			 				{
+              	fn_userlog( c_ServiceName,"SELL order - Trigger price > LTP.");
+              }
+
+							fn_errlog(c_ServiceName, "B22010", DEFMSG, c_errmsg ); 
+							Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+            }
+          }
+				
+					if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog( c_ServiceName,"Available Cash Limit :%lf:",d_tot_avl_limit);
+            fn_userlog( c_ServiceName,"User Entered Cash Limit :%lf:",d_usr_lmt);
+          }
+	
+					/*** Ver 1.6 starts from here ***/
+          /** Check the LTP-SLTP and Limt price-SLTP relation for Limit fresh order in SLTP Future Plus. **/
+          if(c_slm_flg == 'L' && c_cvr_ordr_flw == BUY)
+          {
+            if( d_trigger_pr < d_lmt_rt_pr )
+            {
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+              	fn_userlog( c_ServiceName,"BUY order - Trigger price and Limit price of cover order must be greter than Limit price of fresh SELL order."); 
+              }
+							fn_errlog(c_ServiceName, "B28524", DEFMSG, c_errmsg );
+              Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+            }
+	      	}
+          else if(c_slm_flg == 'L' && c_cvr_ordr_flw == SELL )
+          {
+            if( d_trigger_pr > d_lmt_rt_pr )
+            {
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+              	fn_userlog( c_ServiceName,"BUY order - Trigger price and Limit price of cover order must be greter than Limit price of fresh SELL order."); 
+              }
+
+							fn_errlog(c_ServiceName, "B28524", DEFMSG, c_errmsg );
+              Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+            }
+          }
+          /*** Ver 1.6 Ends here ***/		
+							
+					if( (d_usr_lmt - d_tot_avl_limit) > 0.000001 )
+          {
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{
+            	fn_userlog( c_ServiceName,"User entered limit amount is greater than available limit.");
+            }
+
+						fn_errlog(c_ServiceName, "B23022", DEFMSG, c_errmsg ); 
+						Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+					
+					if(c_slm_flg == 'L')        /*** if() added in Ver 1.6 ***/
+          {
+            /** Get 100% of the entered or total available amount. **/
+            if(d_usr_lmt == 0)
+            {
+              d_lmt = d_tot_avl_limit;
+            }
+            else
+            {
+              d_lmt = d_usr_lmt;
+            }
+          }
+          else
+          {
+						/** Get 99% of the entered or total available amount. **/
+     				if (d_usr_lmt == 0)
+     				{
+       				d_99_lmt = d_tot_avl_limit * 99/100;
+     				}
+     				else
+     				{
+     	     	/** Get 99% of the entered amount. **/
+          		d_99_lmt = d_usr_lmt * 99/100;
+						}
+					}
+
+						if( c_prd_typ == 'U' )        /*** if-esle condition added in Ver 1.1 ***/
+						{
+							if(c_slm_flg == 'M')
+							{
+								if (c_cvr_ordr_flw == SELL  )  /** Fresh Order flow is 'BUY' **/
+          			{
+									i_lot = (long)trunc(( d_99_lmt / ((d_bst_offr_prc  * d_fmm_sltp_prcnt / 100) + (d_bst_offr_prc - d_limit_pr)) ) / i_min_lot_qty);   /* itrunc to (long)trunc in ver TOL */
+									/*** Ver 2.4 starts ***/
+									/*** i_lot1 =  itrunc(( d_99_lmt / (d_bst_offr_prc  * d_xchng_prcnt / 100) ) / i_min_lot_qty); ***commented in Ver 3.0 ***/
+				
+									/*** Ver 3.0 starts ***/
+									/** FORMULA: FPSL SEBI% * (SPAN + EXPOSURE) **/	
+
+									i_lot1 = (long)trunc( d_99_lmt / 
+																	( d_xchng_prcnt/100 *
+                 										(
+                  										d_spn_per_lot_B/100 +
+                  										( i_min_lot_qty * d_bst_offr_prc * d_expr_prcnt/100 )
+                 										)
+                									)
+																 );
+ 									/*** Ver 3.0 ends ***/
+
+									if (i_lot1 < i_lot)
+									{
+										i_lot = i_lot1;
+									}
+									/*** Ver 2.4 ends ***/
+								}
+								else    /** Fresh Order flow is 'SELL' **/
+          			{
+									i_lot = (long)trunc(( d_99_lmt / ((d_bst_bid_prc * d_fmm_sltp_prcnt / 100) + (d_limit_pr - d_bst_bid_prc)) ) / i_min_lot_qty);  /* itrunc to (long)trunc in ver TOL */
+									/*** Ver 2.4 starts ***/
+									/*** i_lot1 =  itrunc(( d_99_lmt / (d_bst_bid_prc  * d_xchng_prcnt / 100) ) / i_min_lot_qty); ***commented in Ver 3.0 ***/
+
+                  /*** Ver 3.0 starts ***/
+                  /** FORMULA: FPSL SEBI% * (SPAN + EXPOSURE) **/
+
+                  i_lot1 = (long)trunc( d_99_lmt /
+                                  ( d_xchng_prcnt/100 *
+                                    (
+                                       d_spn_per_lot/100 +
+                                      ( i_min_lot_qty * d_bst_bid_prc * d_expr_prcnt/100 )
+                                    )
+                                  )
+                                 );  /* itrunc to (long)trunc in ver TOL */
+                  /*** Ver 3.0 ends ***/ 
+
+									if (i_lot1 < i_lot)
+									{
+										i_lot = i_lot1;
+									}
+									/*** Ver 2.4 ends ***/
+								}
+							}
+							else if(c_slm_flg == 'L')																										/** Ver 1.6 **/
+							{
+								if (c_cvr_ordr_flw == SELL  )  /** Fresh Order flow is 'BUY' **/
+              	{
+  									if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  									{
+                			fn_userlog( c_ServiceName, "d_lmt--------[%lf]",d_lmt);
+											fn_userlog( c_ServiceName, "d_lmt_rt_pr---------[%lf]",d_lmt_rt_pr);
+										}
+
+                    if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+                    {
+											fn_userlog( c_ServiceName, "d_fmm_sltp_prcnt-------------[%lf]",d_fmm_sltp_prcnt);
+											fn_userlog( c_ServiceName, "d_limit_pr------------------[%lf]",d_limit_pr);	
+										}
+		
+										i_lot = (long)trunc((d_lmt / ((d_lmt_rt_pr *  d_fmm_sltp_prcnt / 100) + (d_lmt_rt_pr - d_limit_pr)) ) / i_min_lot_qty);  /* itrunc to (long)trunc in ver TOL */
+										/*** Ver 2.4 starts ***/
+										/*** i_lot1 =  itrunc(( d_lmt / (d_lmt_rt_pr  * d_xchng_prcnt / 100) ) / i_min_lot_qty);  ** commented in Ver 3.0 ***/
+
+                  	/*** Ver 3.0 starts ***/
+                  	/** FORMULA: FPSL SEBI% * (SPAN + EXPOSURE) **/
+
+                  	i_lot1 = (long)trunc( d_lmt /
+                                  ( d_xchng_prcnt/100 *
+                                    (
+                                      d_spn_per_lot_B/100 +
+                                      ( i_min_lot_qty * d_lmt_rt_pr * d_expr_prcnt/100 )
+                                    )
+                                  )
+                                 );  /* itrunc to (long)trunc in ver TOL */
+										 fn_userlog( c_ServiceName, "i_lot=%d i_lot1:%d:",i_lot,i_lot1);
+
+                  	/*** Ver 3.0 ends ***/
+
+										if (i_lot1 < i_lot)
+										{
+											i_lot = i_lot1;
+										}
+										/*** Ver 2.4 ends ***/
+              	}
+              	else    /** Fresh Order flow is 'SELL' **/
+              	{
+                	i_lot = (long)trunc((d_lmt / ((d_lmt_rt_pr *  d_fmm_sltp_prcnt / 100) + (d_limit_pr - d_lmt_rt_pr)) ) / i_min_lot_qty);  /* itrunc to (long)trunc in ver TOL */
+									/*** Ver 2.4 starts ***/
+									/*** i_lot1 =  itrunc(( d_lmt / (d_lmt_rt_pr  * d_xchng_prcnt / 100) ) / i_min_lot_qty); ***commented in Ver 3.0 ***/
+
+                  /*** Ver 3.0 starts ***/
+                  /** FORMULA: FPSL SEBI% * (SPAN + EXPOSURE) **/
+
+                  i_lot1 = (long)trunc( d_lmt /
+	                                ( d_xchng_prcnt/100 *
+                                    (
+                                      d_spn_per_lot/100 +
+                                      ( i_min_lot_qty * d_lmt_rt_pr * d_expr_prcnt/100 )
+                                    )
+                                  )
+                                 );  /* itrunc to (long)trunc in ver TOL */
+                   /*** Ver 3.0 ends ***/
+
+									if (i_lot1 < i_lot)
+									{
+										i_lot = i_lot1;
+									}
+									/*** Ver 2.4 ends ***/
+              	}
+							}
+						}
+					else if( c_prd_typ == 'I' )							/*** Ver 1.1 ** Starts ***/
+					{
+						EXEC SQL
+            		SELECT NVL(FRM_DIFFRNC_MRGN,0)			/***	Ver 2.3 Hard Parsing Changes	***/
+            		INTO   :d_frm_diffrnc_mrgn
+            		FROM   FRM_FO_RANGE_MSTR
+            		WHERE  FRM_XCHNG_CD = :c_xchng_cd
+            		AND    FRM_UNDRLYNG = :c_undrlyng
+            		AND    FRM_ORDR_FLOW = decode(:c_cvr_ordr_flw,'S','B','S')
+            		AND    FRM_FROM_RANGE <= :l_trigger_pr_temp 
+								AND    :l_trigger_pr_temp		< FRM_TO_RANGE; 
+
+          	if ( SQLCODE  !=  0  && SQLCODE != NO_DATA_FOUND)
+          	{
+            	fn_errlog( c_ServiceName, "S31125",SQLMSG,c_errmsg);
+            	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+            	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          	}
+
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{
+							fn_userlog(c_ServiceName,"d_frm_diffrnc_mrgn  :%lf:", d_frm_diffrnc_mrgn);
+							fn_userlog(c_ServiceName,"d_lmt_rt_pr   :%lf:",d_lmt_rt_pr);
+						}
+
+	
+						/*** Ver 2.5 starts ***
+
+						EXEC SQL
+            SELECT NVL(FTQ_SPN_PER_LOT,0),
+                   NVL(FTQ_MIN_LOT_QTY,0)
+            INTO   :d_spn_per_lot,
+                   :l_lot_sz
+            FROM   FTQ_FO_TRD_QT
+            WHERE  FTQ_XCHNG_CD = :c_xchng_cd
+            AND    FTQ_UNDRLYNG = :c_undrlyng
+            AND    FTQ_PRDCT_TYP = decode(:c_prd_typ,'I','O','F')
+            AND    trunc(FTQ_EXPRY_DT) = :c_exp_date
+            AND    FTQ_STRK_PRC = :l_strike_prc
+            AND    FTQ_EXER_TYP = :c_exrc_typ
+            AND    FTQ_OPT_TYP = :c_opt_typ;
+
+            if ( SQLCODE  !=  0 )
+            {
+              fn_errlog( c_ServiceName, "S31130",SQLMSG,c_errmsg);
+              Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            }
+						****/
+
+						/*** Ver 2.5 starts ***/
+					  EXEC SQL
+              SELECT  NVL(LTQ_RT,0.0) * 100,  /*** Ver 3.0 NVL added ***/
+										  NVL(LTQ_PREV_CLS_PRC,0.0) * 100		 /*** ver 3.0 ***/
+              INTO    :d_spot,
+											:d_prev_und_quote								/*** Ver 3.0 ***/
+              FROM    LTQ_TRD_QT  
+              WHERE   LTQ_XCHNG_CD  = decode(:c_xchng_cd,'BFO','BSE','NSE')
+              AND     LTQ_STCK_CD   = :c_undrlyng;
+
+            if ( SQLCODE  !=  0 )
+            {
+              fn_errlog( c_ServiceName, "S31135",SQLMSG,c_errmsg);
+              Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            }
+
+						fn_userlog(c_ServiceName,"SPAN PER LOT:%lf: SPOT:%lf: PREV SPOT:%lf:",d_spn_per_lot,d_spot,d_prev_und_quote); /*** Ver 3.0 ***/
+						/*** Ver 2.5 ends ***/
+
+					 /*** Ver 2.5 starts ***/
+					 d_mrgn_amt =  (double) i_min_lot_qty * d_op_flat_rt;  /*** qty cal computation is in Rs...flat rate is saved in Rs in DB ***/
+					 d_spn_mrgn = d_spn_per_lot/100;
+           d_expr_mrgn = (double)i_min_lot_qty * fn_maxd(d_spot,d_prev_und_quote)/100  * (d_expr_prcnt/100); /*** Max with prev closing taken in Ver 3.0 ***/
+           d_xchng_amt = d_sop_sebi_prcnt/100 * (d_spn_mrgn + d_expr_mrgn) ;
+
+					 /*** Ver 2.5 ends ***/
+
+						if(c_slm_flg == 'M')      /*** if() added in Ver 1.8 ***/
+            {
+							if (c_cvr_ordr_flw == SELL  )  /** Fresh Order flow is 'BUY' **/
+            	{
+								if( d_frm_diffrnc_mrgn < 100 && d_frm_diffrnc_mrgn != -1 )
+            		{
+              		/*** i_lot = itrunc(( d_99_lmt / ((d_bst_offr_prc  * d_fmm_sltp_prcnt / 100) + (d_bst_offr_prc - d_limit_pr)) ) / i_min_lot_qty); *** commented in Ver 2.5 ***/
+									
+								 d_lss_amt =  (double) i_min_lot_qty * (d_bst_offr_prc - d_limit_pr); /*** Ver 2.5 ***/
+			           d_xchng_amt = ( (double) i_min_lot_qty * d_bst_offr_prc * d_bop_sebi_prcnt) /100; /*** Ver 2.5 ***/
+			 					 d_prem_amt =  (double) i_min_lot_qty * d_bst_offr_prc; /*** Ver 2.5 ***/
+
+								 fn_userlog(c_ServiceName,"1 MKT FRSH BUY MRGN:%lf: LOSS:%lf: OFFER PRC:%lf: LMT RT:%lf: QTY:%d: B_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_bst_offr_prc,d_limit_pr,i_min_lot_qty,d_bop_sebi_prcnt); /*** Ver 2.5 ***/
+
+								}
+								else if ( d_frm_diffrnc_mrgn == 100 )
+            		{
+									/*** i_lot = itrunc(( d_99_lmt / ((d_bst_offr_prc  * d_fmm_sltp_prcnt / 100) + (d_bst_offr_prc)) ) / i_min_lot_qty); *** commented in Ver 2.5 ***/
+									d_lss_amt =  (double) i_min_lot_qty * (d_bst_offr_prc); /*** Ver 2.5 ***/
+			            d_xchng_amt = ( (double) i_min_lot_qty * d_bst_offr_prc * d_bop_sebi_prcnt) /100; /*** Ver 2.5 ***/
+			 					  d_prem_amt =  (double) i_min_lot_qty * d_bst_offr_prc; /*** Ver 2.5 ***/
+
+									fn_userlog(c_ServiceName,"2 MKT FRSH BUY MRGN:%lf: LOSS:%lf: OFFER PRC:%lf: LMT RT:%lf: QTY:%d: B_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_bst_offr_prc,d_limit_pr,i_min_lot_qty,d_bop_sebi_prcnt); /*** Ver 2.5 ***/
+
+								}
+            	}
+            	else    /** Fresh Order flow is 'SELL' **/
+            	{
+              	/*** i_lot = itrunc(( d_99_lmt / ((d_bst_bid_prc * d_fmm_sltp_prcnt / 100) + (d_limit_pr - d_bst_bid_prc)) ) / i_min_lot_qty); *** commented in Ver 2.5 ***/
+							   d_lss_amt =  (double) i_min_lot_qty * (d_limit_pr - d_bst_bid_prc); /*** Ver 2.5 ***/
+
+								 fn_userlog(c_ServiceName,"MKT SELL MRGN:%lf: LOSS:%lf: FRS_PRC:%lf: LMT RT:%lf: QTY:%d: S_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_bst_bid_prc,d_limit_pr,i_min_lot_qty,d_sop_sebi_prcnt);/*** Ver 2.5 ***/
+
+            	}
+					  }     /*** Ver 1.1 ** Ends ***/
+						else if(c_slm_flg == 'L')							/**** Ver 1.8 Starts Here ****/						
+            {
+              if (c_cvr_ordr_flw == SELL  )  /** Fresh Order flow is 'BUY' **/
+              {
+                if( d_frm_diffrnc_mrgn < 100 && d_frm_diffrnc_mrgn != -1 )
+                {
+                  /*** i_lot = itrunc((d_lmt / ((d_lmt_rt_pr *  d_fmm_sltp_prcnt / 100) + (d_lmt_rt_pr - d_limit_pr)) ) / i_min_lot_qty); *** commented in Ver 2.5 ***/
+									d_lss_amt =  (double) i_min_lot_qty * (d_lmt_rt_pr - d_limit_pr); /*** Ver 2.5 ***/
+			            d_xchng_amt = ( (double) i_min_lot_qty * d_lmt_rt_pr * d_bop_sebi_prcnt) /100; /*** Ver 2.5 ***/
+			 					  d_prem_amt =  (double) i_min_lot_qty * d_lmt_rt_pr; /*** Ver 2.5 ***/
+
+									fn_userlog(c_ServiceName,"1 LMT FRSH BUY MRGN:%lf: LOSS:%lf: FRSH LMT:%lf: LMT RT:%lf: QTY:%d: B_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_lmt_rt_pr,d_limit_pr,i_min_lot_qty,d_bop_sebi_prcnt); /*** Ver 2.5 ***/
+                }
+                else if ( d_frm_diffrnc_mrgn == 100 )
+                {
+                  /*** i_lot = itrunc((d_lmt / ((d_lmt_rt_pr *  d_fmm_sltp_prcnt / 100) + (d_lmt_rt_pr)) ) / i_min_lot_qty); *** commented in Ver 2.5 ***/
+									d_lss_amt =  (double) i_min_lot_qty * (d_lmt_rt_pr); /*** Ver 2.5 ***/
+			            d_xchng_amt = ( (double) i_min_lot_qty * d_lmt_rt_pr * d_bop_sebi_prcnt) /100; /*** Ver 2.5 ***/
+			 					  d_prem_amt =  (double) i_min_lot_qty * d_lmt_rt_pr; /*** Ver 2.5 ***/
+
+									fn_userlog(c_ServiceName,"2 LMT FRSH BUY MRGN:%lf: LOSS:%lf: FRSH LMT:%lf: LMT RT:%lf: QTY:%d: B_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_lmt_rt_pr,d_limit_pr,i_min_lot_qty,d_bop_sebi_prcnt); /*** Ver 2.5 ***/
+
+                }
+              }
+              else    /** Fresh Order flow is 'SELL' **/
+              {
+                /*** i_lot = itrunc((d_lmt / ((d_lmt_rt_pr *  d_fmm_sltp_prcnt / 100) + (d_limit_pr - d_lmt_rt_pr)) ) / i_min_lot_qty); *** commented in Ver 2.5 ***/
+								 
+								 d_lss_amt =  (double) i_min_lot_qty * (d_limit_pr - d_lmt_rt_pr); /*** Ver 2.5 ***/
+								 fn_userlog(c_ServiceName,"LMT SELL MRGN:%lf: LOSS:%lf: FRS_PRC:%lf: LMT RT:%lf: QTY:%d: S_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_lmt_rt_pr,d_limit_pr,i_min_lot_qty,d_sop_sebi_prcnt);/*** Ver 2.5 ***/
+
+              }
+            }
+
+						fn_userlog(c_ServiceName,"PREM:%lf:d_xchng_amt:%lf: SPN:%lf: EXP:%lf: ",d_prem_amt,d_xchng_amt,d_spn_mrgn,d_expr_mrgn); /*** Ver 2.5 ***/
+
+						if (c_cvr_ordr_flw == SELL  )  /** Fresh Order flow is 'BUY' **/
+						{
+						 if ( d_xchng_amt > (d_mrgn_amt + d_lss_amt) ) /*** Taking Max component ***/
+							{
+								if ( d_xchng_amt < d_prem_amt)   /*** Taking Min component ***/
+								{
+									d_lss_amt = d_xchng_amt;
+									d_mrgn_amt = 0.0;
+								}
+								else
+								{
+									d_lss_amt = d_prem_amt;
+									d_mrgn_amt = 0.0;
+								}
+							}
+							else
+							{
+								if ( (d_lss_amt + d_mrgn_amt) < d_prem_amt)  /*** Taking Min component ***/
+								{
+									d_lss_amt = (d_lss_amt + d_mrgn_amt);
+									d_mrgn_amt = 0.0;
+								}
+								else
+								{
+									d_lss_amt = d_prem_amt;
+									d_mrgn_amt = 0.0;
+								}
+							}
+						}
+					 else
+					 {
+							if ( d_xchng_amt > (d_mrgn_amt + d_lss_amt) ) /*** Taking Max component ***/
+							{
+									d_lss_amt = d_xchng_amt;
+									d_mrgn_amt = 0.0;
+							}
+							else
+							{
+									d_lss_amt = (d_lss_amt + d_mrgn_amt);
+									d_mrgn_amt = 0.0;
+							}
+					 }
+
+					if(c_slm_flg == 'M')
+					{
+						i_lot = (long)trunc( d_99_lmt / d_lss_amt );   /* itrunc to (long)trunc in ver TOL */
+					}
+					else
+					{
+						i_lot = (long)trunc( d_lmt / d_lss_amt );   /* itrunc to (long)trunc in ver TOL */
+					}
+
+					fn_userlog(c_ServiceName,"FINAL LOSS AMT:%lf: 99LMT=:%lf: TOT_LMT=:%lf: I_LOT=:%d:",d_lss_amt,d_99_lmt,d_lmt,i_lot);
+
+					/*** Ver 2.5 Ends ***/
+
+					/**** Ver 1.8 Ends Here ****/	
+					}
+	  			if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  				{
+						fn_userlog(c_ServiceName,"Val of i_lot  :<%d>",i_lot);
+					}
+
+     			i_qty = 0; /*** Ver 1.1 ***/
+					i_qty = i_lot * i_min_lot_qty; 
+
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog( c_ServiceName,"Last Traded Price(LTP) :%lf:",d_ltp);
+            fn_userlog( c_ServiceName,"Cover Order Limit Price:%lf:",d_limit_pr);
+            fn_userlog( c_ServiceName,"Best Offer Price       :%lf:",d_bst_offr_prc);
+            fn_userlog( c_ServiceName,"Best Bid Price         :%lf:",d_bst_bid_prc);
+            fn_userlog( c_ServiceName,"99 prcnt of limit      :%lf:",d_99_lmt);
+						fn_userlog( c_ServiceName,"100 prcnt of limit      :%lf:",d_lmt);
+            fn_userlog( c_ServiceName,"Derived Quantity       :%d:",i_qty);
+          }
+				
+					/** Check if derived quantity is ZERo. **/
+          if( i_qty <=  0 )
+          {
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{
+            	fn_userlog( c_ServiceName,"Derived Quantity is ZERO.");
+            }
+
+						fn_errlog(c_ServiceName, "B23025", DEFMSG, c_errmsg ); 
+						Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+
+          /**Return Quantity in o/p buffer. **/
+
+          if((Fadd32(ptr_fml_Ibuf,FFO_AVL_QTY, (char *)&i_qty, 0))==-1)
+          {
+            fn_userlog( c_ServiceName,"Error while adding Quantity to o/p buffer.");
+						fn_errlog( c_ServiceName, "S31140", FMLMSG, c_errmsg  );
+						Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+
+    break;
+
+		/*** Ver 1.1 ** Starts ***/
+
+		case 	COVER_ORDER_LIMIT_PRICE_CALCULATION_OPTIONPLUS :
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"Inside COVER_ORDER_LIMIT_PRICE_CALCULATION_OPTIONPLUS");
+          }
+
+          if(Fget32(ptr_fml_Ibuf, FFO_STP_LSS_TGR,0,(char *)&li_stp_lss_tgr_prc,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input FFO_STP_LSS_TGR.");
+            fn_errlog( c_ServiceName, "S31145", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+	
+					if(Fget32(ptr_fml_Ibuf,FFO_EXPRY_DT,0,(char *)c_exp_date.arr,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input FFO_EXPRY_DT.");
+            fn_errlog( c_ServiceName, "S31150", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+
+					/*** Ver 1.3 Flag to identify whether call is from placement or modification ***/
+					if(Fget32(ptr_fml_Ibuf,FFO_SOURCE_FLG,0,(char *)&c_source_flg,0) == -1)
+          {
+						if ( Ferror32 != FNOTPRES )
+						{
+							fn_userlog(c_ServiceName,"Error while getting input FFO_SOURCE_FLG.");
+							fn_errlog( c_ServiceName, "S31155", FMLMSG, c_errmsg  );
+							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+						}
+          }
+					/*** Ver 1.3 ends ***/
+
+					SETLEN(c_exp_date);
+
+  				if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				{
+						fn_userlog( c_ServiceName,"Expiry Date :%s",c_exp_date.arr);
+					}
+	
+          /** Get LTP for the given exchange and stock. **/
+          EXEC SQL
+                SELECT  FTQ_LST_TRD_PRC
+                INTO    :d_ltp
+                FROM    FTQ_FO_TRD_QT
+                WHERE   FTQ_XCHNG_CD = :c_xchng_cd
+                AND     FTQ_PRDCT_TYP = :c_opt_prd_typ		/***  Ver 2.3 Hard code Value changed with bind variable  ***/
+                AND     FTQ_UNDRLYNG  = :c_undrlyng
+                AND     FTQ_EXPRY_DT  = :c_exp_date
+                AND     FTQ_EXER_TYP  = :c_exercs_typ			/***	Ver 2.3 Hard code Value changed with bind variable	***/
+                AND     FTQ_OPT_TYP   = :c_opt_typ
+                AND     FTQ_STRK_PRC  = :l_strike_prc;
+
+
+          if(SQLCODE != 0)
+          {
+            fn_userlog( c_ServiceName,"Error while getting LTP.");
+            fn_errlog( c_ServiceName, "S31160", SQLMSG, c_errmsg );
+            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+
+  				if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				{
+			    	fn_userlog(c_ServiceName,"li_stp_lss_tgr_prc  :%ld:", li_stp_lss_tgr_prc);
+					}
+
+					EXEC SQL
+      				SELECT 	NVL(FRM_DIFFRNC_MRGN,0),			/*** Ver 2.3 nvl changed to NVL ***/
+             					NVL(FRM_MINIMUM_SLTP,0),
+											FRM_FROM_RANGE/100,
+                      FRM_TO_RANGE/100
+      				INTO   	:d_frm_diffrnc_mrgn,
+             					:l_minimum_sltp,
+											:d_frm_rng,
+                  		:d_to_rng
+      				FROM   FRM_FO_RANGE_MSTR
+      				WHERE  FRM_XCHNG_CD = :c_xchng_cd
+      				AND    FRM_UNDRLYNG = :c_undrlyng
+      				AND    FRM_ORDR_FLOW = decode(:c_cvr_ordr_flw,'S','B','S') 
+							AND    FRM_FROM_RANGE <= :li_stp_lss_tgr_prc
+              AND    :li_stp_lss_tgr_prc   < FRM_TO_RANGE;
+
+  				if ( SQLCODE  !=  0  && SQLCODE != NO_DATA_FOUND )
+  				{
+            fn_userlog( c_ServiceName,"Error while getting Range.");
+            fn_errlog( c_ServiceName, "S31165", SQLMSG, c_errmsg );
+            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+  				}
+          else if ( SQLCODE == NO_DATA_FOUND )
+          {
+            fn_userlog( c_ServiceName,"No data found in range master.");
+            fn_errlog( c_ServiceName, "S31170", "Order Not Allowed To Place.", c_errmsg );
+						strcpy(c_errmsg,"Orders cannot be accepted for SLTP Out Off Range.");
+            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }					
+
+          l_frm_cutoff_premium = 0 ;
+
+          EXEC SQL
+           SELECT DISTINCT(NVL(FRM_CUTOFF_PREMIUM,0))
+           INTO   :l_frm_cutoff_premium
+           FROM   FRM_FO_RANGE_MSTR
+           WHERE  FRM_XCHNG_CD     =:c_xchng_cd
+           AND    FRM_UNDRLYNG     =:c_undrlyng
+           AND    FRM_CUTOFF_PREMIUM IS NOT NULL;
+
+					 if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND )
+           {
+             fn_errlog( c_ServiceName, "S31175", SQLMSG, c_errmsg);
+						 Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+             Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+             tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+					 }
+
+  				if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				{
+  					fn_userlog(c_ServiceName,"d_frm_diffrnc_mrgn  :%lf:", d_frm_diffrnc_mrgn);
+  					fn_userlog(c_ServiceName,"l_minimum_sltp      :%ld:",  l_minimum_sltp);
+  					fn_userlog(c_ServiceName,"l_frm_cutoff_premium  :%ld:",  l_frm_cutoff_premium);
+						fn_userlog(c_ServiceName,"d_frm_rng 					 :%lf:", d_frm_rng);
+						fn_userlog(c_ServiceName,"d_to_rng            :%lf:", d_to_rng);
+
+						fn_userlog(c_ServiceName,"Inside d_frm_diffrnc_mrgn not equal to zero condition");
+					}
+
+         	l_sltp_lmt_diff = (long) (li_stp_lss_tgr_prc * d_frm_diffrnc_mrgn/100);
+
+					if(c_cvr_ordr_flw == SELL ) /** Fresh Order is BUY Order. **/
+					{
+						d_limit_diff = l_sltp_lmt_diff;
+					}
+					else if(c_cvr_ordr_flw == BUY ) /** Fresh Order is SELL Order. **/
+					{
+         	 l_lmt_diff =  l_minimum_sltp;
+         	 l_max_limit_diff = fn_max(c_ServiceName, l_sltp_lmt_diff, l_lmt_diff);
+  				 if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				 {
+         	 	 fn_userlog( c_ServiceName," SLTP price *  Difference Margin : l_sltp_lmt_diff: :%ld:",l_sltp_lmt_diff);
+         	 	 fn_userlog( c_ServiceName," Minimum l_lmt_diff :%ld:",l_lmt_diff);
+         	 	 fn_userlog( c_ServiceName," fn_max :l_max_limit_diff:  :%ld:",l_max_limit_diff);
+         	 }
+
+						d_limit_diff = (double) l_max_limit_diff;
+					}
+
+  				if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  				{
+				  	fn_userlog(c_ServiceName,"c_source_flg :%c:",c_source_flg); /*** Ver 1.8 ***/
+					}
+
+					/** Calculate cover order limit price. **/
+					/*** Ver 1.8 Starts from here ***/
+
+					if(c_source_flg == 'M')
+					{
+          	if(Fget32(ptr_fml_Ibuf,FFO_ORDR_RFRNC,0,(char *)&c_ordr_rfrnc,0) == -1)
+						{
+						  fn_userlog( c_ServiceName," Cover Order ref:%s:",c_ordr_rfrnc);	
+            	fn_userlog(c_ServiceName,"Error while getting input FFO_ORDR_RFRNC.");
+            	fn_errlog( c_ServiceName, "S31180", FMLMSG, c_errmsg  );
+            	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          	}
+
+						EXEC SQL
+           			 SELECT FOD_ORDR_STTS,
+												FOD_SLTP_ORDR_RFRNC			/***	Ver 2.3 Hard Parsing Changes	***/
+             		 	 INTO :c_cvr_ordr_stts,
+												:c_frsh_ordr_rfrnc
+             		 	 FROM FOD_FO_ORDR_DTLS
+            		 	WHERE FOD_ORDR_RFRNC=:c_ordr_rfrnc;
+			        
+							if ( SQLCODE  !=  0 )
+              {
+                fn_errlog( c_ServiceName, "S31185",SQLMSG,c_errmsg);
+                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+                Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+                tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+              }
+						
+		          EXEC SQL
+                 SELECT FOD_ORDR_STTS
+                   INTO :c_frsh_ordr_stts
+                   FROM FOD_FO_ORDR_DTLS
+                  WHERE FOD_ORDR_RFRNC=:c_frsh_ordr_rfrnc;
+
+              if ( SQLCODE  !=  0 )
+              {
+                fn_errlog( c_ServiceName, "S31190",SQLMSG,c_errmsg);
+                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+                Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+                tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+              }
+					}
+					/*** Ver 1.8 Ends here ***/
+
+  				if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				{
+				  	fn_userlog( c_ServiceName," fresh Order status :%c:",c_frsh_ordr_stts);		/*** Ver 1.8 ***/
+          	fn_userlog( c_ServiceName," cover Order status :%c:",c_cvr_ordr_stts);			 /*** Ver 1.8 ***/
+						fn_userlog( c_ServiceName," cover Order ref		 :%s:",c_ordr_rfrnc);      /*** Ver 1.8 ***/
+			    	fn_userlog( c_ServiceName," fresh Order ref%s:",c_frsh_ordr_rfrnc);			/*** Ver 1.8 ***/	
+						fn_userlog(c_ServiceName,"c_source_flg :%c:",c_source_flg); /*** Ver 1.3 ***/
+          }
+
+					if(c_cvr_ordr_flw == BUY ) /** Fresh Order is SELL Order. **/
+          {
+						
+							if( d_ltp <= l_frm_cutoff_premium && (c_source_flg != 'M' || (c_source_flg == 'M' && c_frsh_ordr_stts == 'O' && c_cvr_ordr_stts == 'O')))	/*** c_source_flg condition added in Ver 1.3  *** Condition for modification added in Ver 1.8 ***/
+							{
+								if (c_source_flg != 'M')
+								{
+  								if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  								{
+									fn_userlog( c_ServiceName," Since LTP is less than the premium cut-off price, orders are currently not allowed.");
+									}
+
+									fn_errlog( c_ServiceName, "S31195", "Order Not Allowed To Place.", c_errmsg );
+									strcpy(c_errmsg," Since LTP is less than the premium cut-off price, orders are currently not allowed.");								
+								}
+								else if (c_source_flg == 'M' && c_frsh_ordr_stts == 'O' && c_cvr_ordr_stts == 'O')
+								{
+  								if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  								{
+										fn_userlog( c_ServiceName," You are only allowed to cancel this OptionPLUS order. Since LTP is less than the cut-off premium price so placement/modification of fresh sell OptionPLUS orders is currently not allowed in this contract.");
+									}
+
+									fn_errlog( c_ServiceName, "S31200", "Order Not Allowed To Place.", c_errmsg );
+									strcpy(c_errmsg," You are only allowed to cancel this OptionPLUS order. Since LTP is less than the cut-off premium price so placement/modification of fresh sell OptionPLUS orders is currently not allowed in this contract.");
+								}
+            		Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+            		Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            		tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+							}
+
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{
+            	fn_userlog(c_ServiceName,"Fresh Order is SELL Order :sltp perc diff value d_limit_diff :%lf:",d_limit_diff);
+						}
+
+            l_lmt_rt=fn_cal_price_optplus(c_ServiceName,li_stp_lss_tgr_prc,d_limit_diff,CAL_UPPER,c_xchng_cd,i_tick_sz);
+
+          }
+          else if(c_cvr_ordr_flw == SELL ) /** Fresh Order is BUY Order. **/
+          {
+          	if(d_frm_diffrnc_mrgn == -1)
+          	{
+
+						   sprintf ( c_rng_err,"Orders cannot be accepted for SLTP ranging %.2lf - %.2lf. Please modify SLTP and try again. ", d_frm_rng, d_to_rng);
+							 rtrim(c_rng_err);  
+
+            	 fn_userlog( c_ServiceName,"Error :%s:",c_rng_err);
+            	 fn_errlog( c_ServiceName, "S31205",c_rng_err , c_errmsg );
+ 							 strcpy(c_errmsg, c_rng_err);
+            	 Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+            	 Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            	 tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          	 }
+
+            if(d_frm_diffrnc_mrgn == 100)
+            {
+							fn_userlog(c_ServiceName,"Fresh Order is BUY :inside d_frm_diffrnc_mrgn == 100 condition");						
+
+              l_lmt_rt = 5;                     /*** have to set default limit rate as 0.05 ***/
+            }
+						else
+						{
+    					fn_userlog(c_ServiceName,"Fresh Order is BUY Order :sltp perc diff value d_limit_diff :%lf:",d_limit_diff);
+
+            	l_lmt_rt=fn_cal_price_optplus(c_ServiceName,li_stp_lss_tgr_prc,d_limit_diff,CAL_LOWER,c_xchng_cd,i_tick_sz);
+						}
+          }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"Input SLTP :%ld: Calculated Limit Price :%ld:",li_stp_lss_tgr_prc,l_lmt_rt);
+          }
+
+          /** Add to the o/p buffer.**/
+
+          if((Fadd32(ptr_fml_Ibuf,FFO_LMT_RT, (char *)&l_lmt_rt, 0))==-1)
+          {
+            fn_userlog(c_ServiceName,"Error while adding Limit price to o/p buffer.");
+            fn_errlog( c_ServiceName, "S31210", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+		
+		break;
+
+		case	VIEW_MARGIN:
+		
+  				if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				{	
+          	fn_userlog(c_ServiceName,"Inside VIEW_MARGIN...Product type :%c:",c_prd_typ);	
+					}
+
+					if(c_prd_typ == 'U')				/*** if() added in Ver 1.9 ***/
+					{
+		        if(DEBUG_MSG_LVL_3)
+            {
+						  fn_userlog(c_ServiceName,"Inside VIEW_MARGIN for SLTP FP");
+						}
+					}
+					else if(c_prd_typ == 'I')
+					{	
+						if(DEBUG_MSG_LVL_3)
+          	{
+            	fn_userlog(c_ServiceName,"Inside VIEW_MARGIN for OPTIONPLUS");
+          	}
+					}
+
+					if(Fget32(ptr_fml_Ibuf,FFO_EXPRY_DT,0,(char *)c_exp_date.arr,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input FFO_EXPRY_DT.");
+            fn_errlog( c_ServiceName, "S31215", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+					if(Fget32(ptr_fml_Ibuf, FFO_STP_LSS_TGR,0,(char *)&li_stp_lss_tgr_prc,0) == -1)
+          {
+						if ( Ferror32 != FNOTPRES )
+						{
+							fn_userlog(c_ServiceName,"Error while getting input FFO_STP_LSS_TGR.");
+							fn_errlog( c_ServiceName, "S31220", FMLMSG, c_errmsg  );
+							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+						}
+          }
+					if(Fget32(ptr_fml_Ibuf, FFO_EXER_TYP,0,(char *)&c_exrc_typ, 0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input FFO_EXER_TYP");
+            fn_errlog( c_ServiceName, "S31225", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+					if(Fget32(ptr_fml_Ibuf, FFO_AVL_QTY,0,(char *)&l_ord_tot_qty,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input FFO_AVL_QTY");
+            fn_errlog( c_ServiceName, "S31230", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+					if(Fget32(ptr_fml_Ibuf, FFO_LMT_RT,0,(char *)&l_lmt_rt,0) == -1)
+          {
+						if ( Ferror32 != FNOTPRES )
+						{
+							fn_userlog(c_ServiceName,"Error while getting input FFO_LMT_RT");
+							fn_errlog( c_ServiceName, "S31235", FMLMSG, c_errmsg  );
+							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+						}
+          }
+				
+					/*** Ver 1.8 starts from here ***/
+
+          i_err[0] = Fget32(ptr_fml_Ibuf,FFO_MKT_TYP,0,(char *)&c_mkt_type,0);
+          i_ferr [0] = Ferror32;
+
+          if( (i_err[0] == -1) &&  i_ferr[0] != FNOTPRES)
+          {
+              fn_userlog(c_ServiceName,"Error while getting input FFO_MKT_TYP.");
+              fn_errlog( c_ServiceName, "S31240", FMLMSG, c_errmsg  );
+              Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+
+  				if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				{		
+          	fn_userlog( c_ServiceName,"Market Type :%c",c_mkt_type);
+					}
+
+          /*** Ver 2.1 Starts ***/
+
+          if (l_ord_tot_qty == 0) 
+          {
+            fn_userlog(c_ServiceName,"Order Quantity cannot be 0. Please enter valid quantity");
+						fn_errlog( c_ServiceName, "S31245"," Order Quantity cannot be 0. Please enter valid quantity.",c_errmsg);
+            strcpy(c_errmsg,"Order Quantity cannot be 0. Please enter valid quantity");
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+
+          /*** Ver 2.1 Ends ***/
+
+					if(c_mkt_type == 'L')
+					{
+						if(Fget32(ptr_fml_Ibuf,FFO_OPNPSTN_RT,0,(char *)&l_frsh_lmt_rt,0) == -1)
+          	{
+            	fn_userlog(c_ServiceName,"Error while getting input FFO_OPNPSTN_RT.");
+            	fn_errlog( c_ServiceName, "S31250", FMLMSG, c_errmsg  );
+            	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          	}
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+ 				 		{
+							fn_userlog( c_ServiceName,"fresh limit rate :%ld",l_frsh_lmt_rt);	
+						}	
+					}
+					/*** Ver 1.8 Ends here ***/
+				/***	MEMSET(i_err);      ** Ver 1.6 **
+          MEMSET(i_ferr);     ** Ver 1.6 ** Commented in Ver 1.8 ***/		
+			
+					i_err[1]	 = Fget32(ptr_fml_Ibuf, FFO_ORDR_RFRNC,0,(char *)&c_ordr_rfrnc,0);
+          i_ferr [1] = Ferror32;
+
+          if ( i_err[1] == -1 )
+          {
+            if ( Ferror32 != FNOTPRES )
+            {
+              fn_errlog( c_ServiceName, "S31255", FMLMSG, c_err_msg  );
+							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            }
+						if ( Ferror32 == FNOTPRES )
+						{
+								c_call_from = 'P';	/*** View margin called is from Placement page ***/
+						}
+          }
+
+          SETLEN(c_exp_date);
+
+  				if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  				{
+          	fn_userlog( c_ServiceName,"Expiry Date :%s",c_exp_date.arr);
+					}
+
+					if(DEBUG_MSG_LVL_3)
+          {
+						fn_userlog(c_ServiceName,"Cover order reference = :%s:",c_ordr_rfrnc);
+						fn_userlog(c_ServiceName,"Called from = :%c:",c_call_from);
+					}
+
+
+					/*** Ver 2.5 starts ***/
+				  fn_userlog(c_ServiceName,"SPAN:%s:%s:%c:%s:%ld:%c:%c:",c_xchng_cd,c_undrlyng,c_prd_typ,c_exp_date.arr,l_strike_prc,c_exrc_typ,c_opt_typ);
+
+					 EXEC SQL
+						SELECT NVL(FTQ_SPN_PER_LOT,0),
+									 NVL(FTQ_SPN_PER_LOT_B,0),
+									 NVL(FTQ_MIN_LOT_QTY,0)
+						INTO   :d_spn_per_lot,
+									 :d_spn_per_lot_B,
+									 :l_lot_sz
+						FROM   FTQ_FO_TRD_QT
+						WHERE  FTQ_XCHNG_CD = :c_xchng_cd
+						AND    FTQ_UNDRLYNG = :c_undrlyng
+						AND    FTQ_PRDCT_TYP = decode(:c_prd_typ,'I','O','F')
+						AND    trunc(FTQ_EXPRY_DT) = :c_exp_date
+						AND    FTQ_STRK_PRC = :l_strike_prc
+						AND    FTQ_EXER_TYP = :c_exrc_typ
+						AND    FTQ_OPT_TYP = :c_opt_typ;
+
+						if ( SQLCODE  !=  0 )
+						{
+ 							fn_errlog( c_ServiceName, "S31260",SQLMSG,c_errmsg);
+ 							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+ 							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+ 							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+						}
+
+						 EXEC SQL
+							SELECT  NVL(LTQ_RT,0.0) * 100,  /*** NVL added in Ver 3.0 ***/
+											NVL(LTQ_PREV_CLS_PRC,0.0) * 100	 /*** Ver 3.0 ***/
+							INTO    :d_spot,
+											:d_prev_und_quote		/*** Ver 3.0 ***/
+							FROM    LTQ_TRD_QT  
+							WHERE   LTQ_XCHNG_CD  = decode(:c_xchng_cd,'BFO','BSE','NSE')
+							AND     LTQ_STCK_CD   = :c_undrlyng;
+
+						if ( SQLCODE  !=  0 )
+						{
+ 							fn_errlog( c_ServiceName, "S31265",SQLMSG,c_errmsg);
+ 							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+ 							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+ 							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+						}
+					
+					fn_userlog(c_ServiceName,"SPAN PER LOT:%lf: LOT SZ:%ld: SPOT:%lf:",d_spn_per_lot,l_lot_sz,d_spot);
+					/*** Ver 2.5 ends ***/
+
+
+					/*** Ver 1.2 Starts ***/
+			
+					if (l_lmt_rt != 0)  /*** Check only if not market order ***/ 
+					{			
+	
+						l_lst_trd_prc = 0 ;
+
+							EXEC SQL	
+								SELECT NVL(FTQ_LST_TRD_PRC,0)     	/***	Ver 2.3	Hard Parsing Changes	***/
+								INTO 	 :l_lst_trd_prc             
+								FROM   FTQ_FO_TRD_QT
+								WHERE  FTQ_XCHNG_CD  = :c_xchng_cd
+								AND    FTQ_PRDCT_TYP = decode(:c_prd_typ,'I','O','F')				
+								AND    FTQ_UNDRLYNG  = :c_undrlyng
+								AND    FTQ_EXPRY_DT  = :c_exp_date
+								AND    FTQ_EXER_TYP  = :c_exrc_typ
+								AND    FTQ_OPT_TYP   = :c_opt_typ
+								AND    FTQ_STRK_PRC  = :l_strike_prc;
+
+							if ( SQLCODE  !=  0 )
+							{
+  							fn_errlog( c_ServiceName, "S31270",SQLMSG,c_errmsg);
+  							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+  							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+  							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+							}	
+	
+						if( c_cvr_ordr_flw == BUY )               /*** Fresh sell order ***/
+						{
+  						if( li_stp_lss_tgr_prc < l_lst_trd_prc ) 
+  						{
+								/** ver 2.8 Started **/ 
+								if(c_baskt_typ == 'B')
+								{
+									fn_userlog(c_ServiceName,"Inside c_baskt_typ == B in Buy condition");
+									d_lss_amt = 0.0; 
+								 	d_mrgn_amt = 0.0;
+								  d_tot_margin = d_mrgn_amt + d_lss_amt;		
+									Fadd32(ptr_fml_Ibuf,FFO_U_ORDR_MRGN, (char *)&d_tot_margin, 0);
+									tpreturn(TPSUCCESS,SUCC_BFR,(char *)ptr_fml_Ibuf,0,0);
+								}
+								/** ver 2.8 end **/
+
+  							if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  							{
+   						  	fn_userlog(c_ServiceName,"Stop Loss Trigger Price cannot be less than the Last traded price for Buy orders.");
+    						}
+
+								fn_errlog( c_ServiceName, "S31275","Stop Loss Trigger Price cannot be less than the Last traded price for Buy																										orders.",c_errmsg);
+    						strcpy(c_errmsg,"Stop Loss Trigger Price cannot be less than the Last traded price for Buy orders.");
+    						Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+    						tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  						}
+						}
+						else if ( c_cvr_ordr_flw == SELL )      /*** Fresh buy order ***/
+						{
+  						if( li_stp_lss_tgr_prc > l_lst_trd_prc )
+  						{
+								/** ver 2.8 Basket Order Handling **/
+								if(c_baskt_typ == 'B')
+								{
+									fn_userlog(c_ServiceName,"Inside c_baskt_typ == B in Sell condition"); 
+									d_lss_amt = 0.0;
+									d_mrgn_amt = 0.0;
+									d_tot_margin = d_mrgn_amt + d_lss_amt;	
+									Fadd32(ptr_fml_Ibuf,FFO_U_ORDR_MRGN, (char *)&d_tot_margin, 0);
+									tpreturn(TPSUCCESS,SUCC_BFR,(char *)ptr_fml_Ibuf,0,0);
+								}	
+								/** ver 2.8 end **/
+							
+  							if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  							{
+    							fn_userlog(c_ServiceName,"Stop Loss Trigger Price cannot be greater than the Last traded price for Sell orders.");
+									fn_userlog(c_ServiceName,"SLTP price:%ld: LTP:%ld:",li_stp_lss_tgr_prc,l_lst_trd_prc); /*** Ver 2.5 ***/
+    						}
+
+								fn_errlog( c_ServiceName, "S31280","Stop Loss Trigger Price cannot be greater than the Last traded price for Sell orders.",c_errmsg);
+    						strcpy(c_errmsg,"Stop Loss Trigger Price cannot be greater than the Last traded price for Sell orders.");
+    						Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+    						tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  						}
+						}
+					}
+
+					/*** Ver 1.2 Ends ***/
+
+					if ( c_call_from == 'P' )
+					{
+						if(c_mkt_type == 'M')									/*** Condition added in Ver 1.8 ***/
+						{
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+								fn_userlog(c_ServiceName,"Called from Placement page");
+							}
+
+								EXEC SQL
+								SELECT  NVL(FTQ_BST1_BID_PRC,0),			/***	Ver 2.3	Hard Parsing Changes	***/
+												NVL(FTQ_BST1_BID_QTY,0),
+												NVL(FTQ_BST2_BID_PRC,0),
+												NVL(FTQ_BST2_BID_QTY,0),
+												NVL(FTQ_BST3_BID_PRC,0),
+												NVL(FTQ_BST3_BID_QTY,0),
+												NVL(FTQ_BST4_BID_PRC,0),
+												NVL(FTQ_BST4_BID_QTY,0),
+												NVL(FTQ_BST5_BID_PRC,0),
+												NVL(FTQ_BST5_BID_QTY,0),
+												NVL(FTQ_BST1_OFFR_PRC,0),
+												NVL(FTQ_BST1_OFFR_QTY,0),
+												NVL(FTQ_BST2_OFFR_PRC,0),
+												NVL(FTQ_BST2_OFFR_QTY,0),
+												NVL(FTQ_BST3_OFFR_PRC,0),
+												NVL(FTQ_BST3_OFFR_QTY,0),
+												NVL(FTQ_BST4_OFFR_PRC,0),
+												NVL(FTQ_BST4_OFFR_QTY,0),
+												NVL(FTQ_BST5_OFFR_PRC,0),
+												NVL(FTQ_BST5_OFFR_QTY,0),
+              	      	FTQ_MIN_LOT_QTY            /*** Ver 1.7 ***/
+								INTO   :l_bst_bid_prc[0],
+											 :l_bst_bid_qty[0],
+										 	 :l_bst_bid_prc[1],
+											 :l_bst_bid_qty[1],
+											 :l_bst_bid_prc[2],
+											 :l_bst_bid_qty[2],
+											 :l_bst_bid_prc[3],
+											 :l_bst_bid_qty[3],
+											 :l_bst_bid_prc[4],
+											 :l_bst_bid_qty[4],
+											 :l_bst_offr_prc[0],
+											 :l_bst_offr_qty[0],
+											 :l_bst_offr_prc[1],
+											 :l_bst_offr_qty[1],
+											 :l_bst_offr_prc[2],
+											 :l_bst_offr_qty[2],
+											 :l_bst_offr_prc[3],
+											 :l_bst_offr_qty[3],
+											 :l_bst_offr_prc[4],
+											 :l_bst_offr_qty[4],
+          	      	   :l_min_lot_qty               /*** Ver 1.7 ***/        
+								FROM   FTQ_FO_TRD_QT
+								WHERE  FTQ_XCHNG_CD  = :c_xchng_cd
+								AND    FTQ_PRDCT_TYP =decode(:c_prd_typ,'I','O','F')   /*** decode added in Ver 1.9 ***/ 
+								AND    FTQ_UNDRLYNG  = :c_undrlyng
+								AND    FTQ_EXPRY_DT  = :c_exp_date
+								AND    FTQ_EXER_TYP  = :c_exrc_typ
+								AND    FTQ_OPT_TYP   = :c_opt_typ
+								AND    FTQ_STRK_PRC  = :l_strike_prc;
+
+								if ( SQLCODE  !=  0 )
+								{
+									fn_errlog( c_ServiceName, "S31285",SQLMSG,c_errmsg);
+									Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+									Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+									tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+								}	
+
+								d_tot_bid_qty = l_bst_bid_qty[0] +
+																l_bst_bid_qty[1] +
+																l_bst_bid_qty[2] +
+																l_bst_bid_qty[3] +
+																l_bst_bid_qty[4];
+	
+								d_tot_offr_qty = l_bst_offr_qty[0] +
+																 l_bst_offr_qty[1] +
+																 l_bst_offr_qty[2] +
+																 l_bst_offr_qty[3] +
+																 l_bst_offr_qty[4];
+	
+
+
+						 if(DEBUG_MSG_LVL_3)
+						 {
+								fn_userlog( c_ServiceName, "d_tot_bid_qty :%lf:",d_tot_bid_qty);
+								fn_userlog( c_ServiceName, "d_tot_offr_qty :%lf:",d_tot_offr_qty);
+						 }
+						
+						
+						 /*** Ver 1.2 Starts ***/	
+						 /*** Commented in Ver 1.7 and below column selected in above existing FTQ select ***
+      	    	EXEC SQL
+    						SELECT  FCM_LOT_SZ
+    						INTO    :l_min_lot_qty
+    						FROM    FCM_FO_CNTRCT_MSTR
+    						WHERE   FCM_XCHNG_CD    = :c_xchng_cd
+   		 					AND     FCM_PRDCT_TYP   = 'O'
+    						AND     FCM_UNDRLYNG    = :c_undrlyng
+    						AND     FCM_EXPRY_DT    = :c_exp_date
+    						AND     FCM_EXER_TYP    = :c_exrc_typ
+    						AND     FCM_OPT_TYP     = :c_opt_typ
+    						AND     FCM_STRK_PRC    = :l_strike_prc;
+
+ 	 						if ( SQLCODE  !=  0 )
+  						{
+    						fn_errlog( c_ServiceName, "S31290",SQLMSG,c_errmsg);
+    						Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+   	 						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+    						tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  						}
+
+ 	           ***/
+
+							if ( l_ord_tot_qty % l_min_lot_qty!= 0 )
+  						{
+	  						fn_userlog(c_ServiceName,"Please enter lots in multiple of defined contract lot.");
+	  						fn_errlog( c_ServiceName, "B28529", DEFMSG, c_errmsg );
+    						strcpy(c_errmsg,"Please enter lots in multiple of defined contract lot.");
+    						Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+    						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+    						tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+  						}
+
+						 /*** Ver 1.2 Ends   ***/	
+	
+	
+							/*** Calculating weighted avg price ****/
+								if(c_prd_typ == 'I')
+								{
+  								if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  								{
+                  	fn_userlog(c_ServiceName,"Inside OPTIONPLUS avg price calculation");
+									}
+
+									if( c_cvr_ordr_flw == BUY )								/*** Fresh sell order ***/					
+									{
+										fn_avg_price_cal(c_ServiceName,l_bst_bid_qty,l_bst_bid_prc,&d_avg_prc,l_ord_tot_qty);
+									}
+									else if ( c_cvr_ordr_flw == SELL )			/*** Fresh buy order ***/
+									{
+										fn_avg_price_cal(c_ServiceName,l_bst_offr_qty,l_bst_offr_prc,&d_avg_prc,l_ord_tot_qty);
+									}
+								}
+								else if(c_prd_typ == 'U')			/**** Ver 1.9 starts from Here ****/
+								{
+  								if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  								{
+					        	fn_userlog(c_ServiceName,"Inside SLTP FP avg price calculation");
+		          		}
+
+									if((c_cvr_ordr_flw == 'B' && l_ord_tot_qty > d_tot_bid_qty ) ||
+            			(c_cvr_ordr_flw == 'S' && l_ord_tot_qty > d_tot_offr_qty))
+          				{
+            				if ( strcmp (c_undrlyng,"NIFTY") == 0 )
+            				{
+
+ 	   				          l_max_allw_qty = 0;
+
+ 			             		EXEC SQL
+  			              SELECT  nvl(FUM_SLTPFP_MKT_MAX_ALLWD_QTY,0)
+    	  		            INTO  :l_max_allw_qty
+      	    		        FROM  FUM_FO_UNDRLYNG_MSTR
+        	      		   WHERE  FUM_XCHNG_CD 	= :c_xchng_cd
+          	        		 AND  FUM_UNDRLYNG 	= :c_undrlyng
+ 		           	       	 AND  FUM_PRDCT_TYP =	:c_fut_prd_typ;	/***  Ver 2.3 Hard code Value changed with bind variable  ***/
+
+ 		             				if( SQLCODE != 0 )
+  		            			{
+    	            				fn_errlog( c_ServiceName, "S31295",SQLMSG,c_errmsg);
+      	          				Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+        	        				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+          	      				tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            	  				}	
+              					if(DEBUG_MSG_LVL_3)
+              					{
+                					fn_userlog(c_ServiceName,"Max allowed Qty IS :%ld:",l_max_allw_qty);
+              					}
+
+ 				  	            if ( l_ord_tot_qty > l_max_allw_qty)
+  	  	 			          {
+													fn_errlog( c_ServiceName, "S31300",LIBMSG,c_errmsg);
+    	         				   	sprintf(c_errmsg,"Maximum allowed quantity for fresh market order in %s is %ld",c_undrlyng,l_max_allw_qty);
+        	                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+          	              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+            	            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+												}
+              					else
+              					{
+  												if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  												{
+                						fn_userlog(c_ServiceName,"Order Quantity is greater total bid/offer qty but less than Max Quantity allowed for NIFTY");
+                					}
+
+													i_cal_on_wrst_prc = 1;
+              					}
+           						}
+		          				else
+          						{
+            						fn_errlog( c_ServiceName, "S31305","Order Quantity is greater than total quantity of best 5 bids/offers",c_err_msg);
+   							        strcpy(c_err_msg,"Order Quantity is greater than total quantity of best 5 bids/offers");
+	                      Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+                        Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+                        tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          						}
+										}
+
+        						if(c_cvr_ordr_flw == 'B' )
+        						{
+  										if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  										{
+                      	fn_userlog(c_ServiceName,"Inside cover order flow sell....................");
+          						}
+
+											if (i_cal_on_wrst_prc == 1 )    
+          						{
+            						d_avg_prc = (double) l_bst_bid_prc[4];
+          						}
+          						else    
+          						{
+            						fn_avg_price_cal(c_ServiceName,l_bst_bid_qty,l_bst_bid_prc,&d_avg_prc,l_ord_tot_qty);
+          						}
+      							}
+      							else if (c_cvr_ordr_flw == 'S')
+      							{
+  										if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  										{
+                      	fn_userlog(c_ServiceName,"Inside cover order flow Buy....................");
+        							}
+
+											if (i_cal_on_wrst_prc == 1 )  
+        							{
+          							d_avg_prc = (double) l_bst_offr_prc[4];
+        							}
+        							else  
+        							{
+          							fn_avg_price_cal(c_ServiceName,l_bst_offr_qty,l_bst_offr_prc,&d_avg_prc,l_ord_tot_qty);
+        							}
+      						 	}
+  									if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  									{
+                  		fn_userlog(c_ServiceName,"d_avg_prc............:%lf:",d_avg_prc);
+										}
+								  }
+								/**** Ver 1.9 Ends Here ****/
+							}
+							else if(c_mkt_type == 'L')					/*** condition added in Ver 1.8 ***/
+            	{
+								d_avg_prc=(double)l_frsh_lmt_rt;
+							}
+  							if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  							{
+                    fn_userlog(c_ServiceName,"d_fmm_sltp_prcnt............:%lf:",d_fmm_sltp_prcnt);
+								}
+
+						if(c_prd_typ == 'I') /*** if loop added in Ver 2.5 ***/
+						{
+							fn_userlog(c_ServiceName,"AVG PRC BEFORE trunc:%lf:",d_avg_prc);
+							d_avg_prc = trunc(d_avg_prc);  
+							fn_userlog(c_ServiceName,"AVG PRC After trunc:%lf:",d_avg_prc);
+
+							d_mrgn_amt= (l_ord_tot_qty * d_op_flat_rt * 100 );
+						}
+						else
+						{
+	 	         d_mrgn_amt= ((l_ord_tot_qty * d_avg_prc *d_fmm_sltp_prcnt)/100);
+						}
+						
+						
+  						if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  						{
+             		fn_userlog(c_ServiceName,"Margine amount.......... :%lf:",d_mrgn_amt);
+ 		         		fn_userlog(c_ServiceName,"Input SLTP :%ld:",li_stp_lss_tgr_prc);
+							}
+
+					   if(c_prd_typ == 'I')
+             { 
+  		       	 EXEC SQL
+    		      	  SELECT NVL(FRM_DIFFRNC_MRGN,0)			/***	Ver 2.3 Hard Parsing Changes	***/
+      		      	INTO   :d_frm_diffrnc_mrgn
+        		    	FROM   FRM_FO_RANGE_MSTR
+          		  	WHERE  FRM_XCHNG_CD = :c_xchng_cd
+            			AND    FRM_UNDRLYNG = :c_undrlyng
+     	       			AND    FRM_ORDR_FLOW = decode(:c_cvr_ordr_flw,'S','B','S')
+      	      		AND    FRM_FROM_RANGE <= :li_stp_lss_tgr_prc
+        	    		AND    :li_stp_lss_tgr_prc   < FRM_TO_RANGE;
+
+ 		  	        if ( SQLCODE  !=  0  && SQLCODE != NO_DATA_FOUND)
+  			        {
+    		        	fn_errlog( c_ServiceName, "S31310",SQLMSG,c_errmsg);
+      		      	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+        		    	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+          		  	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          			}
+
+		        	  if(DEBUG_MSG_LVL_3)
+  		        	{
+    		        	fn_userlog(c_ServiceName,"d_frm_diffrnc_mrgn  :%lf:", d_frm_diffrnc_mrgn);
+      		      	fn_userlog(c_ServiceName,"d_avg_prc: %lf:", d_avg_prc);
+        		  	}
+
+ 		         		if( c_cvr_ordr_flw == SELL )     /*** Fresh buy order ***/
+  		        	{
+    		        	if( d_frm_diffrnc_mrgn < 100 && d_frm_diffrnc_mrgn != -1 )
+      		      	{
+        		      	d_lss_amt = l_ord_tot_qty * (d_avg_prc - l_lmt_rt);
+          		  	}
+            			else if ( d_frm_diffrnc_mrgn == 100 )
+            			{
+             	 		 	d_lss_amt = l_ord_tot_qty * d_avg_prc;
+            			}
+            			else if( d_frm_diffrnc_mrgn == -1 )
+            			{
+              			fn_userlog(c_ServiceName,"Entered SLTP is OutOff Range");
+              			fn_errlog( c_ServiceName, "S31315","Please Enter SLTP in Proper Range",c_errmsg);
+              			strcpy(c_errmsg,"Please Enter SLTP in Proper Range.");
+              			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              			Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+              			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            			}
+
+									/*** Ver 2.5 starts ***/
+									fn_userlog(c_ServiceName,"IN FRSH BUY MRGN:%lf: LOSS:%lf: AVG PRC:%lf: LMT RT:%ld: QTY:%ld: B_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_avg_prc,l_lmt_rt,l_ord_tot_qty,d_bop_sebi_prcnt);
+									d_prem_amt = (double) l_ord_tot_qty * d_avg_prc;
+									d_xchng_amt = ( ((double) l_ord_tot_qty * d_avg_prc * d_bop_sebi_prcnt) /100); 
+							
+							   if ( d_xchng_amt > (d_mrgn_amt + d_lss_amt) ) /*** Taking Max component ***/
+									{
+										if ( d_xchng_amt < d_prem_amt)   /*** Taking Min component ***/
+										{
+											d_lss_amt = d_xchng_amt;
+											d_mrgn_amt = 0.0;
+										}
+										else
+										{
+											d_lss_amt = d_prem_amt;
+										  d_mrgn_amt = 0.0;
+										}
+									}
+									else
+									{
+										if ( (d_lss_amt + d_mrgn_amt) < d_prem_amt)  /*** Taking Min component ***/
+										{
+											d_lss_amt = (d_lss_amt + d_mrgn_amt);
+											d_mrgn_amt = 0.0;
+										}
+										else
+										{
+											d_lss_amt = d_prem_amt;
+											d_mrgn_amt = 0.0;
+										}
+									}
+
+									/*** End Ver 2.5 ***/
+          			}
+          			else
+          			{
+            			d_lss_amt = l_ord_tot_qty * (d_avg_prc - l_lmt_rt ) * -1;
+
+								 /*** Ver 2.5 starts ***/
+									fn_userlog(c_ServiceName,"IN FRSH SELL MRGN:%lf: LOSS:%lf: AVG PRC:%lf: LMT RT:%ld: QTY:%ld: S_SEBI:%lf:",d_mrgn_amt,d_lss_amt,d_avg_prc,l_lmt_rt,l_ord_tot_qty,d_sop_sebi_prcnt);
+
+						     d_spn_mrgn = d_spn_per_lot * ( (double)l_ord_tot_qty /(double) l_lot_sz );
+						     d_expr_mrgn = (double)l_ord_tot_qty * fn_maxd(d_spot,d_prev_und_quote)  * (d_expr_prcnt/100); /*** Max with prev closing taken in Ver 3.0 ***/
+								 d_xchng_amt = d_sop_sebi_prcnt/100 * (d_spn_mrgn + d_expr_mrgn) ;
+
+							   if ( d_xchng_amt > (d_mrgn_amt + d_lss_amt) ) /*** Taking Max component ***/
+									{
+											d_lss_amt = d_xchng_amt;
+											d_mrgn_amt = 0.0;
+									}
+									else
+									{
+											d_lss_amt = (d_lss_amt + d_mrgn_amt);
+											d_mrgn_amt = 0.0;
+									}
+								 /*** Ver 2.5 ends ***/
+          			}
+								
+								fn_userlog(c_ServiceName,"PREM:%lf:d_xchng_amt:%lf: SPN:%lf: EXP:%lf: ",d_prem_amt,d_xchng_amt,d_spn_mrgn,d_expr_mrgn); /*** Ver 2.5 ***/
+						
+							}
+							else if(c_prd_typ == 'U')		/**** Ver 1.9 starts from here ****/
+              {
+  								if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  								{
+                  	fn_userlog(c_ServiceName,"l_ord_tot_qty....................: %ld:",l_ord_tot_qty);
+                  	fn_userlog(c_ServiceName,"l_lmt_rt....................: %ld:",l_lmt_rt);
+									}
+
+									if(c_cvr_ordr_flw == 'S' )
+									{
+   						   		d_lss_amt =l_ord_tot_qty * (d_avg_prc - l_lmt_rt); 
+										d_spnperlot_T = d_spn_per_lot_B; 	/*** Ver 3.0 ***/
+									}
+									else
+									{
+                    d_lss_amt= l_ord_tot_qty * (d_avg_prc - l_lmt_rt) * -1;
+										d_spnperlot_T = d_spn_per_lot;  /*** Ver 3.0 ***/
+                    if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  									{
+											fn_userlog(c_ServiceName,"d_lss_amt....................: %lf:",d_lss_amt);
+										}
+									}
+
+									/*** Ver 2.4 starts ***/
+									/*** d_xchng_amt = ((l_ord_tot_qty * d_avg_prc *d_xchng_prcnt)/100);  *** Commented in Ver 3.0 ***/
+									
+									/*** Ver 3.0 starts ***/
+									/** FORMULA: FPSL SEBI% * (SPAN + EXPOSURE) **/
+
+ 									d_xchng_amt =( d_xchng_prcnt/100 *
+									                 (
+ 										                 (  d_spnperlot_T * ((double)l_ord_tot_qty / (double) l_lot_sz)) +
+                  									 ( (double)l_ord_tot_qty * d_avg_prc * d_expr_prcnt/100 )
+                 									 )
+                								);
+									/*** Ver 3.0 ends ***/
+
+									if ( d_xchng_amt > (d_mrgn_amt + d_lss_amt) )
+									{
+										d_lss_amt = d_xchng_amt;
+										d_mrgn_amt = 0.0;
+									}
+									/*** Ver 2.4 ends ***/
+								}
+							/**** Ver 1.9 Ends here ****/
+						}
+					else if ( c_call_from == 'M' )
+					{
+  					if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  					{
+							fn_userlog(c_ServiceName,"Called from Modification page");
+						}
+
+						if (l_lmt_rt == 0)
+          	{
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+            		fn_userlog(c_ServiceName,"Market Order");
+							}
+
+            	EXEC SQL
+              	SELECT  FTQ_LST_TRD_PRC
+              	INTO    :l_lmt_rt
+              	FROM    FTQ_FO_TRD_QT
+              	WHERE   FTQ_XCHNG_CD  = :c_xchng_cd
+              	AND     FTQ_PRDCT_TYP =decode(:c_prd_typ,'I','O','F') 
+              	AND     FTQ_UNDRLYNG  = :c_undrlyng
+              	AND     FTQ_EXPRY_DT  = :c_exp_date
+              	AND     FTQ_EXER_TYP  = :c_exrc_typ
+              	AND     FTQ_OPT_TYP   = :c_opt_typ
+              	AND     FTQ_STRK_PRC  = :l_strike_prc;
+
+            	if(SQLCODE  !=  0 )
+            	{
+              	fn_errlog( c_ServiceName, "S31320",SQLMSG,c_errmsg);
+              	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+              	tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            	}
+          	}
+			
+		        if(DEBUG_MSG_LVL_3)
+            {
+              fn_userlog(c_ServiceName,"Limit Rate = :%ld:",l_lmt_rt);
+            }
+
+						if ( l_frsh_lmt_rt == 0) /*** If loop added in Ver 1.8 ***/
+            {
+  						if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  						{
+              	fn_userlog(c_ServiceName,"Fresh Market Order");
+							}
+
+              EXEC SQL
+                SELECT  FTQ_LST_TRD_PRC
+                INTO    :l_frsh_lmt_rt
+                FROM    FTQ_FO_TRD_QT
+                WHERE   FTQ_XCHNG_CD  = :c_xchng_cd
+                AND     FTQ_PRDCT_TYP = decode(:c_prd_typ,'I','O','F')
+                AND     FTQ_UNDRLYNG  = :c_undrlyng
+                AND     FTQ_EXPRY_DT  = :c_exp_date
+                AND     FTQ_EXER_TYP  = :c_exrc_typ
+                AND     FTQ_OPT_TYP   = :c_opt_typ
+                AND     FTQ_STRK_PRC  = :l_strike_prc;
+
+              if(SQLCODE  !=  0 )
+              {
+                fn_errlog( c_ServiceName, "S31325",SQLMSG,c_errmsg);
+                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+                Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+                tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+              }
+            }
+
+          	if(DEBUG_MSG_LVL_3)
+          	{
+            	fn_userlog(c_ServiceName,"Fresh Limit Rate = :%ld:",l_frsh_lmt_rt);
+          	}				
+
+						/**** Commented in Ver 1.8 *******
+						** Getting the total executed value and quantity of FRESH order. **
+						EXEC SQL
+							SELECT  NVL(SUM(FTD_EXCTD_QTY * FTD_EXCTD_RT),0),
+											NVL(SUM(FTD_EXCTD_QTY),0)
+							INTO    :d_frsh_exe_val,
+											:li_tot_exec_qty
+							FROM    FTD_FO_TRD_DTLS
+							WHERE   FTD_ORDR_RFRNC = ( SELECT FOD_SLTP_ORDR_RFRNC 
+																				 FROM		FOD_FO_ORDR_DTLS  
+																				 WHERE 	FOD_ORDR_RFRNC = :c_ordr_rfrnc
+																			);
+
+						if( SQLCODE != 0 )
+						{
+							fn_errlog( c_ServiceName, "S31330",SQLMSG,c_errmsg);
+							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+						}
+						d_avg_prc  = (double) (d_frsh_exe_val / li_tot_exec_qty);
+					*** Comment Ends in Ver 1.8 *****/
+
+					/*** Ver 1.8 starts from here ***/
+						
+				    EXEC SQL
+							SELECT FOD_SLTP_ORDR_RFRNC 
+						  INTO   :c_frsh_ordr_rfrnc
+							FROM	 FOD_FO_ORDR_DTLS
+							WHERE  FOD_ORDR_RFRNC= :c_ordr_rfrnc;
+
+            if( SQLCODE != 0 )
+            {
+              fn_errlog( c_ServiceName, "S31335",SQLMSG,c_errmsg);
+              Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+              Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+              tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+            }
+
+            if(c_prd_typ == 'I')						/**** if() added in Ver 1.9 ****/
+            {	
+			      	i_returncode = fn_cal_mrgn_sltp_op ( c_ServiceName,
+       					                                   c_frsh_ordr_rfrnc,
+              				                             l_frsh_lmt_rt,
+                  	   				                     l_lmt_rt,
+                    	        			               &d_mrgn_amt,
+                      	             				       &d_lss_amt,
+ 				                                          c_ref_rmrks,  /*** Ver 2.5 ***/
+																									&d_comp1_mrgn,/*** Ver 2.5 ***/
+																									&d_comp1_pl,  /*** Ver 2.5  ***/
+																									&d_xchng_amt, /*** Ver 2.5 ***/
+																									&d_prem_amt,  /*** Ver 2.5 ***/
+																									&d_spn_mrgn,  /*** Ver 2.5 ***/
+																									&d_expr_mrgn, /*** Ver 2.5  ***/
+                        	                  			 'U',
+                          	                			 c_err_msg
+                            	            			 );
+		  	    	if ( i_returncode == -1 )
+    					{	
+      					fn_errlog( c_ServiceName, "S31340", LIBMSG, c_err_msg );
+      			  	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+								Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+      					tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    					}
+    					else if( i_returncode == -2 )
+    					{
+      					fn_userlog(c_ServiceName,"Entered SLTP is OutOff Range");
+      					fn_errlog( c_ServiceName, "S31345","Please Enter SLTP in Proper Range",c_err_msg);
+      		    	Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+								Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+      					tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+    					}	
+						/*** Ver 1.8 Ends here ***/
+						}
+						else  if(c_prd_typ == 'U')				/*** Ver 1.9 starts from here  ***/
+						{
+						  i_returncode =  fn_cal_mrgn_sltp (c_ServiceName,
+              													        c_frsh_ordr_rfrnc,
+                      													l_frsh_lmt_rt,
+                      													l_lmt_rt,
+                      													&d_mrgn_amt,
+                      													&d_lss_amt,
+																								c_ref_rmrks,  /*** Ver 2.4 ***/
+																								&d_comp1_mrgn,/*** Ver 2.4 ***/
+																								&d_comp1_pl,	/*** Ver 2.4 ***/
+																								&d_xchng_amt, /*** Ver 2.4 ***/
+                      													c_err_msg);
+
+		          if ( i_returncode == -1 )
+              {
+                fn_errlog( c_ServiceName, "S31350", LIBMSG, c_err_msg );
+                Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+                Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID,(char *)&i_actn_id, 0 );
+                tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+              }	
+						}
+						/*** Ver 1.9 Ends here ***/
+					}
+
+					if ( d_lss_amt < 0 )
+					{
+						d_lss_amt = 0.0;
+					}
+
+      		d_mrgn_amt = (long long)d_mrgn_amt;
+      		d_lss_amt = (long long) d_lss_amt;
+					
+					d_tot_margin = d_mrgn_amt + d_lss_amt;
+
+					if(DEBUG_MSG_LVL_3)
+      		{
+        		fn_userlog( c_ServiceName, "d_lss_amt = :%lf:",d_lss_amt);
+        		fn_userlog(c_ServiceName,"d_mrgn_amt :%lf:",d_mrgn_amt);
+        		fn_userlog(c_ServiceName,"d_tot_margin :%lf:",d_tot_margin);
+					}
+					/** Add to the o/p buffer.**/
+
+          if((Fadd32(ptr_fml_Ibuf,FFO_U_ORDR_MRGN, (char *)&d_tot_margin, 0))==-1)
+          {
+            fn_userlog(c_ServiceName,"Error while adding Limit price to o/p buffer.");
+            fn_errlog( c_ServiceName, "S31355", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+		break;	
+									
+					/*** Ver 1.1 ** Ends ***/
+		
+          /*** Ver 2.2 Starts ***/
+    case  LIMIT_PRICE_TRAIL_SLTP_CALCULATION_FUTURE:
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"Inside LIMIT_PRICE_TRAIL_SLTP_CALCULATION_FUTURE");
+          }
+
+          if(Fget32(ptr_fml_Ibuf, FFO_STP_LSS_TGR,0,(char *)&li_stp_lss_tgr_prc,0) == -1)
+          {
+            fn_userlog(c_ServiceName,"Error while getting input FFO_STP_LSS_TGR.");
+            fn_errlog( c_ServiceName, "S31360", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+
+          /** Calculate cover order limit price. **/
+
+          if(c_cvr_ordr_flw == BUY ) /** Cover Order is BUY Order. **/
+          {
+           l_lmt_rt=fn_cal_price(c_ServiceName,li_stp_lss_tgr_prc,d_fmm_sltptrail_diff_prcnt,CAL_UPPER,c_xchng_cd,i_tick_sz);
+          }
+          else if(c_cvr_ordr_flw == SELL ) /** Cover Order is SELL Order. **/
+          {
+           l_lmt_rt=fn_cal_price(c_ServiceName,li_stp_lss_tgr_prc,d_fmm_sltptrail_diff_prcnt,CAL_LOWER,c_xchng_cd,i_tick_sz);
+          }
+
+          if(DEBUG_MSG_LVL_3)
+          {
+            fn_userlog(c_ServiceName,"Input SLTP :%ld: Calculated Limit Price :%ld:",li_stp_lss_tgr_prc,l_lmt_rt);
+          }
+
+          /** Add to the o/p buffer.**/
+
+          if((Fadd32(ptr_fml_Ibuf,FFO_LMT_RT, (char *)&l_lmt_rt, 0))==-1)
+          {
+            fn_userlog(c_ServiceName,"Error while adding Limit price to o/p buffer.");
+            fn_errlog( c_ServiceName, "S31365", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+
+          if((Fadd32(ptr_fml_Ibuf,FFO_FUT_PRC, (char *)&d_sltp_upd_cnd, 0))==-1)
+          {
+            fn_userlog(c_ServiceName,"Error while adding SLTP update condition to o/p buffer.");
+            fn_errlog( c_ServiceName, "S31370", FMLMSG, c_errmsg  );
+            Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+            tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+          }
+    break;
+          /*** Ver 2.2 Ends ***/
+
+		  /*** ver 3.1 Starts***/
+	case  GTT_FNO_LIMIT_PRICE_CALCULATION:
+
+		MEMSET(c_exp_date);
+		MEMSET(c_xchng_cd);
+		MEMSET(c_undrlyng);
+		 i_err[0] = Fget32(ptr_fml_Ibuf, FFO_PRDCT_TYP,0,(char *)&c_prd_typ,0);
+		 i_ferr[0] = Ferror32;
+		 i_err[1] = Fget32(ptr_fml_Ibuf, FFO_XCHNG_CD,0,(char *)c_xchng_cd,0);
+		 i_ferr[1] = Ferror32;
+		 i_err[2] = Fget32(ptr_fml_Ibuf, FFO_UNDRLYNG,0,(char *)c_undrlyng,0);
+		 i_ferr[2] = Ferror32;
+		 i_err[3] = Fget32(ptr_fml_Ibuf, FFO_EXPRY_DT,0,(char *)c_exp_date.arr,0);
+		 i_ferr[3] = Ferror32;
+		 i_err[4] = Fget32(ptr_fml_Ibuf, FFO_OPT_TYP,0,(char *)&c_opt_typ,0);
+		 i_ferr[4] = Ferror32;
+		 i_err[5] = Fget32(ptr_fml_Ibuf, FFO_STRK_PRC,0,(char *)&l_strike_prc,0);
+		 i_ferr[5] = Ferror32;
+
+		i_err[6] = Fget32(ptr_fml_Ibuf, FFO_EX_ORDR_TYP,0,(char *)&c_gtt_rqst_typ,0);
+		i_ferr[6] = Ferror32;
+
+	SETLEN(c_exp_date);
+		 	for(i_cnt =0; i_cnt <=6; i_cnt++) 		
+  {
+    if ( (i_err[ i_cnt ] == -1 ) )  
+    {
+			if(i_cnt == 5 || i_cnt == 6)
+			{
+				fn_userlog( c_ServiceName, "Error in field no. [%d] ",i_cnt);
+      			fn_errlog( c_ServiceName, "S31375", Fstrerror32(i_ferr[i_cnt]),c_errmsg);
+      			Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+				Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+      			tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+			}
+	}
+  }
+				if(DEBUG_MSG_LVL_3)
+				{
+            fn_userlog(c_ServiceName," xchng code :%s:", c_xchng_cd);
+            fn_userlog(c_ServiceName," product type :%c:",c_prd_typ);
+            fn_userlog(c_ServiceName," underlying :%s:", c_undrlyng);
+            fn_userlog(c_ServiceName," expiry date :%s:", c_exp_date.arr);
+            fn_userlog(c_ServiceName," exercise :%c:", c_exercs_typ);
+            fn_userlog(c_ServiceName," option type :%c:", c_opt_typ);
+            fn_userlog(c_ServiceName," strike price :%ld:", l_strike_prc);
+            fn_userlog(c_ServiceName," gtt_rqst_typ is :%c:", c_gtt_rqst_typ);
+				}
+				rtrim(c_xchng_cd);
+				rtrim(c_undrlyng);
+		EXEC SQL
+      SELECT  FTQ_LST_TRD_PRC
+      INTO    :d_ltp
+      FROM    FTQ_FO_TRD_QT
+      WHERE   FTQ_XCHNG_CD = :c_xchng_cd
+      AND     FTQ_PRDCT_TYP = :c_prd_typ
+      AND     FTQ_UNDRLYNG  = :c_undrlyng
+      AND     FTQ_EXPRY_DT  = :c_exp_date
+      AND     FTQ_EXER_TYP  = :c_exercs_typ
+      AND     FTQ_OPT_TYP   = :c_opt_typ
+      AND     FTQ_STRK_PRC  = :l_strike_prc;
+
+				if(SQLCODE != 0)
+          {
+            fn_userlog( c_ServiceName,"Error while getting LTP.");
+						fn_errlog( c_ServiceName, "S31380", SQLMSG, c_errmsg );
+						Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+						tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+					if(DEBUG_MSG_LVL_3)	fn_userlog(c_ServiceName, " last traded price fetched :%lf:", d_ltp); 
+		  
+			EXEC SQL
+                SELECT  NVL(FUM_TRGT_SLTP_MIN_DIFF,0),
+												NVL(FUM_LTP_TRGT_MIN_DIFF,0),
+												NVL(FUM_LTP_SLTP_MIN_DIFF,0)
+                INTO    :d_trgt_sltp_min_diff,
+												:d_ltp_trgt_min_diff,
+												:d_ltp_sltp_min_diff
+                FROM    FUM_FO_UNDRLYNG_MSTR
+                WHERE   FUM_XCHNG_CD = :c_xchng_cd
+                AND     FUM_PRDCT_TYP = :c_prd_typ		
+                AND     FUM_UNDRLYNG  = :c_undrlyng ;
+
+				if(SQLCODE != 0)
+          {
+            fn_userlog( c_ServiceName,"Error while getting minimum Difference.");
+						fn_errlog( c_ServiceName, "S31385", SQLMSG, c_errmsg );
+						Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+						Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+						tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+          }
+
+	     if(DEBUG_MSG_LVL_3)
+			 {
+				 fn_userlog(c_ServiceName, " target sl min diff fetched :%lf:", d_trgt_sltp_min_diff);
+				 fn_userlog(c_ServiceName, " ltp sl min diff fetched :%lf:", d_ltp_sltp_min_diff);
+				 fn_userlog(c_ServiceName, " ltp target min diff fetched :%lf:", d_ltp_trgt_min_diff);
+			 }
+
+			 if (c_gtt_rqst_typ == 'S'){d_ltp_sltp_min_diff=d_ltp_trgt_min_diff;};
+
+
+
+				i_err[0]  = Fget32(ptr_fml_Ibuf,FFO_LOW_PRC,0,(char *)&l_sl_trgr,0);
+          i_ferr[0] = Ferror32;
+          i_err[1]  = Fget32(ptr_fml_Ibuf,FFO_HGH_PRC,0,(char *)&l_trgt_trgr,0);
+          i_ferr[1] = Ferror32;
+          i_err[2]  = Fget32(ptr_fml_Ibuf,FFO_INDEX,0,(char *)&d_sl_prct,0);
+          i_ferr[2] = Ferror32;
+          i_err[3]  = Fget32(ptr_fml_Ibuf,FFO_USER_INDEX,0,(char *)&d_trgt_prct,0);
+          i_ferr[3] = Ferror32;
+
+		  	for(i_cnt =0; i_cnt <=3; i_cnt++) 		
+        {
+             if ( (i_err[ i_cnt ] == -1) )				
+			     {
+					if( i_ferr[i_cnt]  != FNOTPRES )
+					{
+      	             fn_userlog( c_ServiceName, "Error in field no. [%d] ",i_cnt);
+                     fn_errlog( c_ServiceName, "S31390", Fstrerror32(i_ferr[i_cnt]),c_errmsg);
+      				 Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+					 Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+      				 tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+					 
+					}
+					else
+					{
+						i_arr[i_cnt]=0;
+						fn_userlog( c_ServiceName, "missing field no. [%d] ",i_cnt);
+					}
+        		 }
+			 else
+			 {
+				i_arr[i_cnt]=1;
+				fn_userlog( c_ServiceName, "present field no. [%d] ",i_cnt);
+			 } 
+
+		}
+
+		if(c_gtt_rqst_typ == 'G')
+		{
+			i_err[0] = Fget32(ptr_fml_Ibuf, FFO_BRKR_STTS,0,(char *)&c_gtt_tgt_stts,0);
+			i_ferr[0] = Ferror32;
+			i_err[1] = Fget32(ptr_fml_Ibuf, FFO_SETTLOR_STTS,0,(char *)&c_gtt_sl_stts,0);
+			i_ferr[1] = Ferror32;
+
+			for ( i_cnt = 0; i_cnt < 2; i_cnt++ )
+			{
+							if(i_err[i_cnt] == -1 )
+							{
+							fn_userlog( c_ServiceName, "Error in field no. [%d] ",i_cnt);
+							fn_errlog( c_ServiceName, "S31395", Fstrerror32(i_ferr[i_cnt]),c_errmsg);
+							Fadd32( ptr_fml_Ibuf, FFO_ERR_MSG, c_errmsg, 0 );
+							Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+							tpreturn(TPFAIL, ERR_BFR, (char *)ptr_fml_Ibuf, 0, 0 );
+							}	
+			}
+
+			if(DEBUG_MSG_LVL_3)
+			{
+			 fn_userlog(c_ServiceName, " c_gtt_tgt_stts is :%c:", c_gtt_tgt_stts);
+			 fn_userlog(c_ServiceName, " c_gtt_sl_stts is :%c:", c_gtt_sl_stts);
+			}
+		}
+
+		int i_mul = 0;
+    
+    if (c_cvr_ordr_flw == 'B'){ i_mul = 1;}
+    else if (c_cvr_ordr_flw =='S'){i_mul = -1;}
+    
+    if (i_arr[0] + i_arr[1] + i_arr[2] + i_arr[3] == 0)
+    {
+            fn_userlog( c_ServiceName, "sum i_arr=0" );
+						d_sl_prct = i_mul * d_ltp_sltp_min_diff;
+            d_trgt_prct = -1 * i_mul * d_ltp_trgt_min_diff;
+            l_sl_trgr = (d_ltp+(d_ltp*d_sl_prct/100));
+            l_trgt_trgr = (d_ltp+(d_ltp*d_trgt_prct/100));
+            l_sl_lmt_pc =  l_sl_trgr;
+            l_trgt_lmt_pc = l_trgt_trgr;
+    }
+
+    else if (i_arr[0] + i_arr[1] + i_arr[2] + i_arr[3] <= 3)
+    {
+						fn_userlog( c_ServiceName, "sum i_arr<=3" );
+            if (i_arr[0] == 0 && !(c_gtt_sl_stts == 'N' && c_gtt_rqst_typ == 'G' ))
+            {
+                    if (abs(d_sl_prct) < d_ltp_sltp_min_diff)
+                    {
+                            fn_errlog(c_ServiceName, "S31400","Stoploss too close to LTP", c_errmsg);
+                            sprintf(c_errmsg, "Stoploss too close to LTP(Difference should be more than %.2f%%)", d_ltp_sltp_min_diff);
+														if (c_gtt_rqst_typ == 'S')
+														{sprintf(c_errmsg, "Trigger too close to LTP(Difference should be more than %.2f%%)", d_ltp_trgt_min_diff);}
+                            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+                            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+                            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+                    }
+    
+                    l_sl_trgr = (d_ltp+(d_ltp*d_sl_prct/100));
+            }
+            else if (i_arr[1] == 0 && !(c_gtt_tgt_stts == 'N' && c_gtt_rqst_typ == 'G' ))
+            {
+                    if (abs(d_trgt_prct) < d_ltp_trgt_min_diff)
+                    {
+                            fn_errlog(c_ServiceName, "S31405","Target too close to LTP", c_errmsg);
+                            sprintf(c_errmsg, "Target too close to LTP(Difference should be more than %.2f%%)", d_ltp_trgt_min_diff);
+														if (c_gtt_rqst_typ == 'S')
+														{sprintf(c_errmsg, "Trigger too close to LTP(Difference should be more than %.2f%%)", d_ltp_trgt_min_diff);}
+                            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+                            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+                            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+                    }
+    
+                    l_trgt_trgr = (d_ltp+(d_ltp*d_trgt_prct/100));
+            }
+            else if (i_arr[2] == 0 && !(c_gtt_sl_stts == 'N' && c_gtt_rqst_typ == 'G' ))
+            {
+                    d_sl_prct = 100 * (l_sl_trgr - d_ltp) / d_ltp;
+                    if(abs(d_sl_prct) < d_ltp_sltp_min_diff)
+                    {
+                            fn_errlog(c_ServiceName, "S31410","Stoploss too close to LTP", c_errmsg);
+                            sprintf(c_errmsg, "Stoploss too close to LTP(Difference should be more than %.2f%%)", d_ltp_sltp_min_diff);
+														if (c_gtt_rqst_typ == 'S')
+														{sprintf(c_errmsg, "Trigger too close to LTP(Difference should be more than %.2f%%)", d_ltp_trgt_min_diff);}
+                            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+                            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+                            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+                    }
+            }
+            else if (i_arr[3] == 0 && !(c_gtt_tgt_stts == 'N' && c_gtt_rqst_typ == 'G' ))
+            {
+                    d_trgt_prct = 100 * ( l_trgt_trgr - d_ltp)/ d_ltp;
+                    if(abs(d_trgt_prct) < d_ltp_trgt_min_diff)
+                    {
+                            fn_errlog(c_ServiceName, "S31415","Target too close to LTP", c_errmsg);
+                            sprintf(c_errmsg, "Target too close to LTP(Difference should be more than %.2f%%)", d_ltp_trgt_min_diff);
+														if (c_gtt_rqst_typ == 'S')
+														{sprintf(c_errmsg, "Trigger too close to LTP(Difference should be more than %.2f%%)", d_ltp_trgt_min_diff);}
+                            Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+                            Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+                            tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+                    }
+            }
+    
+            if ( c_gtt_rqst_typ != 'S' && d_trgt_sltp_min_diff > abs( l_sl_trgr - l_trgt_trgr ) * 100 / d_ltp  && !(!(c_gtt_tgt_stts == 'Y' && c_gtt_sl_stts == 'Y') && c_gtt_rqst_typ == 'G' ))
+            {
+                    fn_errlog(c_ServiceName, "S31420","Stoploss too close to Target", c_errmsg);
+                    sprintf(c_errmsg, "Stoploss too close to Target(Difference should be more than %.2f%%)", d_trgt_sltp_min_diff);
+										Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+                    Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+                    tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+            }
+    }
+
+		d_trgt_prct = (float)((int)(d_trgt_prct * 100 ))/100;
+		d_sl_prct = (float)((int)(d_sl_prct * 100 ))/100;
+		l_sl_lmt_pc =  l_sl_trgr;
+		l_trgt_lmt_pc = l_trgt_trgr;
+		
+		if(DEBUG_MSG_LVL_3)
+		{
+			fn_userlog(c_ServiceName,"l_sl_trgr is :%ld:", l_sl_trgr);
+			fn_userlog(c_ServiceName,"l_trgt_trgr is :%ld:", l_trgt_trgr);
+			fn_userlog(c_ServiceName,"d_sl_prct is :%lf:", d_sl_prct);
+			fn_userlog(c_ServiceName,"d_trgt_prct is :%lf:", d_trgt_prct);
+			fn_userlog(c_ServiceName,"l_sl_lmt_pc is :%ld:", l_sl_lmt_pc);
+			fn_userlog(c_ServiceName,"l_trgt_lmt_pc is :%ld:", l_trgt_lmt_pc);	
+		}
+
+		fn_userlog(c_ServiceName,"returning limit price to user"); 	
+									Fchg32(ptr_fml_Ibuf,FFO_LOW_PRC, 0 , (char *)&l_sl_trgr, 0);									
+									Fchg32(ptr_fml_Ibuf,FFO_HGH_PRC, 0 , (char *)&l_trgt_trgr, 0);
+									Fchg32(ptr_fml_Ibuf,FFO_INDEX, 0 , (char *)&d_sl_prct, 0);
+									Fchg32(ptr_fml_Ibuf,FFO_USER_INDEX, 0 , (char *)&d_trgt_prct, 0);
+									Fchg32(ptr_fml_Ibuf,FFO_OPN_PRC, 0 , (char *)&l_sl_lmt_pc, 0);									
+									Fchg32(ptr_fml_Ibuf,FFO_CLS_PRC, 0 , (char *)&l_trgt_lmt_pc, 0);
+									tpreturn(TPSUCCESS,SUCC_BFR,(char *)ptr_fml_Ibuf,0,0);
+
+	break;
+	/*** ver 3.1 Ends ***/	
+	
+		default :
+          fn_userlog( c_ServiceName,"Invalid request type.");
+          fn_errlog ( c_ServiceName, "S31425", DEFMSG,c_errmsg );
+					Fadd32(ptr_fml_Ibuf,FFO_ERR_MSG,c_errmsg,0 );
+					Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+          tpreturn(TPFAIL,ERR_BFR,(char *)ptr_fml_Ibuf,0,0);
+
+    break;	
+  
+	}	/** End of switch-case **/ 
+
+	if(DEBUG_MSG_LVL_3)
+	{
+    fn_userlog(c_ServiceName,"The service %s completed successfully.......",c_ServiceName);
+  }
+	
+	i_actn_id= 0;
+	
+	Fadd32( ptr_fml_Ibuf, FFO_ACTN_ID, (char *)&i_actn_id, 0 );
+
+  tpreturn(TPSUCCESS,0,(char *)ptr_fml_Ibuf,0,0) ;
+
+} 
+
+long fn_cal_price(char *c_ServiceName,long l_sltp_price,double d_prcnt,int i_hilow,char * c_exg,int i_tick_sz)
+{
+	long l_price=0;
+	double d_temp =0.0;
+	double d_price= 0.0;
+	
+	if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Inside fn_cal_price");
+    fn_userlog(c_ServiceName,"SLTP Price :%ld:",l_sltp_price);
+    fn_userlog(c_ServiceName,"Diff. Percent :%lf:",d_prcnt);
+    fn_userlog(c_ServiceName,"Exchng :%s:",c_exg);
+    fn_userlog(c_ServiceName,"Upper(1) Lower(2) :%d:",i_hilow);
+		fn_userlog(c_ServiceName,"Tick size :%d:",i_tick_sz);
+  }
+
+  if(i_hilow == CAL_UPPER )
+  {
+		d_temp = ( l_sltp_price * d_prcnt / 100 );
+
+  	if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  	{
+			fn_userlog(c_ServiceName,"sltp perc diff value d_temp :%lf:",d_temp);
+		}
+	
+    d_price = d_temp + (double)l_sltp_price; 
+
+  	if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  	{		
+			fn_userlog(c_ServiceName,"d_price CAL_UPPER :%lf:",d_price);
+		}
+	
+		l_price = (long) ceil(d_price);
+
+  	if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  	{
+    	fn_userlog(c_ServiceName,"before tick - function l_price :%ld:",l_price);	
+		}
+
+  	if(l_price %  i_tick_sz !=0)
+  	{
+			l_price = l_price - (l_price % i_tick_sz - i_tick_sz);
+
+  		if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+ 			{
+				fn_userlog(c_ServiceName,"after tick - function final values l_price :%ld:",l_price);
+			}
+  	}
+  }
+  else /** CAL_LOWER **/
+  {
+		d_temp = ( l_sltp_price * d_prcnt / 100 );
+
+  	if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  	{
+			fn_userlog(c_ServiceName,"sltp perc diff value d_temp :%lf:",d_temp);
+		}
+
+    d_price = (double) l_sltp_price - d_temp; 
+
+  	if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  	{
+			fn_userlog(c_ServiceName,"d_price CAL_LOWER :%lf:",d_price);
+		}
+
+		l_price = (long) floor(d_price);
+
+  	if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  	{
+			fn_userlog(c_ServiceName,"before tick - function l_price :%ld:",l_price);
+		}
+
+  	if(l_price % i_tick_sz !=0)
+  	{
+    	l_price = l_price - (l_price % i_tick_sz);
+
+  		if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  		{  		
+				fn_userlog(c_ServiceName," after tick - function final values l_price :%ld:",l_price);
+			}
+		}
+  }
+		
+  return l_price;
+}
+
+/*** Ver 1.1 ** Starts ***/
+
+long fn_cal_price_optplus(char *c_ServiceName,long l_sltp_price,double d_limit_diff,int i_hilow,char * c_exg,int i_tick_sz)
+{
+  long l_price=0;
+  double d_price= 0.0;
+	
+
+  if(DEBUG_MSG_LVL_3)
+  {
+    fn_userlog(c_ServiceName,"Inside fn_cal_price_optplus function");
+    fn_userlog(c_ServiceName,"SLTP Price :%ld:",l_sltp_price);
+    fn_userlog(c_ServiceName,"Exchng :%s:",c_exg);
+		fn_userlog(c_ServiceName,"limit difference :d_limit_diff: :%lf:",d_limit_diff); 
+    fn_userlog(c_ServiceName,"Upper(1) Lower(2) :%d:",i_hilow);
+    fn_userlog(c_ServiceName,"Tick size :%d:",i_tick_sz);
+  }
+
+  if(i_hilow == CAL_UPPER )
+  {
+		d_price = d_limit_diff + (double)l_sltp_price;
+
+		l_price = (long) ceil(d_price);
+
+    if(l_price %  i_tick_sz !=0)
+    {
+      l_price = l_price - (l_price % i_tick_sz - i_tick_sz);
+
+  		if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  		{
+      	fn_userlog(c_ServiceName,"after tick - function final values l_price :%ld:",l_price);
+			}
+
+    }
+  }
+  else /** CAL_LOWER **/
+  {		
+		d_price = (double) l_sltp_price - d_limit_diff;	
+
+    l_price = (long) floor(d_price);
+
+  	if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  	{
+    	fn_userlog(c_ServiceName,"before tick - function l_price :%ld:",l_price);
+		}
+
+    if(l_price % i_tick_sz !=0)
+    {
+      l_price = l_price - (l_price % i_tick_sz);
+
+  		if(DEBUG_MSG_LVL_0) /*** Ver 2.0 ***/
+  		{
+      	fn_userlog(c_ServiceName," after tick - function final values l_price :%ld:",l_price);
+			}
+    }
+  }
+
+	return l_price;
+
+}	
+
+long fn_max(char *c_ServiceName, long l_limit_diff, long l_sltp_lmt_diff)
+{
+  if(DEBUG_MSG_LVL_3) /*** Ver 2.0 ***/
+  {
+		fn_userlog(c_ServiceName,"Inside fn_max funtion");
+	}
+	
+	long l_max_val = 0;
+ 
+  if (l_limit_diff>= l_sltp_lmt_diff)
+
+     l_max_val = l_limit_diff;
+
+  else if (l_limit_diff < l_sltp_lmt_diff)
+
+     l_max_val = l_sltp_lmt_diff;
+ 
+  return l_max_val; 
+}
+
+/*** Ver 1.1 ** Ends ***/

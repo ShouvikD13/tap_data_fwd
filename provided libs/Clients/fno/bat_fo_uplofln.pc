@@ -1,0 +1,649 @@
+/*****************************************************************************************
+    Service Name          : bat_fo_uplofln
+
+    Description           : Select the offline orders from the FOO_FO_OFLN_ORDERS
+														and call the service SFO_OFFLINE to process them. 
+
+		Input									:	<bat_fo_uplofln> <exchange><exchange><pipe><B/O><NA/ord ack>
+		Output								:	None
+
+    Log                   : 09/12/2002      1.0 Sapan ICICI Infotech
+													: 01/10/2007			1.1 Sandeep Patil	IBM Changes
+													: 28/06/2008			1.2	Shamili Dalvi	FP
+													: 15/11/2011			1.3	Navina D.	SPAN Changes
+													: 24/02/2012			1.4	Sandip T.	BSE  Changes
+													: 15/01/2013      1.5 Navina D. SPAN FuturePLUS
+													: 10/05/2013      1.6 Navina D. SLTP FuturePlus
+													: 19/09/2013      1.7 Swati A.B OptionPLUS Changes  
+													: 07/02/2014      1.8 Navina D. BSE ORS ACK changes  
+													: 09/09/2014      1.9 Sachin B. View to FML Changes  
+													: 31/07/2018			2.0 Parag K.	Core Fix
+******************************************************************************************/
+
+#include <sqlca.h>
+#include <atmi.h>
+#include <string.h>			 /** Ver 1.1 **/
+#include <fml32.h>
+#include <fo.h>
+#include <fn_log.h>
+#include <fn_tuxlib.h>
+#include <fn_battmpt.h>
+#include <fml_def.h>
+#include <fo_fml_def.h>
+#include <fn_ddr.h>
+#include <eba_to_ors.h>
+#include <fn_ddr.h>
+
+/** #include <fo_view_def.h> ** Ver 1.9 **/
+#include <fn_env.h>
+#include <rcv_cln_srvr.h>
+#include <fn_fil_log.h>
+#include <fml_rout.h>			/** Ver 1.1 **/
+#include <fn_read_debug_lvl.h>      /*** Ver 1.1 ***/
+
+
+#define ORDER_AND_TRADE_UPLOAD	'B'
+#define	ORDER_SPECIFIC_UPLOAD	'O'
+
+EXEC SQL INCLUDE "table/exg_xchng_mstr.h";
+EXEC SQL INCLUDE "table/foo_fo_ofln_orders.h";
+EXEC SQL INCLUDE "table/fot_fo_ofln_trades.h";
+
+void fn_msg( char *c_ServiceName, char* c_err_msg, char c_mem_flg );
+
+char c_pipe_id[4];
+char plc_ord_msg[256];
+char ordr_ref[20];
+int ord_val,ret_val,trd_val;
+char ord_ack_err[256];
+int ret_trd ;
+char trd_err_msg[256];
+char eba_trd_ref[20];
+char c_ServiceName [ 33 ];
+char c_err_msg [ 256 ];
+char c_errmsg[256];
+
+EXEC SQL BEGIN DECLARE SECTION;
+	varchar c_trd_dt[11 + 1];
+	varchar	c_trd_ref[10];	
+EXEC SQL END DECLARE SECTION;
+
+void BAT_FO_UPLOFLN ( int argc, char *argv[] ) 
+{ 
+	char upl_typ;
+	char inp_ord_ack[20];
+	int rec_cnt=0;
+	int match_exist;
+	char c_user_id[10];
+	long session_id=0;
+	char err_msg[256];
+	int trd_cnt=0;
+	int trade_cnt=0;
+	int ord_cnt=0;
+	long tot_trd_qty=0;
+	int i_trnsctn=0;
+	int i_trnsctn_main=0;
+	char con_msg[256];
+	char succ_msg[256];
+	int cnt=0;
+	int i_cnt=0;
+
+	char lm_mkt_flg;
+  char ord_typ = 'T';
+  char svc_name[20];
+  char c_channel[4];
+  FBFR32* ptr_fml_Ibuf;
+  FBFR32* ptr_fml_Obuf;
+  long li_len_tobuf;
+  int i_err[27];	/***Index Changed From 25 To 26 In Ver1.1***/  /*** Index Changed From 26 To 27 In Ver 1.3 ***/  
+  long stop_loss_trp_prc = 0L;
+  long disclosed_qty = 0L;
+	char c_ddr[4];
+	char c_span_flag = '\0';  /*** Ver 1.3 ***/
+	char c_bse_span_flag = '\0';  /*** Ver 1.4 ***/
+	char c_sys_msg[4] = "\0";	/*** Ver 1.6 ***/
+	char c_spl_flg = '\0';		/*** Ver 1.6 ***/
+
+  int i_ch_val;
+	char c_msg[256];
+
+	char c_xchng_cd [ 4 ];
+	int 	i;
+
+  strcpy ( c_ServiceName, argv[0] );
+
+	INITBATDBGLVL(argv[0]);     /*** Ver 1.1 ***/
+
+	fn_userlog(c_ServiceName,"agrc = [%d]",argc);
+	sprintf ( c_msg, "Batch process %s for FNO Offline Upload started......", argv[0] );
+ 	fn_bat_pst_msg ( c_ServiceName, c_msg, c_tag );
+
+	if( argc != 6 )
+	{
+		fn_bat_pst_msg ( c_ServiceName, "Invalid Number of Arguments", c_tag );
+		return;
+	}
+
+	strcpy(sql_exg_xchng_cd,argv[2]);
+	strcpy(c_pipe_id,argv[3]);
+	upl_typ = argv[4][0];
+	strcpy( inp_ord_ack, argv[5] );
+
+	fn_userlog( c_ServiceName, "Inputs to the batch program.... ");
+	fn_userlog( c_ServiceName, "upl_typ = [%c]",upl_typ);
+	fn_userlog( c_ServiceName, "inp_ord_ack = [%s]",inp_ord_ack);
+	fn_userlog( c_ServiceName, "sql_exg_xchng_cd = [%s]",sql_exg_xchng_cd);
+	fn_userlog( c_ServiceName, "c_pipe_id = [%s]",c_pipe_id);
+
+	EXEC SQL
+  SELECT to_char ( exg_nxt_trd_dt, 'yyyymmdd' ),
+         to_char ( exg_nxt_trd_dt, 'DD-Mon-yyyy' ),
+         opm_xchng_cd
+  INTO :c_trd_ref,
+       :c_trd_dt,
+       :c_xchng_cd
+  FROM exg_xchng_mstr, opm_ord_pipe_mstr
+  WHERE opm_pipe_id =  :c_pipe_id
+  AND exg_xchng_cd = opm_xchng_cd;
+
+	if ( SQLCODE != 0 )
+ 	{	
+  	fn_errlog(c_ServiceName,"S31005", SQLMSG, c_err_msg);
+   	fn_msg(c_ServiceName,"System Error..contact system support",'N');	
+		return;
+ 	}
+ 	SETNULL ( c_trd_ref );
+ 	SETNULL ( c_trd_dt );
+
+	fn_userlog( c_ServiceName, "c_trd_ref = [%s]",c_trd_ref.arr);
+	fn_userlog( c_ServiceName, "c_trd_dt = [%s]",c_trd_dt.arr);
+
+	if(upl_typ == ORDER_AND_TRADE_UPLOAD )
+	{
+		fn_msg ( c_ServiceName, "Request for Bulk  ORDER_AND_TRADE_UPLOAD..",'N');
+			
+		EXEC SQL
+    SELECT count(*)
+    INTO   :ord_cnt
+    FROM
+        FOO_FO_OFLN_ORDERS
+    WHERE
+				FOO_XCHNG_CD = :sql_exg_xchng_cd AND    /*** Ver 1.3 ***/
+      	trunc(FOO_ORDR_DT) = to_date(:c_trd_dt,'dd-mon-yyyy') AND 
+        FOO_PLCD_STTS <> 'U';	
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31010",SQLMSG,c_err_msg);
+      fn_msg ( c_ServiceName, "System Error.Contact system support",'N');
+      return;
+    }
+		sprintf(con_msg,"Number of Offline orders to be uploaded into EBA is [%ld]",ord_cnt);
+		fn_msg ( c_ServiceName, con_msg,'N');
+
+		EXEC SQL
+    SELECT count(*)
+    INTO   :trade_cnt
+    FROM
+        FOT_FO_OFLN_TRADES
+    WHERE
+				FOT_XCHNG_CD = :sql_exg_xchng_cd AND    /*** Ver 1.3 ***/
+      	trunc(FOT_TRD_DT) = to_date(:c_trd_dt,'dd-mon-yyyy') AND 
+        FOT_PLCD_STTS <> 'U';
+
+    if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog(c_ServiceName,"S31015",SQLMSG,c_err_msg);
+      fn_msg ( c_ServiceName, "Error in selecting record count from Offline Trade table ",'N');
+      return;
+    }
+    sprintf(con_msg,"Number of Trades to be upoaded is [%ld]",trade_cnt);
+    fn_msg ( c_ServiceName, con_msg,'N');
+
+		i_trnsctn = fn_begintran( c_ServiceName, c_errmsg );
+    if(i_trnsctn == -1)
+    {
+      fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the BAT_FO_UPLOFLN process...",c_errmsg);
+      fn_msg ( c_ServiceName, "System error ocured..exiting..",'N');
+      fn_errlog( c_ServiceName, "S31020", FMLMSG, c_errmsg  );
+      return;
+    }
+
+    EXEC SQL
+    UPDATE FOO_FO_OFLN_ORDERS
+    SET FOO_REMARKS= 'Record not reached'
+    WHERE
+				FOO_XCHNG_CD = :sql_exg_xchng_cd AND    /*** Ver 1.3 ***/
+    	  trunc(FOO_ORDR_DT) = to_date(:c_trd_dt,'dd-mon-yyyy') AND 
+        FOO_PLCD_STTS = 'R' ;
+
+		if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog(c_ServiceName,"S31025",SQLMSG,c_err_msg);
+      fn_msg ( c_ServiceName, "Error in selecting run number ",'Y');
+      return;
+    }
+		
+    EXEC SQL
+    UPDATE FOT_FO_OFLN_TRADES
+    SET FOT_REMARKS= 'Record not reached'
+    WHERE
+				FOT_XCHNG_CD = :sql_exg_xchng_cd AND    /*** Ver 1.3 ***/
+    	  trunc(FOT_TRD_DT) = to_date(:c_trd_dt,'dd-mon-yyyy') AND 
+        FOT_PLCD_STTS = 'R';
+
+		if ( SQLCODE != 0  && SQLCODE != NO_DATA_FOUND )
+    {
+      fn_errlog(c_ServiceName,"S31030",SQLMSG,c_err_msg);
+      fn_msg ( c_ServiceName, "Error in selecting run number ",'Y');
+      return;
+    }
+
+		if( fn_committran( c_ServiceName, i_trnsctn, c_errmsg ) == -1 )
+   	{
+     	fn_userlog(c_ServiceName,"Error in tpbegin [%s] exiting the BAT_FO_UPLOFLN process...",c_errmsg);
+     	fn_errlog( c_ServiceName, "S31035", FMLMSG, c_errmsg  );
+     	fn_msg ( c_ServiceName, "System error ocured..exiting..",'Y');
+     	return;
+   	}
+
+		if( ord_cnt == 0 )
+		{
+			sprintf(con_msg,"No orders to upload into EBA for Order date [%s]..exiting..",c_trd_dt.arr);
+			fn_msg(c_ServiceName,con_msg,'N');
+			return;
+		}	
+
+		fn_msg ( c_ServiceName,con_msg,'N');	
+	}	/* end of if */
+
+	if( upl_typ == ORDER_SPECIFIC_UPLOAD)
+	{
+		if(strcmp(inp_ord_ack,"NA") == 0)
+		{
+			fn_msg ( c_ServiceName, "Invalid Order Ack passed for ORDER_SPECIFIC_UPLOAD..exiting",'N');
+			return;
+		}		
+		fn_msg ( c_ServiceName, "Request for ORDER_SPECIFIC_UPLOAD..",'N');
+
+		EXEC SQL
+    SELECT count(*)
+    INTO   :ord_cnt
+    FROM
+        FOO_FO_OFLN_ORDERS
+    WHERE
+				FOO_XCHNG_CD = :sql_exg_xchng_cd AND    /*** Ver 1.3 ***/
+        trunc(FOO_ORDR_DT) = to_date(:c_trd_dt,'dd-mon-yyyy') AND
+        FOO_PLCD_STTS <> 'U' and 
+				FOO_XCHNG_ACK = :inp_ord_ack;
+
+    if ( SQLCODE != 0 )
+    {
+      fn_errlog(c_ServiceName,"S31040",SQLMSG,c_err_msg);
+      fn_msg ( c_ServiceName, "System Error.Contact system support",'N');
+      return;
+    }
+
+		if(ord_cnt == 0)
+		{
+    	sprintf(con_msg,"Exg Order Ack entered not found for order date [%s] exiting...",c_trd_dt.arr);
+    	fn_msg ( c_ServiceName, con_msg,'N');
+			return;
+		}
+	}
+			
+  if( upl_typ == ORDER_AND_TRADE_UPLOAD || upl_typ == ORDER_SPECIFIC_UPLOAD)
+  {
+		/* upload both the order.txt and trade.txt files together */
+		/* select orders to be uploaded from the table FOO_FO_OFLN_ORDERS table */
+
+		EXEC SQL
+		DECLARE cur_ord 
+		CURSOR FOR
+		SELECT 		
+			FOO_XCHNG_CD,
+			FOO_XCHNG_ACK,
+			FOO_CLM_MTCH_ACCNT,
+			FOO_PRDCT_TYP,
+			FOO_UNDRLYNG,
+			FOO_STRIKE_PRC,
+			FOO_EXPRY_DT,
+			FOO_EXER_TYP,
+			FOO_OPT_TYP,
+			FOO_INDSTK,
+			FOO_ORDR_FLW,
+			FOO_EXEC_QTY,
+			FOO_EXEC_RATE,
+			to_char(FOO_ORDR_DT,'dd-Mon-yyyy hh24:mi:ss'),
+			to_char(FOO_LST_MDFD_TM,'dd-Mon-yyyy hh24:mi:ss'),
+			to_char(FOO_EXCHNG_ACK_TM,'dd-Mon-yyyy hh24:mi:ss'),
+			FOO_PLCD_STTS,
+			nvl(FOO_XCHNG_REMARKS,' ')
+		FROM
+			FOO_FO_OFLN_ORDERS
+		WHERE
+			FOO_XCHNG_CD = :sql_exg_xchng_cd AND    /*** Ver 1.3 ***/
+			trunc(FOO_ORDR_DT) = to_date(:c_trd_dt,'dd-Mon-yyyy') AND 
+			FOO_PLCD_STTS <> 'U'	AND
+			trim(FOO_XCHNG_ACK) = decode(:upl_typ,'B',trim(FOO_XCHNG_ACK),:inp_ord_ack);  /*** trim added in Ver 1.8 ***/
+
+		i_cnt = 0;		/* record counter */
+		EXEC SQL
+			OPEN cur_ord;
+		
+		for( ; ; )			/* loop for uploading the orders */
+		{
+			EXEC SQL
+			FETCH cur_ord
+			INTO
+				:sql_foo_xchng_cd,
+      	:sql_foo_xchng_ack,
+      	:sql_foo_clm_mtch_accnt,
+      	:sql_foo_prdct_typ,
+      	:sql_foo_undrlyng,
+      	:sql_foo_strike_prc,
+      	:sql_foo_expry_dt,
+      	:sql_foo_exer_typ,
+      	:sql_foo_opt_typ,
+      	:sql_foo_indstk,
+      	:sql_foo_ordr_flw,
+      	:sql_foo_exec_qty,
+      	:sql_foo_exec_rate,
+      	:sql_foo_ordr_dt,
+      	:sql_foo_lst_mdfd_tm,
+      	:sql_foo_exchng_ack_tm,
+      	:sql_foo_plcd_stts,
+				:sql_foo_xchng_remarks;
+
+			if( SQLCODE == NO_DATA_FOUND )
+			{
+				EXEC SQL CLOSE cur_ord;
+				break;
+			}	
+
+			if ( SQLCODE != 0 && SQLCODE != NO_DATA_FOUND )
+  		{
+				EXEC SQL CLOSE cur_ord;
+   			fn_errlog(c_ServiceName,"S31045",SQLMSG,c_err_msg);
+   			fn_msg ( c_ServiceName, "Error in selecting record from Offline table ",'N');
+				return;
+  		}
+
+			rtrim(sql_foo_xchng_ack); /*** Ver 1.8 ***/
+
+			sprintf(con_msg,"Processing record no = [%ld] for sql_foo_xchng_ack=[%s]....",i_cnt,sql_foo_xchng_ack);
+			fn_msg ( c_ServiceName, con_msg,'N');
+
+			/*** Start Ver 1.3 ***/
+			fn_userlog(c_ServiceName,"sql_foo_clm_mtch_accnt = :%s:", sql_foo_clm_mtch_accnt);
+
+			EXEC SQL
+				SELECT	NVL(CLM_SPAN_ALLWD,'N'),
+								NVL(CLM_BSESPAN_ALLWD,'N')						/*** Ver 1.4 ***/ 
+				INTO		:c_span_flag,
+								:c_bse_span_flag											/*** Ver 1.4 ***/ 
+				FROM		CLM_CLNT_MSTR 
+				WHERE		CLM_MTCH_ACCNT = :sql_foo_clm_mtch_accnt;
+	
+			if( SQLCODE != 0 )
+			{
+				EXEC SQL CLOSE cur_ord;
+   			fn_errlog(c_ServiceName,"S31050",SQLMSG,c_err_msg);
+   			fn_msg ( c_ServiceName, "Error in selecting span flag",'N');
+				return;
+			}
+
+			fn_userlog(c_ServiceName,"c_span_flag = :%c:", c_span_flag);
+			fn_userlog(c_ServiceName,"c_bse_span_flag = :%c:", c_bse_span_flag); /*** Ver 1.4 ***/
+			sprintf(con_msg,"c_span_flag = :%c:", c_span_flag);
+			fn_msg ( c_ServiceName, con_msg,'N');
+			/*** End Ver 1.3 ***/
+
+			fn_userlog(c_ServiceName," sql_foo_prdct_typ=:%c:",sql_foo_prdct_typ);
+
+			/*if(sql_foo_prdct_typ == 'F') */							/*Ver 1.2*/
+			/*if(sql_foo_prdct_typ == 'F' || sql_foo_prdct_typ == 'P')            *Ver 1.2*  *** Commented in Ver 1.6 ***/
+			if(sql_foo_prdct_typ == 'F' || sql_foo_prdct_typ == 'P' || sql_foo_prdct_typ == 'U')			 	  /*** Ver 1.6 ***/
+				sprintf(con_msg,"Exg Order ack [%s], Match Account [%s] Contract [FUT-%s-%s]",sql_foo_xchng_ack,sql_foo_clm_mtch_accnt,sql_foo_undrlyng,sql_foo_expry_dt.arr);
+
+			/*** if(sql_foo_prdct_typ == 'O') Commented In Ver 1.7 ***/
+			if(sql_foo_prdct_typ == 'O' || sql_foo_prdct_typ == 'I' )   /*** Ver 1.7 ***/
+				sprintf(con_msg,"Exg Order ack [%s], Match Account [%s] Contract [OPT-%s-%s-%ld-%c%c]",sql_foo_xchng_ack,sql_foo_clm_mtch_accnt,sql_foo_undrlyng,sql_foo_expry_dt.arr,sql_foo_strike_prc/100,sql_foo_opt_typ,sql_foo_exer_typ);
+
+			fn_msg ( c_ServiceName, con_msg,'N');
+
+			SETNULL(sql_foo_expry_dt);
+			SETNULL(sql_foo_ordr_dt);
+			SETNULL(sql_foo_lst_mdfd_tm);
+			SETNULL(sql_foo_exchng_ack_tm);
+			SETNULL(sql_foo_xchng_remarks);
+
+			/* call the service SFO_OFFLINE */			
+
+			ptr_fml_Ibuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+  		ptr_fml_Obuf = (FBFR32*)tpalloc("FML32",NULL,MIN_FML_BUF_LEN);
+		
+			if(ptr_fml_Ibuf == NULL)
+  		{
+    		fn_errlog( c_ServiceName, "S31055", TPMSG, c_err_msg  );
+				fn_msg(c_ServiceName,"System error ..exiting",'N');
+				return;
+  		}
+
+			if(ptr_fml_Obuf == NULL)
+  		{
+    		fn_errlog( c_ServiceName, "S31060", TPMSG, c_err_msg  );
+				fn_msg(c_ServiceName,"System error ..exiting",'N');
+				return;
+  		}
+
+			strcpy(c_user_id,"system");
+  		session_id = 0L;
+
+  		if(sql_foo_exec_rate == 0)
+    		lm_mkt_flg = 'M';
+  		else
+    		lm_mkt_flg = 'L';
+
+			/*** Ver 1.3 starts ***/
+		/**	if( c_span_flag == 'Y' ) ** Ver 1.4 comment ***/
+			if( ( ( c_span_flag == 'Y' 		 && strcmp(sql_foo_xchng_cd,"NFO" )== 0) ||
+					( c_bse_span_flag == 'Y' && strcmp(sql_foo_xchng_cd,"BFO") == 0) ) &&
+					( sql_foo_prdct_typ != 'P')		/*** Ver 1.5 ***/
+				)
+					strcpy(svc_name,"SFO_SPN_PLC_ORD");		 
+		/**	else  Ver 1.4 comment **/
+			/*** Ver 1.3 ends ***/
+
+			else	if( ( c_span_flag == 'N' 		 && strcmp(sql_foo_xchng_cd,"NFO" )== 0) ||
+								( c_bse_span_flag == 'N' && strcmp(sql_foo_xchng_cd,"BFO") == 0) ||
+								( sql_foo_prdct_typ == 'P')		/*** Ver 1.5 ***/
+							)			/** Ver 1.4 **/
+			{							/** Ver 1.4 **/
+  			/*** if(sql_foo_prdct_typ == 'F' || sql_foo_prdct_typ == 'P')   ** Ver 1.2 **		*** Commented in Ver 1.6 ***/
+				if(sql_foo_prdct_typ == 'F' || sql_foo_prdct_typ == 'P' || sql_foo_prdct_typ == 'U')	 			 /*** Ver 1.6 ***/
+    			strcpy(svc_name,"SFO_FUT_PLC_ORD");
+  			else
+    			strcpy(svc_name,"SFO_OPT_PLC_ORD");
+			}							/** Ver 1.4 **/
+
+  		strcpy(c_channel,"OFF");
+
+			fn_cpy_ddr(c_ddr);
+
+			i_err[0] = Fadd32(ptr_fml_Ibuf,FFO_USR_ID,(char *)c_user_id,0) ;
+  		i_err[1] = Fadd32(ptr_fml_Ibuf,FFO_SSSN_ID,(char *)&session_id,0) ;
+  		i_err[2] = Fadd32(ptr_fml_Ibuf,FFO_EBA_MTCH_ACT_NO,(char *)sql_foo_clm_mtch_accnt,0) ;
+  		i_err[3] = Fadd32(ptr_fml_Ibuf,FFO_XCHNG_CD,(char *)sql_foo_xchng_cd,0) ;
+  		i_err[4] = Fadd32(ptr_fml_Ibuf,FFO_PRDCT_TYP,(char *)&sql_foo_prdct_typ,0) ;
+  		i_err[5] = Fadd32(ptr_fml_Ibuf,FFO_UNDRLYNG,(char *)sql_foo_undrlyng,0) ;
+  		i_err[6] = Fadd32(ptr_fml_Ibuf,FFO_EXPRY_DT,(char *)sql_foo_expry_dt.arr,0) ;
+  		i_err[7] = Fadd32(ptr_fml_Ibuf,FFO_EXER_TYP,(char *)&sql_foo_exer_typ,0) ;
+  		i_err[8] = Fadd32(ptr_fml_Ibuf,FFO_OPT_TYP,(char *)&sql_foo_opt_typ,0) ;
+  		i_err[9] = Fadd32(ptr_fml_Ibuf,FFO_STRK_PRC,(char *)&sql_foo_strike_prc,0) ;
+  		i_err[10] = Fadd32(ptr_fml_Ibuf,FFO_CTGRY_INDSTK,(char *)&sql_foo_indstk,0) ;
+  		i_err[11] = Fadd32(ptr_fml_Ibuf,FFO_ORDR_FLW,(char *)&sql_foo_ordr_flw,0) ;
+  		i_err[12] = Fadd32(ptr_fml_Ibuf,FFO_LMT_MKT_SL_FLG,(char *)&lm_mkt_flg,0) ;
+  		i_err[13] = Fadd32(ptr_fml_Ibuf,FFO_LMT_RT,(char *)&sql_foo_exec_rate,0) ;
+  		i_err[14] = Fadd32(ptr_fml_Ibuf,FFO_ORD_TYP,(char *)&ord_typ,0) ;
+  		i_err[15] = Fadd32(ptr_fml_Ibuf,FFO_ORD_TOT_QTY,(char *)&sql_foo_exec_qty,0) ;
+  		i_err[16] = Fadd32(ptr_fml_Ibuf,FFO_ORD_VALID_DT,(char *)sql_foo_ordr_dt.arr,0) ;
+  		i_err[17] = Fadd32(ptr_fml_Ibuf,FFO_SVC_NAME,(char *)svc_name,0) ;
+  		i_err[18] = Fadd32(ptr_fml_Ibuf,FFO_CHANNEL,(char *)c_channel,0) ;
+  		i_err[19] = Fadd32(ptr_fml_Ibuf,FFO_STP_LSS_TGR,(char *)&stop_loss_trp_prc,0) ;
+  		i_err[20] = Fadd32(ptr_fml_Ibuf,FFO_DSCLSD_QTY,(char *)&disclosed_qty,0) ;
+  		i_err[21] = Fadd32(ptr_fml_Ibuf,FFO_ACK_NMBR,(char *)sql_foo_xchng_ack,0) ;
+  		i_err[22] = Fadd32(ptr_fml_Ibuf,FFO_REMARKS,(char *)sql_foo_xchng_remarks.arr,0) ;
+  		i_err[23] = Fadd32(ptr_fml_Ibuf,FFO_ACK_TM,(char *)sql_foo_exchng_ack_tm.arr,0) ;
+  		i_err[24] = Fadd32(ptr_fml_Ibuf,FFO_PIPE_ID,(char *)c_pipe_id,0) ;
+  		i_err[25] = Fadd32(ptr_fml_Ibuf,FFO_DPID,(char *)c_ddr,0) ;
+			i_err[26] = Fadd32(ptr_fml_Ibuf,FFO_SOURCE_FLG,(char *)&c_span_flag,0) ;					/*** Ver 1.3 ***/
+
+			for(i=0;i<27;i++)			/*** Ver 1.3  changed from 26 to 27 ***/
+  		{
+    		if(i_err[i] == -1)
+    		{
+					fn_userlog(c_ServiceName,"Error in Fadd for i [%d]",i);
+      		fn_errlog( c_ServiceName, "S31065", FMLMSG, c_err_msg  );
+					fn_msg(c_ServiceName,"system error occured..exiting",'N');
+					return;
+    		}
+  		}
+			/****** Ver 1.4 new code starts ****/
+			if(Fadd32(ptr_fml_Ibuf,FFO_STATUS_FLG,(char *)&c_bse_span_flag,0) == -1 )
+			{
+					fn_userlog(c_ServiceName,"Error in Fadd for BSE SPAN FLAG ");
+      		fn_errlog( c_ServiceName, "S31070", FMLMSG, c_err_msg  );
+					fn_msg(c_ServiceName,"system error occured..exiting",'N');
+					return;
+			}
+			/****** Ver 1.4 new Code Ends ****/
+
+			/*** Ver 1.6 starts here ***/
+			/*** if ( sql_foo_prdct_typ == 'U' ) Commented In Ver 1.7 ***/
+			if ( sql_foo_prdct_typ == 'U' || sql_foo_prdct_typ == 'I' ) /*** Ver 1.7 ***/
+			{
+				 strcpy(c_sys_msg,"OFF");
+				 c_spl_flg = SYSTEM_SQUAREOFF;
+
+				if(Fadd32(ptr_fml_Ibuf,FFO_SYS_MSG,(char *)c_sys_msg,0) == -1 )
+				{
+					if ( sql_foo_prdct_typ == 'U')  /*** Ver 1.7 - If condition added ***/
+					{
+						fn_userlog(c_ServiceName,"Error in Fadd for SYS MSG for SLTP F+ ");
+					}
+					else if ( sql_foo_prdct_typ == 'I') /*** Ver 1.7 ***/
+					{
+            fn_userlog(c_ServiceName,"Error in Fadd for SYS MSG for OptionPLUS ");
+          }
+
+      		fn_errlog( c_ServiceName, "S31075", FMLMSG, c_err_msg  );
+					fn_msg(c_ServiceName,"system error occured..exiting",'N');
+					return;
+				}
+
+				if(Fadd32(ptr_fml_Ibuf,FFO_SPL_FLG,(char *)&c_spl_flg,0) == -1 )
+				{
+					if ( sql_foo_prdct_typ == 'U')  /*** Ver 1.7 - If condition added ***/
+					{
+						fn_userlog(c_ServiceName,"Error in Fadd for SPL FLAG for SLTP F+ ");
+					}
+					else if ( sql_foo_prdct_typ == 'I') /*** Ver 1.7 ***/
+					{
+            fn_userlog(c_ServiceName,"Error in Fadd for SPL FLAG for OptionPLUS ");
+          }
+      		fn_errlog( c_ServiceName, "S31080", FMLMSG, c_err_msg  );
+					fn_msg(c_ServiceName,"system error occured..exiting",'N');
+					return;
+				}
+			}
+			/*** Ver 1.6 ends here ***/
+
+			fn_msg ( c_ServiceName, "CALL SFO_OFFLINE...",'N');
+
+			ret_val = tpcall("SFO_OFFLINE",(char*)ptr_fml_Ibuf,0,(char **)&ptr_fml_Obuf,&li_len_tobuf,0);
+
+  		if(ret_val == -1) /* error in placing the order */
+  		{
+    		if(Fget32(ptr_fml_Obuf,FFO_ERR_MSG,0,(char *)err_msg,0) == -1)
+    		{
+      		fn_errlog( c_ServiceName, "S31085", FMLMSG, c_err_msg  );
+      		sprintf(c_err_msg,"Order Upload for Exc_ack:[%s] failed..,Please Contact Customer Support",sql_foo_xchng_ack);
+      		fn_msg(c_ServiceName,c_err_msg,'N');
+    		}
+    		else
+    		{
+      		/* order upload failed..updating the table FOO_FO_OFLN_ORDERS */
+/***      		sprintf(c_err_msg,"Upload for Exc_ack:[%s] failed..ERR MSG:[%s]",sql_foo_xchng_ack,err_msg); *** Commented In Ver 2.0 ***/
+					sprintf(c_err_msg,"Upload for Exc_ack:[%s] failed:[%s]",sql_foo_xchng_ack,err_msg);	/*** Added In Ver 2.0 ***/
+      		fn_msg(c_ServiceName,c_err_msg,'N');
+    		}
+  		}
+			else  /* order placed successfully..get the order reference */
+  		{
+    		if(Fget32(ptr_fml_Obuf,FFO_ORDR_RFRNC,0,(char *)ordr_ref,0) == -1)
+    		{
+      		fn_errlog( c_ServiceName, "S31090", FMLMSG, c_err_msg  );
+      		sprintf(c_err_msg,"Unable to get order ref..Upload for Exc_ack:[%s] failed..,Please Contact Customer Support",sql_foo_xchng_ack);
+      		fn_msg(c_ServiceName,c_err_msg,'N');
+    		}
+    		else
+    		{
+      		fn_userlog(c_ServiceName,"Order upload success..ordr ref from EBA recd...[%s]",ordr_ref);
+					sprintf(succ_msg,"Order and trade success for Exc_ack [%s]..EBA Ordr Ref [%s]",sql_foo_xchng_ack,ordr_ref); 
+					fn_msg(c_ServiceName,succ_msg,'N');
+    		}
+  		}
+
+			i_cnt++;
+		}
+		sprintf(con_msg,"Total number of offline orders processed - [%ld]",i_cnt);
+		fn_msg(c_ServiceName,con_msg,'N');
+		fn_msg(c_ServiceName,"FNO Offline process over..",'N');
+
+  }/* end of if of upl_typ */
+	else
+	{
+		fn_msg(c_ServiceName,"Invalid Upload Type...exiting",'N');
+		return;
+	}
+	return;
+}
+
+void fn_msg( char *c_ServiceName, char* c_err_msg, char c_mem_flg )
+{
+    fn_bat_pst_msg ( c_ServiceName, c_err_msg, c_tag );
+    if( c_mem_flg == 'Y' )
+    {
+      tpabort(0);
+    }
+    return;
+}
+
+int fn_bat_init ( int argc, char *argv[] ) 
+{
+  fn_init_ddr_pop ( argv[3],
+                    TRADING_SECTION,
+                    COMMON);
+
+	fn_var = BAT_FO_UPLOFLN;
+	return 0;
+}
+
+void fn_bat_term ( int argc, char *argv[] )
+{
+	return;
+}
+
+int fn_prcs_trg ( char *c_pgm_nm, int i_trg_typ )
+{
+	return 0;
+}
+
+
+
+
+
+
+
+	
